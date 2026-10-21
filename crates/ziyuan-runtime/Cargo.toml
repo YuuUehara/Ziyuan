@@ -1,0 +1,10 @@
+[package]
+name = "ziyuan-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ziyuan-core = { path = "../ziyuan-core" }
+ziyuan-governance = { path = "../ziyuan-governance" }

@@ -1,0 +1,183 @@
+//! 紫垣核心领域模型：官员、官职、诏令与朝廷事件。
+use std::fmt;
+use std::str::FromStr;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Department {
+    Personnel,
+    Revenue,
+    Rites,
+    War,
+    Justice,
+    Works,
+}
+
+impl Department {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Personnel => "personnel",
+            Self::Revenue => "revenue",
+            Self::Rites => "rites",
+            Self::War => "war",
+            Self::Justice => "justice",
+            Self::Works => "works",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Personnel => "吏部",
+            Self::Revenue => "户部",
+            Self::Rites => "礼部",
+            Self::War => "兵部",
+            Self::Justice => "刑部",
+            Self::Works => "工部",
+        }
+    }
+}
+impl fmt::Display for Department {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl FromStr for Department {
+    type Err = String;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.to_ascii_lowercase().as_str() {
+            "personnel" => Ok(Self::Personnel),
+            "revenue" => Ok(Self::Revenue),
+            "rites" => Ok(Self::Rites),
+            "war" => Ok(Self::War),
+            "justice" => Ok(Self::Justice),
+            "works" => Ok(Self::Works),
+            _ => Err(format!("未知部门: {input}")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GovernanceMode {
+    Chancellor,
+    DirectRule,
+    Cabinet,
+}
+impl GovernanceMode {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Chancellor => "chancellor",
+            Self::DirectRule => "direct",
+            Self::Cabinet => "cabinet",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chancellor => "丞相制",
+            Self::DirectRule => "废相亲政",
+            Self::Cabinet => "内阁制",
+        }
+    }
+}
+impl fmt::Display for GovernanceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl FromStr for GovernanceMode {
+    type Err = String;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.to_ascii_lowercase().as_str() {
+            "chancellor" => Ok(Self::Chancellor),
+            "direct" => Ok(Self::DirectRule),
+            "cabinet" => Ok(Self::Cabinet),
+            _ => Err(format!(
+                "未知制度: {input}（可用：chancellor/direct/cabinet）"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Office {
+    Chancellor,
+    FirstGrandSecretary,
+    Minister(Department),
+    Clerk(Department),
+}
+impl Office {
+    pub fn code(self) -> String {
+        match self {
+            Self::Chancellor => "chancellor".into(),
+            Self::FirstGrandSecretary => "first-secretary".into(),
+            Self::Minister(d) => format!("minister:{}", d.code()),
+            Self::Clerk(d) => format!("clerk:{}", d.code()),
+        }
+    }
+    pub fn label(self) -> String {
+        match self {
+            Self::Chancellor => "丞相".into(),
+            Self::FirstGrandSecretary => "内阁首辅".into(),
+            Self::Minister(d) => format!("{}尚书", d.label()),
+            Self::Clerk(d) => format!("{}属官", d.label()),
+        }
+    }
+}
+impl FromStr for Office {
+    type Err = String;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "chancellor" => Ok(Self::Chancellor),
+            "first-secretary" => Ok(Self::FirstGrandSecretary),
+            _ => {
+                let (kind, department) = input
+                    .split_once(':')
+                    .ok_or_else(|| format!("官职格式无效: {input}"))?;
+                let department = department.parse::<Department>()?;
+                match kind {
+                    "minister" => Ok(Self::Minister(department)),
+                    "clerk" => Ok(Self::Clerk(department)),
+                    _ => Err(format!("未知官职: {input}")),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Agent {
+    pub id: AgentId,
+    pub name: String,
+    pub speciality: Department,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edict {
+    pub id: TaskId,
+    pub department: Department,
+    pub text: String,
+}
+
+/// Event Sourcing: 朝廷状态由此事件列表重放而来。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CourtEvent {
+    Founded(GovernanceMode),
+    AgentRegistered(Agent),
+    OfficialAppointed {
+        agent: AgentId,
+        office: Office,
+    },
+    OfficialDismissed {
+        agent: AgentId,
+    },
+    InstitutionReformed(GovernanceMode),
+    EdictIssued(Edict),
+    TaskCompleted {
+        task: TaskId,
+        worker: AgentId,
+        summary: String,
+    },
+}

@@ -1,0 +1,16 @@
+[package]
+name = "ziyuan-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ziyuan"
+path = "src/main.rs"
+
+[dependencies]
+ziyuan-core = { path = "../ziyuan-core" }
+ziyuan-governance = { path = "../ziyuan-governance" }
+ziyuan-runtime = { path = "../ziyuan-runtime" }
+ziyuan-storage = { path = "../ziyuan-storage" }
