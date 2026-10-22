@@ -1,6 +1,60 @@
 //! 治理引擎。职权由代码校验，不由 Agent 的角色提示词决定。
 use std::collections::BTreeMap;
+use std::fmt;
 use ziyuan_core::{Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId};
+
+/// 违反朝廷规则的操作；回放与提议共用同一套规则。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GovernanceError {
+    NotFounded,
+    DuplicateAgent(AgentId),
+    UnknownAgent(AgentId),
+    EmptyName,
+    AlreadyAppointed(AgentId),
+    NotAppointed(AgentId),
+    OfficeNotInMode(Office),
+    SpecialityMismatch {
+        name: String,
+        department: Department,
+    },
+    OfficeOccupied(Office),
+    SameMode(GovernanceMode),
+    EmptyEdict,
+    DuplicateEdict(TaskId),
+    UnknownEdict(TaskId),
+    AlreadyCompleted(TaskId),
+    Vacant(Office),
+}
+impl fmt::Display for GovernanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFounded => f.write_str("事件日志必须以 Founded 开始"),
+            Self::DuplicateAgent(id) => write!(f, "重复官员 ID: {}", id.0),
+            Self::UnknownAgent(id) => write!(f, "官员 #{} 不存在", id.0),
+            Self::EmptyName => f.write_str("姓名不能为空"),
+            Self::AlreadyAppointed(_) => {
+                f.write_str("该官员已有官职。请先执行 dismiss，再重新任命。")
+            }
+            Self::NotAppointed(_) => f.write_str("该官员未任职"),
+            Self::OfficeNotInMode(office) => write!(f, "现行制度不设{}", office.label()),
+            Self::SpecialityMismatch { name, department } => {
+                write!(f, "{name}的专长不属于{}", department.label())
+            }
+            Self::OfficeOccupied(office) => write!(f, "{}已有任职者", office.label()),
+            Self::SameMode(_) => f.write_str("已经是该制度"),
+            Self::EmptyEdict => f.write_str("诏令不能为空"),
+            Self::DuplicateEdict(id) => write!(f, "重复诏令 ID: {}", id.0),
+            Self::UnknownEdict(id) => write!(f, "未记录下达的诏令 #{}", id.0),
+            Self::AlreadyCompleted(id) => write!(f, "诏令 #{} 已完成，拒绝重复记功", id.0),
+            Self::Vacant(Office::Chancellor) => f.write_str("丞相空缺。请先任命丞相，或改制。"),
+            Self::Vacant(Office::FirstGrandSecretary) => {
+                f.write_str("内阁首辅空缺。请先 appoint 一名首辅。")
+            }
+            Self::Vacant(office) => write!(f, "{}空缺，无法承接诏令", office.label()),
+        }
+    }
+}
+impl std::error::Error for GovernanceError {}
 
 #[derive(Clone, Debug)]
 pub struct Court {
@@ -14,10 +68,10 @@ pub struct Court {
 }
 
 impl Court {
-    pub fn replay(events: &[CourtEvent]) -> Result<Self, String> {
+    pub fn replay(events: &[CourtEvent]) -> Result<Self, GovernanceError> {
         let mode = match events.first() {
             Some(CourtEvent::Founded(mode)) => *mode,
-            _ => return Err("事件日志必须以 Founded 开始".into()),
+            _ => return Err(GovernanceError::NotFounded),
         };
         let mut court = Self {
             mode,
@@ -34,12 +88,12 @@ impl Court {
         Ok(court)
     }
 
-    pub fn apply(&mut self, event: &CourtEvent) -> Result<(), String> {
+    pub fn apply(&mut self, event: &CourtEvent) -> Result<(), GovernanceError> {
         match event {
             CourtEvent::Founded(mode) => self.mode = *mode,
             CourtEvent::AgentRegistered(agent) => {
                 if self.agents.contains_key(&agent.id) {
-                    return Err(format!("重复官员 ID: {}", agent.id.0));
+                    return Err(GovernanceError::DuplicateAgent(agent.id));
                 }
                 self.next_agent_id = self.next_agent_id.max(agent.id.0 + 1);
                 self.agents.insert(agent.id, agent.clone());
@@ -60,7 +114,7 @@ impl Court {
             }
             CourtEvent::EdictIssued(edict) => {
                 if self.issued.contains_key(&edict.id) {
-                    return Err("重复诏令 ID".into());
+                    return Err(GovernanceError::DuplicateEdict(edict.id));
                 }
                 self.next_task_id = self.next_task_id.max(edict.id.0 + 1);
                 self.issued.insert(edict.id, edict.clone());
@@ -71,13 +125,13 @@ impl Court {
                 summary,
             } => {
                 if !self.issued.contains_key(task) {
-                    return Err("未记录下达的诏令".into());
+                    return Err(GovernanceError::UnknownEdict(*task));
                 }
                 if !self.agents.contains_key(worker) {
-                    return Err("回奏官员不存在".into());
+                    return Err(GovernanceError::UnknownAgent(*worker));
                 }
                 if self.completions.contains_key(task) {
-                    return Err("同一诏令已完成，拒绝重复记功".into());
+                    return Err(GovernanceError::AlreadyCompleted(*task));
                 }
                 self.completions.insert(*task, (*worker, summary.clone()));
             }
@@ -90,9 +144,9 @@ impl Court {
         &self,
         name: String,
         speciality: Department,
-    ) -> Result<CourtEvent, String> {
+    ) -> Result<CourtEvent, GovernanceError> {
         if name.trim().is_empty() {
-            return Err("姓名不能为空".into());
+            return Err(GovernanceError::EmptyName);
         }
         Ok(CourtEvent::AgentRegistered(Agent {
             id: AgentId(self.next_agent_id),
@@ -106,46 +160,56 @@ impl Court {
         &self,
         agent: AgentId,
         office: Office,
-    ) -> Result<CourtEvent, String> {
-        let person = self.agents.get(&agent).ok_or("官员不存在")?;
+    ) -> Result<CourtEvent, GovernanceError> {
+        let person = self
+            .agents
+            .get(&agent)
+            .ok_or(GovernanceError::UnknownAgent(agent))?;
         if self.appointments.contains_key(&agent) {
-            return Err("该官员已有官职。请先执行 dismiss，再重新任命。".into());
+            return Err(GovernanceError::AlreadyAppointed(agent));
         }
         match office {
             Office::Chancellor if self.mode != GovernanceMode::Chancellor => {
-                return Err("现行制度不设丞相".into());
+                return Err(GovernanceError::OfficeNotInMode(office));
             }
             Office::FirstGrandSecretary if self.mode != GovernanceMode::Cabinet => {
-                return Err("现行制度不设首辅".into());
+                return Err(GovernanceError::OfficeNotInMode(office));
             }
             Office::Minister(d) | Office::Clerk(d) if d != person.speciality => {
-                return Err(format!("{}的专长不属于{}", person.name, d.label()));
+                return Err(GovernanceError::SpecialityMismatch {
+                    name: person.name.clone(),
+                    department: d,
+                });
             }
             _ => {}
         }
         if !matches!(office, Office::Clerk(_)) && self.appointments.values().any(|o| *o == office) {
-            return Err(format!("{}已有任职者", office.label()));
+            return Err(GovernanceError::OfficeOccupied(office));
         }
         Ok(CourtEvent::OfficialAppointed { agent, office })
     }
 
-    pub fn propose_dismissal(&self, agent: AgentId) -> Result<CourtEvent, String> {
+    pub fn propose_dismissal(&self, agent: AgentId) -> Result<CourtEvent, GovernanceError> {
         if !self.appointments.contains_key(&agent) {
-            return Err("该官员未任职".into());
+            return Err(GovernanceError::NotAppointed(agent));
         }
         Ok(CourtEvent::OfficialDismissed { agent })
     }
 
-    pub fn propose_reform(&self, mode: GovernanceMode) -> Result<CourtEvent, String> {
+    pub fn propose_reform(&self, mode: GovernanceMode) -> Result<CourtEvent, GovernanceError> {
         if self.mode == mode {
-            return Err("已经是该制度".into());
+            return Err(GovernanceError::SameMode(mode));
         }
         Ok(CourtEvent::InstitutionReformed(mode))
     }
 
-    pub fn new_edict(&self, department: Department, text: String) -> Result<Edict, String> {
+    pub fn new_edict(
+        &self,
+        department: Department,
+        text: String,
+    ) -> Result<Edict, GovernanceError> {
         if text.trim().is_empty() {
-            return Err("诏令不能为空".into());
+            return Err(GovernanceError::EmptyEdict);
         }
         Ok(Edict {
             id: TaskId(self.next_task_id),
@@ -165,26 +229,26 @@ impl Court {
     }
 
     /// 路由说明是可观察性日志，不是给 Worker 的权限凭证。
-    pub fn route(&self, edict: &Edict) -> Result<Route, String> {
+    pub fn route(&self, edict: &Edict) -> Result<Route, GovernanceError> {
         let mut path = vec!["皇帝".to_owned()];
         match self.mode {
             GovernanceMode::Chancellor => {
                 let agent = self
                     .appointed_as(Office::Chancellor)
-                    .ok_or("丞相空缺。请先任命丞相，或改制。")?;
+                    .ok_or(GovernanceError::Vacant(Office::Chancellor))?;
                 path.push(format!("丞相·{}", agent.name));
             }
             GovernanceMode::Cabinet => {
                 let agent = self
                     .appointed_as(Office::FirstGrandSecretary)
-                    .ok_or("内阁首辅空缺。请先 appoint 一名首辅。")?;
+                    .ok_or(GovernanceError::Vacant(Office::FirstGrandSecretary))?;
                 path.push(format!("首辅·{}", agent.name));
             }
             GovernanceMode::DirectRule => {}
         }
         let minister = self
             .appointed_as(Office::Minister(edict.department))
-            .ok_or_else(|| format!("{}尚书空缺，无法承接诏令", edict.department.label()))?;
+            .ok_or(GovernanceError::Vacant(Office::Minister(edict.department)))?;
         path.push(format!(
             "{}尚书·{}",
             edict.department.label(),

@@ -1,8 +1,40 @@
 //! 紫垣事件簿：简易 append-only 日志，v1 格式；未来可换成 SQLite。
+use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use ziyuan_core::{Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId};
+
+#[derive(Debug)]
+pub enum StorageError {
+    Io(io::Error),
+    /// 事件簿第 `line` 行（从 1 开始）无法解码。
+    Corrupt {
+        line: usize,
+        reason: String,
+    },
+}
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "事件簿读写失败: {e}"),
+            Self::Corrupt { line, reason } => write!(f, "日志第 {line} 行: {reason}"),
+        }
+    }
+}
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Corrupt { .. } => None,
+        }
+    }
+}
+impl From<io::Error> for StorageError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
 
 pub struct EventLog {
     path: PathBuf,
@@ -16,9 +48,9 @@ impl EventLog {
     pub fn exists(&self) -> bool {
         self.path.exists()
     }
-    pub fn append(&self, events: &[CourtEvent]) -> Result<(), String> {
+    pub fn append(&self, events: &[CourtEvent]) -> Result<(), StorageError> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            fs::create_dir_all(parent)?;
         }
         let mut content = String::new();
         for event in events {
@@ -28,25 +60,24 @@ impl EventLog {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)
-            .map_err(|e| e.to_string())?;
-        file.write_all(content.as_bytes())
-            .map_err(|e| e.to_string())?;
-        file.sync_data().map_err(|e| e.to_string())?;
+            .open(&self.path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_data()?;
         Ok(())
     }
-    pub fn load(&self) -> Result<Vec<CourtEvent>, String> {
+    pub fn load(&self) -> Result<Vec<CourtEvent>, StorageError> {
         let mut data = String::new();
         OpenOptions::new()
             .read(true)
-            .open(&self.path)
-            .map_err(|e| e.to_string())?
-            .read_to_string(&mut data)
-            .map_err(|e| e.to_string())?;
+            .open(&self.path)?
+            .read_to_string(&mut data)?;
         data.lines()
             .enumerate()
             .map(|(idx, line)| {
-                decode_event(line).map_err(|e| format!("日志第 {} 行: {e}", idx + 1))
+                decode_event(line).map_err(|reason| StorageError::Corrupt {
+                    line: idx + 1,
+                    reason,
+                })
             })
             .collect()
     }
@@ -115,23 +146,31 @@ fn decode_event(line: &str) -> Result<CourtEvent, String> {
     let id =
         |i: usize| -> Result<u64, String> { field(i)?.parse::<u64>().map_err(|e| e.to_string()) };
     let event = match field(1)? {
-        "FOUNDED" => Founded(field(2)?.parse::<GovernanceMode>()?),
+        "FOUNDED" => Founded(
+            field(2)?
+                .parse::<GovernanceMode>()
+                .map_err(|e| e.to_string())?,
+        ),
         "REGISTERED" => AgentRegistered(Agent {
             id: AgentId(id(2)?),
             name: from_hex(field(3)?)?,
-            speciality: field(4)?.parse::<Department>()?,
+            speciality: field(4)?.parse::<Department>().map_err(|e| e.to_string())?,
         }),
         "APPOINTED" => OfficialAppointed {
             agent: AgentId(id(2)?),
-            office: field(3)?.parse::<Office>()?,
+            office: field(3)?.parse::<Office>().map_err(|e| e.to_string())?,
         },
         "DISMISSED" => OfficialDismissed {
             agent: AgentId(id(2)?),
         },
-        "REFORMED" => InstitutionReformed(field(2)?.parse::<GovernanceMode>()?),
+        "REFORMED" => InstitutionReformed(
+            field(2)?
+                .parse::<GovernanceMode>()
+                .map_err(|e| e.to_string())?,
+        ),
         "EDICT" => EdictIssued(Edict {
             id: TaskId(id(2)?),
-            department: field(3)?.parse::<Department>()?,
+            department: field(3)?.parse::<Department>().map_err(|e| e.to_string())?,
             text: from_hex(field(4)?)?,
         }),
         "COMPLETED" => TaskCompleted {

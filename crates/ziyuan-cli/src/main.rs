@@ -1,5 +1,6 @@
 //! 紫垣命令行：用户扮演皇帝，改制/任免为显式用户操作。
 use std::env;
+use std::error::Error;
 use std::process::ExitCode;
 use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office};
 use ziyuan_governance::{Court, founding_events};
@@ -44,7 +45,7 @@ fn main() -> ExitCode {
         }
     }
 }
-fn run() -> Result<(), String> {
+fn run() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "help" || args[0] == "--help" {
         println!("{HELP}");
@@ -143,7 +144,7 @@ fn run() -> Result<(), String> {
             }
             let mode = args[0].parse::<GovernanceMode>()?;
             let event = court.propose_reform(mode)?;
-            log.append(&[event.clone()])?;
+            log.append(std::slice::from_ref(&event))?;
             court.apply(&event)?;
             println!(
                 "诏令已颁：制度改为{}。原丞相/首辅职务自动撤销。",
@@ -188,7 +189,7 @@ fn run() -> Result<(), String> {
                 println!("{:>3}: {}", i + 1, describe_event(event));
             }
         }
-        _ => return Err(format!("未知命令：{command}。运行 ziyuan help 查看帮助")),
+        _ => return Err(format!("未知命令：{command}。运行 ziyuan help 查看帮助").into()),
     }
     Ok(())
 }
@@ -199,15 +200,15 @@ fn ensure_no_args(args: &[String]) -> Result<(), String> {
         Err("该命令不接受额外参数".into())
     }
 }
-fn parse_id(args: &[String], usage: &str) -> Result<AgentId, String> {
+fn parse_id(args: &[String], usage: &str) -> Result<AgentId, Box<dyn Error>> {
     if args.len() != 1 {
-        return Err(format!("用法: {usage}"));
+        return Err(format!("用法: {usage}").into());
     }
     Ok(AgentId(
         args[0].parse::<u64>().map_err(|_| "官员 ID 必须是数字")?,
     ))
 }
-fn parse_edict(mut args: Vec<String>) -> Result<(Department, String), String> {
+fn parse_edict(mut args: Vec<String>) -> Result<(Department, String), Box<dyn Error>> {
     let department = if args.first().map(String::as_str) == Some("--dept") {
         if args.len() < 3 {
             return Err("用法: ziyuan edict --dept works <诏令内容>".into());

@@ -2,6 +2,26 @@
 use std::fmt;
 use std::str::FromStr;
 
+/// 字符串到领域类型的解析错误（CLI 参数、事件簿字段）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    UnknownDepartment(String),
+    UnknownMode(String),
+    UnknownOffice(String),
+    MalformedOffice(String),
+}
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownDepartment(s) => write!(f, "未知部门: {s}"),
+            Self::UnknownMode(s) => write!(f, "未知制度: {s}（可用：chancellor/direct/cabinet）"),
+            Self::UnknownOffice(s) => write!(f, "未知官职: {s}"),
+            Self::MalformedOffice(s) => write!(f, "官职格式无效: {s}"),
+        }
+    }
+}
+impl std::error::Error for ParseError {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId(pub u64);
 
@@ -46,7 +66,7 @@ impl fmt::Display for Department {
     }
 }
 impl FromStr for Department {
-    type Err = String;
+    type Err = ParseError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.to_ascii_lowercase().as_str() {
             "personnel" => Ok(Self::Personnel),
@@ -55,7 +75,7 @@ impl FromStr for Department {
             "war" => Ok(Self::War),
             "justice" => Ok(Self::Justice),
             "works" => Ok(Self::Works),
-            _ => Err(format!("未知部门: {input}")),
+            _ => Err(ParseError::UnknownDepartment(input.into())),
         }
     }
 }
@@ -88,15 +108,13 @@ impl fmt::Display for GovernanceMode {
     }
 }
 impl FromStr for GovernanceMode {
-    type Err = String;
+    type Err = ParseError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.to_ascii_lowercase().as_str() {
             "chancellor" => Ok(Self::Chancellor),
             "direct" => Ok(Self::DirectRule),
             "cabinet" => Ok(Self::Cabinet),
-            _ => Err(format!(
-                "未知制度: {input}（可用：chancellor/direct/cabinet）"
-            )),
+            _ => Err(ParseError::UnknownMode(input.into())),
         }
     }
 }
@@ -127,7 +145,7 @@ impl Office {
     }
 }
 impl FromStr for Office {
-    type Err = String;
+    type Err = ParseError;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input {
             "chancellor" => Ok(Self::Chancellor),
@@ -135,12 +153,12 @@ impl FromStr for Office {
             _ => {
                 let (kind, department) = input
                     .split_once(':')
-                    .ok_or_else(|| format!("官职格式无效: {input}"))?;
+                    .ok_or_else(|| ParseError::MalformedOffice(input.into()))?;
                 let department = department.parse::<Department>()?;
                 match kind {
                     "minister" => Ok(Self::Minister(department)),
                     "clerk" => Ok(Self::Clerk(department)),
-                    _ => Err(format!("未知官职: {input}")),
+                    _ => Err(ParseError::UnknownOffice(input.into())),
                 }
             }
         }

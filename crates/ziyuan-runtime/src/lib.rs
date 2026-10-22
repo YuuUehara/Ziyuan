@@ -1,15 +1,42 @@
 //! 廷枢：运行时调度与模型/工具接口。v0.1 默认使用显式模拟后端。
+use std::fmt;
 use ziyuan_core::{Agent, AgentId, Edict};
-use ziyuan_governance::{Court, Route};
+use ziyuan_governance::{Court, GovernanceError, Route};
+
+/// 后端/模型/工具 Adapter 的错误类型：由具体实现决定内部结构。
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub trait WorkerBackend {
-    fn execute(&self, actor: &Agent, edict: &Edict) -> Result<String, String>;
+    fn execute(&self, actor: &Agent, edict: &Edict) -> Result<String, BoxError>;
+}
+
+#[derive(Debug)]
+pub enum DispatchError {
+    /// 治理层拒绝派工（职位空缺等）。
+    Route(GovernanceError),
+    Backend(BoxError),
+}
+impl fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Route(e) => e.fmt(f),
+            Self::Backend(e) => write!(f, "执行后端失败: {e}"),
+        }
+    }
+}
+impl std::error::Error for DispatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Route(e) => Some(e),
+            Self::Backend(e) => Some(e.as_ref()),
+        }
+    }
 }
 
 /// 仅供验证调度链路；不访问项目、不使用 LLM，也不会真正检查源码。
 pub struct DemoBackend;
 impl WorkerBackend for DemoBackend {
-    fn execute(&self, actor: &Agent, edict: &Edict) -> Result<String, String> {
+    fn execute(&self, actor: &Agent, edict: &Edict) -> Result<String, BoxError> {
         Ok(format!(
             "[DEMO ONLY] {}收到诏令：{}。未连接 LLM 或运行任何工具。",
             actor.name, edict.text
@@ -28,10 +55,15 @@ pub fn dispatch(
     court: &Court,
     edict: &Edict,
     backend: &dyn WorkerBackend,
-) -> Result<ExecutionReport, String> {
-    let Route { path, worker } = court.route(edict)?;
-    let agent = court.agents.get(&worker).ok_or("执行者不存在")?;
-    let summary = backend.execute(agent, edict)?;
+) -> Result<ExecutionReport, DispatchError> {
+    let Route { path, worker } = court.route(edict).map_err(DispatchError::Route)?;
+    let agent = court
+        .agents
+        .get(&worker)
+        .ok_or(DispatchError::Route(GovernanceError::UnknownAgent(worker)))?;
+    let summary = backend
+        .execute(agent, edict)
+        .map_err(DispatchError::Backend)?;
     Ok(ExecutionReport {
         path,
         worker,
@@ -41,6 +73,28 @@ pub fn dispatch(
 
 pub mod agent_loop {
     //! 独立于治理层的最小 Tool Calling Loop，供后续真实模型 Adapter 实现。
+    use super::BoxError;
+    use std::fmt;
+
+    #[derive(Debug)]
+    pub enum LoopError {
+        Model(BoxError),
+        EmptyToolCalls,
+        UnauthorizedTool(String),
+        StepLimit(usize),
+    }
+    impl fmt::Display for LoopError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Model(e) => write!(f, "模型调用失败: {e}"),
+                Self::EmptyToolCalls => f.write_str("模型返回空工具调用"),
+                Self::UnauthorizedTool(name) => write!(f, "未授权的工具: {name}"),
+                Self::StepLimit(n) => write!(f, "超出最大模型调用步数: {n}"),
+            }
+        }
+    }
+    impl std::error::Error for LoopError {}
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct ToolSpec {
         pub name: String,
@@ -79,11 +133,11 @@ pub mod agent_loop {
             &mut self,
             messages: &[Message],
             tools: &[ToolSpec],
-        ) -> Result<ModelTurn, String>;
+        ) -> Result<ModelTurn, BoxError>;
     }
     pub trait Tool {
         fn spec(&self) -> ToolSpec;
-        fn execute(&self, args_json: &str) -> Result<String, String>;
+        fn execute(&self, args_json: &str) -> Result<String, BoxError>;
     }
 
     pub fn run(
@@ -91,22 +145,25 @@ pub mod agent_loop {
         tools: &[Box<dyn Tool>],
         user_request: &str,
         max_steps: usize,
-    ) -> Result<String, String> {
+    ) -> Result<String, LoopError> {
         let mut messages = vec![Message::User(user_request.into())];
         let specs: Vec<ToolSpec> = tools.iter().map(|tool| tool.spec()).collect();
         for _ in 0..max_steps {
-            match model.next_turn(&messages, &specs)? {
+            match model
+                .next_turn(&messages, &specs)
+                .map_err(LoopError::Model)?
+            {
                 ModelTurn::Final(answer) => return Ok(answer),
                 ModelTurn::Calls(calls) => {
                     if calls.is_empty() {
-                        return Err("模型返回空工具调用".into());
+                        return Err(LoopError::EmptyToolCalls);
                     }
                     for call in calls {
                         // 只有注册的工具才能执行；工具输入校验由 Tool Adapter 实现。
                         let tool = tools
                             .iter()
                             .find(|t| t.spec().name == call.name)
-                            .ok_or_else(|| format!("未授权的工具: {}", call.name))?;
+                            .ok_or_else(|| LoopError::UnauthorizedTool(call.name.clone()))?;
                         messages.push(Message::ToolCall {
                             id: call.id.clone(),
                             name: call.name,
@@ -123,7 +180,7 @@ pub mod agent_loop {
                 }
             }
         }
-        Err(format!("超出最大模型调用步数: {max_steps}"))
+        Err(LoopError::StepLimit(max_steps))
     }
 
     #[cfg(test)]
@@ -135,7 +192,7 @@ pub mod agent_loop {
                 &mut self,
                 messages: &[Message],
                 _tools: &[ToolSpec],
-            ) -> Result<ModelTurn, String> {
+            ) -> Result<ModelTurn, BoxError> {
                 if messages
                     .iter()
                     .any(|m| matches!(m, Message::ToolOutput { .. }))
@@ -159,7 +216,7 @@ pub mod agent_loop {
                     input_schema_json: "{\"type\":\"object\"}".into(),
                 }
             }
-            fn execute(&self, _args_json: &str) -> Result<String, String> {
+            fn execute(&self, _args_json: &str) -> Result<String, BoxError> {
                 Ok("ok".into())
             }
         }
