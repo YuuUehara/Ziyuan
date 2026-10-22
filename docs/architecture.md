@@ -1,4 +1,4 @@
-# ZiYuan 设计文档（v0.1）
+# ZiYuan 设计文档（v0.2 开发中）
 
 ## 1. 核心目标
 
@@ -17,7 +17,7 @@ Emperor (human / authenticated control plane)
           └─ Cabinet First Secretary
               └─ Minister → Clerk (Worker)
                   └─ Runtime::dispatch(WorkerBackend)
-                      └─ DemoBackend | RealLLMBackend (future)
+                      └─ DemoBackend | AgentBackend (ziyuan-llm + 只读工具)
 ```
 
 `Office` 和 `Agent` 是独立对象；官职任免修改 office map，但不更改 Agent ID。制度迁移自动清理协调层的旧职务，并保持六部任职关系。
@@ -37,7 +37,8 @@ ziyuan-cli ──▶ ziyuan-app (Session) ──▶ ziyuan-governance (Court)
 - `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
 - `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。
 - `ziyuan-storage`：`EventStore { load, append }`；`EventLog`（`.ziyuan/court.log`）与 `MemoryEventLog`。编码在私有 `codec` 模块，与文件 I/O 分离。
-- `ziyuan-runtime`：`dispatch` 按 `Court::route` 调用 `WorkerBackend`；Adapter 错误统一为 `BoxError`。
+- `ziyuan-runtime`：`dispatch` 按 `Court::route` 调用 `WorkerBackend`；Adapter 错误统一为 `BoxError`。`AgentBackend` 运行 `agent_loop`，`tools` 提供只读工具。
+- `ziyuan-llm`：`OpenAiCompatible` 实现 `ModelProvider`。HTTP/TLS 依赖只在此 crate，runtime 保持无网络依赖。
 - `ziyuan-app`：`Session<S: EventStore>` 是唯一的写入路径。每个用例：治理层提议事件 → 在 `Court` 副本上 `apply` 校验 → `EventStore::append` → 替换内存状态。被拒绝的操作不留事件；写入的事件一定可以回放。
 - `ziyuan-cli`：把参数解析为 `Command`，调用 `Session`，打印结果。未来的 TUI/Web 复用 `Session`。
 
@@ -49,7 +50,11 @@ ziyuan-cli ──▶ ziyuan-app (Session) ──▶ ziyuan-governance (Court)
 
 `ziyuan-runtime::WorkerBackend` 是实际执行者接口；`DemoBackend` 不执行任务。
 
-`ziyuan-runtime::agent_loop` 提供独立的 `ModelProvider`, `Tool`, `ModelTurn`, `Message` 等抽象，并实现最小 Tool Calling 循环。真实 LLM Provider 尚未实现，当前同步执行，后续可以改为 async。
+`ziyuan-runtime::agent_loop` 提供独立的 `ModelProvider`, `Tool`, `ModelTurn`, `Message` 等抽象，并实现最小 Tool Calling 循环。一轮内的全部工具调用先于其输出写入消息（与 Chat API 的顺序一致）；任一调用未注册则整轮拒绝，不执行任何工具。
+
+`ziyuan-llm::OpenAiCompatible` 对接 OpenAI 兼容的 `/chat/completions`（同步、非流式），由 `ZIYUAN_LLM_MODEL` / `ZIYUAN_LLM_BASE_URL` / `ZIYUAN_LLM_API_KEY` 配置。
+
+`ziyuan-runtime::tools::read_only_tools(root)` 提供 `read_file`（64 KiB 截断）与 `search_code`（字面量、最多 50 条）。路径先 canonicalize 再检查是否在根目录内，因此 `..`、绝对路径与指向外部的符号链接都被拒绝；搜索跳过 `.git`、`.jj`、`.ziyuan`、`target`。
 
 此 Loop **还不是生产级别**：未实现 API retry policy、token budget、并行工具、工具输入 JSON Schema 验证、沙箱、模型响应结构检验、prompt injection 隔离、trace IDs、上下文压缩。
 

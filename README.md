@@ -2,7 +2,7 @@
 
 > **实验性 Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
 
-**v0.1 是一个可执行的调度原型，不是已经接通 LLM 的代码 Agent。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务；它不会修改文件、运行命令或实际分析源码。
+**当前为 v0.2 开发中。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员只能用只读工具 `read_file`、`search_code` 查阅当前目录；仍不能修改文件或运行命令。
 
 ## 组件命名
 
@@ -21,7 +21,8 @@
 crates/
   ziyuan-core/        官员、官职、部门、诏令、事件等领域类型
   ziyuan-governance/  朝廷状态重放、改制、任免与任务路由（规则唯一来源）
-  ziyuan-runtime/     WorkerBackend、演示执行与最小 Model/Tool Loop
+  ziyuan-runtime/     WorkerBackend（Demo / Agent）、Tool Calling Loop、只读工具
+  ziyuan-llm/         OpenAI 兼容 Chat Completions Adapter（ureq + serde_json）
   ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
   ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
   ziyuan-cli/         `ziyuan` 命令行（仅解析参数与呈现结果）
@@ -31,7 +32,7 @@ docs/                 架构决策与扩展路线
 
 ## 快速开始
 
-要求：Rust 1.85 或更新的稳定版工具链（Rust 2024 edition，全部使用标准库，无第三方依赖）。
+要求：Rust 1.85 或更新的稳定版工具链（Rust 2024 edition）。第三方依赖仅限 `ziyuan-llm` 使用的 `ureq` 与 `serde_json`。
 
 ```bash
 cargo fmt --all -- --check
@@ -61,6 +62,18 @@ cd /tmp/ziyuan-demo
 /path/to/ziyuan/target/debug/ziyuan edict --dept works "请首辅协调调查"
 /path/to/ziyuan/target/debug/ziyuan history
 ```
+
+### 接入真实模型
+
+```bash
+export ZIYUAN_LLM_MODEL=deepseek-chat
+export ZIYUAN_LLM_BASE_URL=https://api.deepseek.com/v1   # 默认 https://api.openai.com/v1
+export ZIYUAN_LLM_API_KEY=...                            # 本地 Ollama 可不设
+cd /path/to/your/project && ziyuan init
+ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
+```
+
+模型调用或工具循环失败时，诏令被拒绝，不写入事件簿。单件诏令最多 12 轮模型调用。
 
 ### 版本控制：Jujutsu
 
@@ -103,8 +116,8 @@ v0.1 支持 `recruit` 动态扩充官员；同部门多个属官目前按已记�
 
 ## 下一阶段（v0.2）
 
-- 为 ModelProvider 实现真实 LLM API Adapter（支持 Tool Calling、流式输出、使用量统计）。
-- 将 `WorkerBackend` 切换为实际 `AgentLoop`，可配置只读工具 `search_code`、`read_file`。
+- ~~为 ModelProvider 实现真实 LLM API Adapter（Tool Calling）~~ 已完成；流式输出与使用量统计待做。
+- ~~将 `WorkerBackend` 切换为实际 `AgentLoop`，可配置只读工具 `search_code`、`read_file`~~ 已完成。
 - 为运行时加 Tokio 调度、任务队列、取消、超时、并发上限与审计链路。
 - 让任命/罢免使用原子事件事务，并引入 `Yuxi` 权限令牌与非 CLI 身份验证。
 - 实现可验证的 `LiBu` 考绩与候选人推荐；升迁仍由皇帝批准。

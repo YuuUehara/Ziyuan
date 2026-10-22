@@ -430,6 +430,7 @@ version = "0.1.0"
 dependencies = [
  "ziyuan-app",
  "ziyuan-core",
+ "ziyuan-llm",
  "ziyuan-runtime",
  "ziyuan-storage",
 ]

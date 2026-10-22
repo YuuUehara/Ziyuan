@@ -6,7 +6,8 @@ use std::error::Error;
 use std::process::ExitCode;
 use ziyuan_app::Session;
 use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office};
-use ziyuan_runtime::DemoBackend;
+use ziyuan_llm::OpenAiCompatible;
+use ziyuan_runtime::{AgentBackend, DemoBackend, WorkerBackend, tools::read_only_tools};
 use ziyuan_storage::EventLog;
 
 const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示版）
@@ -16,7 +17,7 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职及任务完成数
   ziyuan recruit <姓名> <部门>          招募新官（须另行 appoint 任职）
-  ziyuan edict [--dept works] <内容>    下诏（Worker 为模拟后端）
+  ziyuan edict [--dept works] <内容>    下诏（默认模拟后端；见下方环境变量）
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
@@ -26,6 +27,11 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
 
 默认官职：chancellor、first-secretary、minister:works、clerk:personnel 等
 部门：personnel / revenue / rites / war / justice / works
+
+真实模型（OpenAI 兼容 Chat Completions API）：
+  ZIYUAN_LLM_MODEL     模型名；设置后 edict 由模型以只读工具查阅当前目录
+  ZIYUAN_LLM_BASE_URL  默认 https://api.openai.com/v1（如 https://api.deepseek.com/v1、http://localhost:11434/v1）
+  ZIYUAN_LLM_API_KEY   API Key（本地 Ollama 可不设）
 
 示例：
   ziyuan init
@@ -37,6 +43,9 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan appoint 6 first-secretary
   ziyuan edict --dept works "请内阁协调检查"
 "#;
+
+/// 单件诏令最多的模型调用轮数。
+const MAX_AGENT_STEPS: usize = 12;
 
 enum Command {
     Help,
@@ -153,8 +162,8 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             println!("诏令已颁：招募官员 #{} {}（未授官职）。", id.0, name);
         }
         Command::Edict(department, text) => {
-            // 模拟后端不能执行真实修改。
-            let (edict, report) = session.issue_edict(department, text, &DemoBackend)?;
+            let backend = worker_backend()?;
+            let (edict, report) = session.issue_edict(department, text, backend.as_ref())?;
             println!("诏令 #{}：{}", edict.id.0, edict.text);
             println!("路由：{}", report.path.join(" → "));
             println!("回奏：{}", report.summary);
@@ -197,6 +206,23 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
     }
     Ok(())
+}
+
+/// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。
+fn worker_backend() -> Result<Box<dyn WorkerBackend>, Box<dyn Error>> {
+    let Some(model) = OpenAiCompatible::from_env() else {
+        return Ok(Box::new(DemoBackend));
+    };
+    eprintln!(
+        "执行后端：{}（只读工具：read_file、search_code）",
+        model.model()
+    );
+    let tools = read_only_tools(&env::current_dir()?)?;
+    Ok(Box::new(AgentBackend::new(
+        Box::new(model),
+        tools,
+        MAX_AGENT_STEPS,
+    )))
 }
 
 fn no_args(args: Vec<String>, command: Command) -> Result<Command, Box<dyn Error>> {
