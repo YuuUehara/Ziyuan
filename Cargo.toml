@@ -13,3 +13,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+ziyuan-core = { path = "crates/ziyuan-core" }
+ziyuan-governance = { path = "crates/ziyuan-governance" }
+ziyuan-runtime = { path = "crates/ziyuan-runtime" }
+ziyuan-storage = { path = "crates/ziyuan-storage" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

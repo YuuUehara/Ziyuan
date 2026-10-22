@@ -10,7 +10,10 @@ name = "ziyuan"
 path = "src/main.rs"
 
 [dependencies]
-ziyuan-core = { path = "../ziyuan-core" }
-ziyuan-governance = { path = "../ziyuan-governance" }
-ziyuan-runtime = { path = "../ziyuan-runtime" }
-ziyuan-storage = { path = "../ziyuan-storage" }
+ziyuan-core.workspace = true
+ziyuan-governance.workspace = true
+ziyuan-runtime.workspace = true
+ziyuan-storage.workspace = true
+
+[lints]
+workspace = true
