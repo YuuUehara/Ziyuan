@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Prepares a fresh Amp orb: Rust toolchain, Jujutsu, colocated jj repo, warm build cache.
+# Must stay idempotent and fast on a warm (snapshot-restored) filesystem.
+set -euo pipefail
+
+JJ_VERSION="0.46.0"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local name="$1"; shift
+  local start=$SECONDS
+  echo "==> $name"
+  "$@"
+  echo "    $name done in $((SECONDS - start))s"
+}
+
+install_rust() {
+  if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal -c rustfmt,clippy
+  fi
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+  rustup component add rustfmt clippy >/dev/null
+  cargo --version
+}
+
+persist_paths() {
+  # Amp and supervised services start in login shells; expose cargo and jj there.
+  local marker="# ziyuan: toolchain paths"
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >> "$HOME/.bash_profile" <<'PROFILE'
+
+# ziyuan: toolchain paths
+. "$HOME/.cargo/env"
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+PROFILE
+  fi
+}
+
+install_jj() {
+  local bin="$HOME/.local/bin/jj"
+  if [ -x "$bin" ] && "$bin" --version | grep -q "^jj $JJ_VERSION"; then
+    "$bin" --version
+    return
+  fi
+  local tmp
+  tmp="$(mktemp -d)"
+  curl -sSfL "https://github.com/jj-vcs/jj/releases/download/v$JJ_VERSION/jj-v$JJ_VERSION-x86_64-unknown-linux-musl.tar.gz" \
+    | tar xz -C "$tmp" ./jj
+  mkdir -p "$HOME/.local/bin"
+  mv "$tmp/jj" "$bin"
+  rm -rf "$tmp"
+  "$bin" --version
+}
+
+init_jj_repo() {
+  local jj="$HOME/.local/bin/jj"
+  if [ ! -d .jj ]; then
+    "$jj" git init --colocate
+  fi
+  # Keep local main following origin; a no-op once tracked.
+  "$jj" bookmark track main --remote=origin >/dev/null 2>&1 || true
+}
+
+warm_build() {
+  cargo build --workspace --all-targets
+  cargo clippy --workspace --all-targets --quiet
+}
+
+step "rust toolchain" install_rust
+step "jujutsu" install_jj
+step "login shell paths" persist_paths
+step "jj colocated repo" init_jj_repo
+step "warm build cache" warm_build

@@ -2,3 +2,4 @@
 /.ziyuan/
 **/*.rs.bk
 .DS_Store
+.amp/portals/*

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Runs whenever an orb starts or wakes. Must finish within seconds.
+# Mirrors the thread's git identity into jj so new changes are attributed correctly.
+set -euo pipefail
+
+jj="$HOME/.local/bin/jj"
+[ -x "$jj" ] || exit 0
+
+for key in user.name user.email; do
+  value="$(git config --global "$key" || true)"
+  if [ -n "$value" ] && [ "$("$jj" config get "$key" 2>/dev/null || true)" != "$value" ]; then
+    "$jj" config set --user "$key" "$value"
+  fi
+done
