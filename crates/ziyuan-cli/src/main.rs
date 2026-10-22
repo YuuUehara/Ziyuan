@@ -4,10 +4,16 @@
 use std::env;
 use std::error::Error;
 use std::process::ExitCode;
-use ziyuan_app::Session;
-use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office};
+use std::sync::Arc;
+use std::time::Duration;
+use ziyuan_app::{Session, TaskReport};
+use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office, TaskId};
+use ziyuan_governance::TaskStatus;
 use ziyuan_llm::OpenAiCompatible;
-use ziyuan_runtime::{AgentBackend, DemoBackend, WorkerBackend, tools::read_only_tools};
+use ziyuan_runtime::{
+    AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
+    tools::read_only_tools,
+};
 use ziyuan_storage::EventLog;
 
 const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示版）
@@ -17,7 +23,12 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职及任务完成数
   ziyuan recruit <姓名> <部门>          招募新官（须另行 appoint 任职）
-  ziyuan edict [--dept works] <内容>    下诏（默认模拟后端；见下方环境变量）
+  ziyuan edict [--dept works] [--queue] <内容>
+                                       下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
+  ziyuan run [--jobs 4] [--timeout 300]
+                                       并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
+  ziyuan tasks                         查看诏令及其状态
+  ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
@@ -42,10 +53,17 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan dismiss 6
   ziyuan appoint 6 first-secretary
   ziyuan edict --dept works "请内阁协调检查"
+  ziyuan edict --queue "检查 storage crate"
+  ziyuan edict --queue "检查 runtime crate"
+  ziyuan run --jobs 2 --timeout 120
 "#;
 
 /// 单件诏令最多的模型调用轮数。
 const MAX_AGENT_STEPS: usize = 12;
+const DEFAULT_LIMITS: Limits = Limits {
+    max_concurrent: 4,
+    timeout: Duration::from_secs(300),
+};
 
 enum Command {
     Help,
@@ -53,7 +71,14 @@ enum Command {
     Court,
     Officials,
     Recruit(String, Department),
-    Edict(Department, String),
+    Edict {
+        department: Department,
+        text: String,
+        queue: bool,
+    },
+    Run(Limits),
+    Tasks,
+    Cancel(TaskId),
     Reform(GovernanceMode),
     Dismiss(AgentId),
     Appoint(AgentId, Office),
@@ -100,10 +125,13 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Ok([name, dept]) => Command::Recruit(name, dept.parse()?),
             Err(_) => return Err("用法: ziyuan recruit <姓名> <部门>".into()),
         },
-        "edict" => {
-            let (department, text) = parse_edict(args)?;
-            Command::Edict(department, text)
-        }
+        "edict" => parse_edict(args)?,
+        "run" => Command::Run(parse_limits(args)?),
+        "tasks" => no_args(args, Command::Tasks)?,
+        "cancel" => match <[String; 1]>::try_from(args) {
+            Ok([id]) => Command::Cancel(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
+            Err(_) => return Err("用法: ziyuan cancel <诏令ID>".into()),
+        },
         "reform" => match <[String; 1]>::try_from(args) {
             Ok([mode]) => Command::Reform(mode.parse()?),
             Err(_) => return Err("用法: ziyuan reform <chancellor|direct|cabinet>".into()),
@@ -161,12 +189,53 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             let id = session.recruit(name.clone(), department)?;
             println!("诏令已颁：招募官员 #{} {}（未授官职）。", id.0, name);
         }
-        Command::Edict(department, text) => {
-            let backend = worker_backend()?;
-            let (edict, report) = session.issue_edict(department, text, backend.as_ref())?;
-            println!("诏令 #{}：{}", edict.id.0, edict.text);
-            println!("路由：{}", report.path.join(" → "));
-            println!("回奏：{}", report.summary);
+        Command::Edict {
+            department,
+            text,
+            queue,
+        } => {
+            let edict = session.issue(department, text)?;
+            if queue {
+                println!("诏令 #{} 已入队：{}", edict.id.0, edict.text);
+            } else {
+                let limits = Limits {
+                    max_concurrent: 1,
+                    ..DEFAULT_LIMITS
+                };
+                run_tasks(session, &[edict.id], limits)?;
+            }
+        }
+        Command::Run(limits) => {
+            let tasks = session.court().open_tasks();
+            if tasks.is_empty() {
+                println!("没有未结束的诏令。");
+            } else {
+                run_tasks(session, &tasks, limits)?;
+            }
+        }
+        Command::Tasks => {
+            let court = session.court();
+            for task in court.tasks() {
+                let name = |id: AgentId| court.agent(id).map_or("?", |a| a.name.as_str());
+                let status = match &task.status {
+                    TaskStatus::Pending => "待办".to_owned(),
+                    TaskStatus::Assigned(w) => format!("已指派 {}（未结束）", name(*w)),
+                    TaskStatus::Completed { worker, .. } => format!("已完成（{}）", name(*worker)),
+                    TaskStatus::Failed { reason } => format!("失败：{reason}"),
+                    TaskStatus::Cancelled => "已撤销".to_owned(),
+                };
+                println!(
+                    "#{:<3} {} {}  —  {}",
+                    task.edict.id.0,
+                    task.edict.department.label(),
+                    task.edict.text,
+                    status
+                );
+            }
+        }
+        Command::Cancel(task) => {
+            session.cancel(task)?;
+            println!("诏令 #{} 已撤销。", task.0);
         }
         Command::Reform(mode) => {
             session.reform(mode)?;
@@ -208,17 +277,68 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
     Ok(())
 }
 
+/// 在 Tokio 上执行 `tasks` 并逐件打印结局；有未完成的诏令时返回错误。
+fn run_tasks(
+    session: &mut Session<EventLog>,
+    tasks: &[TaskId],
+    limits: Limits,
+) -> Result<(), Box<dyn Error>> {
+    let scheduler = Scheduler::new(worker_backend()?, limits);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let mut unfinished = 0;
+    let result = runtime.block_on(async {
+        let cancel = CancelToken::new();
+        let on_interrupt = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("收到中断：撤销执行中的诏令，排队中的保留。");
+                on_interrupt.cancel();
+            }
+        });
+        session
+            .run(tasks, &scheduler, &cancel, |report| {
+                if !matches!(report.outcome, Outcome::Completed(_)) {
+                    unfinished += 1;
+                }
+                print_report(report);
+            })
+            .await
+    });
+    // 超时或撤销后，阻塞中的模型请求可能仍未返回；不等待它们。
+    runtime.shutdown_background();
+    result?;
+    if unfinished > 0 {
+        return Err(format!("{unfinished} 件诏令未完成").into());
+    }
+    Ok(())
+}
+
+fn print_report(report: &TaskReport) {
+    println!("诏令 #{}：{}", report.edict.id.0, report.edict.text);
+    if !report.path.is_empty() {
+        println!("路由：{}", report.path.join(" → "));
+    }
+    match &report.outcome {
+        Outcome::Completed(summary) => println!("回奏：{summary}"),
+        Outcome::Failed(reason) => println!("失败：{reason}"),
+        Outcome::Cancelled => println!("已撤销（执行中被中断）"),
+        Outcome::NotStarted => println!("未开始：仍在队列中，可再次 `ziyuan run`"),
+    }
+}
+
 /// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。
-fn worker_backend() -> Result<Box<dyn WorkerBackend>, Box<dyn Error>> {
+fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
     let Some(model) = OpenAiCompatible::from_env() else {
-        return Ok(Box::new(DemoBackend));
+        return Ok(Arc::new(DemoBackend));
     };
     eprintln!(
         "执行后端：{}（只读工具：read_file、search_code）",
         model.model()
     );
     let tools = read_only_tools(&env::current_dir()?)?;
-    Ok(Box::new(AgentBackend::new(
+    Ok(Arc::new(AgentBackend::new(
         Box::new(model),
         tools,
         MAX_AGENT_STEPS,
@@ -244,13 +364,46 @@ fn parse_id(args: &[String], usage: &str) -> Result<AgentId, Box<dyn Error>> {
     }
 }
 
-fn parse_edict(mut args: Vec<String>) -> Result<(Department, String), Box<dyn Error>> {
-    let department = if args.first().map(String::as_str) == Some("--dept") {
-        if args.len() < 3 {
-            return Err("用法: ziyuan edict --dept works <诏令内容>".into());
+fn parse_limits(args: Vec<String>) -> Result<Limits, Box<dyn Error>> {
+    const USAGE: &str = "用法: ziyuan run [--jobs <并发数>] [--timeout <秒>]（均须为正整数）";
+    let mut limits = DEFAULT_LIMITS;
+    for pair in args.chunks(2) {
+        let [flag, value] = pair else {
+            return Err(USAGE.into());
+        };
+        let value = value.parse::<u64>().ok().filter(|v| *v > 0).ok_or(USAGE)?;
+        match flag.as_str() {
+            "--jobs" => limits.max_concurrent = value as usize,
+            "--timeout" => limits.timeout = Duration::from_secs(value),
+            _ => return Err(USAGE.into()),
         }
-        args.remove(0);
-        args.remove(0).parse::<Department>()?
+    }
+    Ok(limits)
+}
+
+fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    const USAGE: &str = "用法: ziyuan edict [--dept works] [--queue] <诏令内容>";
+    let mut department = None;
+    let mut queue = false;
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--queue") => {
+                args.remove(0);
+                queue = true;
+            }
+            Some("--dept") if args.len() >= 2 => {
+                args.remove(0);
+                department = Some(args.remove(0).parse::<Department>()?);
+            }
+            Some("--dept") => return Err(USAGE.into()),
+            _ => break,
+        }
+    }
+    if args.is_empty() {
+        return Err(USAGE.into());
+    }
+    let department = if let Some(department) = department {
+        department
     } else {
         let combined = args.join(" ").to_lowercase();
         if combined.contains("任免") || combined.contains("官员") || combined.contains("考绩")
@@ -260,7 +413,11 @@ fn parse_edict(mut args: Vec<String>) -> Result<(Department, String), Box<dyn Er
             Department::Works
         }
     };
-    Ok((department, args.join(" ")))
+    Ok(Command::Edict {
+        department,
+        text: args.join(" "),
+        queue,
+    })
 }
 fn describe_event(event: &CourtEvent) -> String {
     match event {
@@ -272,8 +429,23 @@ fn describe_event(event: &CourtEvent) -> String {
         CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
         CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
         CourtEvent::EdictIssued(e) => format!("诏令 #{}：{}", e.id.0, e.text),
+        CourtEvent::TaskAssigned { task, worker } => {
+            format!("诏令 #{} 派给 #{}", task.0, worker.0)
+        }
+        CourtEvent::ToolInvoked {
+            task,
+            tool,
+            args_json,
+            ok,
+        } => format!(
+            "诏令 #{} 调用 {tool} {args_json}（{}）",
+            task.0,
+            if *ok { "成功" } else { "失败" }
+        ),
         CourtEvent::TaskCompleted { task, worker, .. } => {
             format!("诏令 #{} 由 #{} 回奏", task.0, worker.0)
         }
+        CourtEvent::TaskFailed { task, reason } => format!("诏令 #{} 失败：{reason}", task.0),
+        CourtEvent::TaskCancelled { task } => format!("诏令 #{} 撤销", task.0),
     }
 }

@@ -1,5 +1,5 @@
 //! 独立于治理层的最小 Tool Calling Loop；模型 Adapter 见 `ziyuan-llm`。
-use crate::BoxError;
+use crate::{BoxError, ExecutionHooks};
 use std::fmt;
 
 #[derive(Debug)]
@@ -8,6 +8,7 @@ pub enum LoopError {
     EmptyToolCalls,
     UnauthorizedTool(String),
     StepLimit(usize),
+    Cancelled,
 }
 impl fmt::Display for LoopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -16,6 +17,7 @@ impl fmt::Display for LoopError {
             Self::EmptyToolCalls => f.write_str("模型返回空工具调用"),
             Self::UnauthorizedTool(name) => write!(f, "未授权的工具: {name}"),
             Self::StepLimit(n) => write!(f, "超出最大模型调用步数: {n}"),
+            Self::Cancelled => f.write_str("任务已被撤销或超时"),
         }
     }
 }
@@ -55,10 +57,10 @@ pub enum ModelTurn {
     Calls(Vec<ToolRequest>),
 }
 
-pub trait ModelProvider {
+pub trait ModelProvider: Send + Sync {
     fn next_turn(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, BoxError>;
 }
-pub trait Tool {
+pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn execute(&self, args_json: &str) -> Result<String, BoxError>;
 }
@@ -69,9 +71,13 @@ pub fn run(
     tools: &[Box<dyn Tool>],
     mut messages: Vec<Message>,
     max_steps: usize,
+    hooks: &dyn ExecutionHooks,
 ) -> Result<String, LoopError> {
     let specs: Vec<ToolSpec> = tools.iter().map(|tool| tool.spec()).collect();
     for _ in 0..max_steps {
+        if hooks.is_cancelled() {
+            return Err(LoopError::Cancelled);
+        }
         match model
             .next_turn(&messages, &specs)
             .map_err(LoopError::Model)?
@@ -100,11 +106,14 @@ pub fn run(
                         args_json: call.args_json.clone(),
                     });
                 }
+                if hooks.is_cancelled() {
+                    return Err(LoopError::Cancelled);
+                }
                 for (tool, call) in resolved {
                     // 工具错误回传给模型，由模型决定如何继续。
-                    let output = tool
-                        .execute(&call.args_json)
-                        .unwrap_or_else(|err| format!("tool error: {err}"));
+                    let result = tool.execute(&call.args_json);
+                    hooks.tool_invoked(&call.name, &call.args_json, result.is_ok());
+                    let output = result.unwrap_or_else(|err| format!("tool error: {err}"));
                     messages.push(Message::ToolOutput {
                         call_id: call.id,
                         output,
@@ -157,12 +166,44 @@ mod tests {
     fn model_can_call_a_tool() {
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(Echo)];
         assert_eq!(
-            run(&FakeModel, &tools, vec![Message::User("test".into())], 3).unwrap(),
+            run(
+                &FakeModel,
+                &tools,
+                vec![Message::User("test".into())],
+                3,
+                &()
+            )
+            .unwrap(),
             "已完成"
         );
     }
+    /// 记录工具调用；第一次工具调用后即视为被撤销。
+    #[derive(Default)]
+    struct CancelAfterTool(std::cell::RefCell<Vec<(String, bool)>>);
+    impl ExecutionHooks for CancelAfterTool {
+        fn is_cancelled(&self) -> bool {
+            !self.0.borrow().is_empty()
+        }
+        fn tool_invoked(&self, tool: &str, _args_json: &str, ok: bool) {
+            self.0.borrow_mut().push((tool.into(), ok));
+        }
+    }
+    #[test]
+    fn hooks_audit_tools_and_stop_the_loop() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(Echo)];
+        let hooks = CancelAfterTool::default();
+        let result = run(
+            &FakeModel,
+            &tools,
+            vec![Message::User("test".into())],
+            3,
+            &hooks,
+        );
+        assert!(matches!(result, Err(LoopError::Cancelled)), "{result:?}");
+        assert_eq!(*hooks.0.borrow(), [("echo".to_owned(), true)]);
+    }
     #[test]
     fn model_step_limit_enforced() {
-        assert!(run(&FakeModel, &[], vec![Message::User("test".into())], 0).is_err());
+        assert!(run(&FakeModel, &[], vec![Message::User("test".into())], 0, &()).is_err());
     }
 }

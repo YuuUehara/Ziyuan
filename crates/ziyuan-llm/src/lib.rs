@@ -253,7 +253,7 @@ mod tests {
             text: "查 unsafe".into(),
         };
         assert_eq!(
-            backend.execute(&actor, &edict).unwrap(),
+            backend.execute(&actor, &edict, &()).unwrap(),
             "lib.rs 第 1 行有 unsafe"
         );
 

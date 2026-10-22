@@ -9,7 +9,7 @@
 | 名称 | 职能 | 当前状态 |
 | --- | --- | --- |
 | 紫垣 ZiYuan | 项目和整体框架 | Rust Workspace |
-| 廷枢 Tingshu | Agent Runtime / Scheduler | `ziyuan-runtime`：同步演示调度 + Tool Calling 接口 |
+| 廷枢 Tingshu | Agent Runtime / Scheduler | `ziyuan-runtime`：Tokio 调度器（并发上限、超时、撤销）+ Tool Calling |
 | 玉玺 Yuxi | 职权、审批、审计 | `ziyuan-governance` 的显式任免规则，后续拆分 |
 | 诏令 ZhaoLing | 任务入口 | `Edict` 数据模型 + CLI |
 | 吏部 LiBu | 考绩、升迁 | `examine` 完成数，后续实现真正评估 |
@@ -21,7 +21,7 @@
 crates/
   ziyuan-core/        官员、官职、部门、诏令、事件等领域类型
   ziyuan-governance/  朝廷状态重放、改制、任免与任务路由（规则唯一来源）
-  ziyuan-runtime/     WorkerBackend（Demo / Agent）、Tool Calling Loop、只读工具
+  ziyuan-runtime/     Scheduler、WorkerBackend（Demo / Agent）、Tool Calling Loop、只读工具
   ziyuan-llm/         OpenAI 兼容 Chat Completions Adapter（ureq + serde_json）
   ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
   ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
@@ -73,7 +73,23 @@ cd /path/to/your/project && ziyuan init
 ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
 ```
 
-模型调用或工具循环失败时，诏令被拒绝，不写入事件簿。单件诏令最多 12 轮模型调用。
+单件诏令最多 12 轮模型调用。模型调用失败、超时或被撤销都会记入事件簿（`TaskFailed` / `TaskCancelled`），每次工具调用也记为 `ToolInvoked`（参数与成败，不含输出），可用 `ziyuan history` 审计。
+
+### 任务队列与并发
+
+```bash
+ziyuan edict --queue --dept works "检查 storage crate"   # 只入队
+ziyuan edict --queue --dept works "检查 runtime crate"
+ziyuan tasks                                            # 查看状态
+ziyuan cancel 2                                         # 撤销未结束的诏令
+ziyuan run --jobs 2 --timeout 120                       # 并发执行全部未结束诏令
+```
+
+- 不带 `--queue` 的 `edict` 入队后立即执行这一件（默认超时 300 秒）。`run` 默认并发 4、超时 300 秒。
+- 路由在下诏时检查：职位空缺等无法派工的诏令直接拒绝，不留记录。
+- 并发派工时，已派出但未完成的任务也计入属官负载。
+- Ctrl-C：执行中的诏令记为撤销，排队中的保持未结束，可再次 `run`。
+- 取消是协作式的：模型请求阻塞期间无法打断，后端在下一轮前停下；超时/撤销的结论立即记录，不等待请求返回。
 
 ### 版本控制：Jujutsu
 
@@ -118,7 +134,7 @@ v0.1 支持 `recruit` 动态扩充官员；同部门多个属官目前按已记�
 
 - ~~为 ModelProvider 实现真实 LLM API Adapter（Tool Calling）~~ 已完成；流式输出与使用量统计待做。
 - ~~将 `WorkerBackend` 切换为实际 `AgentLoop`，可配置只读工具 `search_code`、`read_file`~~ 已完成。
-- 为运行时加 Tokio 调度、任务队列、取消、超时、并发上限与审计链路。
+- ~~为运行时加 Tokio 调度、任务队列、取消、超时、并发上限与审计链路~~ 已完成（工具调用审计）；事件簿写锁与多进程协作待做。
 - 让任命/罢免使用原子事件事务，并引入 `Yuxi` 权限令牌与非 CLI 身份验证。
 - 实现可验证的 `LiBu` 考绩与候选人推荐；升迁仍由皇帝批准。
 - 做「紫禁城」TUI/Web UI；人格层只影响措辞与辩论，不得越权。

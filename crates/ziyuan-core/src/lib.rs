@@ -192,10 +192,30 @@ pub enum CourtEvent {
         agent: AgentId,
     },
     InstitutionReformed(GovernanceMode),
+    /// 诏令入队；此后依次可有 `TaskAssigned`、若干 `ToolInvoked`，并以完成/失败/撤销之一结束。
     EdictIssued(Edict),
+    /// 派给某位官员。进程中断后未结束的任务可重新指派。
+    TaskAssigned {
+        task: TaskId,
+        worker: AgentId,
+    },
+    /// 审计：执行中的一次工具调用（只记参数与成败，不记输出）。
+    ToolInvoked {
+        task: TaskId,
+        tool: String,
+        args_json: String,
+        ok: bool,
+    },
     TaskCompleted {
         task: TaskId,
         worker: AgentId,
         summary: String,
+    },
+    TaskFailed {
+        task: TaskId,
+        reason: String,
+    },
+    TaskCancelled {
+        task: TaskId,
     },
 }

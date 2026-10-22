@@ -52,6 +52,21 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             worker.0,
             to_hex(summary)
         ),
+        TaskAssigned { task, worker } => format!("v1\tASSIGNED\t{}\t{}", task.0, worker.0),
+        ToolInvoked {
+            task,
+            tool,
+            args_json,
+            ok,
+        } => format!(
+            "v1\tTOOL\t{}\t{}\t{}\t{}",
+            task.0,
+            to_hex(tool),
+            to_hex(args_json),
+            u8::from(*ok)
+        ),
+        TaskFailed { task, reason } => format!("v1\tFAILED\t{}\t{}", task.0, to_hex(reason)),
+        TaskCancelled { task } => format!("v1\tCANCELLED\t{}", task.0),
     }
 }
 pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
@@ -96,12 +111,34 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
             worker: AgentId(id(3)?),
             summary: from_hex(field(4)?)?,
         },
+        "ASSIGNED" => TaskAssigned {
+            task: TaskId(id(2)?),
+            worker: AgentId(id(3)?),
+        },
+        "TOOL" => ToolInvoked {
+            task: TaskId(id(2)?),
+            tool: from_hex(field(3)?)?,
+            args_json: from_hex(field(4)?)?,
+            ok: match field(5)? {
+                "1" => true,
+                "0" => false,
+                other => return Err(format!("成败标记无效: {other}")),
+            },
+        },
+        "FAILED" => TaskFailed {
+            task: TaskId(id(2)?),
+            reason: from_hex(field(3)?)?,
+        },
+        "CANCELLED" => TaskCancelled {
+            task: TaskId(id(2)?),
+        },
         other => return Err(format!("未知事件类型: {other}")),
     };
     let expected_fields = match &event {
-        Founded(_) | InstitutionReformed(_) | OfficialDismissed { .. } => 3,
-        OfficialAppointed { .. } => 4,
+        Founded(_) | InstitutionReformed(_) | OfficialDismissed { .. } | TaskCancelled { .. } => 3,
+        OfficialAppointed { .. } | TaskAssigned { .. } | TaskFailed { .. } => 4,
         AgentRegistered(_) | EdictIssued(_) | TaskCompleted { .. } => 5,
+        ToolInvoked { .. } => 6,
     };
     if parts.len() != expected_fields {
         return Err("字段数量不正确".into());
@@ -114,12 +151,32 @@ mod tests {
     use super::*;
     #[test]
     fn event_round_trip_chinese_and_tabs() {
-        let original = CourtEvent::EdictIssued(Edict {
-            id: TaskId(42),
-            department: Department::Works,
-            text: "检查\tRust\n测试".into(),
-        });
-        assert_eq!(decode_event(&encode_event(&original)).unwrap(), original);
+        let task = TaskId(42);
+        let events = [
+            CourtEvent::EdictIssued(Edict {
+                id: task,
+                department: Department::Works,
+                text: "检查\tRust\n测试".into(),
+            }),
+            CourtEvent::TaskAssigned {
+                task,
+                worker: AgentId(7),
+            },
+            CourtEvent::ToolInvoked {
+                task,
+                tool: "read_file".into(),
+                args_json: r#"{"path":"src/\t主.rs"}"#.into(),
+                ok: false,
+            },
+            CourtEvent::TaskFailed {
+                task,
+                reason: "超时\n（300s）".into(),
+            },
+            CourtEvent::TaskCancelled { task },
+        ];
+        for original in events {
+            assert_eq!(decode_event(&encode_event(&original)).unwrap(), original);
+        }
     }
     #[test]
     fn malformed_event_is_rejected() {

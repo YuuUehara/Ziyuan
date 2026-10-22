@@ -11,5 +11,8 @@ ziyuan-governance.workspace = true
 ziyuan-runtime.workspace = true
 ziyuan-storage.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [lints]
 workspace = true

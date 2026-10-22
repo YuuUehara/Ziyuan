@@ -22,7 +22,12 @@ pub enum GovernanceError {
     EmptyEdict,
     DuplicateEdict(TaskId),
     UnknownEdict(TaskId),
-    AlreadyCompleted(TaskId),
+    TaskFinished(TaskId),
+    TaskNotAssigned(TaskId),
+    WrongWorker {
+        task: TaskId,
+        worker: AgentId,
+    },
     Vacant(Office),
 }
 impl fmt::Display for GovernanceError {
@@ -45,7 +50,11 @@ impl fmt::Display for GovernanceError {
             Self::EmptyEdict => f.write_str("诏令不能为空"),
             Self::DuplicateEdict(id) => write!(f, "重复诏令 ID: {}", id.0),
             Self::UnknownEdict(id) => write!(f, "未记录下达的诏令 #{}", id.0),
-            Self::AlreadyCompleted(id) => write!(f, "诏令 #{} 已完成，拒绝重复记功", id.0),
+            Self::TaskFinished(id) => write!(f, "诏令 #{} 已结束，不能再变更", id.0),
+            Self::TaskNotAssigned(id) => write!(f, "诏令 #{} 未在执行中", id.0),
+            Self::WrongWorker { task, worker } => {
+                write!(f, "诏令 #{} 并未派给官员 #{}", task.0, worker.0)
+            }
             Self::Vacant(Office::Chancellor) => f.write_str("丞相空缺。请先任命丞相，或改制。"),
             Self::Vacant(Office::FirstGrandSecretary) => {
                 f.write_str("内阁首辅空缺。请先 appoint 一名首辅。")
@@ -65,8 +74,36 @@ pub struct Court {
     appointments: BTreeMap<AgentId, Office>,
     next_task_id: u64,
     next_agent_id: u64,
-    issued: BTreeMap<TaskId, Edict>,
-    completions: BTreeMap<TaskId, (AgentId, String)>,
+    tasks: BTreeMap<TaskId, Task>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Task {
+    pub edict: Edict,
+    pub status: TaskStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskStatus {
+    /// 已入队，尚未指派。
+    Pending,
+    /// 已指派、尚未结束（执行中，或上次运行中断）。
+    Assigned(AgentId),
+    Completed {
+        worker: AgentId,
+        summary: String,
+    },
+    Failed {
+        reason: String,
+    },
+    Cancelled,
+}
+
+impl TaskStatus {
+    /// 未结束的任务可被（重新）执行或撤销。
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Pending | Self::Assigned(_))
+    }
 }
 
 impl Court {
@@ -81,8 +118,7 @@ impl Court {
             appointments: BTreeMap::new(),
             next_task_id: 1,
             next_agent_id: 1,
-            issued: BTreeMap::new(),
-            completions: BTreeMap::new(),
+            tasks: BTreeMap::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -123,27 +159,68 @@ impl Court {
                 if edict.text.trim().is_empty() {
                     return Err(GovernanceError::EmptyEdict);
                 }
-                if self.issued.contains_key(&edict.id) {
+                if self.tasks.contains_key(&edict.id) {
                     return Err(GovernanceError::DuplicateEdict(edict.id));
                 }
                 self.next_task_id = self.next_task_id.max(edict.id.0 + 1);
-                self.issued.insert(edict.id, edict.clone());
+                self.tasks.insert(
+                    edict.id,
+                    Task {
+                        edict: edict.clone(),
+                        status: TaskStatus::Pending,
+                    },
+                );
+            }
+            CourtEvent::TaskAssigned { task, worker } => {
+                self.open_task(*task)?;
+                if !self.agents.contains_key(worker) {
+                    return Err(GovernanceError::UnknownAgent(*worker));
+                }
+                self.set_status(*task, TaskStatus::Assigned(*worker));
+            }
+            CourtEvent::ToolInvoked { task, .. } => {
+                if !matches!(self.open_task(*task)?, TaskStatus::Assigned(_)) {
+                    return Err(GovernanceError::TaskNotAssigned(*task));
+                }
             }
             CourtEvent::TaskCompleted {
                 task,
                 worker,
                 summary,
             } => {
-                if !self.issued.contains_key(task) {
-                    return Err(GovernanceError::UnknownEdict(*task));
+                // v0.1 的日志没有 TaskAssigned，直接从 Pending 完成。
+                match self.open_task(*task)? {
+                    TaskStatus::Assigned(assigned) if assigned != worker => {
+                        return Err(GovernanceError::WrongWorker {
+                            task: *task,
+                            worker: *worker,
+                        });
+                    }
+                    _ => {}
                 }
                 if !self.agents.contains_key(worker) {
                     return Err(GovernanceError::UnknownAgent(*worker));
                 }
-                if self.completions.contains_key(task) {
-                    return Err(GovernanceError::AlreadyCompleted(*task));
-                }
-                self.completions.insert(*task, (*worker, summary.clone()));
+                self.set_status(
+                    *task,
+                    TaskStatus::Completed {
+                        worker: *worker,
+                        summary: summary.clone(),
+                    },
+                );
+            }
+            CourtEvent::TaskFailed { task, reason } => {
+                self.open_task(*task)?;
+                self.set_status(
+                    *task,
+                    TaskStatus::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+            }
+            CourtEvent::TaskCancelled { task } => {
+                self.propose_cancellation(*task)?;
+                self.set_status(*task, TaskStatus::Cancelled);
             }
         }
         Ok(())
@@ -171,7 +248,50 @@ impl Court {
     }
 
     pub fn completed_count(&self) -> usize {
-        self.completions.len()
+        self.tasks
+            .values()
+            .filter(|t| matches!(t.status, TaskStatus::Completed { .. }))
+            .count()
+    }
+
+    pub fn task(&self, id: TaskId) -> Option<&Task> {
+        self.tasks.get(&id)
+    }
+
+    /// 按 ID 升序列出全部诏令。
+    pub fn tasks(&self) -> impl Iterator<Item = &Task> {
+        self.tasks.values()
+    }
+
+    /// 未结束的诏令，按 ID 升序。
+    pub fn open_tasks(&self) -> Vec<TaskId> {
+        self.tasks
+            .iter()
+            .filter(|(_, t)| t.status.is_open())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    fn open_task(&self, id: TaskId) -> Result<&TaskStatus, GovernanceError> {
+        let task = self
+            .tasks
+            .get(&id)
+            .ok_or(GovernanceError::UnknownEdict(id))?;
+        if !task.status.is_open() {
+            return Err(GovernanceError::TaskFinished(id));
+        }
+        Ok(&task.status)
+    }
+
+    fn set_status(&mut self, id: TaskId, status: TaskStatus) {
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.status = status;
+        }
+    }
+
+    pub fn propose_cancellation(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
+        self.open_task(task)?;
+        Ok(CourtEvent::TaskCancelled { task })
     }
 
     /// 招募新官员，登记身份但不自动授职。
@@ -289,13 +409,13 @@ impl Court {
             edict.department.label(),
             minister.name
         ));
-        // 目前只按已记录任务量均衡派工；未来可接入可靠的考绩评分。
+        // 目前只按任务量均衡派工；未来可接入可靠的考绩评分。
         let worker = self
             .appointments
             .iter()
             .filter(|(_, office)| **office == Office::Clerk(edict.department))
             .filter_map(|(id, _)| self.agents.get(id))
-            .min_by_key(|candidate| (self.recorded_completions(candidate.id), candidate.id))
+            .min_by_key(|candidate| (self.workload(candidate.id), candidate.id))
             .unwrap_or(minister);
         if worker.id != minister.id {
             path.push(format!("{}属官·{}", edict.department.label(), worker.name));
@@ -307,9 +427,22 @@ impl Court {
     }
 
     pub fn recorded_completions(&self, agent: AgentId) -> usize {
-        self.completions
+        self.tasks
             .values()
-            .filter(|(worker, _)| *worker == agent)
+            .filter(|t| matches!(t.status, TaskStatus::Completed { worker, .. } if worker == agent))
+            .count()
+    }
+
+    /// 派工负载：已完成与执行中的任务数。并发派工时，先派出的任务也计入。
+    fn workload(&self, agent: AgentId) -> usize {
+        self.tasks
+            .values()
+            .filter(|t| match t.status {
+                TaskStatus::Assigned(worker) | TaskStatus::Completed { worker, .. } => {
+                    worker == agent
+                }
+                _ => false,
+            })
             .count()
     }
 }
@@ -453,6 +586,62 @@ mod tests {
         let mut events = founding_events();
         events.push(CourtEvent::InstitutionReformed(GovernanceMode::Chancellor));
         assert!(Court::replay(&events).is_err());
+    }
+    #[test]
+    fn task_lifecycle_is_enforced_on_replay() {
+        let task = TaskId(1);
+        let mut base = founding_events();
+        base.push(CourtEvent::EdictIssued(Edict {
+            id: task,
+            department: Department::Works,
+            text: "查".into(),
+        }));
+        let with = |extra: &[CourtEvent]| {
+            let mut events = base.clone();
+            events.extend_from_slice(extra);
+            Court::replay(&events)
+        };
+        let assigned = CourtEvent::TaskAssigned {
+            task,
+            worker: AgentId(4),
+        };
+        let tool = CourtEvent::ToolInvoked {
+            task,
+            tool: "read_file".into(),
+            args_json: "{}".into(),
+            ok: true,
+        };
+        let done_by = |worker| CourtEvent::TaskCompleted {
+            task,
+            worker: AgentId(worker),
+            summary: "ok".into(),
+        };
+
+        // v0.1 日志：未指派即完成，仍可回放。
+        assert!(with(&[done_by(4)]).is_ok());
+        assert!(with(&[assigned.clone(), tool.clone(), done_by(4)]).is_ok());
+        assert_eq!(
+            with(&[assigned.clone(), done_by(2)]).unwrap_err(),
+            GovernanceError::WrongWorker {
+                task,
+                worker: AgentId(2)
+            }
+        );
+        assert_eq!(
+            with(std::slice::from_ref(&tool)).unwrap_err(),
+            GovernanceError::TaskNotAssigned(task)
+        );
+        assert_eq!(
+            with(&[assigned, CourtEvent::TaskCancelled { task }, tool]).unwrap_err(),
+            GovernanceError::TaskFinished(task)
+        );
+        let court = with(&[CourtEvent::TaskFailed {
+            task,
+            reason: "x".into(),
+        }])
+        .unwrap();
+        assert!(court.open_tasks().is_empty());
+        assert!(court.propose_cancellation(task).is_err());
     }
     #[test]
     fn recruitment_enables_dynamic_worker_pool() {

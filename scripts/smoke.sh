@@ -29,5 +29,18 @@ fi
 "$BIN" appoint 6 first-secretary
 ROUTE="$("$BIN" edict --dept works '内阁承办')"
 grep -q '首辅' <<< "$ROUTE"
-"$BIN" history > /dev/null
+# 入队、撤销、并发执行
+queue() { "$BIN" edict --queue --dept works "$1" | sed -n 's/^诏令 #\([0-9]*\) 已入队.*/\1/p'; }
+A="$(queue '排队一')"; B="$(queue '排队二')"; C="$(queue '撤销我')"
+"$BIN" cancel "$C"
+if "$BIN" cancel "$C" > /dev/null 2>&1; then echo '不应重复撤销' >&2; exit 1; fi
+RUN="$("$BIN" run --jobs 2 --timeout 30)"
+grep -q "诏令 #$A：排队一" <<< "$RUN"
+grep -q "诏令 #$B：排队二" <<< "$RUN"
+if grep -q '撤销我' <<< "$RUN"; then echo '已撤销的诏令不应执行' >&2; exit 1; fi
+TASKS="$("$BIN" tasks)"
+grep -q "#$C .*已撤销" <<< "$TASKS"
+if grep -q '待办\|未结束' <<< "$TASKS"; then echo '仍有未结束诏令' >&2; exit 1; fi
+grep -q '没有未结束的诏令' <<< "$("$BIN" run)"
+"$BIN" history | grep -q "诏令 #$A 派给"
 echo 'ZiYuan smoke test PASS'

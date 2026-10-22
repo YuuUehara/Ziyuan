@@ -16,7 +16,7 @@ Emperor (human / authenticated control plane)
           ├─ Direct to Department OR
           └─ Cabinet First Secretary
               └─ Minister → Clerk (Worker)
-                  └─ Runtime::dispatch(WorkerBackend)
+                  └─ Runtime::Scheduler (Tokio：并发上限 / 超时 / 撤销)
                       └─ DemoBackend | AgentBackend (ziyuan-llm + 只读工具)
 ```
 
@@ -28,27 +28,37 @@ Emperor (human / authenticated control plane)
 
 ```text
 ziyuan-cli ──▶ ziyuan-app (Session) ──▶ ziyuan-governance (Court)
-                    │        │                    ▲
-                    │        └──▶ ziyuan-runtime ─┘ (dispatch / WorkerBackend)
-                    └──▶ ziyuan-storage (EventStore)
-            （所有 crate 依赖 ziyuan-core 领域类型）
+    │               │
+    │               ├──▶ ziyuan-runtime (Scheduler / WorkerBackend)
+    │               └──▶ ziyuan-storage (EventStore)
+    └──▶ ziyuan-llm ──▶ ziyuan-runtime (ModelProvider)
+            （所有 crate 依赖 ziyuan-core 领域类型；runtime 不依赖 governance）
 ```
 
 - `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
 - `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。
 - `ziyuan-storage`：`EventStore { load, append }`；`EventLog`（`.ziyuan/court.log`）与 `MemoryEventLog`。编码在私有 `codec` 模块，与文件 I/O 分离。
-- `ziyuan-runtime`：`dispatch` 按 `Court::route` 调用 `WorkerBackend`；Adapter 错误统一为 `BoxError`。`AgentBackend` 运行 `agent_loop`，`tools` 提供只读工具。
+- `ziyuan-runtime`：`Scheduler` 并发执行已指派的 `Job`，经通道回报 `Progress`（工具调用与结局）；不了解治理规则。Adapter 错误统一为 `BoxError`。`AgentBackend` 运行 `agent_loop`，`tools` 提供只读工具。
 - `ziyuan-llm`：`OpenAiCompatible` 实现 `ModelProvider`。HTTP/TLS 依赖只在此 crate，runtime 保持无网络依赖。
 - `ziyuan-app`：`Session<S: EventStore>` 是唯一的写入路径。每个用例：治理层提议事件 → 在 `Court` 副本上 `apply` 校验 → `EventStore::append` → 替换内存状态。被拒绝的操作不留事件；写入的事件一定可以回放。
 - `ziyuan-cli`：把参数解析为 `Command`，调用 `Session`，打印结果。未来的 TUI/Web 复用 `Session`。
 
-初始化生成 `Founded`, `AgentRegistered`, `OfficialAppointed`。运行时追加 `EdictIssued`, `TaskCompleted`。`Court::replay` 根据完整日志恢复当前朝廷状态；`InstitutionReformed` 在回放时清理最高协调职务。
+初始化生成 `Founded`, `AgentRegistered`, `OfficialAppointed`。诏令的事件序列：
 
-注意：v0.1 的 EventLog 只适合单进程演示。后续迁移 SQLite 的单事务批次写入；另需锁、Schema 版本、幂等键、快照与事件去重。
+```text
+EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskCompleted | TaskFailed | TaskCancelled
+     └──────────────────────────────────────────▶ TaskCancelled（排队中撤销）
+```
+
+`Session::issue` 只写 `EdictIssued`（路由不通则拒绝）。`Session::run` 按当前制度逐件写 `TaskAssigned`，交给 `Scheduler`，再把每条 `Progress` 作为事件提交。`Court::apply` 校验生命周期：结束后的诏令不能再变更；`ToolInvoked` 只能出现在已指派的诏令上；完成者必须是被指派者。未结束且已指派的诏令（进程中断）可重新指派。v0.1 日志中没有 `TaskAssigned` 的完成记录仍可回放。`Court::replay` 根据完整日志恢复当前朝廷状态；`InstitutionReformed` 在回放时清理最高协调职务。
+
+注意：EventLog 只适合单进程：同一时刻只应有一个 `ziyuan` 进程写入（`Session` 在进程内是唯一写入者）。后续迁移 SQLite 的单事务批次写入；另需锁、Schema 版本、幂等键、快照与事件去重。
 
 ## 4. Runtime 与 LLM
 
-`ziyuan-runtime::WorkerBackend` 是实际执行者接口；`DemoBackend` 不执行任务。
+`ziyuan-runtime::WorkerBackend` 是实际执行者接口（同步，`Send + Sync`）；`DemoBackend` 不执行任务。
+
+`Scheduler` 基于 Tokio：信号量限制并发，每件任务在阻塞线程池中执行；许可随执行线程释放，因此超时后仍在收尾的线程也计入并发数。取消是协作式的：超时或 `CancelToken` 触发时调度器立即给出结局，并通过 `ExecutionHooks::is_cancelled` 通知后端；`agent_loop` 在每轮模型调用前与执行工具前检查。撤销时尚未开始的任务报告为 `NotStarted`，保持未结束。CLI 退出时不等待仍阻塞的 HTTP 请求。
 
 `ziyuan-runtime::agent_loop` 提供独立的 `ModelProvider`, `Tool`, `ModelTurn`, `Message` 等抽象，并实现最小 Tool Calling 循环。一轮内的全部工具调用先于其输出写入消息（与 Chat API 的顺序一致）；任一调用未注册则整轮拒绝，不执行任何工具。
 
