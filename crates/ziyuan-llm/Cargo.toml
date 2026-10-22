@@ -1,0 +1,17 @@
+[package]
+name = "ziyuan-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+ureq.workspace = true
+ziyuan-runtime.workspace = true
+
+[dev-dependencies]
+ziyuan-core.workspace = true
+
+[lints]
+workspace = true

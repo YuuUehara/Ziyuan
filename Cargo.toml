@@ -3,6 +3,7 @@ members = [
     "crates/ziyuan-core",
     "crates/ziyuan-governance",
     "crates/ziyuan-runtime",
+    "crates/ziyuan-llm",
     "crates/ziyuan-storage",
     "crates/ziyuan-app",
     "crates/ziyuan-cli",
@@ -19,6 +20,7 @@ license = "MIT OR Apache-2.0"
 ziyuan-core = { path = "crates/ziyuan-core" }
 ziyuan-governance = { path = "crates/ziyuan-governance" }
 ziyuan-runtime = { path = "crates/ziyuan-runtime" }
+ziyuan-llm = { path = "crates/ziyuan-llm" }
 ziyuan-storage = { path = "crates/ziyuan-storage" }
 ziyuan-app = { path = "crates/ziyuan-app" }
 serde_json = "1"
