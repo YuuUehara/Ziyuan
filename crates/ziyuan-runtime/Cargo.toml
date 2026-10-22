@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 ziyuan-core.workspace = true
 ziyuan-governance.workspace = true
 
