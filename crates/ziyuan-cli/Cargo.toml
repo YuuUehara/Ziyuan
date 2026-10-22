@@ -10,8 +10,8 @@ name = "ziyuan"
 path = "src/main.rs"
 
 [dependencies]
+ziyuan-app.workspace = true
 ziyuan-core.workspace = true
-ziyuan-governance.workspace = true
 ziyuan-runtime.workspace = true
 ziyuan-storage.workspace = true
 

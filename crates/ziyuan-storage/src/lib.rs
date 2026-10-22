@@ -46,6 +46,15 @@ pub trait EventStore {
     fn append(&mut self, events: &[CourtEvent]) -> Result<(), StorageError>;
 }
 
+impl<T: EventStore + ?Sized> EventStore for &mut T {
+    fn load(&self) -> Result<Vec<CourtEvent>, StorageError> {
+        (**self).load()
+    }
+    fn append(&mut self, events: &[CourtEvent]) -> Result<(), StorageError> {
+        (**self).append(events)
+    }
+}
+
 /// `<root>/.ziyuan/court.log` 文本事件簿。单进程演示用：无写锁、无事务。
 pub struct EventLog {
     path: PathBuf,

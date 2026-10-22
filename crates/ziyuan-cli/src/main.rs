@@ -1,11 +1,13 @@
 //! 紫垣命令行：用户扮演皇帝，改制/任免为显式用户操作。
+//!
+//! 本模块只负责解析参数与呈现结果；用例流程在 `ziyuan-app::Session` 中。
 use std::env;
 use std::error::Error;
 use std::process::ExitCode;
+use ziyuan_app::Session;
 use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office};
-use ziyuan_governance::{Court, founding_events};
-use ziyuan_runtime::{DemoBackend, dispatch};
-use ziyuan_storage::{EventLog, EventStore};
+use ziyuan_runtime::DemoBackend;
+use ziyuan_storage::EventLog;
 
 const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示版）
 
@@ -36,6 +38,20 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan edict --dept works "请内阁协调检查"
 "#;
 
+enum Command {
+    Help,
+    Init,
+    Court,
+    Officials,
+    Recruit(String, Department),
+    Edict(Department, String),
+    Reform(GovernanceMode),
+    Dismiss(AgentId),
+    Appoint(AgentId, Office),
+    Examine(AgentId),
+    History,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -45,31 +61,60 @@ fn main() -> ExitCode {
         }
     }
 }
+
 fn run() -> Result<(), Box<dyn Error>> {
-    let mut args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args[0] == "help" || args[0] == "--help" {
-        println!("{HELP}");
-        return Ok(());
-    }
-    let command = args.remove(0);
-    let root = env::current_dir().map_err(|e| e.to_string())?;
-    let mut log = EventLog::new(&root);
-    let events = log.load()?;
-    if command == "init" {
-        if !events.is_empty() {
-            return Err("朝廷已存在，拒绝覆盖日志".into());
+    let command = parse(env::args().skip(1).collect())?;
+    let log = EventLog::new(&env::current_dir()?);
+    match command {
+        Command::Help => println!("{HELP}"),
+        Command::Init => {
+            Session::found(log)?;
+            println!("紫垣已建立。当前制度：丞相制。请执行 `ziyuan court`。");
         }
-        log.append(&founding_events())?;
-        println!("紫垣已建立。当前制度：丞相制。请执行 `ziyuan court`。");
-        return Ok(());
+        command => execute(&mut Session::open(log)?, command)?,
     }
-    if events.is_empty() {
-        return Err("朝廷尚未建立，请先在项目目录执行 `ziyuan init`".into());
+    Ok(())
+}
+
+fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    if args.is_empty() {
+        return Ok(Command::Help);
     }
-    let mut court = Court::replay(&events)?;
-    match command.as_str() {
-        "court" => {
-            ensure_no_args(&args)?;
+    let name = args.remove(0);
+    let command = match name.as_str() {
+        "help" | "--help" => Command::Help,
+        "init" => no_args(args, Command::Init)?,
+        "court" => no_args(args, Command::Court)?,
+        "officials" => no_args(args, Command::Officials)?,
+        "history" => no_args(args, Command::History)?,
+        "recruit" => match <[String; 2]>::try_from(args) {
+            Ok([name, dept]) => Command::Recruit(name, dept.parse()?),
+            Err(_) => return Err("用法: ziyuan recruit <姓名> <部门>".into()),
+        },
+        "edict" => {
+            let (department, text) = parse_edict(args)?;
+            Command::Edict(department, text)
+        }
+        "reform" => match <[String; 1]>::try_from(args) {
+            Ok([mode]) => Command::Reform(mode.parse()?),
+            Err(_) => return Err("用法: ziyuan reform <chancellor|direct|cabinet>".into()),
+        },
+        "dismiss" => Command::Dismiss(parse_id(&args, "ziyuan dismiss <官员ID>")?),
+        "appoint" => match <[String; 2]>::try_from(args) {
+            Ok([id, office]) => Command::Appoint(agent_id(&id)?, office.parse()?),
+            Err(_) => return Err("用法: ziyuan appoint <官员ID> <官职>".into()),
+        },
+        "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
+        _ => return Err(format!("未知命令：{name}。运行 ziyuan help 查看帮助").into()),
+    };
+    Ok(command)
+}
+
+fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<dyn Error>> {
+    match command {
+        Command::Help | Command::Init => unreachable!("在 run 中处理"),
+        Command::Court => {
+            let court = session.court();
             println!("朝廷制度：{} ({})", court.mode().label(), court.mode());
             println!(
                 "在册官员：{}；有职官员：{}；已完成任务：{}",
@@ -86,92 +131,54 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }
             );
         }
-        "officials" => {
-            ensure_no_args(&args)?;
+        Command::Officials => {
+            let court = session.court();
             for agent in court.agents() {
-                let id = &agent.id;
                 let office = court
-                    .office_of(*id)
+                    .office_of(agent.id)
                     .map(|o| o.label())
                     .unwrap_or("未任官职".into());
                 println!(
                     "#{:<3} {:<8} {:<12} {} (完成 {} 件)",
-                    id.0,
+                    agent.id.0,
                     agent.name,
                     office,
                     agent.speciality.label(),
-                    court.recorded_completions(*id)
+                    court.recorded_completions(agent.id)
                 );
             }
         }
-        "recruit" => {
-            if args.len() != 2 {
-                return Err("用法: ziyuan recruit <姓名> <部门>".into());
-            }
-            let event =
-                court.propose_recruitment(args[0].clone(), args[1].parse::<Department>()?)?;
-            let agent_id = match &event {
-                CourtEvent::AgentRegistered(a) => a.id,
-                _ => unreachable!(),
-            };
-            log.append(&[event])?;
-            println!(
-                "诏令已颁：招募官员 #{} {}（未授官职）。",
-                agent_id.0, args[0]
-            );
+        Command::Recruit(name, department) => {
+            let id = session.recruit(name.clone(), department)?;
+            println!("诏令已颁：招募官员 #{} {}（未授官职）。", id.0, name);
         }
-        "edict" => {
-            let (department, text) = parse_edict(args)?;
-            let edict = court.new_edict(department, text)?;
-            // 所有路由检查先于持久化；模拟后端不能执行真实修改。
-            let report = dispatch(&court, &edict, &DemoBackend)?;
-            let changes = [
-                CourtEvent::EdictIssued(edict.clone()),
-                CourtEvent::TaskCompleted {
-                    task: edict.id,
-                    worker: report.worker,
-                    summary: report.summary.clone(),
-                },
-            ];
-            log.append(&changes)?;
+        Command::Edict(department, text) => {
+            // 模拟后端不能执行真实修改。
+            let (edict, report) = session.issue_edict(department, text, &DemoBackend)?;
             println!("诏令 #{}：{}", edict.id.0, edict.text);
             println!("路由：{}", report.path.join(" → "));
             println!("回奏：{}", report.summary);
         }
-        "reform" => {
-            if args.len() != 1 {
-                return Err("用法: ziyuan reform <chancellor|direct|cabinet>".into());
-            }
-            let mode = args[0].parse::<GovernanceMode>()?;
-            let event = court.propose_reform(mode)?;
-            log.append(std::slice::from_ref(&event))?;
-            court.apply(&event)?;
+        Command::Reform(mode) => {
+            session.reform(mode)?;
             println!(
                 "诏令已颁：制度改为{}。原丞相/首辅职务自动撤销。",
-                court.mode().label()
+                mode.label()
             );
             if mode != GovernanceMode::DirectRule {
                 println!("提示：新制度如无协调者，请先任命。 ");
             }
         }
-        "dismiss" => {
-            let id = parse_id(&args, "ziyuan dismiss <官员ID>")?;
-            let event = court.propose_dismissal(id)?;
-            log.append(&[event])?;
+        Command::Dismiss(id) => {
+            session.dismiss(id)?;
             println!("诏令已颁：官员 #{} 已罢免现职（身份与履历保留）。", id.0);
         }
-        "appoint" => {
-            if args.len() != 2 {
-                return Err("用法: ziyuan appoint <官员ID> <官职>".into());
-            }
-            let id = AgentId(args[0].parse().map_err(|_| "官员 ID 必须是数字")?);
-            let office = args[1].parse::<Office>()?;
-            let event = court.propose_appointment(id, office)?;
-            log.append(&[event])?;
+        Command::Appoint(id, office) => {
+            session.appoint(id, office)?;
             println!("诏令已颁：任命官员 #{} 为{}。", id.0, office.label());
         }
-        "examine" => {
-            let id = parse_id(&args, "ziyuan examine <官员ID>")?;
+        Command::Examine(id) => {
+            let court = session.court();
             let agent = court.agent(id).ok_or("官员不存在")?;
             println!(
                 "吏部简报：{}（#{}）已记录 {} 件完成任务。",
@@ -183,31 +190,34 @@ fn run() -> Result<(), Box<dyn Error>> {
                 "注意：当前只是完成次数，不等于实际能力、正确率或晋升资格。模拟后端未验证结果。 "
             );
         }
-        "history" => {
-            ensure_no_args(&args)?;
-            for (i, event) in events.iter().enumerate() {
+        Command::History => {
+            for (i, event) in session.history().iter().enumerate() {
                 println!("{:>3}: {}", i + 1, describe_event(event));
             }
         }
-        _ => return Err(format!("未知命令：{command}。运行 ziyuan help 查看帮助").into()),
     }
     Ok(())
 }
-fn ensure_no_args(args: &[String]) -> Result<(), String> {
+
+fn no_args(args: Vec<String>, command: Command) -> Result<Command, Box<dyn Error>> {
     if args.is_empty() {
-        Ok(())
+        Ok(command)
     } else {
         Err("该命令不接受额外参数".into())
     }
 }
-fn parse_id(args: &[String], usage: &str) -> Result<AgentId, Box<dyn Error>> {
-    if args.len() != 1 {
-        return Err(format!("用法: {usage}").into());
-    }
-    Ok(AgentId(
-        args[0].parse::<u64>().map_err(|_| "官员 ID 必须是数字")?,
-    ))
+
+fn agent_id(input: &str) -> Result<AgentId, Box<dyn Error>> {
+    Ok(AgentId(input.parse().map_err(|_| "官员 ID 必须是数字")?))
 }
+
+fn parse_id(args: &[String], usage: &str) -> Result<AgentId, Box<dyn Error>> {
+    match args {
+        [id] => agent_id(id),
+        _ => Err(format!("用法: {usage}").into()),
+    }
+}
+
 fn parse_edict(mut args: Vec<String>) -> Result<(Department, String), Box<dyn Error>> {
     let department = if args.first().map(String::as_str) == Some("--dept") {
         if args.len() < 3 {

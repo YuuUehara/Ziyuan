@@ -4,6 +4,7 @@ members = [
     "crates/ziyuan-governance",
     "crates/ziyuan-runtime",
     "crates/ziyuan-storage",
+    "crates/ziyuan-app",
     "crates/ziyuan-cli",
 ]
 resolver = "3"
@@ -19,6 +20,7 @@ ziyuan-core = { path = "crates/ziyuan-core" }
 ziyuan-governance = { path = "crates/ziyuan-governance" }
 ziyuan-runtime = { path = "crates/ziyuan-runtime" }
 ziyuan-storage = { path = "crates/ziyuan-storage" }
+ziyuan-app = { path = "crates/ziyuan-app" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
