@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office};
 use ziyuan_governance::{Court, founding_events};
 use ziyuan_runtime::{DemoBackend, dispatch};
-use ziyuan_storage::EventLog;
+use ziyuan_storage::{EventLog, EventStore};
 
 const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示版）
 
@@ -53,19 +53,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     let command = args.remove(0);
     let root = env::current_dir().map_err(|e| e.to_string())?;
-    let log = EventLog::new(&root);
+    let mut log = EventLog::new(&root);
+    let events = log.load()?;
     if command == "init" {
-        if log.exists() {
+        if !events.is_empty() {
             return Err("朝廷已存在，拒绝覆盖日志".into());
         }
         log.append(&founding_events())?;
         println!("紫垣已建立。当前制度：丞相制。请执行 `ziyuan court`。");
         return Ok(());
     }
-    if !log.exists() {
+    if events.is_empty() {
         return Err("朝廷尚未建立，请先在项目目录执行 `ziyuan init`".into());
     }
-    let events = log.load()?;
     let mut court = Court::replay(&events)?;
     match command.as_str() {
         "court" => {
