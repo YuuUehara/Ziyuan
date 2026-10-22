@@ -70,16 +70,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.as_str() {
         "court" => {
             ensure_no_args(&args)?;
-            println!("朝廷制度：{} ({})", court.mode.label(), court.mode);
+            println!("朝廷制度：{} ({})", court.mode().label(), court.mode());
             println!(
                 "在册官员：{}；有职官员：{}；已完成任务：{}",
-                court.agents.len(),
-                court.appointments.len(),
-                court.completions.len()
+                court.agents().count(),
+                court.appointed_count(),
+                court.completed_count()
             );
             println!(
                 "调度中枢：{}",
-                match court.mode {
+                match court.mode() {
                     GovernanceMode::Chancellor => "丞相",
                     GovernanceMode::DirectRule => "皇帝直达六部",
                     GovernanceMode::Cabinet => "首辅",
@@ -88,10 +88,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         "officials" => {
             ensure_no_args(&args)?;
-            for (id, agent) in &court.agents {
+            for agent in court.agents() {
+                let id = &agent.id;
                 let office = court
-                    .appointments
-                    .get(id)
+                    .office_of(*id)
                     .map(|o| o.label())
                     .unwrap_or("未任官职".into());
                 println!(
@@ -148,7 +148,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             court.apply(&event)?;
             println!(
                 "诏令已颁：制度改为{}。原丞相/首辅职务自动撤销。",
-                court.mode.label()
+                court.mode().label()
             );
             if mode != GovernanceMode::DirectRule {
                 println!("提示：新制度如无协调者，请先任命。 ");
@@ -172,7 +172,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         "examine" => {
             let id = parse_id(&args, "ziyuan examine <官员ID>")?;
-            let agent = court.agents.get(&id).ok_or("官员不存在")?;
+            let agent = court.agent(id).ok_or("官员不存在")?;
             println!(
                 "吏部简报：{}（#{}）已记录 {} 件完成任务。",
                 agent.name,

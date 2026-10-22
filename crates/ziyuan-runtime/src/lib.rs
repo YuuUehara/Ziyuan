@@ -58,8 +58,7 @@ pub fn dispatch(
 ) -> Result<ExecutionReport, DispatchError> {
     let Route { path, worker } = court.route(edict).map_err(DispatchError::Route)?;
     let agent = court
-        .agents
-        .get(&worker)
+        .agent(worker)
         .ok_or(DispatchError::Route(GovernanceError::UnknownAgent(worker)))?;
     let summary = backend
         .execute(agent, edict)

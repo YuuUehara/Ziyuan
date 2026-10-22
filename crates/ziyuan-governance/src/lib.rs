@@ -56,15 +56,17 @@ impl fmt::Display for GovernanceError {
 }
 impl std::error::Error for GovernanceError {}
 
+/// 由事件重放得到的朝廷状态。字段私有：唯一的修改途径是 [`Court::apply`]，
+/// 它与 `propose_*` 共用同一套规则，因此回放永远不会接受提议阶段会拒绝的事件。
 #[derive(Clone, Debug)]
 pub struct Court {
-    pub mode: GovernanceMode,
-    pub agents: BTreeMap<AgentId, Agent>,
-    pub appointments: BTreeMap<AgentId, Office>,
-    pub next_task_id: u64,
-    pub next_agent_id: u64,
-    pub issued: BTreeMap<TaskId, Edict>,
-    pub completions: BTreeMap<TaskId, (AgentId, String)>,
+    mode: GovernanceMode,
+    agents: BTreeMap<AgentId, Agent>,
+    appointments: BTreeMap<AgentId, Office>,
+    next_task_id: u64,
+    next_agent_id: u64,
+    issued: BTreeMap<TaskId, Edict>,
+    completions: BTreeMap<TaskId, (AgentId, String)>,
 }
 
 impl Court {
@@ -92,6 +94,9 @@ impl Court {
         match event {
             CourtEvent::Founded(mode) => self.mode = *mode,
             CourtEvent::AgentRegistered(agent) => {
+                if agent.name.trim().is_empty() {
+                    return Err(GovernanceError::EmptyName);
+                }
                 if self.agents.contains_key(&agent.id) {
                     return Err(GovernanceError::DuplicateAgent(agent.id));
                 }
@@ -103,9 +108,11 @@ impl Court {
                 self.appointments.insert(*agent, *office);
             }
             CourtEvent::OfficialDismissed { agent } => {
+                self.propose_dismissal(*agent)?;
                 self.appointments.remove(agent);
             }
             CourtEvent::InstitutionReformed(mode) => {
+                self.propose_reform(*mode)?;
                 // 改制时自动撤销最高协调职务；部门官员保留。
                 self.appointments.retain(|_, office| {
                     !matches!(office, Office::Chancellor | Office::FirstGrandSecretary)
@@ -113,6 +120,9 @@ impl Court {
                 self.mode = *mode;
             }
             CourtEvent::EdictIssued(edict) => {
+                if edict.text.trim().is_empty() {
+                    return Err(GovernanceError::EmptyEdict);
+                }
                 if self.issued.contains_key(&edict.id) {
                     return Err(GovernanceError::DuplicateEdict(edict.id));
                 }
@@ -137,6 +147,31 @@ impl Court {
             }
         }
         Ok(())
+    }
+
+    pub fn mode(&self) -> GovernanceMode {
+        self.mode
+    }
+
+    pub fn agent(&self, id: AgentId) -> Option<&Agent> {
+        self.agents.get(&id)
+    }
+
+    /// 按 ID 升序列出全部在册官员。
+    pub fn agents(&self) -> impl Iterator<Item = &Agent> {
+        self.agents.values()
+    }
+
+    pub fn office_of(&self, id: AgentId) -> Option<Office> {
+        self.appointments.get(&id).copied()
+    }
+
+    pub fn appointed_count(&self) -> usize {
+        self.appointments.len()
+    }
+
+    pub fn completed_count(&self) -> usize {
+        self.completions.len()
     }
 
     /// 招募新官员，登记身份但不自动授职。
@@ -218,7 +253,7 @@ impl Court {
         })
     }
 
-    pub fn appointed_as(&self, office: Office) -> Option<&Agent> {
+    fn appointed_as(&self, office: Office) -> Option<&Agent> {
         self.appointments.iter().find_map(|(id, o)| {
             if *o == office {
                 self.agents.get(id)
@@ -405,6 +440,18 @@ mod tests {
             agent: AgentId(2),
             office: Office::Minister(Department::Works),
         });
+        assert!(Court::replay(&events).is_err());
+    }
+    #[test]
+    fn replay_applies_same_rules_as_proposals() {
+        let mut events = founding_events();
+        events.push(CourtEvent::OfficialDismissed { agent: AgentId(7) });
+        assert_eq!(
+            Court::replay(&events).unwrap_err(),
+            GovernanceError::NotAppointed(AgentId(7))
+        );
+        let mut events = founding_events();
+        events.push(CourtEvent::InstitutionReformed(GovernanceMode::Chancellor));
         assert!(Court::replay(&events).is_err());
     }
     #[test]
