@@ -24,7 +24,22 @@ Emperor (human / authenticated control plane)
 
 工具的实际访问权限还没有在 v0.1 实现；未来应从签发者权限、官职与任务上下文中取交集（least privilege），而不是信任 Agent 声称的身份。
 
-## 3. Event Sourcing
+## 3. 分层与 Event Sourcing
+
+```text
+ziyuan-cli ──▶ ziyuan-app (Session) ──▶ ziyuan-governance (Court)
+                    │        │                    ▲
+                    │        └──▶ ziyuan-runtime ─┘ (dispatch / WorkerBackend)
+                    └──▶ ziyuan-storage (EventStore)
+            （所有 crate 依赖 ziyuan-core 领域类型）
+```
+
+- `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
+- `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。
+- `ziyuan-storage`：`EventStore { load, append }`；`EventLog`（`.ziyuan/court.log`）与 `MemoryEventLog`。编码在私有 `codec` 模块，与文件 I/O 分离。
+- `ziyuan-runtime`：`dispatch` 按 `Court::route` 调用 `WorkerBackend`；Adapter 错误统一为 `BoxError`。
+- `ziyuan-app`：`Session<S: EventStore>` 是唯一的写入路径。每个用例：治理层提议事件 → 在 `Court` 副本上 `apply` 校验 → `EventStore::append` → 替换内存状态。被拒绝的操作不留事件；写入的事件一定可以回放。
+- `ziyuan-cli`：把参数解析为 `Command`，调用 `Session`，打印结果。未来的 TUI/Web 复用 `Session`。
 
 初始化生成 `Founded`, `AgentRegistered`, `OfficialAppointed`。运行时追加 `EdictIssued`, `TaskCompleted`。`Court::replay` 根据完整日志恢复当前朝廷状态；`InstitutionReformed` 在回放时清理最高协调职务。
 
@@ -48,19 +63,16 @@ Emperor (human / authenticated control plane)
 
 ## 6. 建议的下一步接口
 
+`EventStore` 已落地（文件与内存两种实现）；SQLite 实现只需再实现该 trait，并让 `append` 成为单事务。
+
 ```rust,ignore
 trait GovernancePolicy {
-    fn route(&self, court: &Court, edict: &Edict) -> Result<Route, Error>;
-    fn authorize(&self, principal: Principal, action: Action) -> Result<(), Error>;
-}
-
-trait CourtStorage {
-    fn append_transaction(&mut self, events: &[CourtEvent]) -> Result<(), Error>;
-    fn load_stream(&self) -> Result<Vec<CourtEvent>, Error>;
+    fn route(&self, court: &Court, edict: &Edict) -> Result<Route, GovernanceError>;
+    fn authorize(&self, principal: Principal, action: Action) -> Result<(), GovernanceError>;
 }
 ```
 
-暂不实现这些抽象，以免 MVP 中只有一个实现且产生过度工程化。当前的 `Court` 和 `EventLog` 已是明确的重构边界。
+`GovernancePolicy` 暂不实现：目前三种制度由 `GovernanceMode` 枚举确定性路由，只有一个实现时抽象没有收益。授权（`Principal`/`Action`）应放在 `Session` 入口处检查。
 
 ## 7. 验收标准
 

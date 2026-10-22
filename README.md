@@ -20,10 +20,11 @@
 ```text
 crates/
   ziyuan-core/        官员、官职、部门、诏令、事件等领域类型
-  ziyuan-governance/  朝廷状态重放、改制、任免与任务路由
+  ziyuan-governance/  朝廷状态重放、改制、任免与任务路由（规则唯一来源）
   ziyuan-runtime/     WorkerBackend、演示执行与最小 Model/Tool Loop
-  ziyuan-storage/     append-only 事件簿（标准库实现）
-  ziyuan-cli/         `ziyuan` 命令行
+  ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
+  ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
+  ziyuan-cli/         `ziyuan` 命令行（仅解析参数与呈现结果）
 
 docs/                 架构决策与扩展路线
 ```
@@ -60,6 +61,22 @@ cd /tmp/ziyuan-demo
 /path/to/ziyuan/target/debug/ziyuan edict --dept works "请首辅协调调查"
 /path/to/ziyuan/target/debug/ziyuan history
 ```
+
+### 版本控制：Jujutsu
+
+本仓库使用 [Jujutsu (jj)](https://jj-vcs.github.io/jj/) 管理版本，与 Git 共存（colocated），GitHub 远端不变：
+
+```bash
+jj git init --colocate          # 首次克隆后执行一次
+jj bookmark track main --remote=origin
+jj new main                     # 在 main 上开始新改动
+jj describe -m "feat: ..."      # 随时写/改提交说明；工作区自动快照
+jj commit -m "refactor: ..."    # 结束当前改动并开启下一个
+jj git fetch && jj rebase -d main@origin
+jj bookmark set my-feature -r @- && jj git push -b my-feature
+```
+
+提交前请运行上方的 fmt / check / test 与 `scripts/smoke.sh`。
 
 也可以进入项目根目录并使用 `cargo run -p ziyuan-cli -- <子命令>`，但请注意：**事件簿创建在当前工作目录**，不是源码自动定位的目录。
 
