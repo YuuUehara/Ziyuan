@@ -12,7 +12,7 @@
 | 廷枢 Tingshu | Agent Runtime / Scheduler | `ziyuan-runtime`：Tokio 调度器（并发上限、超时、撤销）+ Tool Calling |
 | 玉玺 Yuxi | 职权、审批、审计 | `Seal`：每件诏令的工具与查阅范围，随事件簿审计 |
 | 诏令 ZhaoLing | 任务入口 | `Edict` 数据模型 + CLI |
-| 吏部 LiBu | 考绩、升迁 | `examine` 完成数，后续实现真正评估 |
+| 吏部 LiBu | 考绩、升迁 | `review` 评定、`examine` 考绩、`recommend` 荐举（只采信皇帝评定） |
 | 紫禁城 Forbidden City | 可视化与角色扮演 UI | 尚未实现 |
 
 ## 项目结构
@@ -89,6 +89,19 @@ ziyuan edict --tools none "只凭诏令文本回答"
 - 无论玉玺如何，`.ziyuan`（事件簿）、`.git`、`.jj` 与 `.env*` 一律不可读。
 - 运行时按玉玺构造工具：模型看不到未授予的工具，越界的读取记为失败的 `ToolInvoked`。
 
+### 吏部：评定、考绩与荐举
+
+```bash
+ziyuan review 3 accept "结论属实"      # 评定已完成的诏令（每件一次）
+ziyuan review 4 reject "漏查 storage"
+ziyuan examine 7                      # 采纳/驳回/失败/待评定，工具失败次数
+ziyuan recommend minister:works       # 按履历排列可任工部尚书者
+```
+
+- 考绩只采信皇帝的评定（`TaskReviewed`）。未评定的回奏单独列出、不计入；模型的自我评价与完成次数都不是政绩。
+- 失败（含超时）计入承办官员；撤销不计。越出玉玺的工具调用计为工具失败。
+- 荐举按「采纳 − 驳回」降序，再按失败数、工具失败数升序。它只是建议：不写入事件簿，任命仍须 `appoint`。
+
 ### 任务队列与并发
 
 ```bash
@@ -144,7 +157,7 @@ jj bookmark set my-feature -r @- && jj git push -b my-feature
 5. **演示后端不是代码分析**：`DemoBackend` 只验证调度线路，绝不声称已完成真实分析。
 6. **日志是 MVP 格式**：`.ziyuan/court.log` 是版本化文本事件日志，多进程读写由文件锁与乐观并发保护，崩溃留下的残行会被忽略并截掉；但每次追加都会重读全文，尚无快照与 Schema 迁移，不应直接用于生产。
 
-v0.1 支持 `recruit` 动态扩充官员；同部门多个属官目前按已记录任务数量进行简单均衡派工，**尚不具备“择优任用”能力**。
+支持 `recruit` 动态扩充官员；同部门多个属官按任务量均衡派工。择优任用通过 `recommend` 给出建议，由皇帝决定是否任命。
 
 ## 下一阶段（v0.2）
 
@@ -152,7 +165,7 @@ v0.1 支持 `recruit` 动态扩充官员；同部门多个属官目前按已记�
 - ~~将 `WorkerBackend` 切换为实际 `AgentLoop`，可配置只读工具 `search_code`、`read_file`~~ 已完成。
 - ~~为运行时加 Tokio 调度、任务队列、取消、超时、并发上限与审计链路~~ 已完成（工具调用审计）。
 - ~~事件簿写锁与原子追加~~ 已完成（文件锁 + 乐观并发 + 执行者锁）；~~`Yuxi` 权限令牌~~ 已完成（诏令级玉玺）；按官职设定权限上限与非 CLI 身份验证待做。
-- 实现可验证的 `LiBu` 考绩与候选人推荐；升迁仍由皇帝批准。
+- ~~实现可验证的 `LiBu` 考绩与候选人推荐~~ 已完成（基于皇帝评定）；自动验证（如回归测试）待做，升迁仍由皇帝批准。
 - 做「紫禁城」TUI/Web UI；人格层只影响措辞与辩论，不得越权。
 
 详见 [docs/architecture.md](docs/architecture.md)。

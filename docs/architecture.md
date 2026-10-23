@@ -83,13 +83,14 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 此 Loop **还不是生产级别**：未实现 API retry policy、token budget、并行工具、工具输入 JSON Schema 验证、沙箱、模型响应结构检验、prompt injection 隔离、trace IDs、上下文压缩。
 
-## 5. 吏部与官员升迁（后续）
+## 5. 吏部与官员升迁
 
-推荐：
-- 以任务验证通过率、回归测试、质量与成本为基础的绩效指标。
-- 官员可以提交任命建议，但不得直接授予自己系统权限。
-- 准备 `AppointmentProposal` 与 `HumanApproval` 独立事件类型。
-- 不应把人格、模型生成的赞赏或互相投票当成唯一评价依据。
+- **评定**：`TaskReviewed { task, verdict, note }`，只能针对已完成的诏令，每件一次；`Court::apply` 在回放时同样检查。目前唯一的评定者是 CLI 皇帝。
+- **考绩**：`Court::service_record(agent)` 完全由事件簿计算：采纳、驳回、待评定、失败（`TaskStatus::Failed` 记录了失败时的承办者）、工具调用与失败次数。撤销不计；未评定的回奏不计入评价。
+- **荐举**：`Court::recommend(office)` 列出专长与现行制度都符合的官员，按 `采纳 − 驳回` 降序，再按失败、工具失败升序。它不产生事件，任命仍走 `propose_appointment`。
+- 不把人格、模型生成的赞赏、完成次数或互相投票当成评价依据。
+
+尚未实现：自动验证（回归测试、检查回奏引用的文件与行号是否属实）、成本与 token 统计、官员提交任命建议的 `AppointmentProposal` 事件。
 
 ## 6. 建议的下一步接口
 

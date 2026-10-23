@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{Session, TaskReport};
 use ziyuan_core::{
-    AgentId, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId,
+    AgentId, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId, Verdict,
 };
-use ziyuan_governance::TaskStatus;
+use ziyuan_governance::{ServiceRecord, TaskStatus};
 use ziyuan_llm::OpenAiCompatible;
 use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
@@ -34,7 +34,10 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
-  ziyuan examine <官员ID>               吏部基础考绩：完成任务数
+  ziyuan review <诏令ID> <accept|reject> [备注]
+                                       评定已完成的诏令（吏部考绩只采信评定）
+  ziyuan examine <官员ID>               吏部考绩：经评定的履历
+  ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
   ziyuan history                       查看事件记录
   ziyuan help
 
@@ -91,6 +94,8 @@ enum Command {
     Dismiss(AgentId),
     Appoint(AgentId, Office),
     Examine(AgentId),
+    Review(TaskId, Verdict, String),
+    Recommend(Office),
     History,
 }
 
@@ -150,6 +155,18 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Err(_) => return Err("用法: ziyuan appoint <官员ID> <官职>".into()),
         },
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
+        "review" => {
+            if args.len() < 2 {
+                return Err("用法: ziyuan review <诏令ID> <accept|reject> [备注]".into());
+            }
+            let task = TaskId(args[0].parse().map_err(|_| "诏令 ID 必须是数字")?);
+            let verdict = args[1].parse::<Verdict>()?;
+            Command::Review(task, verdict, args[2..].join(" "))
+        }
+        "recommend" => match <[String; 1]>::try_from(args) {
+            Ok([office]) => Command::Recommend(office.parse()?),
+            Err(_) => return Err("用法: ziyuan recommend <官职>".into()),
+        },
         _ => return Err(format!("未知命令：{name}。运行 ziyuan help 查看帮助").into()),
     };
     Ok(command)
@@ -238,8 +255,13 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 let status = match &task.status {
                     TaskStatus::Pending => "待办".to_owned(),
                     TaskStatus::Assigned(w) => format!("已指派 {}（未结束）", name(*w)),
-                    TaskStatus::Completed { worker, .. } => format!("已完成（{}）", name(*worker)),
-                    TaskStatus::Failed { reason } => format!("失败：{reason}"),
+                    TaskStatus::Completed { worker, .. } => match &task.review {
+                        Some((verdict, _)) => {
+                            format!("已完成（{}），{}", name(*worker), verdict.label())
+                        }
+                        None => format!("已完成（{}），待评定", name(*worker)),
+                    },
+                    TaskStatus::Failed { reason, .. } => format!("失败：{reason}"),
                     TaskStatus::Cancelled => "已撤销".to_owned(),
                 };
                 println!(
@@ -276,15 +298,46 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         Command::Examine(id) => {
             let court = session.court();
             let agent = court.agent(id).ok_or("官员不存在")?;
+            let r = court.service_record(id);
+            println!("吏部考绩：{}（#{}）", agent.name, id.0);
+            println!("  {}", describe_record(&r));
             println!(
-                "吏部简报：{}（#{}）已记录 {} 件完成任务。",
-                agent.name,
-                id.0,
-                court.recorded_completions(id)
+                "  工具调用 {} 次，其中失败 {} 次（含越出玉玺的尝试）",
+                r.tool_calls, r.tool_failures
             );
+            if r.unreviewed > 0 {
+                println!(
+                    "  另有 {} 件回奏未经评定，不计入考绩。可用 `ziyuan review <诏令ID> accept|reject` 评定。",
+                    r.unreviewed
+                );
+            }
+        }
+        Command::Review(task, verdict, note) => {
+            session.review(task, verdict, note)?;
+            println!("诏令 #{} 评定为{}。", task.0, verdict.label());
+        }
+        Command::Recommend(office) => {
+            let court = session.court();
+            let candidates = court.recommend(office)?;
+            if candidates.is_empty() {
+                println!("无人可任{}。可先 `ziyuan recruit`。", office.label());
+                return Ok(());
+            }
             println!(
-                "注意：当前只是完成次数，不等于实际能力、正确率或晋升资格。模拟后端未验证结果。 "
+                "吏部荐举{}（按 采纳−驳回、失败、工具失败 排序）：",
+                office.label()
             );
+            for c in &candidates {
+                let current = c.current.map_or("未任官职".into(), |o| o.label());
+                println!(
+                    "#{:<3} {:<8} {:<12} {}",
+                    c.agent.id.0,
+                    c.agent.name,
+                    current,
+                    describe_record(&c.record)
+                );
+            }
+            println!("仅为建议：任命须由皇帝 `ziyuan appoint`（如有现职须先 dismiss）。");
         }
         Command::History => {
             for (i, event) in session.history().iter().enumerate() {
@@ -485,6 +538,13 @@ fn seal_note(seal: &Seal) -> String {
     }
 }
 
+fn describe_record(r: &ServiceRecord) -> String {
+    format!(
+        "采纳 {}，驳回 {}，失败 {}，待评定 {}",
+        r.accepted, r.rejected, r.failed, r.unreviewed
+    )
+}
+
 fn describe_event(event: &CourtEvent) -> String {
     match event {
         CourtEvent::Founded(m) => format!("开国：{}", m.label()),
@@ -515,5 +575,17 @@ fn describe_event(event: &CourtEvent) -> String {
         }
         CourtEvent::TaskFailed { task, reason } => format!("诏令 #{} 失败：{reason}", task.0),
         CourtEvent::TaskCancelled { task } => format!("诏令 #{} 撤销", task.0),
+        CourtEvent::TaskReviewed {
+            task,
+            verdict,
+            note,
+        } => {
+            let note = if note.is_empty() {
+                String::new()
+            } else {
+                format!("：{note}")
+            };
+            format!("诏令 #{} 评定为{}{note}", task.0, verdict.label())
+        }
     }
 }

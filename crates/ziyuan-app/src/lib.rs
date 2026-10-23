@@ -6,7 +6,9 @@
 //! 诏令分两步：[`Session::issue`] 入队（路由不通则拒绝、不留记录），
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 use std::fmt;
-use ziyuan_core::{AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId};
+use ziyuan_core::{
+    AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, Verdict,
+};
 use ziyuan_governance::{Court, GovernanceError, TaskStatus, founding_events};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
 use ziyuan_storage::{EventStore, StorageError};
@@ -144,6 +146,12 @@ impl<S: EventStore> Session<S> {
             Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
             _ => unreachable!("issue 只产生 EdictIssued"),
         }
+    }
+
+    /// 皇帝评定一件已完成的诏令。吏部考绩只采信这些评定。
+    pub fn review(&mut self, task: TaskId, verdict: Verdict, note: String) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_review(task, verdict, note.clone())?]))?;
+        Ok(())
     }
 
     /// 撤销尚未结束的诏令。
@@ -456,6 +464,7 @@ mod tests {
         assert_eq!(
             court.task(failing.id).unwrap().status,
             TaskStatus::Failed {
+                worker: Some(AgentId(4)),
                 reason: "模型不可用".into()
             }
         );

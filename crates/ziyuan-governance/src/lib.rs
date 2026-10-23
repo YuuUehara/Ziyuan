@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
-    Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId,
+    Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -33,6 +33,9 @@ pub enum GovernanceError {
         task: TaskId,
         worker: AgentId,
     },
+    /// 只有已完成的诏令可以评定。
+    NotCompleted(TaskId),
+    AlreadyReviewed(TaskId),
     Vacant(Office),
 }
 impl fmt::Display for GovernanceError {
@@ -66,6 +69,8 @@ impl fmt::Display for GovernanceError {
             Self::WrongWorker { task, worker } => {
                 write!(f, "诏令 #{} 并未派给官员 #{}", task.0, worker.0)
             }
+            Self::NotCompleted(id) => write!(f, "诏令 #{} 尚未完成，无从评定", id.0),
+            Self::AlreadyReviewed(id) => write!(f, "诏令 #{} 已评定过", id.0),
             Self::Vacant(Office::Chancellor) => f.write_str("丞相空缺。请先任命丞相，或改制。"),
             Self::Vacant(Office::FirstGrandSecretary) => {
                 f.write_str("内阁首辅空缺。请先 appoint 一名首辅。")
@@ -92,6 +97,11 @@ pub struct Court {
 pub struct Task {
     pub edict: Edict,
     pub status: TaskStatus,
+    /// 执行中的工具调用次数与其中失败的次数（含越出玉玺的尝试）。
+    pub tool_calls: u32,
+    pub tool_failures: u32,
+    /// 皇帝的评定；只有已完成的诏令才有。
+    pub review: Option<(Verdict, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,7 +114,9 @@ pub enum TaskStatus {
         worker: AgentId,
         summary: String,
     },
+    /// `worker` 为失败时的承办官员；指派前（如路由失败）为 `None`。
     Failed {
+        worker: Option<AgentId>,
         reason: String,
     },
     Cancelled,
@@ -180,6 +192,9 @@ impl Court {
                     Task {
                         edict: edict.clone(),
                         status: TaskStatus::Pending,
+                        tool_calls: 0,
+                        tool_failures: 0,
+                        review: None,
                     },
                 );
             }
@@ -190,10 +205,13 @@ impl Court {
                 }
                 self.set_status(*task, TaskStatus::Assigned(*worker));
             }
-            CourtEvent::ToolInvoked { task, .. } => {
+            CourtEvent::ToolInvoked { task, ok, .. } => {
                 if !matches!(self.open_task(*task)?, TaskStatus::Assigned(_)) {
                     return Err(GovernanceError::TaskNotAssigned(*task));
                 }
+                let entry = self.tasks.get_mut(task).expect("open_task 已确认存在");
+                entry.tool_calls += 1;
+                entry.tool_failures += u32::from(!ok);
             }
             CourtEvent::TaskCompleted {
                 task,
@@ -222,13 +240,26 @@ impl Court {
                 );
             }
             CourtEvent::TaskFailed { task, reason } => {
-                self.open_task(*task)?;
+                let worker = match self.open_task(*task)? {
+                    TaskStatus::Assigned(worker) => Some(*worker),
+                    _ => None,
+                };
                 self.set_status(
                     *task,
                     TaskStatus::Failed {
+                        worker,
                         reason: reason.clone(),
                     },
                 );
+            }
+            CourtEvent::TaskReviewed {
+                task,
+                verdict,
+                note,
+            } => {
+                self.propose_review(*task, *verdict, note.clone())?;
+                let entry = self.tasks.get_mut(task).expect("propose_review 已确认存在");
+                entry.review = Some((*verdict, note.clone()));
             }
             CourtEvent::TaskCancelled { task } => {
                 self.propose_cancellation(*task)?;
@@ -299,6 +330,30 @@ impl Court {
         if let Some(task) = self.tasks.get_mut(&id) {
             task.status = status;
         }
+    }
+
+    /// 皇帝评定一件已完成的诏令；每件只能评定一次。
+    pub fn propose_review(
+        &self,
+        task: TaskId,
+        verdict: Verdict,
+        note: String,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if !matches!(entry.status, TaskStatus::Completed { .. }) {
+            return Err(GovernanceError::NotCompleted(task));
+        }
+        if entry.review.is_some() {
+            return Err(GovernanceError::AlreadyReviewed(task));
+        }
+        Ok(CourtEvent::TaskReviewed {
+            task,
+            verdict,
+            note,
+        })
     }
 
     pub fn propose_cancellation(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
@@ -386,6 +441,74 @@ impl Court {
             text,
             seal,
         })
+    }
+
+    /// 吏部考绩：完全由事件簿计算的履历。质量只采信皇帝的评定。
+    pub fn service_record(&self, agent: AgentId) -> ServiceRecord {
+        let mut record = ServiceRecord::default();
+        for task in self.tasks.values() {
+            let handled_by = match &task.status {
+                TaskStatus::Assigned(worker) | TaskStatus::Completed { worker, .. } => {
+                    Some(*worker)
+                }
+                TaskStatus::Failed { worker, .. } => *worker,
+                // 撤销不计入：可能是皇帝改了主意，不代表官员表现。
+                TaskStatus::Pending | TaskStatus::Cancelled => None,
+            };
+            if handled_by != Some(agent) {
+                continue;
+            }
+            record.tool_calls += task.tool_calls;
+            record.tool_failures += task.tool_failures;
+            match (&task.status, &task.review) {
+                (TaskStatus::Completed { .. }, Some((Verdict::Accepted, _))) => {
+                    record.accepted += 1
+                }
+                (TaskStatus::Completed { .. }, Some((Verdict::Rejected, _))) => {
+                    record.rejected += 1
+                }
+                (TaskStatus::Completed { .. }, None) => record.unreviewed += 1,
+                (TaskStatus::Failed { .. }, _) => record.failed += 1,
+                _ => {}
+            }
+        }
+        record
+    }
+
+    /// 吏部荐举：列出可任 `office` 的官员（专长与制度均符合），按已评定的履历排序。
+    /// 仅供参考，不产生事件；任命仍须皇帝 `appoint`。
+    pub fn recommend(&self, office: Office) -> Result<Vec<Candidate<'_>>, GovernanceError> {
+        match office {
+            Office::Chancellor if self.mode != GovernanceMode::Chancellor => {
+                return Err(GovernanceError::OfficeNotInMode(office));
+            }
+            Office::FirstGrandSecretary if self.mode != GovernanceMode::Cabinet => {
+                return Err(GovernanceError::OfficeNotInMode(office));
+            }
+            _ => {}
+        }
+        let mut candidates: Vec<_> = self
+            .agents
+            .values()
+            .filter(|agent| match office {
+                Office::Minister(d) | Office::Clerk(d) => agent.speciality == d,
+                Office::Chancellor | Office::FirstGrandSecretary => true,
+            })
+            .map(|agent| Candidate {
+                agent,
+                current: self.office_of(agent.id),
+                record: self.service_record(agent.id),
+            })
+            .collect();
+        candidates.sort_by_key(|c| {
+            (
+                std::cmp::Reverse(c.record.net_accepted()),
+                c.record.failed,
+                c.record.tool_failures,
+                c.agent.id,
+            )
+        });
+        Ok(candidates)
     }
 
     fn appointed_as(&self, office: Office) -> Option<&Agent> {
@@ -476,6 +599,34 @@ fn validate_seal(seal: &Seal) -> Result<(), GovernanceError> {
         }
     }
     Ok(())
+}
+
+/// 一位官员经手诏令的统计。`unreviewed` 不计入评价：未经皇帝评定的回奏不算政绩。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServiceRecord {
+    pub accepted: u32,
+    pub rejected: u32,
+    pub unreviewed: u32,
+    /// 承办时失败（含超时）。
+    pub failed: u32,
+    pub tool_calls: u32,
+    /// 失败的工具调用，含越出玉玺的尝试。
+    pub tool_failures: u32,
+}
+
+impl ServiceRecord {
+    /// 荐举排序的主要依据：采纳数减驳回数。
+    pub fn net_accepted(&self) -> i64 {
+        i64::from(self.accepted) - i64::from(self.rejected)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate<'a> {
+    pub agent: &'a Agent,
+    /// 现任官职；荐举不会自动罢免或调任。
+    pub current: Option<Office>,
+    pub record: ServiceRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,6 +768,101 @@ mod tests {
         let mut events = founding_events();
         events.push(CourtEvent::InstitutionReformed(GovernanceMode::Chancellor));
         assert!(Court::replay(&events).is_err());
+    }
+    #[test]
+    fn libu_counts_only_reviewed_results_and_ranks_by_them() {
+        let mut events = founding_events();
+        events.push(CourtEvent::AgentRegistered(Agent {
+            id: AgentId(7),
+            name: "新工".into(),
+            speciality: Department::Works,
+        }));
+        let mut next = 1;
+        // (承办者, 是否完成, 评定, 失败的工具调用数)
+        let mut handle = |worker: u64, ok: bool, verdict: Option<Verdict>, bad_tools: u32| {
+            let task = TaskId(next);
+            next += 1;
+            events.push(CourtEvent::EdictIssued(Edict {
+                id: task,
+                department: Department::Works,
+                text: "查".into(),
+                seal: Seal::default(),
+            }));
+            events.push(CourtEvent::TaskAssigned {
+                task,
+                worker: AgentId(worker),
+            });
+            for _ in 0..bad_tools {
+                events.push(CourtEvent::ToolInvoked {
+                    task,
+                    tool: "read_file".into(),
+                    args_json: "{}".into(),
+                    ok: false,
+                });
+            }
+            events.push(if ok {
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker: AgentId(worker),
+                    summary: "ok".into(),
+                }
+            } else {
+                CourtEvent::TaskFailed {
+                    task,
+                    reason: "超时".into(),
+                }
+            });
+            if let Some(verdict) = verdict {
+                events.push(CourtEvent::TaskReviewed {
+                    task,
+                    verdict,
+                    note: String::new(),
+                });
+            }
+        };
+        // 陈工（#4）完成数最多，但多为驳回或未评定；新工（#7）完成少但被采纳。
+        handle(4, true, Some(Verdict::Rejected), 0);
+        handle(4, true, None, 0);
+        handle(4, true, None, 0);
+        handle(4, false, None, 2);
+        handle(7, true, Some(Verdict::Accepted), 1);
+        let court = Court::replay(&events).unwrap();
+
+        assert_eq!(
+            court.service_record(AgentId(4)),
+            ServiceRecord {
+                accepted: 0,
+                rejected: 1,
+                unreviewed: 2,
+                failed: 1,
+                tool_calls: 2,
+                tool_failures: 2,
+            }
+        );
+        let ranked: Vec<_> = court
+            .recommend(Office::Clerk(Department::Works))
+            .unwrap()
+            .iter()
+            .map(|c| c.agent.id.0)
+            .collect();
+        // 新工居首；沈衡（#2，无履历）在被驳回过的陈工之前；吏部官员不入选。
+        assert_eq!(ranked, [7, 2, 4]);
+        assert!(court.recommend(Office::FirstGrandSecretary).is_err());
+
+        // 只能评定已完成且未评定过的诏令。
+        assert_eq!(
+            court.propose_review(TaskId(4), Verdict::Accepted, String::new()),
+            Err(GovernanceError::NotCompleted(TaskId(4)))
+        );
+        assert_eq!(
+            court.propose_review(TaskId(5), Verdict::Rejected, String::new()),
+            Err(GovernanceError::AlreadyReviewed(TaskId(5)))
+        );
+        assert!(
+            court
+                .propose_review(TaskId(2), Verdict::Accepted, "好".into())
+                .is_ok()
+        );
     }
     #[test]
     fn seal_scope_must_stay_inside_project() {

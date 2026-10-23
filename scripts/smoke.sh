@@ -57,4 +57,11 @@ SEALED="$("$BIN" edict --queue --scope src --tools search_code '只查 src')"
 grep -q '玉玺 工具：search_code；范围：src' <<< "$SEALED"
 "$BIN" history | grep -q '只查 src〔玉玺'
 "$BIN" run > /dev/null
+# 吏部：评定、考绩、荐举
+"$BIN" review "$A" accept '属实'
+if "$BIN" review "$A" reject > /dev/null 2>&1; then echo '不应重复评定' >&2; exit 1; fi
+if "$BIN" review "$C" accept > /dev/null 2>&1; then echo '已撤销的诏令不应评定' >&2; exit 1; fi
+WORKER="$("$BIN" history | sed -n "s/.*诏令 #$A 由 #\([0-9]*\) 回奏.*/\1/p")"
+"$BIN" examine "$WORKER" | grep -q '采纳 1，'
+"$BIN" recommend clerk:works | sed -n 2p | grep -q "^#$WORKER "
 echo 'ZiYuan smoke test PASS'

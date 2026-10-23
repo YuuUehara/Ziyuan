@@ -1,6 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
-    Agent, AgentId, Capability, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId,
+    Agent, AgentId, Capability, CourtEvent, Department, Edict, GovernanceMode, Office, Seal,
+    TaskId, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -81,6 +82,16 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         ),
         TaskFailed { task, reason } => format!("v1\tFAILED\t{}\t{}", task.0, to_hex(reason)),
         TaskCancelled { task } => format!("v1\tCANCELLED\t{}", task.0),
+        TaskReviewed {
+            task,
+            verdict,
+            note,
+        } => format!(
+            "v1\tREVIEWED\t{}\t{}\t{}",
+            task.0,
+            verdict.code(),
+            to_hex(note)
+        ),
     }
 }
 /// 逗号分隔的列表；空字段为空列表。
@@ -164,13 +175,18 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "CANCELLED" => TaskCancelled {
             task: TaskId(id(2)?),
         },
+        "REVIEWED" => TaskReviewed {
+            task: TaskId(id(2)?),
+            verdict: field(3)?.parse::<Verdict>().map_err(|e| e.to_string())?,
+            note: from_hex(field(4)?)?,
+        },
         other => return Err(format!("未知事件类型: {other}")),
     };
     let expected_fields = match &event {
         Founded(_) | InstitutionReformed(_) | OfficialDismissed { .. } | TaskCancelled { .. } => 3,
         OfficialAppointed { .. } | TaskAssigned { .. } | TaskFailed { .. } => 4,
         EdictIssued(_) if parts.len() == 5 => 5,
-        AgentRegistered(_) | TaskCompleted { .. } => 5,
+        AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } => 5,
         EdictIssued(_) => 7,
         ToolInvoked { .. } => 6,
     };
@@ -220,6 +236,11 @@ mod tests {
                 reason: "超时\n（300s）".into(),
             },
             CourtEvent::TaskCancelled { task },
+            CourtEvent::TaskReviewed {
+                task,
+                verdict: Verdict::Rejected,
+                note: "结论有误\t需重查".into(),
+            },
         ];
         for original in events {
             assert_eq!(decode_event(&encode_event(&original)).unwrap(), original);

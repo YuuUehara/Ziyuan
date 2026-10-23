@@ -11,6 +11,7 @@ pub enum ParseError {
     UnknownOffice(String),
     MalformedOffice(String),
     UnknownCapability(String),
+    UnknownVerdict(String),
 }
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -19,6 +20,7 @@ impl fmt::Display for ParseError {
             Self::UnknownMode(s) => write!(f, "未知制度: {s}（可用：chancellor/direct/cabinet）"),
             Self::UnknownOffice(s) => write!(f, "未知官职: {s}"),
             Self::MalformedOffice(s) => write!(f, "官职格式无效: {s}"),
+            Self::UnknownVerdict(s) => write!(f, "未知评定: {s}（可用：accept/reject）"),
             Self::UnknownCapability(s) => {
                 write!(f, "未知工具权限: {s}（可用：read_file/search_code）")
             }
@@ -177,6 +179,37 @@ pub struct Agent {
     pub speciality: Department,
 }
 
+/// 皇帝对一件已完成诏令的评定：吏部考绩只采信经评定的结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Accepted,
+    Rejected,
+}
+impl Verdict {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Accepted => "accept",
+            Self::Rejected => "reject",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "采纳",
+            Self::Rejected => "驳回",
+        }
+    }
+}
+impl FromStr for Verdict {
+    type Err = ParseError;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "accept" => Ok(Self::Accepted),
+            "reject" => Ok(Self::Rejected),
+            _ => Err(ParseError::UnknownVerdict(input.into())),
+        }
+    }
+}
+
 /// 官员执行诏令时可使用的工具。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
@@ -281,5 +314,11 @@ pub enum CourtEvent {
     },
     TaskCancelled {
         task: TaskId,
+    },
+    /// 皇帝评定已完成的诏令（每件一次）。这是吏部考绩唯一采信的质量依据。
+    TaskReviewed {
+        task: TaskId,
+        verdict: Verdict,
+        note: String,
     },
 }
