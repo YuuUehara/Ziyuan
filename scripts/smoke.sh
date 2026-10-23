@@ -20,7 +20,7 @@ grep -q '新工' <<< "$ROUTE"
 "$BIN" reform direct
 ROUTE="$("$BIN" edict --dept works '直接承办')"
 if grep -q '丞相' <<< "$ROUTE"; then exit 1; fi
-"$BIN" reform cabinet
+grep -q '四叔来看你了' <<< "$("$BIN" reform cabinet)"
 if "$BIN" edict --dept works '尚未设首辅' > /dev/null 2>&1; then
   echo '首辅空缺时应拒绝派工' >&2
   exit 1
@@ -34,6 +34,10 @@ queue() { "$BIN" edict --queue --dept works "$1" | sed -n 's/^诏令 #\([0-9]*\)
 A="$(queue '排队一')"; B="$(queue '排队二')"; C="$(queue '撤销我')"
 "$BIN" cancel "$C"
 if "$BIN" cancel "$C" > /dev/null 2>&1; then echo '不应重复撤销' >&2; exit 1; fi
+# 内阁制：未批红的诏令不执行
+"$BIN" tasks | grep -q "#$A .*待批红（票拟：皇帝 → 内阁首辅"
+grep -q '没有未结束的诏令' <<< "$("$BIN" run 2>/dev/null)"
+"$BIN" approve all | grep -q "诏令 #$B 已批红"
 RUN="$("$BIN" run --jobs 2 --timeout 30)"
 grep -q "诏令 #$A：排队一" <<< "$RUN"
 grep -q "诏令 #$B：排队二" <<< "$RUN"
@@ -70,4 +74,12 @@ grep -q '招募官员 #[0-9]* ..*（未授官职）' <<< "$RECRUITED"
 OFFICIALS="$("$BIN" officials)"
 grep -q '内阁首辅（正五品）.*模型 演示' <<< "$OFFICIALS"
 grep -q '工部尚书（正二品）' <<< "$OFFICIALS"
+# 内阁改回丞相：土木堡；一键朱元璋：革去丞相并废相；被革者不能再任官
+# 改制已撤销 #6 的首辅之职
+grep -q '大元，杀回来了' <<< "$("$BIN" reform chancellor)"
+"$BIN" appoint 6 chancellor
+grep -q '胡惟庸' <<< "$("$BIN" abolish)"
+"$BIN" officials | grep -q '^#6 .*已革职'
+if "$BIN" appoint 6 minister:personnel > /dev/null 2>&1; then echo '革职者不应再任官' >&2; exit 1; fi
+"$BIN" court | grep -q '废相亲政'
 echo 'ZiYuan smoke test PASS'

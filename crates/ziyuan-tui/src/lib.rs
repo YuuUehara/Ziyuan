@@ -19,7 +19,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use ziyuan_app::{AppError, RunUpdate, Session, describe_event, describe_record, seal_note};
+use ziyuan_app::{
+    ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, seal_note,
+};
 use ziyuan_core::{AgentId, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
 use ziyuan_governance::{Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -106,6 +108,16 @@ enum Modal {
         kind: ChooseKind,
         selected: usize,
     },
+    /// 不可逆操作的确认：`y` 确认，其他键取消。
+    Confirm(ConfirmKind),
+    /// 史官记：任意键关闭。
+    Notice(String),
+}
+
+#[derive(Clone, Copy)]
+enum ConfirmKind {
+    Purge(AgentId),
+    Abolish,
 }
 
 #[derive(Clone, Copy)]
@@ -274,6 +286,7 @@ impl App {
             KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(5),
             KeyCode::Char('r') => self.start_run(),
             KeyCode::Char('s') => self.stop_run(),
+            KeyCode::Char('Z') => self.modal = Some(Modal::Confirm(ConfirmKind::Abolish)),
             KeyCode::Char('g') => {
                 let selected = GovernanceMode::ALL
                     .iter()
@@ -312,6 +325,12 @@ impl App {
             KeyCode::Char('c') => {
                 self.mutate(|s| s.cancel(task), |_| format!("诏令 #{} 已撤销", task.0));
             }
+            KeyCode::Char('b') => {
+                self.mutate(
+                    |s| s.approve(task),
+                    |_| format!("诏令 #{} 已批红（按 r 执行）", task.0),
+                );
+            }
             KeyCode::Char('a' | 'd') => {
                 let verdict = if code == KeyCode::Char('a') {
                     Verdict::Accepted
@@ -344,6 +363,7 @@ impl App {
                     selected: 0,
                 })
             }
+            KeyCode::Char('x') => self.modal = Some(Modal::Confirm(ConfirmKind::Purge(agent))),
             KeyCode::Char('d') => {
                 self.mutate(
                     |s| s.dismiss(agent),
@@ -355,6 +375,20 @@ impl App {
     }
 
     fn modal_key(&mut self, key: KeyEvent) {
+        match self.modal {
+            Some(Modal::Notice(_)) => {
+                self.modal = None;
+                return;
+            }
+            Some(Modal::Confirm(kind)) => {
+                self.modal = None;
+                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                    self.confirm(kind);
+                }
+                return;
+            }
+            _ => {}
+        }
         let count = match &self.modal {
             Some(Modal::Choose { kind, .. }) => self.options(*kind).len().max(1),
             _ => 1,
@@ -387,6 +421,8 @@ impl App {
                 KeyCode::Enter => self.submit_choice(),
                 _ => {}
             },
+            // 已在本函数开头处理。
+            Modal::Confirm(_) | Modal::Notice(_) => {}
         }
     }
 
@@ -432,6 +468,34 @@ impl App {
         }
     }
 
+    fn confirm(&mut self, kind: ConfirmKind) {
+        match kind {
+            ConfirmKind::Purge(agent) => {
+                self.mutate(
+                    |s| s.purge(agent),
+                    |_| format!("官员 #{} 革职，削去仕籍，永不叙用", agent.0),
+                );
+            }
+            ConfirmKind::Abolish => {
+                if let Some(purged) =
+                    self.mutate(|s| s.abolish_chancellery(), |_| "罢中书省，废相亲政".into())
+                {
+                    let names: Vec<_> = purged
+                        .iter()
+                        .filter_map(|&id| self.court().agent(id))
+                        .map(|a| a.name.clone())
+                        .collect();
+                    let purged = if names.is_empty() {
+                        String::new()
+                    } else {
+                        format!("丞相{}革职削籍。\n\n", names.join("、"))
+                    };
+                    self.modal = Some(Modal::Notice(format!("{purged}{ABOLITION_NOTE}")));
+                }
+            }
+        }
+    }
+
     fn submit_choice(&mut self) {
         let Some(Modal::Choose { kind, selected }) = self.modal.take() else {
             return;
@@ -439,7 +503,11 @@ impl App {
         match kind {
             ChooseKind::Reform => {
                 let mode = GovernanceMode::ALL[selected];
-                self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()));
+                if let Some(note) =
+                    self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()))
+                {
+                    self.modal = Some(Modal::Notice(note.to_owned()));
+                }
             }
             ChooseKind::Appoint(agent) => {
                 let Some(&office) = appointable(self.court(), agent).get(selected) else {
@@ -516,8 +584,12 @@ impl App {
             Ok(None) => return self.error("另一个 ziyuan 进程正在执行诏令，请待其结束"),
             Err(e) => return self.error(e.to_string()),
         };
-        if self.court().open_tasks().is_empty() {
-            return self.info("没有未结束的诏令");
+        if self.court().runnable_tasks().is_empty() {
+            return if self.court().open_tasks().is_empty() {
+                self.info("没有未结束的诏令")
+            } else {
+                self.error("诏令尚待批红：内阁制下须先按 b 朱笔批红")
+            };
         }
         let cancel = CancelToken::new();
         self.run = Some(cancel.clone());
@@ -631,7 +703,7 @@ impl App {
         let items: Vec<ListItem> = order
             .iter()
             .map(|task| {
-                let (label, style) = status_badge(task);
+                let (label, style) = status_badge(self.court(), task);
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("#{:<3}", task.edict.id.0), Style::new().dim()),
                     Span::styled(format!("{:<6}", label), style),
@@ -691,7 +763,7 @@ impl App {
         let court = self.court();
         let name = |id: AgentId| court.agent(id).map_or("?".to_owned(), |a| a.name.clone());
         let label = |s: &str| Span::styled(format!("{s}　"), Style::new().fg(GOLD));
-        let (status, style) = status_badge(task);
+        let (status, style) = status_badge(court, task);
         let mut lines = vec![Line::from(task.edict.text.clone()).bold(), Line::default()];
         let seal = seal_note(&task.edict.seal);
         lines.push(Line::from(vec![
@@ -751,6 +823,16 @@ impl App {
                     lines.push(Line::from("实时输出").fg(GOLD).bold());
                     lines.extend(live.lines().map(|l| Line::from(l.to_owned())));
                     following = true;
+                } else if court.needs_approval(task) {
+                    lines.push(Line::from(vec![
+                        Span::styled("内阁票拟　", Style::new().fg(VERMILION).bold()),
+                        Span::raw(match court.route(&task.edict) {
+                            Ok(route) => route.path.join(" → "),
+                            Err(e) => e.to_string(),
+                        }),
+                    ]));
+                    lines.push(Line::default());
+                    lines.push(Line::from("待批红。按 b 朱笔批红，c 撤销。").dim());
                 } else if matches!(task.status, TaskStatus::Pending) {
                     lines.push(Line::from("排队中。按 r 执行，c 撤销。").dim());
                 }
@@ -779,6 +861,7 @@ impl App {
                     Cell::from(a.name.clone()),
                     match office {
                         Some(o) => Cell::from(o).fg(GOLD),
+                        None if court.is_purged(a.id) => Cell::from("已革职").fg(Color::Red),
                         None => Cell::from("未任官职").dim(),
                     },
                     Cell::from(a.speciality.label()),
@@ -878,13 +961,17 @@ impl App {
             (Some(Modal::Choose { .. }), _) => {
                 &[("↑↓", "选择"), ("Enter", "确定"), ("Esc", "取消")]
             }
+            (Some(Modal::Confirm(_)), _) => &[("y", "确认"), ("其他键", "取消")],
+            (Some(Modal::Notice(_)), _) => &[("任意键", "退朝")],
             (None, Tab::Edicts) => &[
                 ("n", "下诏"),
                 ("r", "执行"),
                 ("s", "停止"),
                 ("c", "撤销"),
                 ("a/d", "采纳/驳回"),
+                ("b", "批红"),
                 ("g", "改制"),
+                ("Z", "朱元璋"),
                 ("Tab", "切换"),
                 ("q", "退出"),
             ],
@@ -892,7 +979,9 @@ impl App {
                 ("n", "招募"),
                 ("p", "任命"),
                 ("d", "罢免"),
+                ("x", "革职"),
                 ("g", "改制"),
+                ("Z", "朱元璋"),
                 ("Tab", "切换"),
                 ("q", "退出"),
             ],
@@ -985,6 +1074,41 @@ impl App {
                     &mut state,
                 );
             }
+            Modal::Confirm(kind) => {
+                let text = match kind {
+                    ConfirmKind::Purge(agent) => {
+                        let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
+                        format!("革去官员 #{} {name}？削去仕籍，永不叙用。", agent.0)
+                    }
+                    ConfirmKind::Abolish => {
+                        "一键朱元璋：革去全部丞相、罢中书省，改为废相亲政？".to_owned()
+                    }
+                };
+                let paragraph = Paragraph::new(vec![
+                    Line::from(text),
+                    Line::default(),
+                    Line::from("按 y 确认，其他键取消").dim(),
+                ])
+                .wrap(Wrap { trim: false })
+                .block(modal_block("圣裁".into()));
+                let height = paragraph.line_count(50) as u16; // 已含边框
+                let popup = centered(area, 50, height);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(paragraph, popup);
+            }
+            Modal::Notice(note) => {
+                let paragraph = Paragraph::new(Text::from(
+                    note.lines()
+                        .map(|l| Line::from(l.to_owned()))
+                        .collect::<Vec<_>>(),
+                ))
+                .wrap(Wrap { trim: false })
+                .block(modal_block("史官记".into()));
+                let height = paragraph.line_count(60) as u16; // 已含边框
+                let popup = centered(area, 60, height);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(paragraph, popup);
+            }
         }
     }
 }
@@ -1016,7 +1140,13 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn status_badge(task: &Task) -> (String, Style) {
+fn status_badge(court: &Court, task: &Task) -> (String, Style) {
+    if court.needs_approval(task) {
+        return (
+            "待批红".into(),
+            Style::new().fg(Color::White).bg(VERMILION).bold(),
+        );
+    }
     match &task.status {
         TaskStatus::Pending => ("待办".into(), Style::new().fg(Color::Gray)),
         TaskStatus::Assigned(_) => ("执行中".into(), Style::new().fg(Color::Yellow).bold()),
@@ -1138,7 +1268,9 @@ mod tests {
     async fn reform_and_appointments_follow_court_rules() {
         let (mut app, _messages, root) = temp_app("court");
         // 改为内阁制（第三项）：首辅空缺，派工路线显示空缺，下诏被拒且不留记录。
-        press(&mut app, "g↓↓\n2");
+        press(&mut app, "g↓↓\n");
+        assert!(screen(&app).contains("四叔来看你了"));
+        press(&mut app, " 2");
         assert_eq!(app.court().mode(), GovernanceMode::Cabinet);
         assert!(screen(&app).contains("内阁首辅、次辅俱缺"));
         press(&mut app, "1n无首辅\n");
@@ -1165,6 +1297,31 @@ mod tests {
         assert_eq!(app.court().office_of(id), Some(Office::FirstGrandSecretary));
         press(&mut app, "1n内阁承办\n");
         assert!(app.court().task(TaskId(1)).is_some());
+
+        // 内阁制：新诏令待批红，批红后方可执行。
+        let shown = screen(&app);
+        assert!(
+            shown.contains("待批红") && shown.contains("内阁票拟"),
+            "{shown}"
+        );
+        press(&mut app, "r");
+        assert!(app.run.is_none() && screen(&app).contains("须先按 b"));
+        press(&mut app, "b");
+        assert!(app.court().runnable_tasks() == [TaskId(1)]);
+
+        // 改回丞相制：土木堡之变，史官记弹出，任意键关闭。
+        press(&mut app, "g↓\n");
+        assert_eq!(app.court().mode(), GovernanceMode::Chancellor);
+        assert!(screen(&app).contains("大元，杀回来了"));
+        press(&mut app, " ");
+        assert!(app.modal.is_none());
+        // 一键朱元璋：取消不生效，确认后丞相革职、改为亲政。
+        press(&mut app, "Zn");
+        assert_eq!(app.court().mode(), GovernanceMode::Chancellor);
+        press(&mut app, "Zy");
+        assert_eq!(app.court().mode(), GovernanceMode::DirectRule);
+        assert!(screen(&app).contains("胡惟庸"));
+        press(&mut app, " ");
 
         // 其他进程的写入在重新加载后可见。
         let mut other = Session::open(EventLog::new(&root)).unwrap();

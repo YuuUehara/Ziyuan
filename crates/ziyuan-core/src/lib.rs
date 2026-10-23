@@ -397,9 +397,17 @@ pub enum CourtEvent {
     OfficialDismissed {
         agent: AgentId,
     },
+    /// 革职：除去官职并削去仕籍，此后不得再任官；身份与履历保留。
+    OfficialPurged {
+        agent: AgentId,
+    },
     InstitutionReformed(GovernanceMode),
     /// 诏令入队；此后依次可有 `TaskAssigned`、若干 `ToolInvoked`，并以完成/失败/撤销之一结束。
     EdictIssued(Edict),
+    /// 内阁制下皇帝对内阁票拟的批红：批红后诏令方可指派执行。
+    EdictApproved {
+        task: TaskId,
+    },
     /// 派给某位官员。进程中断后未结束的任务可重新指派。
     TaskAssigned {
         task: TaskId,

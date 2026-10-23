@@ -1,7 +1,7 @@
 //! 治理引擎。职权由代码校验，不由 Agent 的角色提示词决定。
 pub mod names;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
@@ -40,6 +40,13 @@ pub enum GovernanceError {
     NotCompleted(TaskId),
     AlreadyReviewed(TaskId),
     Vacant(Office),
+    /// 已革职的官员永不叙用。
+    Purged(AgentId),
+    /// 只有内阁制下的诏令需要批红。
+    ApprovalNotNeeded,
+    AlreadyApproved(TaskId),
+    /// 一键朱元璋只能在丞相制下使用。
+    NoChancellery,
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -84,6 +91,12 @@ impl fmt::Display for GovernanceError {
                 write!(f, "{0}尚书、{0}侍郎俱缺，无法承接诏令", d.label())
             }
             Self::Vacant(office) => write!(f, "{}空缺，无法承接诏令", office.label()),
+            Self::Purged(id) => write!(f, "官员 #{} 已革职，永不叙用", id.0),
+            Self::ApprovalNotNeeded => {
+                f.write_str("现行制度无须批红：只有内阁制下的票拟须经皇帝批红")
+            }
+            Self::AlreadyApproved(id) => write!(f, "诏令 #{} 已批红或已在执行", id.0),
+            Self::NoChancellery => f.write_str("现行制度不设中书省，已无丞相可废"),
         }
     }
 }
@@ -96,6 +109,8 @@ pub struct Court {
     mode: GovernanceMode,
     agents: BTreeMap<AgentId, Agent>,
     appointments: BTreeMap<AgentId, Office>,
+    /// 革职削籍的官员。
+    purged: BTreeSet<AgentId>,
     next_task_id: u64,
     next_agent_id: u64,
     tasks: BTreeMap<TaskId, Task>,
@@ -112,6 +127,8 @@ pub struct Task {
     pub usage: TokenUsage,
     /// 皇帝的评定；只有已完成的诏令才有。
     pub review: Option<(Verdict, String)>,
+    /// 皇帝是否已对内阁票拟批红（只在内阁制下要求）。
+    pub approved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +166,7 @@ impl Court {
             mode,
             agents: BTreeMap::new(),
             appointments: BTreeMap::new(),
+            purged: BTreeSet::new(),
             next_task_id: 1,
             next_agent_id: 1,
             tasks: BTreeMap::new(),
@@ -180,6 +198,15 @@ impl Court {
                 self.propose_dismissal(*agent)?;
                 self.appointments.remove(agent);
             }
+            CourtEvent::OfficialPurged { agent } => {
+                self.propose_purge(*agent)?;
+                self.appointments.remove(agent);
+                self.purged.insert(*agent);
+            }
+            CourtEvent::EdictApproved { task } => {
+                self.propose_approval(*task)?;
+                self.tasks.get_mut(task).expect("已确认存在").approved = true;
+            }
             CourtEvent::InstitutionReformed(mode) => {
                 self.propose_reform(*mode)?;
                 // 改制时撤销旧制度协调机构的官职；六部官员保留（品级随制度变化）。
@@ -205,6 +232,7 @@ impl Court {
                         tool_failures: 0,
                         usage: TokenUsage::default(),
                         review: None,
+                        approved: false,
                     },
                 );
             }
@@ -344,6 +372,68 @@ impl Court {
             .collect()
     }
 
+    /// 内阁制下尚未批红的待办诏令：须先批红才能执行。
+    pub fn needs_approval(&self, task: &Task) -> bool {
+        self.mode == GovernanceMode::Cabinet && !task.approved && task.status == TaskStatus::Pending
+    }
+
+    /// 现在就可以执行的诏令：未结束，且（内阁制下）已批红。按 ID 升序。
+    pub fn runnable_tasks(&self) -> Vec<TaskId> {
+        self.tasks
+            .values()
+            .filter(|t| t.status.is_open() && !self.needs_approval(t))
+            .map(|t| t.edict.id)
+            .collect()
+    }
+
+    pub fn is_purged(&self, agent: AgentId) -> bool {
+        self.purged.contains(&agent)
+    }
+
+    /// 革职：除去官职并削去仕籍，此后不得再任官。皇帝可革任何在籍官员。
+    pub fn propose_purge(&self, agent: AgentId) -> Result<CourtEvent, GovernanceError> {
+        if !self.agents.contains_key(&agent) {
+            return Err(GovernanceError::UnknownAgent(agent));
+        }
+        if self.purged.contains(&agent) {
+            return Err(GovernanceError::Purged(agent));
+        }
+        Ok(CourtEvent::OfficialPurged { agent })
+    }
+
+    /// 批红：内阁制下，诏令经内阁票拟（派工路线）后须皇帝批红才能执行。
+    pub fn propose_approval(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
+        if self.mode != GovernanceMode::Cabinet {
+            return Err(GovernanceError::ApprovalNotNeeded);
+        }
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if !entry.status.is_open() {
+            return Err(GovernanceError::TaskFinished(task));
+        }
+        if !self.needs_approval(entry) {
+            return Err(GovernanceError::AlreadyApproved(task));
+        }
+        Ok(CourtEvent::EdictApproved { task })
+    }
+
+    /// 一键朱元璋：革去中书省全部丞相，罢中书省，改为废相亲政。
+    pub fn propose_abolition(&self) -> Result<Vec<CourtEvent>, GovernanceError> {
+        if self.mode != GovernanceMode::Chancellor {
+            return Err(GovernanceError::NoChancellery);
+        }
+        let mut events: Vec<_> = self
+            .appointments
+            .iter()
+            .filter(|(_, office)| office.mode() == Some(GovernanceMode::Chancellor))
+            .map(|(&agent, _)| CourtEvent::OfficialPurged { agent })
+            .collect();
+        events.push(CourtEvent::InstitutionReformed(GovernanceMode::DirectRule));
+        Ok(events)
+    }
+
     fn open_task(&self, id: TaskId) -> Result<&TaskStatus, GovernanceError> {
         let task = self
             .tasks
@@ -416,6 +506,9 @@ impl Court {
             .agents
             .get(&agent)
             .ok_or(GovernanceError::UnknownAgent(agent))?;
+        if self.purged.contains(&agent) {
+            return Err(GovernanceError::Purged(agent));
+        }
         if self.appointments.contains_key(&agent) {
             return Err(GovernanceError::AlreadyAppointed(agent));
         }
@@ -510,6 +603,7 @@ impl Court {
         let mut candidates: Vec<_> = self
             .agents
             .values()
+            .filter(|agent| !self.purged.contains(&agent.id))
             .filter(|agent| department_of(office).is_none_or(|d| agent.speciality == d))
             .map(|agent| Candidate {
                 agent,
@@ -847,6 +941,79 @@ mod tests {
         assert_eq!(
             works(&court).unwrap()[1],
             format!("内阁次辅·{}（署理）", name(1))
+        );
+    }
+    #[test]
+    fn abolition_purges_chancellors_and_cabinet_edicts_need_approval() {
+        let mut court = Court::replay(&founding_events(1)).unwrap();
+        let apply = |events: Vec<CourtEvent>, court: &mut Court| {
+            for e in events {
+                court.apply(&e).unwrap();
+            }
+        };
+        // 一键朱元璋：右丞相 #1 被革职，改为亲政；被革者不能再任官，也不入荐举。
+        apply(court.propose_abolition().unwrap(), &mut court);
+        assert_eq!(court.mode(), GovernanceMode::DirectRule);
+        assert!(court.is_purged(AgentId(1)) && court.office_of(AgentId(1)).is_none());
+        assert!(!court.is_purged(AgentId(2)));
+        assert_eq!(
+            court.propose_abolition(),
+            Err(GovernanceError::NoChancellery)
+        );
+        apply(
+            vec![court.propose_reform(GovernanceMode::Cabinet).unwrap()],
+            &mut court,
+        );
+        assert_eq!(
+            court.propose_appointment(AgentId(1), Office::FirstGrandSecretary),
+            Err(GovernanceError::Purged(AgentId(1)))
+        );
+        assert!(
+            court
+                .recommend(Office::FirstGrandSecretary)
+                .unwrap()
+                .iter()
+                .all(|c| c.agent.id != AgentId(1))
+        );
+        assert_eq!(
+            court.propose_purge(AgentId(1)),
+            Err(GovernanceError::Purged(AgentId(1)))
+        );
+
+        // 内阁制：未批红的诏令不可执行；批红一次后可执行，不能重复批红。
+        apply(
+            vec![court.propose_dismissal(AgentId(6)).unwrap()],
+            &mut court,
+        );
+        apply(
+            vec![
+                court
+                    .propose_appointment(AgentId(6), Office::FirstGrandSecretary)
+                    .unwrap(),
+            ],
+            &mut court,
+        );
+        let edict = court
+            .new_edict(Department::Works, "查".into(), Seal::default())
+            .unwrap();
+        let id = edict.id;
+        apply(vec![CourtEvent::EdictIssued(edict)], &mut court);
+        assert!(court.runnable_tasks().is_empty());
+        assert_eq!(court.open_tasks(), [id]);
+        apply(vec![court.propose_approval(id).unwrap()], &mut court);
+        assert_eq!(court.runnable_tasks(), [id]);
+        assert_eq!(
+            court.propose_approval(id),
+            Err(GovernanceError::AlreadyApproved(id))
+        );
+        // 其他制度不批红，诏令直接可执行。
+        apply(
+            vec![court.propose_reform(GovernanceMode::DirectRule).unwrap()],
+            &mut court,
+        );
+        assert_eq!(
+            court.propose_approval(id),
+            Err(GovernanceError::ApprovalNotNeeded)
         );
     }
     #[test]

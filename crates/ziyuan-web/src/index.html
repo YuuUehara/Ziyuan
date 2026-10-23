@@ -182,6 +182,20 @@
   .badge.assigned { color: #a35a12; border-color: #ecc195; background: #fcecd9; }
   .badge.completed { color: var(--jade); border-color: #a8d3bf; background: #e6f3ec; }
   .badge.failed { color: var(--vermilion); border-color: #e9b4ae; background: #fae7e4; }
+  .badge.awaiting { color: #fff; border-color: var(--vermilion); background: var(--vermilion); }
+  .draft { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .draft b { color: var(--vermilion); font-family: var(--serif); }
+  button.zhu {
+    width: 100%; margin-bottom: 14px; padding: 9px; font-family: var(--serif); font-size: 15px;
+    background: #2b1b17; color: var(--gold-soft); border-color: #000;
+  }
+  button.zhu:hover { background: #000; }
+  .chronicle {
+    margin-bottom: 14px; padding: 12px 14px; border-left: 4px solid var(--gold);
+    background: #fbf5e6; font-family: var(--serif); line-height: 1.7;
+  }
+  .chronicle h3 { margin: 0 0 4px; font-size: 14px; color: var(--lacquer); }
+  .chronicle p { margin: 0 0 8px; }
   .badge.cancelled { color: var(--muted); border-color: var(--line); background: var(--paper-dark); }
   .badge.accept { color: #fff; background: var(--jade); border-color: var(--jade); }
   .badge.reject { color: #fff; background: var(--vermilion); border-color: var(--vermilion); }
@@ -289,6 +303,12 @@
       <h2>朝堂 <small>制度与派工路线</small></h2>
       <div class="body">
         <div class="modes" id="modes"></div>
+        <button class="zhu" id="abolish-btn" hidden>一键朱元璋：革丞相，罢中书省</button>
+        <div class="chronicle" id="chronicle" hidden>
+          <h3>史官记</h3>
+          <p id="chronicle-text"></p>
+          <button class="small" id="chronicle-close">退朝</button>
+        </div>
         <div class="routes" id="routes"></div>
       </div>
     </section>
@@ -369,6 +389,12 @@ async function api(path, body) {
   return data;
 }
 
+function chronicle(note) {
+  if (!note) return;
+  $("chronicle-text").textContent = note;
+  $("chronicle").hidden = false;
+}
+
 let toastTimer;
 function toast(message, error = false) {
   const el = $("toast");
@@ -438,11 +464,15 @@ function taskHtml(t) {
       <button class="small accept" data-review="${t.id}" data-verdict="accept">采纳</button>
       <button class="small reject" data-review="${t.id}" data-verdict="reject">驳回</button></div>`;
   } else if (open) {
-    actions = `<div class="review-row"><span style="flex:1"></span><button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
+    const approve = t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
+    actions = `<div class="review-row"><span style="flex:1"></span>${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
+  }
+  if (t.draft) {
+    body += `<div class="draft"><b>内阁票拟</b>　${t.draft.route ? t.draft.route.map(esc).join(" ▸ ") : esc(t.draft.error)}</div>`;
   }
   return `<article class="task ${t.status}">
     <div class="task-head"><span class="task-id">#${t.id}</span><span>${esc(t.department)}</span>
-      <span class="badge ${t.status}">${statusLabel[t.status]}</span>${review}${seal}</div>
+      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${seal}</div>
     <div class="task-text">${esc(t.text)}</div>
     <div class="meta">${meta}</div>${body}${actions}</article>`;
 }
@@ -465,6 +495,7 @@ function render() {
   $("recruit-dept").innerHTML = deptOptions;
   $("recommend-office").innerHTML = s.offices.map((o) => `<option value="${o.code}">${esc(o.label)}（${esc(o.rank)}）</option>`).join("");
 
+  $("abolish-btn").hidden = s.mode.code !== "chancellor";
   $("modes").innerHTML = s.modes.map((m) =>
     `<button data-mode="${m.code}" class="${m.code === s.mode.code ? "current" : ""}">${esc(m.label)}</button>`).join("");
   $("routes").innerHTML = s.departments.map((d) => {
@@ -480,13 +511,16 @@ function render() {
   $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。请在左侧下诏。</div>`;
 
   $("officials").innerHTML = s.officials.map((o) => {
-    const action = o.office
-      ? `<button class="small" data-dismiss="${o.id}">罢免</button>`
+    const purge = `<button class="small reject" data-purge="${o.id}">革职</button>`;
+    const action = o.purged
+      ? ""
+      : o.office
+      ? `<div class="row"><button class="small" data-dismiss="${o.id}">罢免</button>${purge}</div>`
       : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.filter((of) => !of.department || of.department === o.speciality.code).map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
-         <button class="small shrink" data-appoint="${o.id}">任命</button></div>`;
+         <button class="small shrink" data-appoint="${o.id}">任命</button>${purge}</div>`;
     const usage = o.record.usage.input + o.record.usage.output;
     return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}</td><td>${esc(o.speciality.label)}</td>
-      <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : '<span class="hint">未任官职</span>'}</td>
+      <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
       <td class="record">${s.model ? esc(s.model) : '<span class="hint">演示</span>'}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) : "—"}</td><td>${action}</td></tr>`;
   }).join("");
@@ -521,7 +555,9 @@ $("edict-form").addEventListener("submit", async (event) => {
   const result = await act(api("/edicts", body));
   if (!result) return;
   $("edict-text").value = "";
-  toast(`诏令 #${result.id} 已颁布`);
+  toast(`诏令 #${result.id} 已颁布${state.mode.code === "cabinet" && !run ? "，待批红" : ""}`);
+  // 皇帝亲自「下诏并执行」：内阁票拟后当即批红。
+  if (run && state.mode.code === "cabinet") await act(api(`/tasks/${result.id}/approve`, {}));
   if (run && !state.running) await act(api("/run", {}));
 });
 
@@ -549,7 +585,23 @@ document.addEventListener("click", (event) => {
   const d = el.dataset;
   if (d.mode && d.mode !== state.mode.code) {
     const label = el.textContent;
-    if (confirm(`改制为「${label}」？原丞相/首辅职务将自动撤销。`)) act(api("/reform", { mode: d.mode }), `已改制为${label}`);
+    if (confirm(`改制为「${label}」？旧制度的中书省/内阁官职将自动撤销。`)) {
+      act(api("/reform", { mode: d.mode }), `已改制为${label}`).then((r) => r && chronicle(r.note));
+    }
+  } else if (el.id === "abolish-btn") {
+    if (confirm("一键朱元璋：革去全部丞相、罢中书省？被革者永不叙用。")) {
+      act(api("/abolish", {})).then((r) => {
+        if (!r) return;
+        const names = r.purged.map((p) => p.name).join("、");
+        chronicle((names ? `丞相${names}革职削籍。` : "") + r.note);
+      });
+    }
+  } else if (el.id === "chronicle-close") {
+    $("chronicle").hidden = true;
+  } else if (d.approve) {
+    act(api(`/tasks/${d.approve}/approve`, {}), `诏令 #${d.approve} 已批红`);
+  } else if (d.purge) {
+    if (confirm(`革去官员 #${d.purge}？削去仕籍，永不叙用。`)) act(api(`/officials/${d.purge}/purge`, {}), "已革职");
   } else if (d.review) {
     const note = ($("note-" + d.review) || {}).value || "";
     act(api(`/tasks/${d.review}/review`, { verdict: d.verdict, note }), d.verdict === "accept" ? "已采纳" : "已驳回");

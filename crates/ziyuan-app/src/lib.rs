@@ -156,9 +156,38 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    pub fn reform(&mut self, mode: GovernanceMode) -> Result<(), AppError> {
-        self.commit(|court| Ok(vec![court.propose_reform(mode)?]))?;
+    /// 改制，返回史官对这次改制的记述（见 [`reform_note`]）。
+    pub fn reform(&mut self, mode: GovernanceMode) -> Result<&'static str, AppError> {
+        let mut from = self.court.mode();
+        self.commit(|court| {
+            from = court.mode();
+            Ok(vec![court.propose_reform(mode)?])
+        })?;
+        Ok(reform_note(from, mode))
+    }
+
+    /// 革职：除去官职、削去仕籍，永不叙用。
+    pub fn purge(&mut self, agent: AgentId) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_purge(agent)?]))?;
         Ok(())
+    }
+
+    /// 内阁制下对内阁票拟批红，诏令方可执行。
+    pub fn approve(&mut self, task: TaskId) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_approval(task)?]))?;
+        Ok(())
+    }
+
+    /// 一键朱元璋：革去全部丞相并罢中书省（改为废相亲政）。返回被革职的官员。
+    pub fn abolish_chancellery(&mut self) -> Result<Vec<AgentId>, AppError> {
+        let committed = self.commit(|court| court.propose_abolition())?;
+        Ok(committed
+            .iter()
+            .filter_map(|e| match e {
+                CourtEvent::OfficialPurged { agent } => Some(*agent),
+                _ => None,
+            })
+            .collect())
     }
 
     /// 下诏入队。现行制度下无法路由（如职位空缺）时拒绝，不留记录。
@@ -214,7 +243,8 @@ impl<S: EventStore> Session<S> {
                 let entry = court
                     .task(task)
                     .ok_or(GovernanceError::UnknownEdict(task))?;
-                if !entry.status.is_open() {
+                // 已结束，或内阁制下尚未批红：跳过。
+                if !entry.status.is_open() || court.needs_approval(entry) {
                     return Ok(Vec::new());
                 }
                 Ok(vec![match court.route(&entry.edict) {
@@ -345,8 +375,8 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    /// 反复执行全部未结束的诏令，直到队列清空：执行期间新入队的诏令在本轮结束后接着执行。
-    /// `cancel` 触发、或一轮过后只剩未开始的诏令时停止。
+    /// 反复执行全部可执行的诏令（内阁制下须已批红），直到队列清空：执行期间新入队（或新批红）的
+    /// 诏令在本轮结束后接着执行。`cancel` 触发、或一轮过后只剩未开始的诏令时停止。
     pub async fn run_open(
         &mut self,
         scheduler: &Scheduler,
@@ -356,7 +386,7 @@ impl<S: EventStore> Session<S> {
         let mut previous = Vec::new();
         loop {
             self.reload()?;
-            let tasks = self.court.open_tasks();
+            let tasks = self.court.runnable_tasks();
             if tasks.is_empty() || tasks == previous || cancel.is_cancelled() {
                 return Ok(());
             }
@@ -404,6 +434,32 @@ fn random_seed() -> u64 {
 
 // ---- 呈现：CLI、Web 与 TUI 共用的中文描述 ----
 
+/// 一键朱元璋时的史官记述。
+pub const ABOLITION_NOTE: &str = "洪武十三年正月，丞相胡惟庸以谋反伏诛，株连者三万余人。即日罢中书省，升六部，天子亲裁庶务。——一键朱元璋：丞相，从此不再是问题。";
+
+/// 史官对一次改制的记述（埋了些历史梗）。
+pub fn reform_note(from: GovernanceMode, to: GovernanceMode) -> &'static str {
+    use GovernanceMode::*;
+    match (from, to) {
+        (Chancellor, DirectRule) => {
+            "洪武十三年，罢中书省，析其权归六部。太祖垂训：「以后嗣君毋得议置丞相，臣下敢以此请者，置之重典。」"
+        }
+        (_, Cabinet) => {
+            "建文四年六月，燕军渡江，金川门开。「侄儿，四叔来看你了。」新君命解缙、杨士奇等入直文渊阁，参预机务——内阁自此始。今后诏令须经内阁票拟、皇帝批红，方可施行。"
+        }
+        (Cabinet, Chancellor) => {
+            "正统十四年，土木堡之变，天子北狩。瓦剌铁骑南下叩关，中书省竟随之复设——大元，杀回来了。"
+        }
+        (Cabinet, DirectRule) => {
+            "崇祯：「朕非亡国之君，诸臣皆亡国之臣。」十七年间换了五十位大学士，这回索性一个不要，事必躬亲。"
+        }
+        (DirectRule, Chancellor) => {
+            "《皇明祖训》：「以后子孙做皇帝时，并不许立丞相。臣下敢有奏请设立者，文武群臣即时劾奏，将犯人凌迟，全家处死。」太祖的棺材板，快压不住了。"
+        }
+        _ => "",
+    }
+}
+
 /// 默认玉玺不额外显示，保持输出简洁。
 pub fn seal_note(seal: &Seal) -> String {
     if *seal == Seal::default() {
@@ -428,6 +484,8 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("任命 #{} 为{}", agent.0, office.label())
         }
         CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
+        CourtEvent::OfficialPurged { agent } => format!("革职 #{}，削去仕籍", agent.0),
+        CourtEvent::EdictApproved { task } => format!("诏令 #{} 批红", task.0),
         CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
         CourtEvent::EdictIssued(e) => {
             format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
@@ -534,6 +592,42 @@ mod tests {
         assert_eq!(
             reopened.court().agents().cloned().collect::<Vec<_>>(),
             before
+        );
+    }
+
+    #[tokio::test]
+    async fn cabinet_runs_only_approved_edicts_and_reforms_leave_notes() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let purged = session.abolish_chancellery().unwrap();
+        assert_eq!(purged, [AgentId(1)]);
+        assert!(
+            session
+                .reform(GovernanceMode::Cabinet)
+                .unwrap()
+                .contains("四叔")
+        );
+        session.dismiss(AgentId(6)).unwrap();
+        session
+            .appoint(AgentId(6), Office::FirstGrandSecretary)
+            .unwrap();
+        let first = session
+            .issue(Department::Works, "甲".into(), Seal::default())
+            .unwrap();
+        let second = session
+            .issue(Department::Works, "乙".into(), Seal::default())
+            .unwrap();
+        session.approve(second.id).unwrap();
+        let reports = run_all(&mut session, &scheduler(DemoBackend)).await;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].edict.id, second.id);
+        assert!(session.court().task(first.id).unwrap().status.is_open());
+        // 内阁改回丞相：土木堡之变。
+        assert!(
+            session
+                .reform(GovernanceMode::Chancellor)
+                .unwrap()
+                .contains("大元，杀回来了")
         );
     }
 

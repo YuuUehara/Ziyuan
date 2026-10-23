@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use ziyuan_app::{AppError, RunUpdate, Session, TaskReport, describe_event};
+use ziyuan_app::{ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event};
 use ziyuan_core::{
     AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
 };
@@ -69,10 +69,13 @@ pub fn router(config: Config) -> Router {
         .route("/run/stop", post(stop_run))
         .route("/tasks/{id}/cancel", post(cancel))
         .route("/tasks/{id}/review", post(review))
+        .route("/tasks/{id}/approve", post(approve))
         .route("/reform", post(reform))
+        .route("/abolish", post(abolish))
         .route("/officials", post(recruit))
         .route("/officials/{id}/appoint", post(appoint))
         .route("/officials/{id}/dismiss", post(dismiss))
+        .route("/officials/{id}/purge", post(purge))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
@@ -378,8 +381,42 @@ async fn reform(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let mode = parse::<GovernanceMode>(str_field(&body, "mode")?)?;
+    app.mutate(move |s| Ok(json!({ "note": s.reform(mode)? })))
+        .await
+}
+
+/// 一键朱元璋。
+async fn abolish(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
+    app.mutate(|s| {
+        let purged = s.abolish_chancellery()?;
+        let court = s.court();
+        let purged: Vec<_> = purged
+            .iter()
+            .filter_map(|&id| court.agent(id))
+            .map(|a| json!({ "id": a.id.0, "name": a.name }))
+            .collect();
+        Ok(json!({ "purged": purged, "note": ABOLITION_NOTE }))
+    })
+    .await
+}
+
+async fn approve(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
     app.mutate(move |s| {
-        s.reform(mode)?;
+        s.approve(TaskId(id))?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+async fn purge(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    app.mutate(move |s| {
+        s.purge(AgentId(id))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -521,6 +558,7 @@ fn court_json(court: &Court) -> Value {
                 "name": a.name,
                 "speciality": { "code": a.speciality.code(), "label": a.speciality.label() },
                 "office": court.office_of(a.id).map(|o| office_json(o, court.mode())),
+                "purged": court.is_purged(a.id),
                 "record": record_json(&court.service_record(a.id)),
             })
         })
@@ -547,6 +585,12 @@ fn court_json(court: &Court) -> Value {
                     "scope": t.edict.seal.scope,
                 },
                 "status": kind,
+                // 内阁制下待批红的诏令附上内阁票拟（预拟的派工路线）。
+                "needs_approval": court.needs_approval(t),
+                "draft": court.needs_approval(t).then(|| match court.route(&t.edict) {
+                    Ok(route) => json!({ "route": route.path }),
+                    Err(e) => json!({ "error": e.to_string() }),
+                }),
                 "worker": worker.and_then(name),
                 "detail": detail,
                 "review": t.review.as_ref().map(|(v, note)| json!({
@@ -658,6 +702,49 @@ mod tests {
             (status, state["mode"]["code"].as_str()),
             (200, Some("chancellor"))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abolition_and_cabinet_approval() {
+        let (base, root) = start("cabinet").await;
+        let t = Some(TOKEN);
+        let (status, abolished) = call(&base, "/abolish", t, Some(json!({}))).await;
+        assert_eq!(status, 200);
+        assert_eq!(abolished["purged"][0]["id"], 1);
+        assert_eq!(call(&base, "/abolish", t, Some(json!({}))).await.0, 400);
+        let (_, reformed) = call(&base, "/reform", t, Some(json!({ "mode": "cabinet" }))).await;
+        assert!(reformed["note"].as_str().unwrap().contains("四叔"));
+        for path in ["/officials/6/dismiss", "/officials/5/purge"] {
+            assert_eq!(call(&base, path, t, Some(json!({}))).await.0, 200, "{path}");
+        }
+        // 已革职者不能再任官。
+        let office = json!({ "office": "first-secretary" });
+        assert_eq!(
+            call(&base, "/officials/1/appoint", t, Some(office.clone()))
+                .await
+                .0,
+            400
+        );
+        call(&base, "/officials/6/appoint", t, Some(office)).await;
+        let edict = json!({ "department": "works", "text": "查" });
+        call(&base, "/edicts", t, Some(edict)).await;
+        let (_, state) = call(&base, "/state", t, None).await;
+        let task = &state["tasks"][0];
+        assert_eq!(task["needs_approval"], true);
+        assert!(
+            task["draft"]["route"][1]
+                .as_str()
+                .unwrap()
+                .contains("内阁首辅")
+        );
+        assert!(state["officials"][0]["purged"].as_bool().unwrap());
+        assert_eq!(
+            call(&base, "/tasks/1/approve", t, Some(json!({}))).await.0,
+            200
+        );
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(state["tasks"][0]["needs_approval"], false);
         std::fs::remove_dir_all(root).unwrap();
     }
 

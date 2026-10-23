@@ -8,7 +8,9 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
-use ziyuan_app::{RunUpdate, Session, TaskReport, describe_event, describe_record, seal_note};
+use ziyuan_app::{
+    ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, seal_note,
+};
 use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
 use ziyuan_governance::TaskStatus;
 use ziyuan_llm::OpenAiCompatible;
@@ -34,6 +36,9 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
+  ziyuan purge <官员ID>                 革职：削去仕籍，永不叙用
+  ziyuan abolish                       一键朱元璋：革去全部丞相，罢中书省（改为废相亲政）
+  ziyuan approve <诏令ID|all>           内阁制下对内阁票拟批红（批红后方可执行）
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
@@ -100,6 +105,10 @@ enum Command {
     Cancel(TaskId),
     Reform(GovernanceMode),
     Dismiss(AgentId),
+    Purge(AgentId),
+    Abolish,
+    /// `None` 表示全部待批红的诏令。
+    Approve(Option<TaskId>),
     Appoint(AgentId, Office),
     Examine(AgentId),
     Review(TaskId, Verdict, String),
@@ -167,6 +176,15 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Err(_) => return Err("用法: ziyuan reform <chancellor|direct|cabinet>".into()),
         },
         "dismiss" => Command::Dismiss(parse_id(&args, "ziyuan dismiss <官员ID>")?),
+        "purge" => Command::Purge(parse_id(&args, "ziyuan purge <官员ID>")?),
+        "abolish" => no_args(args, Command::Abolish)?,
+        "approve" => match args.as_slice() {
+            [all] if all == "all" => Command::Approve(None),
+            [id] => Command::Approve(Some(TaskId(
+                id.parse().map_err(|_| "诏令 ID 必须是数字或 all")?,
+            ))),
+            _ => return Err("用法: ziyuan approve <诏令ID|all>".into()),
+        },
         "appoint" => match <[String; 2]>::try_from(args) {
             Ok([id, office]) => Command::Appoint(agent_id(&id)?, office.parse()?),
             Err(_) => return Err("用法: ziyuan appoint <官员ID> <官职>".into()),
@@ -216,9 +234,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             let court = session.court();
             let model = model_label();
             for agent in court.agents() {
-                let office = court.office_of(agent.id).map_or("未任官职".into(), |o| {
-                    format!("{}（{}）", o.label(), o.rank(court.mode()))
-                });
+                let office = match court.office_of(agent.id) {
+                    Some(o) => format!("{}（{}）", o.label(), o.rank(court.mode())),
+                    None if court.is_purged(agent.id) => "已革职".into(),
+                    None => "未任官职".into(),
+                };
                 println!(
                     "#{:<3} {:<6} {:<18} {} 模型 {} (完成 {} 件)",
                     agent.id.0,
@@ -244,6 +264,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             // 先取得执行者锁再下诏，避免被拒绝的诏令残留在队列中。
             let executor = if queue { None } else { Some(lock_executor()?) };
             let edict = session.issue(department, text, seal)?;
+            if !queue && session.court().mode() == GovernanceMode::Cabinet {
+                // 皇帝亲自下诏并立即执行：内阁票拟后当即批红。
+                session.approve(edict.id)?;
+                println!("诏令 #{} 经内阁票拟，朱笔批红。", edict.id.0);
+            }
             if queue {
                 println!(
                     "诏令 #{} 已入队：{}{}",
@@ -262,7 +287,14 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
         Command::Run(limits) => {
             let _executor = lock_executor()?;
-            let tasks = session.court().open_tasks();
+            let court = session.court();
+            let tasks = court.runnable_tasks();
+            let waiting = court.open_tasks().len() - tasks.len();
+            if waiting > 0 {
+                eprintln!(
+                    "另有 {waiting} 件诏令待批红（`ziyuan approve <诏令ID|all>`），本次不执行。"
+                );
+            }
             if tasks.is_empty() {
                 println!("没有未结束的诏令。");
             } else {
@@ -305,6 +337,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             for task in court.tasks() {
                 let name = |id: AgentId| court.agent(id).map_or("?", |a| a.name.as_str());
                 let status = match &task.status {
+                    TaskStatus::Pending if court.needs_approval(task) => {
+                        match court.route(&task.edict) {
+                            Ok(route) => format!("待批红（票拟：{}）", route.path.join(" → ")),
+                            Err(e) => format!("待批红（票拟不成：{e}）"),
+                        }
+                    }
                     TaskStatus::Pending => "待办".to_owned(),
                     TaskStatus::Assigned(w) => format!("已指派 {}（未结束）", name(*w)),
                     TaskStatus::Completed { worker, .. } => match &task.review {
@@ -335,13 +373,54 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             println!("诏令 #{} 已撤销。", task.0);
         }
         Command::Reform(mode) => {
-            session.reform(mode)?;
+            let note = session.reform(mode)?;
             println!(
-                "诏令已颁：制度改为{}。原丞相/首辅职务自动撤销。",
+                "诏令已颁：制度改为{}。旧制度的中书省/内阁官职自动撤销。",
                 mode.label()
             );
+            println!("史官记：{note}");
             if mode != GovernanceMode::DirectRule {
                 println!("提示：新制度如无协调者，请先任命。 ");
+            }
+        }
+        Command::Purge(id) => {
+            session.purge(id)?;
+            println!("诏令已颁：官员 #{} 革职，削去仕籍，永不叙用。", id.0);
+        }
+        Command::Abolish => {
+            let purged = session.abolish_chancellery()?;
+            let court = session.court();
+            let names: Vec<_> = purged
+                .iter()
+                .filter_map(|&id| court.agent(id))
+                .map(|a| format!("#{} {}", a.id.0, a.name))
+                .collect();
+            if names.is_empty() {
+                println!("中书省本无丞相在任。");
+            } else {
+                println!("丞相 {} 革职削籍。", names.join("、"));
+            }
+            println!("诏令已颁：罢中书省，制度改为废相亲政。");
+            println!("史官记：{ABOLITION_NOTE}");
+        }
+        Command::Approve(task) => {
+            let tasks = match task {
+                Some(task) => vec![task],
+                None => {
+                    let court = session.court();
+                    court
+                        .tasks()
+                        .filter(|t| court.needs_approval(t))
+                        .map(|t| t.edict.id)
+                        .collect()
+                }
+            };
+            if tasks.is_empty() {
+                println!("没有待批红的诏令。");
+            }
+            for task in tasks {
+                session.approve(task)?;
+                println!("诏令 #{} 已批红。", task.0);
             }
         }
         Command::Dismiss(id) => {

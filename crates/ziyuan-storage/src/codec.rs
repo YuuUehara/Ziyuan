@@ -38,6 +38,8 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tAPPOINTED\t{}\t{}", agent.0, office.code())
         }
         OfficialDismissed { agent } => format!("v1\tDISMISSED\t{}", agent.0),
+        OfficialPurged { agent } => format!("v1\tPURGED\t{}", agent.0),
+        EdictApproved { task } => format!("v1\tAPPROVED\t{}", task.0),
         InstitutionReformed(mode) => format!("v1\tREFORMED\t{}", mode.code()),
         EdictIssued(e) => format!(
             "v1\tEDICT\t{}\t{}\t{}\t{}\t{}",
@@ -129,6 +131,12 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "DISMISSED" => OfficialDismissed {
             agent: AgentId(id(2)?),
         },
+        "PURGED" => OfficialPurged {
+            agent: AgentId(id(2)?),
+        },
+        "APPROVED" => EdictApproved {
+            task: TaskId(id(2)?),
+        },
         "REFORMED" => InstitutionReformed(
             field(2)?
                 .parse::<GovernanceMode>()
@@ -193,7 +201,12 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         other => return Err(format!("未知事件类型: {other}")),
     };
     let expected_fields = match &event {
-        Founded(_) | InstitutionReformed(_) | OfficialDismissed { .. } | TaskCancelled { .. } => 3,
+        Founded(_)
+        | InstitutionReformed(_)
+        | OfficialDismissed { .. }
+        | OfficialPurged { .. }
+        | EdictApproved { .. }
+        | TaskCancelled { .. } => 3,
         OfficialAppointed { .. } | TaskAssigned { .. } | TaskFailed { .. } => 4,
         EdictIssued(_) if parts.len() == 5 => 5,
         AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
@@ -246,6 +259,8 @@ mod tests {
                 reason: "超时\n（300s）".into(),
             },
             CourtEvent::TaskCancelled { task },
+            CourtEvent::EdictApproved { task },
+            CourtEvent::OfficialPurged { agent: AgentId(3) },
             CourtEvent::ModelUsage {
                 task,
                 usage: TokenUsage {
