@@ -1,7 +1,10 @@
 //! 治理引擎。职权由代码校验，不由 Agent 的角色提示词决定。
 use std::collections::BTreeMap;
 use std::fmt;
-use ziyuan_core::{Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId};
+use std::path::{Component, Path};
+use ziyuan_core::{
+    Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId,
+};
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +23,8 @@ pub enum GovernanceError {
     OfficeOccupied(Office),
     SameMode(GovernanceMode),
     EmptyEdict,
+    /// 玉玺的查阅范围为空，或含绝对路径、`..` 等越出项目的路径。
+    InvalidScope(String),
     DuplicateEdict(TaskId),
     UnknownEdict(TaskId),
     TaskFinished(TaskId),
@@ -48,6 +53,12 @@ impl fmt::Display for GovernanceError {
             Self::OfficeOccupied(office) => write!(f, "{}已有任职者", office.label()),
             Self::SameMode(_) => f.write_str("已经是该制度"),
             Self::EmptyEdict => f.write_str("诏令不能为空"),
+            Self::InvalidScope(path) if path.is_empty() => {
+                f.write_str("玉玺必须至少给出一个查阅范围")
+            }
+            Self::InvalidScope(path) => {
+                write!(f, "查阅范围必须是项目内的相对路径，且不含 `..`: {path}")
+            }
             Self::DuplicateEdict(id) => write!(f, "重复诏令 ID: {}", id.0),
             Self::UnknownEdict(id) => write!(f, "未记录下达的诏令 #{}", id.0),
             Self::TaskFinished(id) => write!(f, "诏令 #{} 已结束，不能再变更", id.0),
@@ -159,6 +170,7 @@ impl Court {
                 if edict.text.trim().is_empty() {
                     return Err(GovernanceError::EmptyEdict);
                 }
+                validate_seal(&edict.seal)?;
                 if self.tasks.contains_key(&edict.id) {
                     return Err(GovernanceError::DuplicateEdict(edict.id));
                 }
@@ -362,14 +374,17 @@ impl Court {
         &self,
         department: Department,
         text: String,
+        seal: Seal,
     ) -> Result<Edict, GovernanceError> {
         if text.trim().is_empty() {
             return Err(GovernanceError::EmptyEdict);
         }
+        validate_seal(&seal)?;
         Ok(Edict {
             id: TaskId(self.next_task_id),
             department,
             text,
+            seal,
         })
     }
 
@@ -447,6 +462,22 @@ impl Court {
     }
 }
 
+/// 查阅范围只能是项目内的相对路径。路径是否存在、是否经符号链接逃逸，由运行时在构造工具时检查。
+fn validate_seal(seal: &Seal) -> Result<(), GovernanceError> {
+    if seal.scope.is_empty() {
+        return Err(GovernanceError::InvalidScope(String::new()));
+    }
+    for path in &seal.scope {
+        let escapes = Path::new(path)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
+        if path.trim().is_empty() || escapes {
+            return Err(GovernanceError::InvalidScope(path.clone()));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub path: Vec<String>,
@@ -509,7 +540,7 @@ mod tests {
     fn reform_changes_route() {
         let mut court = Court::replay(&founding_events()).unwrap();
         let edict = court
-            .new_edict(Department::Works, "检查源码".into())
+            .new_edict(Department::Works, "检查源码".into(), Seal::default())
             .unwrap();
         assert!(
             court
@@ -588,6 +619,34 @@ mod tests {
         assert!(Court::replay(&events).is_err());
     }
     #[test]
+    fn seal_scope_must_stay_inside_project() {
+        let court = Court::replay(&founding_events()).unwrap();
+        let seal = |scope: &[&str]| Seal {
+            capabilities: Default::default(),
+            scope: scope.iter().map(|s| s.to_string()).collect(),
+        };
+        let issue = |scope: &[&str]| court.new_edict(Department::Works, "查".into(), seal(scope));
+        assert!(issue(&["."]).is_ok());
+        assert!(issue(&["./crates/ziyuan-storage", "README.md"]).is_ok());
+        for bad in ["/etc", "../secret", "src/../../x", " "] {
+            assert_eq!(
+                issue(&["src", bad]).unwrap_err(),
+                GovernanceError::InvalidScope(bad.into()),
+                "{bad}"
+            );
+        }
+        assert!(issue(&[]).is_err());
+        // 回放同样拒绝：手写的日志也不能绕过。
+        let mut events = founding_events();
+        events.push(CourtEvent::EdictIssued(Edict {
+            id: TaskId(1),
+            department: Department::Works,
+            text: "查".into(),
+            seal: seal(&["/"]),
+        }));
+        assert!(Court::replay(&events).is_err());
+    }
+    #[test]
     fn task_lifecycle_is_enforced_on_replay() {
         let task = TaskId(1);
         let mut base = founding_events();
@@ -595,6 +654,7 @@ mod tests {
             id: task,
             department: Department::Works,
             text: "查".into(),
+            seal: Seal::default(),
         }));
         let with = |extra: &[CourtEvent]| {
             let mut events = base.clone();
@@ -658,7 +718,9 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        let edict = court.new_edict(Department::Works, "测试".into()).unwrap();
+        let edict = court
+            .new_edict(Department::Works, "测试".into(), Seal::default())
+            .unwrap();
         assert_eq!(court.route(&edict).unwrap().worker, AgentId(4));
         let completed = [
             CourtEvent::EdictIssued(edict.clone()),

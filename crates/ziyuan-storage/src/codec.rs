@@ -1,5 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
-use ziyuan_core::{Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId};
+use ziyuan_core::{
+    Agent, AgentId, Capability, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId,
+};
 
 fn to_hex(value: &str) -> String {
     const HEX: &[u8] = b"0123456789abcdef";
@@ -37,10 +39,22 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         OfficialDismissed { agent } => format!("v1\tDISMISSED\t{}", agent.0),
         InstitutionReformed(mode) => format!("v1\tREFORMED\t{}", mode.code()),
         EdictIssued(e) => format!(
-            "v1\tEDICT\t{}\t{}\t{}",
+            "v1\tEDICT\t{}\t{}\t{}\t{}\t{}",
             e.id.0,
             e.department.code(),
-            to_hex(&e.text)
+            to_hex(&e.text),
+            e.seal
+                .capabilities
+                .iter()
+                .map(|c| c.code())
+                .collect::<Vec<_>>()
+                .join(","),
+            e.seal
+                .scope
+                .iter()
+                .map(|p| to_hex(p))
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         TaskCompleted {
             task,
@@ -69,6 +83,11 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         TaskCancelled { task } => format!("v1\tCANCELLED\t{}", task.0),
     }
 }
+/// 逗号分隔的列表；空字段为空列表。
+fn split_list(field: &str) -> impl Iterator<Item = &str> {
+    field.split(',').filter(|item| !item.is_empty())
+}
+
 pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
     use CourtEvent::*;
     let parts: Vec<&str> = line.split('\t').collect();
@@ -105,6 +124,19 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
             id: TaskId(id(2)?),
             department: field(3)?.parse::<Department>().map_err(|e| e.to_string())?,
             text: from_hex(field(4)?)?,
+            // 早期日志没有玉玺字段：当时的诏令实际拥有全部只读工具与整个项目。
+            seal: if parts.len() == 5 {
+                Seal::default()
+            } else {
+                Seal {
+                    capabilities: split_list(field(5)?)
+                        .map(|c| c.parse::<Capability>().map_err(|e| e.to_string()))
+                        .collect::<Result<_, _>>()?,
+                    scope: split_list(field(6)?)
+                        .map(from_hex)
+                        .collect::<Result<_, _>>()?,
+                }
+            },
         }),
         "COMPLETED" => TaskCompleted {
             task: TaskId(id(2)?),
@@ -137,7 +169,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
     let expected_fields = match &event {
         Founded(_) | InstitutionReformed(_) | OfficialDismissed { .. } | TaskCancelled { .. } => 3,
         OfficialAppointed { .. } | TaskAssigned { .. } | TaskFailed { .. } => 4,
-        AgentRegistered(_) | EdictIssued(_) | TaskCompleted { .. } => 5,
+        EdictIssued(_) if parts.len() == 5 => 5,
+        AgentRegistered(_) | TaskCompleted { .. } => 5,
+        EdictIssued(_) => 7,
         ToolInvoked { .. } => 6,
     };
     if parts.len() != expected_fields {
@@ -157,6 +191,19 @@ mod tests {
                 id: task,
                 department: Department::Works,
                 text: "检查\tRust\n测试".into(),
+                seal: Seal {
+                    capabilities: [Capability::SearchCode].into(),
+                    scope: vec!["crates/紫垣,a".into(), "README.md".into()],
+                },
+            }),
+            CourtEvent::EdictIssued(Edict {
+                id: TaskId(43),
+                department: Department::Works,
+                text: "无工具".into(),
+                seal: Seal {
+                    capabilities: Default::default(),
+                    scope: vec![".".into()],
+                },
             }),
             CourtEvent::TaskAssigned {
                 task,
@@ -177,6 +224,16 @@ mod tests {
         for original in events {
             assert_eq!(decode_event(&encode_event(&original)).unwrap(), original);
         }
+    }
+    #[test]
+    fn edict_without_seal_fields_gets_default_seal() {
+        let CourtEvent::EdictIssued(edict) = decode_event("v1\tEDICT\t1\tworks\te69fa5").unwrap()
+        else {
+            panic!("应解码为诏令");
+        };
+        assert_eq!((edict.text.as_str(), edict.seal), ("查", Seal::default()));
+        assert!(decode_event("v1\tEDICT\t1\tworks\te69fa5\tread_file").is_err());
+        assert!(decode_event("v1\tEDICT\t1\tworks\te69fa5\twrite_file\t2e").is_err());
     }
     #[test]
     fn malformed_event_is_rejected() {

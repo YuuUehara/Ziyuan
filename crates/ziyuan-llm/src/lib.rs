@@ -166,8 +166,8 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use ziyuan_core::{Agent, AgentId, Department, Edict, TaskId};
-    use ziyuan_runtime::{AgentBackend, WorkerBackend, tools::read_only_tools};
+    use ziyuan_core::{Agent, AgentId, Capability, Department, Edict, Seal, TaskId};
+    use ziyuan_runtime::{AgentBackend, WorkerBackend};
 
     /// 每个请求的 JSON 请求体与 Authorization 头。
     type Requests = Arc<Mutex<Vec<(Value, String)>>>;
@@ -239,7 +239,7 @@ mod tests {
         ]);
         let backend = AgentBackend::new(
             Box::new(OpenAiCompatible::new(url, Some("sk-test".into()), "m")),
-            read_only_tools(&root).unwrap(),
+            root.clone(),
             4,
         );
         let actor = Agent {
@@ -251,6 +251,11 @@ mod tests {
             id: TaskId(1),
             department: Department::Works,
             text: "查 unsafe".into(),
+            // 只盖 search_code：模型不应看到 read_file。
+            seal: Seal {
+                capabilities: [Capability::SearchCode].into(),
+                scope: vec![".".into()],
+            },
         };
         assert_eq!(
             backend.execute(&actor, &edict, &()).unwrap(),
@@ -269,7 +274,9 @@ mod tests {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["read_file", "search_code"]);
+        assert_eq!(names, ["search_code"]);
+        let system = first["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("工具：search_code"), "{system}");
         // 第二次请求带回工具调用与真实工具输出。
         let messages = &seen[1].0["messages"];
         assert_eq!(messages[2]["tool_calls"][0]["id"], "c1");

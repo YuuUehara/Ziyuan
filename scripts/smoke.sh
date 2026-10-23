@@ -48,4 +48,13 @@ for i in $(seq 1 10); do "$BIN" edict --queue --dept works "并发$i" > /dev/nul
 wait
 [ "$("$BIN" tasks | grep -c '并发')" -eq 10 ]
 "$BIN" run --jobs 4 > /dev/null
+# 玉玺：越界或无效的权限在下诏时拒绝；非默认玉玺记入事件簿
+mkdir -p src
+for bad in "--scope /etc" "--scope ../x" "--scope missing" "--tools write_file"; do
+  if "$BIN" edict --queue $bad '越权' > /dev/null 2>&1; then echo "应拒绝: $bad" >&2; exit 1; fi
+done
+SEALED="$("$BIN" edict --queue --scope src --tools search_code '只查 src')"
+grep -q '玉玺 工具：search_code；范围：src' <<< "$SEALED"
+"$BIN" history | grep -q '只查 src〔玉玺'
+"$BIN" run > /dev/null
 echo 'ZiYuan smoke test PASS'

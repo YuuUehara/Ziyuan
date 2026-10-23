@@ -1,4 +1,5 @@
 //! 紫垣核心领域模型：官员、官职、诏令与朝廷事件。
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -9,6 +10,7 @@ pub enum ParseError {
     UnknownMode(String),
     UnknownOffice(String),
     MalformedOffice(String),
+    UnknownCapability(String),
 }
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -17,6 +19,9 @@ impl fmt::Display for ParseError {
             Self::UnknownMode(s) => write!(f, "未知制度: {s}（可用：chancellor/direct/cabinet）"),
             Self::UnknownOffice(s) => write!(f, "未知官职: {s}"),
             Self::MalformedOffice(s) => write!(f, "官职格式无效: {s}"),
+            Self::UnknownCapability(s) => {
+                write!(f, "未知工具权限: {s}（可用：read_file/search_code）")
+            }
         }
     }
 }
@@ -172,11 +177,70 @@ pub struct Agent {
     pub speciality: Department,
 }
 
+/// 官员执行诏令时可使用的工具。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Capability {
+    ReadFile,
+    SearchCode,
+}
+impl Capability {
+    pub const ALL: [Self; 2] = [Self::ReadFile, Self::SearchCode];
+
+    /// 与工具名一致。
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ReadFile => "read_file",
+            Self::SearchCode => "search_code",
+        }
+    }
+}
+impl FromStr for Capability {
+    type Err = ParseError;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.code() == input)
+            .ok_or_else(|| ParseError::UnknownCapability(input.into()))
+    }
+}
+
+/// 玉玺（Yuxi）：盖在诏令上的权限令牌，限定承办官员可用的工具与可查阅的项目路径。
+///
+/// 由皇帝下诏时给定、随 `EdictIssued` 记入事件簿；运行时只按此令牌构造工具，官员无法越权。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Seal {
+    /// 允许的工具；为空表示只能凭诏令文本作答。
+    pub capabilities: BTreeSet<Capability>,
+    /// 可查阅的范围：相对项目根目录的目录或文件，`.` 表示整个项目。至少一项。
+    pub scope: Vec<String>,
+}
+impl Default for Seal {
+    /// 全部只读工具，整个项目。
+    fn default() -> Self {
+        Self {
+            capabilities: Capability::ALL.into(),
+            scope: vec![".".into()],
+        }
+    }
+}
+impl fmt::Display for Seal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tools: Vec<_> = self.capabilities.iter().map(|c| c.code()).collect();
+        let tools = if tools.is_empty() {
+            "无".to_owned()
+        } else {
+            tools.join("、")
+        };
+        write!(f, "工具：{tools}；范围：{}", self.scope.join("、"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edict {
     pub id: TaskId,
     pub department: Department,
     pub text: String,
+    pub seal: Seal,
 }
 
 /// Event Sourcing: 朝廷状态由此事件列表重放而来。

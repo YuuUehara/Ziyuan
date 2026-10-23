@@ -195,7 +195,7 @@ mod tests {
     use crate::BoxError;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
-    use ziyuan_core::{AgentId, Department};
+    use ziyuan_core::{AgentId, Department, Seal};
 
     fn job(id: u64) -> Job {
         Job {
@@ -208,6 +208,7 @@ mod tests {
                 id: TaskId(id),
                 department: Department::Works,
                 text: format!("任务{id}"),
+                seal: Seal::default(),
             },
         }
     }

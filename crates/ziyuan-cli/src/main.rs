@@ -1,18 +1,20 @@
 //! 紫垣命令行：用户扮演皇帝，改制/任免为显式用户操作。
 //!
 //! 本模块只负责解析参数与呈现结果；用例流程在 `ziyuan-app::Session` 中。
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{Session, TaskReport};
-use ziyuan_core::{AgentId, CourtEvent, Department, GovernanceMode, Office, TaskId};
+use ziyuan_core::{
+    AgentId, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId,
+};
 use ziyuan_governance::TaskStatus;
 use ziyuan_llm::OpenAiCompatible;
 use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
-    tools::read_only_tools,
 };
 use ziyuan_storage::{EventLog, ExecutorLock};
 
@@ -23,7 +25,7 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职及任务完成数
   ziyuan recruit <姓名> <部门>          招募新官（须另行 appoint 任职）
-  ziyuan edict [--dept works] [--queue] <内容>
+  ziyuan edict [--dept works] [--scope <路径>]... [--tools <工具>] [--queue] <内容>
                                        下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
@@ -39,6 +41,11 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
 默认官职：chancellor、first-secretary、minister:works、clerk:personnel 等
 部门：personnel / revenue / rites / war / justice / works
 
+玉玺（承办官员的权限，随诏令记入事件簿）：
+  --scope <路径>   可查阅的项目路径（目录或文件，可重复）；默认整个项目
+  --tools <工具>   read_file、search_code 的逗号列表，或 none；默认全部
+  无论玉玺如何，.ziyuan、.git、.jj 与 .env* 均不可读。
+
 真实模型（OpenAI 兼容 Chat Completions API）：
   ZIYUAN_LLM_MODEL     模型名；设置后 edict 由模型以只读工具查阅当前目录
   ZIYUAN_LLM_BASE_URL  默认 https://api.openai.com/v1（如 https://api.deepseek.com/v1、http://localhost:11434/v1）
@@ -53,7 +60,7 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan dismiss 6
   ziyuan appoint 6 first-secretary
   ziyuan edict --dept works "请内阁协调检查"
-  ziyuan edict --queue "检查 storage crate"
+  ziyuan edict --queue --scope crates/ziyuan-storage --tools search_code "检查 storage crate"
   ziyuan edict --queue "检查 runtime crate"
   ziyuan run --jobs 2 --timeout 120
 "#;
@@ -75,6 +82,7 @@ enum Command {
         department: Department,
         text: String,
         queue: bool,
+        seal: Seal,
     },
     Run(Limits),
     Tasks,
@@ -193,12 +201,18 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             department,
             text,
             queue,
+            seal,
         } => {
             // 先取得执行者锁再下诏，避免被拒绝的诏令残留在队列中。
             let executor = if queue { None } else { Some(lock_executor()?) };
-            let edict = session.issue(department, text)?;
+            let edict = session.issue(department, text, seal)?;
             if queue {
-                println!("诏令 #{} 已入队：{}", edict.id.0, edict.text);
+                println!(
+                    "诏令 #{} 已入队：{}{}",
+                    edict.id.0,
+                    edict.text,
+                    seal_note(&edict.seal)
+                );
             } else {
                 let limits = Limits {
                     max_concurrent: 1,
@@ -348,13 +362,12 @@ fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
         return Ok(Arc::new(DemoBackend));
     };
     eprintln!(
-        "执行后端：{}（只读工具：read_file、search_code）",
+        "执行后端：{}（只读工具与查阅范围由各诏令的玉玺决定）",
         model.model()
     );
-    let tools = read_only_tools(&env::current_dir()?)?;
     Ok(Arc::new(AgentBackend::new(
         Box::new(model),
-        tools,
+        env::current_dir()?,
         MAX_AGENT_STEPS,
     )))
 }
@@ -396,25 +409,42 @@ fn parse_limits(args: Vec<String>) -> Result<Limits, Box<dyn Error>> {
 }
 
 fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan edict [--dept works] [--queue] <诏令内容>";
+    const USAGE: &str = "用法: ziyuan edict [--dept works] [--scope <路径>]... [--tools read_file,search_code|none] [--queue] <诏令内容>";
     let mut department = None;
     let mut queue = false;
-    loop {
-        match args.first().map(String::as_str) {
-            Some("--queue") => {
+    let mut seal = Seal::default();
+    let mut scope = Vec::new();
+    while let Some(flag) = args.first().cloned() {
+        match flag.as_str() {
+            "--queue" => {
                 args.remove(0);
                 queue = true;
             }
-            Some("--dept") if args.len() >= 2 => {
+            "--dept" | "--scope" | "--tools" => {
+                if args.len() < 2 {
+                    return Err(USAGE.into());
+                }
                 args.remove(0);
-                department = Some(args.remove(0).parse::<Department>()?);
+                let value = args.remove(0);
+                match flag.as_str() {
+                    "--dept" => department = Some(value.parse::<Department>()?),
+                    "--scope" => scope.push(value),
+                    _ => seal.capabilities = parse_capabilities(&value)?,
+                }
             }
-            Some("--dept") => return Err(USAGE.into()),
             _ => break,
         }
     }
     if args.is_empty() {
         return Err(USAGE.into());
+    }
+    if !scope.is_empty() {
+        // 越出项目的路径由治理层拒绝；这里尽早指出不存在的路径。
+        let root = env::current_dir()?;
+        if let Some(missing) = scope.iter().find(|p| !root.join(p).exists()) {
+            return Err(format!("查阅范围不存在: {missing}").into());
+        }
+        seal.scope = scope;
     }
     let department = if let Some(department) = department {
         department
@@ -431,8 +461,30 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         department,
         text: args.join(" "),
         queue,
+        seal,
     })
 }
+
+/// `none` 表示不授予任何工具；否则为逗号分隔的工具名。
+fn parse_capabilities(value: &str) -> Result<BTreeSet<Capability>, Box<dyn Error>> {
+    if value == "none" {
+        return Ok(BTreeSet::new());
+    }
+    Ok(value
+        .split(',')
+        .map(str::parse::<Capability>)
+        .collect::<Result<_, _>>()?)
+}
+
+/// 默认玉玺不额外显示，保持输出简洁。
+fn seal_note(seal: &Seal) -> String {
+    if *seal == Seal::default() {
+        String::new()
+    } else {
+        format!("〔玉玺 {seal}〕")
+    }
+}
+
 fn describe_event(event: &CourtEvent) -> String {
     match event {
         CourtEvent::Founded(m) => format!("开国：{}", m.label()),
@@ -442,7 +494,9 @@ fn describe_event(event: &CourtEvent) -> String {
         }
         CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
         CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
-        CourtEvent::EdictIssued(e) => format!("诏令 #{}：{}", e.id.0, e.text),
+        CourtEvent::EdictIssued(e) => {
+            format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
+        }
         CourtEvent::TaskAssigned { task, worker } => {
             format!("诏令 #{} 派给 #{}", task.0, worker.0)
         }

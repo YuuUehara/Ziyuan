@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 紫垣 ZiYuan | 项目和整体框架 | Rust Workspace |
 | 廷枢 Tingshu | Agent Runtime / Scheduler | `ziyuan-runtime`：Tokio 调度器（并发上限、超时、撤销）+ Tool Calling |
-| 玉玺 Yuxi | 职权、审批、审计 | `ziyuan-governance` 的显式任免规则，后续拆分 |
+| 玉玺 Yuxi | 职权、审批、审计 | `Seal`：每件诏令的工具与查阅范围，随事件簿审计 |
 | 诏令 ZhaoLing | 任务入口 | `Edict` 数据模型 + CLI |
 | 吏部 LiBu | 考绩、升迁 | `examine` 完成数，后续实现真正评估 |
 | 紫禁城 Forbidden City | 可视化与角色扮演 UI | 尚未实现 |
@@ -75,6 +75,20 @@ ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
 
 单件诏令最多 12 轮模型调用。模型调用失败、超时或被撤销都会记入事件簿（`TaskFailed` / `TaskCancelled`），每次工具调用也记为 `ToolInvoked`（参数与成败，不含输出），可用 `ziyuan history` 审计。
 
+### 玉玺：限定官员的权限
+
+每件诏令都盖有玉玺（`Seal`），规定承办官员可用的工具与可查阅的路径，并随 `EdictIssued` 记入事件簿：
+
+```bash
+ziyuan edict --scope crates/ziyuan-storage --tools search_code "检查 storage 的 unsafe"
+ziyuan edict --tools none "只凭诏令文本回答"
+```
+
+- 默认：全部只读工具，整个项目。`--scope` 可重复；`--tools` 为逗号列表或 `none`。
+- 绝对路径、`..` 与不存在的路径在下诏时拒绝；运行时按 canonical 路径检查，符号链接也无法越界。
+- 无论玉玺如何，`.ziyuan`（事件簿）、`.git`、`.jj` 与 `.env*` 一律不可读。
+- 运行时按玉玺构造工具：模型看不到未授予的工具，越界的读取记为失败的 `ToolInvoked`。
+
 ### 任务队列与并发
 
 ```bash
@@ -137,7 +151,7 @@ v0.1 支持 `recruit` 动态扩充官员；同部门多个属官目前按已记�
 - ~~为 ModelProvider 实现真实 LLM API Adapter（Tool Calling）~~ 已完成；流式输出与使用量统计待做。
 - ~~将 `WorkerBackend` 切换为实际 `AgentLoop`，可配置只读工具 `search_code`、`read_file`~~ 已完成。
 - ~~为运行时加 Tokio 调度、任务队列、取消、超时、并发上限与审计链路~~ 已完成（工具调用审计）。
-- ~~事件簿写锁与原子追加~~ 已完成（文件锁 + 乐观并发 + 执行者锁）；引入 `Yuxi` 权限令牌与非 CLI 身份验证待做。
+- ~~事件簿写锁与原子追加~~ 已完成（文件锁 + 乐观并发 + 执行者锁）；~~`Yuxi` 权限令牌~~ 已完成（诏令级玉玺）；按官职设定权限上限与非 CLI 身份验证待做。
 - 实现可验证的 `LiBu` 考绩与候选人推荐；升迁仍由皇帝批准。
 - 做「紫禁城」TUI/Web UI；人格层只影响措辞与辩论，不得越权。
 

@@ -22,7 +22,16 @@ Emperor (human / authenticated control plane)
 
 `Office` 和 `Agent` 是独立对象；官职任免修改 office map，但不更改 Agent ID。制度迁移自动清理协调层的旧职务，并保持六部任职关系。
 
-工具的实际访问权限还没有在 v0.1 实现；未来应从签发者权限、官职与任务上下文中取交集（least privilege），而不是信任 Agent 声称的身份。
+### 玉玺（Yuxi）
+
+工具权限由诏令携带的 `Seal { capabilities, scope }` 决定，而不是信任 Agent 声称的身份：
+
+1. 皇帝下诏时给定玉玺（CLI `--tools` / `--scope`，默认全部只读工具、整个项目）。
+2. `ziyuan-governance` 在 `new_edict` 与回放时校验：范围非空，且均为不含 `..` 的相对路径。手写的日志也不能绕过。
+3. 玉玺随 `EdictIssued` 写入事件簿，与 `ToolInvoked` 一起构成审计记录。
+4. `AgentBackend` 每件诏令调用 `tools::sealed_tools(root, &seal)`：只构造被授予的工具；范围 canonicalize 后必须在项目内。工具每次访问都再次 canonicalize 检查，`.ziyuan`、`.git`、`.jj` 与 `.env*` 始终拒绝。
+
+尚未实现：按官职设定权限上限（目前各官职的工具相同）、皇帝的非 CLI 身份验证、写入类工具的审批。
 
 ## 3. 分层与 Event Sourcing
 

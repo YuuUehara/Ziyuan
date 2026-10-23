@@ -2,6 +2,7 @@
 //!
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
+use std::path::PathBuf;
 use ziyuan_core::{Agent, Edict};
 
 mod scheduler;
@@ -47,21 +48,20 @@ impl WorkerBackend for DemoBackend {
 }
 
 /// 由模型驱动的执行后端：官员通过只读工具调查项目，并以模型的最终答复回奏。
+///
+/// 每件诏令的工具都按其玉玺（`Edict::seal`）重新构造，模型无法使用玉玺之外的工具或路径。
 pub struct AgentBackend {
     model: Box<dyn agent_loop::ModelProvider>,
-    tools: Vec<Box<dyn agent_loop::Tool>>,
+    root: PathBuf,
     max_steps: usize,
 }
 
 impl AgentBackend {
-    pub fn new(
-        model: Box<dyn agent_loop::ModelProvider>,
-        tools: Vec<Box<dyn agent_loop::Tool>>,
-        max_steps: usize,
-    ) -> Self {
+    /// `root` 为项目根目录，玉玺的查阅范围相对于它。
+    pub fn new(model: Box<dyn agent_loop::ModelProvider>, root: PathBuf, max_steps: usize) -> Self {
         Self {
             model,
-            tools,
+            root,
             max_steps,
         }
     }
@@ -74,12 +74,14 @@ impl WorkerBackend for AgentBackend {
         edict: &Edict,
         hooks: &dyn ExecutionHooks,
     ) -> Result<String, BoxError> {
+        let tools = tools::sealed_tools(&self.root, &edict.seal)?;
         let system = format!(
             "你是紫垣朝廷{}的官员{}，奉诏办理下列事务。\n\
-             你只能使用所提供的只读工具查阅当前项目，不能修改文件或执行命令。\n\
+             玉玺授权（{}）。你只能使用所提供的只读工具查阅授权范围内的内容，不能修改文件或执行命令。\n\
              请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。",
             edict.department.label(),
             actor.name,
+            edict.seal,
         );
         let messages = vec![
             agent_loop::Message::System(system),
@@ -87,7 +89,7 @@ impl WorkerBackend for AgentBackend {
         ];
         Ok(agent_loop::run(
             self.model.as_ref(),
-            &self.tools,
+            &tools,
             messages,
             self.max_steps,
             hooks,

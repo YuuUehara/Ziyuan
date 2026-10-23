@@ -6,7 +6,7 @@
 //! 诏令分两步：[`Session::issue`] 入队（路由不通则拒绝、不留记录），
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 use std::fmt;
-use ziyuan_core::{AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId};
+use ziyuan_core::{AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId};
 use ziyuan_governance::{Court, GovernanceError, TaskStatus, founding_events};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
 use ziyuan_storage::{EventStore, StorageError};
@@ -128,9 +128,15 @@ impl<S: EventStore> Session<S> {
     }
 
     /// 下诏入队。现行制度下无法路由（如职位空缺）时拒绝，不留记录。
-    pub fn issue(&mut self, department: Department, text: String) -> Result<Edict, AppError> {
+    /// `seal` 是承办官员的权限令牌（玉玺），随诏令记入事件簿。
+    pub fn issue(
+        &mut self,
+        department: Department,
+        text: String,
+        seal: Seal,
+    ) -> Result<Edict, AppError> {
         let committed = self.commit(|court| {
-            let edict = court.new_edict(department, text.clone())?;
+            let edict = court.new_edict(department, text.clone(), seal.clone())?;
             court.route(&edict)?;
             Ok(vec![CourtEvent::EdictIssued(edict)])
         })?;
@@ -364,7 +370,7 @@ mod tests {
         let mut session = Session::found(&mut store).unwrap();
         session.reform(GovernanceMode::Cabinet).unwrap();
         let before = session.history().len();
-        let result = session.issue(Department::Works, "无首辅".into());
+        let result = session.issue(Department::Works, "无首辅".into(), Seal::default());
         assert!(matches!(
             result,
             Err(AppError::Governance(GovernanceError::Vacant(
@@ -384,8 +390,12 @@ mod tests {
         session
             .appoint(id, Office::Clerk(Department::Works))
             .unwrap();
-        session.issue(Department::Works, "一".into()).unwrap();
-        let second = session.issue(Department::Works, "二".into()).unwrap();
+        session
+            .issue(Department::Works, "一".into(), Seal::default())
+            .unwrap();
+        let second = session
+            .issue(Department::Works, "二".into(), Seal::default())
+            .unwrap();
 
         let reports = run_all(&mut session, &scheduler(DemoBackend)).await;
         assert!(
@@ -427,8 +437,12 @@ mod tests {
     async fn failures_cancellations_and_tool_audit_are_recorded() {
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
-        let failing = session.issue(Department::Works, "会失败".into()).unwrap();
-        let cancelled = session.issue(Department::Works, "撤销".into()).unwrap();
+        let failing = session
+            .issue(Department::Works, "会失败".into(), Seal::default())
+            .unwrap();
+        let cancelled = session
+            .issue(Department::Works, "撤销".into(), Seal::default())
+            .unwrap();
         session.cancel(cancelled.id).unwrap();
         assert!(session.cancel(cancelled.id).is_err(), "不能重复撤销");
 
@@ -489,9 +503,13 @@ mod tests {
         let root = temp_root("stale");
         let mut a = Session::found(EventLog::new(&root)).unwrap();
         let mut b = Session::open(EventLog::new(&root)).unwrap();
-        let first = a.issue(Department::Works, "甲".into()).unwrap();
+        let first = a
+            .issue(Department::Works, "甲".into(), Seal::default())
+            .unwrap();
         // b 尚未看到 #1；若不重新提议，会再次分配 #1 并写坏事件簿。
-        let second = b.issue(Department::Works, "乙".into()).unwrap();
+        let second = b
+            .issue(Department::Works, "乙".into(), Seal::default())
+            .unwrap();
         assert_eq!((first.id, second.id), (TaskId(1), TaskId(2)));
         let recruited = a.recruit("新工".into(), Department::Works).unwrap();
         assert_eq!(recruited, AgentId(7));
@@ -525,7 +543,9 @@ mod tests {
     async fn result_of_task_cancelled_elsewhere_is_discarded() {
         let root = temp_root("cancel");
         let mut session = Session::found(EventLog::new(&root)).unwrap();
-        let edict = session.issue(Department::Works, "查".into()).unwrap();
+        let edict = session
+            .issue(Department::Works, "查".into(), Seal::default())
+            .unwrap();
         let reports = run_all(&mut session, &scheduler(CancelledElsewhere(root.clone()))).await;
         assert_eq!(reports[0].outcome, Outcome::Cancelled);
 
