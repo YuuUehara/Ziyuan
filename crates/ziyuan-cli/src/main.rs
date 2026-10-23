@@ -19,7 +19,10 @@ use ziyuan_runtime::{
 };
 use ziyuan_storage::{EventLog, ExecutorLock};
 
-const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示版）
+const HELP: &str = concat!(
+    "紫垣 ZiYuan ",
+    env!("CARGO_PKG_VERSION"),
+    r#" — 朝廷式多 Agent 框架（演示版）
 
 用法：
   ziyuan init                          初始化朝廷（在当前目录建立 .ziyuan/）
@@ -77,7 +80,8 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan edict --queue --scope crates/ziyuan-storage --tools search_code "检查 storage crate"
   ziyuan edict --queue "检查 runtime crate"
   ziyuan run --jobs 2 --timeout 120
-"#;
+"#
+);
 
 /// 单件诏令最多的模型调用轮数。
 const MAX_AGENT_STEPS: usize = 12;
