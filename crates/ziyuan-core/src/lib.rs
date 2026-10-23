@@ -179,6 +179,29 @@ pub struct Agent {
     pub speciality: Department,
 }
 
+/// 一次或多次模型调用消耗的 token（以服务端报告为准）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+}
+impl TokenUsage {
+    pub fn total(self) -> u64 {
+        self.input + self.output
+    }
+}
+impl std::ops::AddAssign for TokenUsage {
+    fn add_assign(&mut self, other: Self) {
+        self.input += other.input;
+        self.output += other.output;
+    }
+}
+impl fmt::Display for TokenUsage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "输入 {} / 输出 {} tokens", self.input, self.output)
+    }
+}
+
 /// 皇帝对一件已完成诏令的评定：吏部考绩只采信经评定的结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -314,6 +337,11 @@ pub enum CourtEvent {
     },
     TaskCancelled {
         task: TaskId,
+    },
+    /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。
+    ModelUsage {
+        task: TaskId,
+        usage: TokenUsage,
     },
     /// 皇帝评定已完成的诏令（每件一次）。这是吏部考绩唯一采信的质量依据。
     TaskReviewed {

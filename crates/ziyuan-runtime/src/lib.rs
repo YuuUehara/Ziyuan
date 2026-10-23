@@ -3,7 +3,7 @@
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::path::PathBuf;
-use ziyuan_core::{Agent, Edict};
+use ziyuan_core::{Agent, Edict, TokenUsage};
 
 mod scheduler;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
@@ -30,6 +30,8 @@ pub trait ExecutionHooks {
     fn tool_invoked(&self, _tool: &str, _args_json: &str, _ok: bool) {}
     /// 模型生成的一段文本（流式）。只用于实时显示，不写入事件簿。
     fn text_delta(&self, _text: &str) {}
+    /// 一次模型调用的 token 用量（服务端报告时）。
+    fn model_usage(&self, _usage: TokenUsage) {}
 }
 impl ExecutionHooks for () {}
 

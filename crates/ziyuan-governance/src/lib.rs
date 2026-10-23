@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
-    Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, Verdict,
+    Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId,
+    TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -100,6 +101,8 @@ pub struct Task {
     /// 执行中的工具调用次数与其中失败的次数（含越出玉玺的尝试）。
     pub tool_calls: u32,
     pub tool_failures: u32,
+    /// 承办期间模型调用的累计用量。
+    pub usage: TokenUsage,
     /// 皇帝的评定；只有已完成的诏令才有。
     pub review: Option<(Verdict, String)>,
 }
@@ -194,6 +197,7 @@ impl Court {
                         status: TaskStatus::Pending,
                         tool_calls: 0,
                         tool_failures: 0,
+                        usage: TokenUsage::default(),
                         review: None,
                     },
                 );
@@ -252,6 +256,16 @@ impl Court {
                     },
                 );
             }
+            CourtEvent::ModelUsage { task, usage } => {
+                let entry = self
+                    .tasks
+                    .get_mut(task)
+                    .ok_or(GovernanceError::UnknownEdict(*task))?;
+                if entry.status == TaskStatus::Pending {
+                    return Err(GovernanceError::TaskNotAssigned(*task));
+                }
+                entry.usage += *usage;
+            }
             CourtEvent::TaskReviewed {
                 task,
                 verdict,
@@ -295,6 +309,15 @@ impl Court {
             .values()
             .filter(|t| matches!(t.status, TaskStatus::Completed { .. }))
             .count()
+    }
+
+    /// 全部诏令的模型 token 用量。
+    pub fn total_usage(&self) -> TokenUsage {
+        let mut total = TokenUsage::default();
+        for task in self.tasks.values() {
+            total += task.usage;
+        }
+        total
     }
 
     pub fn task(&self, id: TaskId) -> Option<&Task> {
@@ -459,6 +482,7 @@ impl Court {
                 continue;
             }
             record.tool_calls += task.tool_calls;
+            record.usage += task.usage;
             record.tool_failures += task.tool_failures;
             match (&task.status, &task.review) {
                 (TaskStatus::Completed { .. }, Some((Verdict::Accepted, _))) => {
@@ -612,6 +636,8 @@ pub struct ServiceRecord {
     pub tool_calls: u32,
     /// 失败的工具调用，含越出玉玺的尝试。
     pub tool_failures: u32,
+    /// 经手诏令（含失败）的模型 token 用量。
+    pub usage: TokenUsage,
 }
 
 impl ServiceRecord {
@@ -792,6 +818,13 @@ mod tests {
                 task,
                 worker: AgentId(worker),
             });
+            events.push(CourtEvent::ModelUsage {
+                task,
+                usage: TokenUsage {
+                    input: 100,
+                    output: 7,
+                },
+            });
             for _ in 0..bad_tools {
                 events.push(CourtEvent::ToolInvoked {
                     task,
@@ -837,8 +870,14 @@ mod tests {
                 failed: 1,
                 tool_calls: 2,
                 tool_failures: 2,
+                // 4 件（含失败的一件）各 100/7。
+                usage: TokenUsage {
+                    input: 400,
+                    output: 28,
+                },
             }
         );
+        assert_eq!(court.total_usage().total(), 5 * 107);
         let ranked: Vec<_> = court
             .recommend(Office::Clerk(Department::Works))
             .unwrap()
@@ -923,6 +962,19 @@ mod tests {
             summary: "ok".into(),
         };
 
+        let usage = CourtEvent::ModelUsage {
+            task,
+            usage: TokenUsage {
+                input: 1,
+                output: 1,
+            },
+        };
+        assert_eq!(
+            with(std::slice::from_ref(&usage)).unwrap_err(),
+            GovernanceError::TaskNotAssigned(task)
+        );
+        // 结束后仍可补记用量（超时后才返回的调用同样消耗了 token）。
+        assert!(with(&[assigned.clone(), CourtEvent::TaskCancelled { task }, usage]).is_ok());
         // v0.1 日志：未指派即完成，仍可回放。
         assert!(with(&[done_by(4)]).is_ok());
         assert!(with(&[assigned.clone(), tool.clone(), done_by(4)]).is_ok());

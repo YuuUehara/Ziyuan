@@ -1,7 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, Capability, CourtEvent, Department, Edict, GovernanceMode, Office, Seal,
-    TaskId, Verdict,
+    TaskId, TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -82,6 +82,9 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         ),
         TaskFailed { task, reason } => format!("v1\tFAILED\t{}\t{}", task.0, to_hex(reason)),
         TaskCancelled { task } => format!("v1\tCANCELLED\t{}", task.0),
+        ModelUsage { task, usage } => {
+            format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output)
+        }
         TaskReviewed {
             task,
             verdict,
@@ -175,6 +178,13 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "CANCELLED" => TaskCancelled {
             task: TaskId(id(2)?),
         },
+        "USAGE" => ModelUsage {
+            task: TaskId(id(2)?),
+            usage: TokenUsage {
+                input: id(3)?,
+                output: id(4)?,
+            },
+        },
         "REVIEWED" => TaskReviewed {
             task: TaskId(id(2)?),
             verdict: field(3)?.parse::<Verdict>().map_err(|e| e.to_string())?,
@@ -186,7 +196,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         Founded(_) | InstitutionReformed(_) | OfficialDismissed { .. } | TaskCancelled { .. } => 3,
         OfficialAppointed { .. } | TaskAssigned { .. } | TaskFailed { .. } => 4,
         EdictIssued(_) if parts.len() == 5 => 5,
-        AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } => 5,
+        AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
         EdictIssued(_) => 7,
         ToolInvoked { .. } => 6,
     };
@@ -236,6 +246,13 @@ mod tests {
                 reason: "超时\n（300s）".into(),
             },
             CourtEvent::TaskCancelled { task },
+            CourtEvent::ModelUsage {
+                task,
+                usage: TokenUsage {
+                    input: 12_345,
+                    output: 678,
+                },
+            },
             CourtEvent::TaskReviewed {
                 task,
                 verdict: Verdict::Rejected,

@@ -73,6 +73,8 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 `ziyuan-runtime::WorkerBackend` 是实际执行者接口（同步，`Send + Sync`）；`DemoBackend` 不执行任务。
 
+用量的路径：`OpenAiCompatible` 请求 `stream_options.include_usage`，从流的最后一块（或普通 JSON 的 `usage`）读出 `prompt_tokens`/`completion_tokens` → `ExecutionHooks::model_usage` → `Progress::Usage` → `Session::run` 提交 `ModelUsage { task, usage }`。指派后任何时刻都可记录（超时后才返回的调用也计入）；`Task::usage`、`ServiceRecord::usage` 与 `Court::total_usage` 由回放累加。
+
 流式文本的路径：`text_delta` → `Progress::TextDelta` → `RunUpdate::Text` → CLI（stderr，按诏令 ID 分行）。它只用于显示，不进入事件簿。
 
 `Scheduler` 基于 Tokio：信号量限制并发，每件任务在阻塞线程池中执行；许可随执行线程释放，因此超时后仍在收尾的线程也计入并发数。取消是协作式的：超时或 `CancelToken` 触发时调度器立即给出结局，并通过 `ExecutionHooks::is_cancelled` 通知后端；`agent_loop` 在每轮模型调用前与执行工具前检查，`OpenAiCompatible` 在流式响应的每一行检查并中止请求。撤销时尚未开始的任务报告为 `NotStarted`，保持未结束。CLI 退出时不等待仍阻塞的 HTTP 请求。

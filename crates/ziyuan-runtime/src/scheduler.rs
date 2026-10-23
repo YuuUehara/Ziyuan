@@ -6,7 +6,7 @@ use crate::{ExecutionHooks, WorkerBackend};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use ziyuan_core::{Agent, Edict, TaskId};
+use ziyuan_core::{Agent, Edict, TaskId, TokenUsage};
 
 /// 可克隆的撤销信号；同步代码用 `is_cancelled` 轮询，异步代码 `await cancelled()`。
 #[derive(Clone, Debug)]
@@ -62,6 +62,8 @@ pub enum Progress {
     },
     /// 模型流式生成的文本片段，只用于实时显示。
     TextDelta { task: TaskId, text: String },
+    /// 一次模型调用的 token 用量。
+    Usage { task: TaskId, usage: TokenUsage },
     /// 每个 Job 恰好一条。
     Finished { task: TaskId, outcome: Outcome },
 }
@@ -178,6 +180,13 @@ struct TaskHooks {
 impl ExecutionHooks for TaskHooks {
     fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    fn model_usage(&self, usage: TokenUsage) {
+        let _ = self.progress.send(Progress::Usage {
+            task: self.task,
+            usage,
+        });
     }
 
     fn text_delta(&self, text: &str) {

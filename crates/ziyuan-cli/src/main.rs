@@ -185,6 +185,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 court.appointed_count(),
                 court.completed_count()
             );
+            println!("模型用量：{}", court.total_usage());
             println!(
                 "调度中枢：{}",
                 match court.mode() {
@@ -265,8 +266,13 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     TaskStatus::Failed { reason, .. } => format!("失败：{reason}"),
                     TaskStatus::Cancelled => "已撤销".to_owned(),
                 };
+                let usage = if task.usage.total() > 0 {
+                    format!("（{} tokens）", task.usage.total())
+                } else {
+                    String::new()
+                };
                 println!(
-                    "#{:<3} {} {}  —  {}",
+                    "#{:<3} {} {}  —  {}{usage}",
                     task.edict.id.0,
                     task.edict.department.label(),
                     task.edict.text,
@@ -306,6 +312,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 "  工具调用 {} 次，其中失败 {} 次（含越出玉玺的尝试）",
                 r.tool_calls, r.tool_failures
             );
+            println!("  模型用量：{}", r.usage);
             if r.unreviewed > 0 {
                 println!(
                     "  另有 {} 件回奏未经评定，不计入考绩。可用 `ziyuan review <诏令ID> accept|reject` 评定。",
@@ -464,6 +471,10 @@ fn print_report(report: &TaskReport) {
         Outcome::Failed(reason) => println!("失败：{reason}"),
         Outcome::Cancelled => println!("已撤销（执行中被中断）"),
         Outcome::NotStarted => println!("未开始：仍在队列中，可再次 `ziyuan run`"),
+    }
+    // 演示后端不调用模型；服务端未报告用量时也不显示。
+    if report.usage.total() > 0 {
+        println!("用量：{}", report.usage);
     }
 }
 
@@ -633,6 +644,7 @@ fn describe_event(event: &CourtEvent) -> String {
         }
         CourtEvent::TaskFailed { task, reason } => format!("诏令 #{} 失败：{reason}", task.0),
         CourtEvent::TaskCancelled { task } => format!("诏令 #{} 撤销", task.0),
+        CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
         CourtEvent::TaskReviewed {
             task,
             verdict,

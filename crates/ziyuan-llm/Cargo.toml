@@ -6,12 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ziyuan-core.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 ziyuan-runtime.workspace = true
-
-[dev-dependencies]
-ziyuan-core.workspace = true
 
 [lints]
 workspace = true

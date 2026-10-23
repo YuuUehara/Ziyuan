@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::env;
 use std::io::{BufRead, BufReader};
 use std::time::Duration;
+use ziyuan_core::TokenUsage;
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
 use ziyuan_runtime::{BoxError, ExecutionHooks};
 
@@ -66,6 +67,8 @@ impl ModelProvider for OpenAiCompatible {
             "model": self.model,
             "messages": encode_messages(messages),
             "stream": true,
+            // 让流的最后一块携带 usage；不支持的服务会忽略。
+            "stream_options": {"include_usage": true},
         });
         if !tools.is_empty() {
             body["tools"] = encode_tools(tools)?;
@@ -92,7 +95,9 @@ impl ModelProvider for OpenAiCompatible {
         }
         if !is_stream {
             // 不支持流式的服务会忽略 `stream`，直接返回完整 JSON。
-            let turn = decode_turn(&serde_json::from_str(&body.read_to_string()?)?)?;
+            let response: Value = serde_json::from_str(&body.read_to_string()?)?;
+            report_usage(&response, hooks);
+            let turn = decode_turn(&response)?;
             if let ModelTurn::Final(text) = &turn {
                 hooks.text_delta(text);
             }
@@ -132,6 +137,7 @@ fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<Model
         if let Some(error) = chunk.get("error") {
             return Err(format!("模型流式响应返回错误: {error}").into());
         }
+        report_usage(&chunk, hooks);
         let delta = &chunk["choices"][0]["delta"];
         if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
             hooks.text_delta(text);
@@ -229,6 +235,18 @@ fn encode_messages(messages: &[Message]) -> Vec<Value> {
         }
     }
     out
+}
+
+/// OpenAI 风格的 `usage` 字段（流式时位于最后一块，其 `choices` 为空）。
+fn report_usage(value: &Value, hooks: &dyn ExecutionHooks) {
+    let usage = &value["usage"];
+    let (Some(input), Some(output)) = (
+        usage["prompt_tokens"].as_u64(),
+        usage["completion_tokens"].as_u64(),
+    ) else {
+        return;
+    };
+    hooks.model_usage(TokenUsage { input, output });
 }
 
 fn decode_turn(response: &Value) -> Result<ModelTurn, BoxError> {
@@ -395,6 +413,7 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         deltas: std::cell::RefCell<Vec<String>>,
+        usage: std::cell::RefCell<Vec<TokenUsage>>,
         cancel_after: Option<usize>,
     }
     impl ExecutionHooks for Recorder {
@@ -404,6 +423,9 @@ mod tests {
         }
         fn text_delta(&self, text: &str) {
             self.deltas.borrow_mut().push(text.into());
+        }
+        fn model_usage(&self, usage: TokenUsage) {
+            self.usage.borrow_mut().push(usage);
         }
     }
 
@@ -463,10 +485,11 @@ mod tests {
 
     #[test]
     fn streamed_text_is_reported_as_it_arrives() {
-        let chunks: Vec<_> = ["紫", "垣", "回奏"]
+        let mut chunks: Vec<_> = ["紫", "垣", "回奏"]
             .iter()
             .map(|t| delta(json!({"content": t})))
             .collect();
+        chunks.push(json!({"choices": [], "usage": {"prompt_tokens": 321, "completion_tokens": 9, "total_tokens": 330}}));
         let (url, _) = mock_server(vec![(200, sse(&chunks, true))]);
         let hooks = Recorder::default();
         let turn = OpenAiCompatible::new(url, None, "m")
@@ -477,6 +500,13 @@ mod tests {
             "{turn:?}"
         );
         assert_eq!(*hooks.deltas.borrow(), ["紫", "垣", "回奏"]);
+        assert_eq!(
+            *hooks.usage.borrow(),
+            [TokenUsage {
+                input: 321,
+                output: 9
+            }]
+        );
     }
 
     #[test]

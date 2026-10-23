@@ -7,7 +7,8 @@
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 use std::fmt;
 use ziyuan_core::{
-    AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, Verdict,
+    AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, TokenUsage,
+    Verdict,
 };
 use ziyuan_governance::{Court, GovernanceError, TaskStatus, founding_events};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
@@ -57,6 +58,8 @@ pub struct TaskReport {
     /// 派工路线；运行时路由失败则为空。
     pub path: Vec<String>,
     pub outcome: Outcome,
+    /// 该诏令至今累计的模型 token 用量（含以往运行）。
+    pub usage: TokenUsage,
 }
 
 /// [`Session::run`] 执行期间的实时进度。
@@ -230,6 +233,7 @@ impl<S: EventStore> Session<S> {
                         edict,
                         path: Vec::new(),
                         outcome: Outcome::Failed(reason),
+                        usage: TokenUsage::default(),
                     }))
                 }
                 _ => unreachable!("指派只产生 TaskAssigned 或 TaskFailed"),
@@ -242,6 +246,15 @@ impl<S: EventStore> Session<S> {
                 break;
             };
             match update {
+                Progress::Usage { task, usage } => {
+                    // 结束后才返回的调用同样消耗了 token，照记不误。
+                    self.commit(|court| {
+                        Ok(match court.task(task).map(|t| &t.status) {
+                            Some(TaskStatus::Pending) | None => Vec::new(),
+                            Some(_) => vec![CourtEvent::ModelUsage { task, usage }],
+                        })
+                    })?;
+                }
                 Progress::TextDelta { task, text } => {
                     // 超时/撤销后仍在收尾的线程可能继续输出；只转发仍在执行的诏令。
                     if running.iter().any(|(e, _)| e.id == task) {
@@ -298,10 +311,12 @@ impl<S: EventStore> Session<S> {
                     } else {
                         outcome
                     };
+                    let usage = self.court.task(task).map(|t| t.usage).unwrap_or_default();
                     on_update(RunUpdate::Finished(&TaskReport {
                         edict,
                         path,
                         outcome,
+                        usage,
                     }));
                 }
             }
@@ -456,7 +471,15 @@ mod tests {
             hooks: &dyn ExecutionHooks,
         ) -> Result<String, BoxError> {
             hooks.text_delta("先");
+            hooks.model_usage(TokenUsage {
+                input: 10,
+                output: 1,
+            });
             hooks.text_delta("后");
+            hooks.model_usage(TokenUsage {
+                input: 20,
+                output: 2,
+            });
             Ok("先后".into())
         }
     }
@@ -478,15 +501,26 @@ mod tests {
                 |u| {
                     seen.push(match u {
                         RunUpdate::Text { task, text } => format!("{}:{text}", task.0),
-                        RunUpdate::Finished(r) => format!("{}:done", r.edict.id.0),
+                        RunUpdate::Finished(r) => {
+                            format!("{}:done {}", r.edict.id.0, r.usage.total())
+                        }
                     })
                 },
             )
             .await
             .unwrap();
-        assert_eq!(seen, ["1:先", "1:后", "1:done"]);
-        // 只多了指派与完成两条事件，流式片段不入事件簿。
-        assert_eq!(session.history().len(), before + 2);
+        assert_eq!(seen, ["1:先", "1:后", "1:done 33"]);
+        // 指派、两次用量与完成；流式片段不入事件簿。
+        assert_eq!(session.history().len(), before + 4);
+        drop(session);
+        let reopened = Session::open(&mut store).unwrap();
+        assert_eq!(
+            reopened.court().task(edict.id).unwrap().usage,
+            TokenUsage {
+                input: 30,
+                output: 3
+            }
+        );
     }
 
     /// 调用一次工具后失败。
