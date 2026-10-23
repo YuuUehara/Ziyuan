@@ -8,11 +8,9 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
-use ziyuan_app::{RunUpdate, Session, TaskReport};
-use ziyuan_core::{
-    AgentId, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId, Verdict,
-};
-use ziyuan_governance::{ServiceRecord, TaskStatus};
+use ziyuan_app::{RunUpdate, Session, TaskReport, describe_event, describe_record, seal_note};
+use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_governance::TaskStatus;
 use ziyuan_llm::OpenAiCompatible;
 use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
@@ -31,6 +29,7 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan tasks                         查看诏令及其状态
+  ziyuan serve [--port 8080]           启动紫禁城 Web 界面（仅本机，需访问令牌）
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
@@ -90,6 +89,7 @@ enum Command {
     },
     Run(Limits),
     Tasks,
+    Serve(u16),
     Cancel(TaskId),
     Reform(GovernanceMode),
     Dismiss(AgentId),
@@ -142,6 +142,13 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "edict" => parse_edict(args)?,
         "run" => Command::Run(parse_limits(args)?),
         "tasks" => no_args(args, Command::Tasks)?,
+        "serve" => match args.as_slice() {
+            [] => Command::Serve(8080),
+            [flag, port] if flag == "--port" => {
+                Command::Serve(port.parse().map_err(|_| "端口必须是 0–65535 的数字")?)
+            }
+            _ => return Err("用法: ziyuan serve [--port 8080]".into()),
+        },
         "cancel" => match <[String; 1]>::try_from(args) {
             Ok([id]) => Command::Cancel(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
             Err(_) => return Err("用法: ziyuan cancel <诏令ID>".into()),
@@ -249,6 +256,24 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             } else {
                 run_tasks(session, &tasks, limits)?;
             }
+        }
+        Command::Serve(port) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let config = ziyuan_web::Config {
+                root: env::current_dir()?,
+                token: ziyuan_web::random_token()?,
+                backend: worker_backend()?,
+                limits: DEFAULT_LIMITS,
+            };
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+                let addr = listener.local_addr()?;
+                println!("紫禁城已开启：http://{addr}/?token={}", config.token);
+                println!("（仅监听本机；令牌即皇帝身份，请勿外传。Ctrl-C 关闭。）");
+                ziyuan_web::serve(listener, config).await
+            })?;
         }
         Command::Tasks => {
             let court = session.court();
@@ -596,68 +621,6 @@ fn parse_capabilities(value: &str) -> Result<BTreeSet<Capability>, Box<dyn Error
         .split(',')
         .map(str::parse::<Capability>)
         .collect::<Result<_, _>>()?)
-}
-
-/// 默认玉玺不额外显示，保持输出简洁。
-fn seal_note(seal: &Seal) -> String {
-    if *seal == Seal::default() {
-        String::new()
-    } else {
-        format!("〔玉玺 {seal}〕")
-    }
-}
-
-fn describe_record(r: &ServiceRecord) -> String {
-    format!(
-        "采纳 {}，驳回 {}，失败 {}，待评定 {}",
-        r.accepted, r.rejected, r.failed, r.unreviewed
-    )
-}
-
-fn describe_event(event: &CourtEvent) -> String {
-    match event {
-        CourtEvent::Founded(m) => format!("开国：{}", m.label()),
-        CourtEvent::AgentRegistered(a) => format!("登记官员 #{} {}", a.id.0, a.name),
-        CourtEvent::OfficialAppointed { agent, office } => {
-            format!("任命 #{} 为{}", agent.0, office.label())
-        }
-        CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
-        CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
-        CourtEvent::EdictIssued(e) => {
-            format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
-        }
-        CourtEvent::TaskAssigned { task, worker } => {
-            format!("诏令 #{} 派给 #{}", task.0, worker.0)
-        }
-        CourtEvent::ToolInvoked {
-            task,
-            tool,
-            args_json,
-            ok,
-        } => format!(
-            "诏令 #{} 调用 {tool} {args_json}（{}）",
-            task.0,
-            if *ok { "成功" } else { "失败" }
-        ),
-        CourtEvent::TaskCompleted { task, worker, .. } => {
-            format!("诏令 #{} 由 #{} 回奏", task.0, worker.0)
-        }
-        CourtEvent::TaskFailed { task, reason } => format!("诏令 #{} 失败：{reason}", task.0),
-        CourtEvent::TaskCancelled { task } => format!("诏令 #{} 撤销", task.0),
-        CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
-        CourtEvent::TaskReviewed {
-            task,
-            verdict,
-            note,
-        } => {
-            let note = if note.is_empty() {
-                String::new()
-            } else {
-                format!("：{note}")
-            };
-            format!("诏令 #{} 评定为{}{note}", task.0, verdict.label())
-        }
-    }
 }
 
 #[cfg(test)]

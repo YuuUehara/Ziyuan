@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>紫禁城 · 紫垣</title>
+<style>
+  :root {
+    --lacquer: #7a1712;
+    --lacquer-dark: #4a0d0a;
+    --vermilion: #b8322a;
+    --gold: #d6a84a;
+    --gold-soft: #f0dca8;
+    --paper: #f7f0e1;
+    --paper-dark: #ece1c8;
+    --ink: #2b1d14;
+    --muted: #7d6a58;
+    --jade: #2f7d5b;
+    --line: #dccaa2;
+    --radius: 10px;
+    --serif: "Noto Serif CJK SC", "Songti SC", "STSong", serif;
+    --sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    color: var(--ink);
+    background: var(--paper);
+    background-image: radial-gradient(circle at 20% 0%, #fffaf0 0, transparent 45%);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    background: linear-gradient(180deg, var(--lacquer) 0%, var(--lacquer-dark) 100%);
+    color: var(--gold-soft);
+    border-bottom: 4px solid var(--gold);
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: baseline; gap: 12px; }
+  .brand h1 {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 30px;
+    letter-spacing: 6px;
+    color: var(--gold);
+    text-shadow: 0 1px 0 #2a0503;
+  }
+  .brand span { font-size: 13px; opacity: .8; letter-spacing: 1px; }
+  .header-stats { display: flex; gap: 10px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+  .stat {
+    border: 1px solid rgba(214, 168, 74, .5);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 13px;
+    background: rgba(0, 0, 0, .15);
+    white-space: nowrap;
+  }
+  .stat b { color: var(--gold); font-weight: 600; }
+  .stat.live { border-color: #f6c35b; color: #fff3cf; }
+  .stat.live::before {
+    content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #f6c35b; margin-right: 6px; animation: pulse 1s infinite alternate;
+  }
+  @keyframes pulse { from { opacity: .3; } to { opacity: 1; } }
+
+  main {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 22px 28px 48px;
+    display: grid;
+    grid-template-columns: minmax(340px, 420px) 1fr;
+    gap: 22px;
+    align-items: start;
+  }
+  .full { grid-column: 1 / -1; }
+  main > *, .stack > *, .officials-layout > * { min-width: 0; }
+  .table-wrap { overflow-x: auto; }
+  .reply, .task-text { overflow-wrap: anywhere; }
+  .stack { display: grid; gap: 22px; }
+  section.card {
+    background: #fffdf7;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 0 #fff inset, 0 2px 8px rgba(74, 13, 10, .06);
+  }
+  .card > h2, .card > summary > h2 {
+    margin: 0;
+    padding: 12px 18px;
+    font-family: var(--serif);
+    font-size: 18px;
+    letter-spacing: 3px;
+    color: var(--lacquer);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .card h2 small { font-family: var(--sans); font-size: 12px; letter-spacing: 0; color: var(--muted); font-weight: normal; }
+  .card > h2 .spacer { margin-left: auto; }
+  .body { padding: 16px 18px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], select, textarea {
+    width: 100%;
+    font: inherit;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 7px 9px;
+  }
+  textarea { min-height: 76px; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--gold); outline-offset: 0; border-color: var(--gold); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > .shrink { flex: 0 0 auto; width: auto; }
+  .checks { display: flex; gap: 14px; }
+  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); font-size: 13px; }
+  .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 12px;
+    white-space: nowrap;
+  }
+  button:hover { border-color: var(--gold); background: #fff6df; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--vermilion); border-color: var(--lacquer); color: #fff8e8; }
+  button.primary:hover { background: var(--lacquer); }
+  button.gold { background: var(--gold); border-color: #a9802f; color: var(--lacquer-dark); font-weight: 600; }
+  button.gold:hover { background: #e6bb5f; }
+  button.small { padding: 3px 9px; font-size: 12px; }
+  button.accept { color: var(--jade); border-color: #9cc9b3; }
+  button.reject { color: var(--vermilion); border-color: #e0a9a3; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; }
+
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+  .modes button { padding: 9px 6px; font-family: var(--serif); font-size: 15px; }
+  .modes button.current { background: var(--lacquer); color: var(--gold-soft); border-color: var(--lacquer-dark); cursor: default; }
+  .routes { display: grid; gap: 7px; }
+  .route { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 8px; }
+  .route .dept { font-family: var(--serif); color: var(--lacquer); font-weight: 600; }
+  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .chip {
+    font-size: 12px; padding: 1px 8px; border-radius: 999px;
+    background: var(--paper-dark); border: 1px solid var(--line); white-space: nowrap;
+  }
+  .chip.emperor { background: var(--gold); border-color: #a9802f; color: var(--lacquer-dark); }
+  .arrow { color: var(--gold); font-size: 12px; }
+  .vacancy { font-size: 12px; color: var(--vermilion); }
+
+  .tasks { display: grid; gap: 12px; }
+  .task {
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--line);
+    border-radius: 8px;
+    padding: 11px 14px;
+    background: #fffefa;
+  }
+  .task.pending { border-left-color: var(--gold); }
+  .task.assigned { border-left-color: #e08a2b; }
+  .task.completed { border-left-color: var(--jade); }
+  .task.failed { border-left-color: var(--vermilion); }
+  .task.cancelled { border-left-color: #b9aa96; opacity: .75; }
+  .task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .task-id { font-family: var(--serif); font-weight: 700; color: var(--lacquer); }
+  .task-text { font-size: 15px; margin: 4px 0 6px; white-space: pre-wrap; }
+  .badge { font-size: 12px; border-radius: 4px; padding: 0 7px; border: 1px solid; white-space: nowrap; }
+  .badge.pending { color: #8a6a1c; border-color: #e5cf96; background: #fbf2d8; }
+  .badge.assigned { color: #a35a12; border-color: #ecc195; background: #fcecd9; }
+  .badge.completed { color: var(--jade); border-color: #a8d3bf; background: #e6f3ec; }
+  .badge.failed { color: var(--vermilion); border-color: #e9b4ae; background: #fae7e4; }
+  .badge.cancelled { color: var(--muted); border-color: var(--line); background: var(--paper-dark); }
+  .badge.accept { color: #fff; background: var(--jade); border-color: var(--jade); }
+  .badge.reject { color: #fff; background: var(--vermilion); border-color: var(--vermilion); }
+  .badge.seal { color: var(--lacquer); border-color: var(--gold); background: #fff4d6; }
+  .meta { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+  .reply {
+    margin: 8px 0 0; padding: 8px 10px; border-radius: 6px;
+    background: var(--paper); border: 1px dashed var(--line);
+    white-space: pre-wrap; font-size: 13px; max-height: 260px; overflow: auto;
+  }
+  .reply.stream { border-style: solid; border-color: #ecc195; background: #fff8ec; }
+  .reply.stream::after { content: "▍"; color: #e08a2b; animation: pulse .6s infinite alternate; }
+  .reply.error { border-color: #e9b4ae; background: #fdf1ef; color: #8c2620; }
+  .review-row { display: flex; gap: 6px; margin-top: 8px; }
+  .review-row input { flex: 1; }
+  .empty { color: var(--muted); text-align: center; padding: 26px 0; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { white-space: nowrap; text-align: left; padding: 8px 10px; border-bottom: 1px solid #efe4cb; vertical-align: middle; }
+  th { font-weight: normal; font-size: 12px; color: var(--muted); }
+  td.name { font-family: var(--serif); font-size: 15px; }
+  td .row select { min-width: 130px; }
+  .record { font-size: 12px; white-space: nowrap; }
+  .record .a { color: var(--jade); }
+  .record .r { color: var(--vermilion); }
+  .officials-layout { display: grid; grid-template-columns: 1fr 300px; gap: 22px; }
+  .side { border-left: 1px solid var(--line); padding-left: 18px; }
+  .side h3 { font-family: var(--serif); color: var(--lacquer); font-size: 15px; margin: 0 0 8px; letter-spacing: 2px; }
+  .side + .side { margin-top: 18px; }
+  ol.ranking { margin: 10px 0 0; padding-left: 22px; }
+  ol.ranking li { margin-bottom: 6px; }
+
+  details.history summary { cursor: pointer; list-style: none; }
+  details.history summary::-webkit-details-marker { display: none; }
+  details.history:not([open]) summary h2 { border-bottom: 0; }
+  details.history summary h2::after { content: "展开"; margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--muted); letter-spacing: 0; }
+  details.history[open] summary h2::after { content: "收起"; }
+  .history-list { margin: 0; padding: 12px 18px 16px 52px; max-height: 360px; overflow: auto; font-size: 13px; columns: 2; column-gap: 40px; }
+  .history-list li { break-inside: avoid; margin-bottom: 3px; }
+
+  #toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: var(--lacquer-dark); color: var(--gold-soft); border: 1px solid var(--gold);
+    padding: 9px 18px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 80vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { background: #fbe9e6; color: #8c2620; border-color: #e0a9a3; }
+  #locked {
+    position: fixed; inset: 0; background: rgba(43, 29, 20, .7); display: none;
+    align-items: center; justify-content: center;
+  }
+  #locked.show { display: flex; }
+  #locked div { background: var(--paper); padding: 28px 34px; border-radius: 12px; border: 2px solid var(--gold); max-width: 460px; }
+  #locked h2 { font-family: var(--serif); color: var(--lacquer); margin-top: 0; }
+
+  @media (max-width: 980px) {
+    main { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+    header { padding: 12px 16px; }
+    .header-stats { margin-left: 0; }
+    .officials-layout { grid-template-columns: 1fr; }
+    .side { border-left: 0; padding-left: 0; }
+    .history-list { columns: 1; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><h1>紫禁城</h1><span>紫垣 ZiYuan · 朝廷控制台</span></div>
+  <div class="header-stats">
+    <span class="stat">制度 <b id="mode-label">—</b></span>
+    <span class="stat">诏令 <b id="task-count">0</b> · 待办 <b id="open-count">0</b></span>
+    <span class="stat">用量 <b id="usage-total">0</b> tokens</span>
+    <span class="stat" id="run-state">待命</span>
+    <button class="gold" id="run-btn">执行待办诏令</button>
+    <button id="stop-btn" hidden>中止执行</button>
+  </div>
+</header>
+
+<main>
+  <div class="stack">
+    <section class="card">
+      <h2>下诏 <small>皇帝颁布诏令</small></h2>
+      <form class="body" id="edict-form">
+        <label for="edict-text">诏令内容</label>
+        <textarea id="edict-text" data-keep placeholder="例如：检查 storage crate 中的 unsafe 代码并说明用途" required></textarea>
+        <label for="edict-dept">承办部门</label>
+        <select id="edict-dept" data-keep></select>
+        <label for="edict-scope">玉玺 · 查阅范围 <span>（逗号分隔，留空为整个项目）</span></label>
+        <input type="text" id="edict-scope" data-keep placeholder="crates/ziyuan-storage, README.md">
+        <label>玉玺 · 可用工具</label>
+        <div class="checks">
+          <label><input type="checkbox" id="tool-read_file" data-keep checked> read_file</label>
+          <label><input type="checkbox" id="tool-search_code" data-keep checked> search_code</label>
+        </div>
+        <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。</p>
+        <div class="actions">
+          <button type="submit" class="primary" data-run="1">下诏并执行</button>
+          <button type="submit" data-run="0">仅入队</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>朝堂 <small>制度与派工路线</small></h2>
+      <div class="body">
+        <div class="modes" id="modes"></div>
+        <div class="routes" id="routes"></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>诏令 <small id="task-summary"></small></h2>
+    <div class="body tasks" id="tasks"></div>
+  </section>
+
+  <section class="card full">
+    <h2>百官 <small>任免、考绩与荐举</small></h2>
+    <div class="body officials-layout">
+      <div class="table-wrap"><table><thead><tr><th>#</th><th>姓名</th><th>专长</th><th>官职</th><th>考绩</th><th>用量</th><th></th></tr></thead><tbody id="officials"></tbody></table></div>
+      <div>
+        <div class="side">
+          <h3>招募</h3>
+          <form id="recruit-form">
+            <div class="row">
+              <input type="text" id="recruit-name" data-keep placeholder="姓名" required>
+              <select id="recruit-dept" data-keep class="shrink"></select>
+            </div>
+            <div class="actions"><button type="submit">招募（不授官职）</button></div>
+          </form>
+        </div>
+        <div class="side">
+          <h3>吏部荐举</h3>
+          <div class="row">
+            <select id="recommend-office" data-keep></select>
+            <button class="shrink" id="recommend-btn">荐举</button>
+          </div>
+          <div id="recommend-result"><p class="hint">按「采纳 − 驳回」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <details class="card full history" id="history">
+    <summary><h2>起居注 <small>事件簿全文</small></h2></summary>
+    <ol class="history-list" id="history-list"></ol>
+  </details>
+</main>
+
+<div id="toast"></div>
+<div id="locked"><div>
+  <h2>需要访问令牌</h2>
+  <p>请使用 <code>ziyuan serve</code> 启动时打印的完整地址（含 <code>?token=</code>）打开本页。</p>
+</div></div>
+
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+let token = params.get("token") || sessionStorage.getItem("ziyuan-token") || "";
+if (params.get("token")) {
+  sessionStorage.setItem("ziyuan-token", token);
+  history.replaceState(null, "", location.pathname);
+}
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (n) => Number(n).toLocaleString("zh-CN");
+
+let state = null;
+const streams = {};   // 诏令 ID → 执行中流式文本
+
+async function api(path, body) {
+  const response = await fetch("api" + path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 401) {
+    $("locked").classList.add("show");
+    throw new Error("缺少访问令牌");
+  }
+  const data = await response.json().catch(() => ({ error: response.statusText }));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+let toastTimer;
+function toast(message, error = false) {
+  const el = $("toast");
+  el.textContent = message;
+  el.className = "show" + (error ? " error" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.className = error ? "error" : ""), error ? 5000 : 2200);
+}
+
+async function act(promise, success) {
+  try {
+    const result = await promise;
+    if (success) toast(success);
+    await refresh();
+    return result;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// 重新渲染时保留正在输入的内容与焦点。
+function preserve(render) {
+  const kept = {};
+  document.querySelectorAll("[data-keep]").forEach((el) => {
+    kept[el.id] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  const focused = document.activeElement && document.activeElement.id;
+  render();
+  for (const [id, value] of Object.entries(kept)) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = value;
+    // 下拉框只恢复仍存在的选项，否则保持默认首项。
+    else if (el.tagName !== "SELECT" || [...el.options].some((o) => o.value === value)) el.value = value;
+  }
+  if (focused && $(focused)) $(focused).focus();
+}
+
+function recordHtml(r) {
+  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}</span>`;
+}
+
+const statusLabel = { pending: "待办", assigned: "执行中", completed: "已完成", failed: "失败", cancelled: "已撤销" };
+
+function taskHtml(t) {
+  const open = t.status === "pending" || t.status === "assigned";
+  const seal = t.seal.default ? "" :
+    `<span class="badge seal" title="玉玺">玉玺 · ${esc(t.seal.tools.join("、") || "无工具")} · ${esc(t.seal.scope.join("、"))}</span>`;
+  const review = t.review ? `<span class="badge ${t.review.verdict}">${esc(t.review.label)}${t.review.note ? "：" + esc(t.review.note) : ""}</span>` : "";
+  const meta = [
+    t.worker ? `承办：${esc(t.worker)}` : "",
+    t.tool_calls ? `工具 ${t.tool_calls} 次${t.tool_failures ? `（失败 ${t.tool_failures}）` : ""}` : "",
+    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}` : "",
+  ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
+  let body = "";
+  if (streams[t.id] !== undefined && open) {
+    body = `<div class="reply stream" id="stream-${t.id}">${esc(streams[t.id])}</div>`;
+  } else if (t.status === "completed") {
+    body = `<div class="reply">${esc(t.detail)}</div>`;
+  } else if (t.status === "failed") {
+    body = `<div class="reply error">${esc(t.detail)}</div>`;
+  }
+  let actions = "";
+  if (t.status === "completed" && !t.review) {
+    actions = `<div class="review-row">
+      <input type="text" id="note-${t.id}" data-keep placeholder="评语（可选）">
+      <button class="small accept" data-review="${t.id}" data-verdict="accept">采纳</button>
+      <button class="small reject" data-review="${t.id}" data-verdict="reject">驳回</button></div>`;
+  } else if (open) {
+    actions = `<div class="review-row"><span style="flex:1"></span><button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
+  }
+  return `<article class="task ${t.status}">
+    <div class="task-head"><span class="task-id">#${t.id}</span><span>${esc(t.department)}</span>
+      <span class="badge ${t.status}">${statusLabel[t.status]}</span>${review}${seal}</div>
+    <div class="task-text">${esc(t.text)}</div>
+    <div class="meta">${meta}</div>${body}${actions}</article>`;
+}
+
+function render() {
+  const s = state;
+  $("mode-label").textContent = s.mode.label;
+  const open = s.tasks.filter((t) => t.status === "pending" || t.status === "assigned").length;
+  $("task-count").textContent = s.tasks.length;
+  $("open-count").textContent = open;
+  $("usage-total").textContent = fmt(s.usage.input + s.usage.output);
+  $("run-state").textContent = s.running ? "执行中" : "待命";
+  $("run-state").classList.toggle("live", s.running);
+  $("run-btn").disabled = s.running || open === 0;
+  $("stop-btn").hidden = !s.running;
+
+  const deptOptions = s.departments.map((d) => `<option value="${d.code}">${esc(d.label)}</option>`).join("");
+  // 与 CLI 一致：默认工部承办。
+  $("edict-dept").innerHTML = s.departments.map((d) => `<option value="${d.code}" ${d.code === "works" ? "selected" : ""}>${esc(d.label)}</option>`).join("");
+  $("recruit-dept").innerHTML = deptOptions;
+  $("recommend-office").innerHTML = s.offices.map((o) => `<option value="${o.code}">${esc(o.label)}</option>`).join("");
+
+  $("modes").innerHTML = s.modes.map((m) =>
+    `<button data-mode="${m.code}" class="${m.code === s.mode.code ? "current" : ""}">${esc(m.label)}</button>`).join("");
+  $("routes").innerHTML = s.departments.map((d) => {
+    const chain = d.route
+      ? d.route.map((p, i) => `<span class="chip ${i === 0 ? "emperor" : ""}">${esc(p)}</span>`).join('<span class="arrow">▸</span>')
+      : `<span class="vacancy">${esc(d.vacancy)}</span>`;
+    return `<div class="route"><span class="dept">${esc(d.label)}</span><div class="chain">${chain}</div></div>`;
+  }).join("");
+
+  const tasks = [...s.tasks].reverse();
+  $("task-summary").textContent = tasks.length ? `共 ${tasks.length} 件，最新在前` : "";
+  $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。请在左侧下诏。</div>`;
+
+  $("officials").innerHTML = s.officials.map((o) => {
+    const action = o.office
+      ? `<button class="small" data-dismiss="${o.id}">罢免</button>`
+      : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
+         <button class="small shrink" data-appoint="${o.id}">任命</button></div>`;
+    const usage = o.record.usage.input + o.record.usage.output;
+    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}</td><td>${esc(o.speciality.label)}</td>
+      <td>${o.office ? esc(o.office.label) : '<span class="hint">未任官职</span>'}</td>
+      <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) : "—"}</td><td>${action}</td></tr>`;
+  }).join("");
+}
+
+async function refresh() {
+  try {
+    state = await api("/state");
+    preserve(render);
+    if ($("history").open) loadHistory();
+  } catch (e) {
+    if (!$("locked").classList.contains("show")) toast(e.message, true);
+  }
+}
+
+async function loadHistory() {
+  const lines = await api("/history");
+  $("history-list").innerHTML = lines.map((l) => `<li>${esc(l)}</li>`).join("");
+}
+
+// ---- 交互 ----
+$("edict-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const run = event.submitter && event.submitter.dataset.run === "1";
+  const tools = ["read_file", "search_code"].filter((t) => $("tool-" + t).checked);
+  const body = {
+    department: $("edict-dept").value,
+    text: $("edict-text").value.trim(),
+    scope: $("edict-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
+    tools,
+  };
+  const result = await act(api("/edicts", body));
+  if (!result) return;
+  $("edict-text").value = "";
+  toast(`诏令 #${result.id} 已颁布`);
+  if (run && !state.running) await act(api("/run", {}));
+});
+
+$("run-btn").addEventListener("click", () => act(api("/run", {}), "开始执行"));
+$("stop-btn").addEventListener("click", () => act(api("/run/stop", {}), "已下令中止"));
+$("recruit-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await act(api("/officials", { name: $("recruit-name").value.trim(), department: $("recruit-dept").value }));
+  if (result) { $("recruit-name").value = ""; toast(`已招募官员 #${result.id}`); }
+});
+$("recommend-btn").addEventListener("click", async () => {
+  try {
+    const office = $("recommend-office").value;
+    const ranked = await api("/recommend?office=" + encodeURIComponent(office));
+    $("recommend-result").innerHTML = ranked.length
+      ? `<ol class="ranking">${ranked.map((c) => `<li><b>${esc(c.name)}</b>（#${c.id}，${c.office ? esc(c.office.label) : "未任官职"}）<br>${recordHtml(c.record)}</li>`).join("")}</ol>`
+      : `<p class="hint">无人可任此职。</p>`;
+  } catch (e) { toast(e.message, true); }
+});
+$("history").addEventListener("toggle", () => { if ($("history").open) loadHistory(); });
+
+document.addEventListener("click", (event) => {
+  const el = event.target.closest("button");
+  if (!el) return;
+  const d = el.dataset;
+  if (d.mode && d.mode !== state.mode.code) {
+    const label = el.textContent;
+    if (confirm(`改制为「${label}」？原丞相/首辅职务将自动撤销。`)) act(api("/reform", { mode: d.mode }), `已改制为${label}`);
+  } else if (d.review) {
+    const note = ($("note-" + d.review) || {}).value || "";
+    act(api(`/tasks/${d.review}/review`, { verdict: d.verdict, note }), d.verdict === "accept" ? "已采纳" : "已驳回");
+  } else if (d.cancel) {
+    act(api(`/tasks/${d.cancel}/cancel`, {}), `诏令 #${d.cancel} 已撤销`);
+  } else if (d.dismiss) {
+    act(api(`/officials/${d.dismiss}/dismiss`, {}), "已罢免（身份与履历保留）");
+  } else if (d.appoint) {
+    act(api(`/officials/${d.appoint}/appoint`, { office: $("appoint-" + d.appoint).value }), "已任命");
+  }
+});
+
+// ---- 实时推送 ----
+function connect() {
+  const source = new EventSource("api/events?token=" + encodeURIComponent(token));
+  let pending;
+  const scheduleRefresh = () => { clearTimeout(pending); pending = setTimeout(refresh, 120); };
+  source.addEventListener("changed", scheduleRefresh);
+  source.addEventListener("run", scheduleRefresh);
+  source.addEventListener("text", (event) => {
+    const { task, text } = JSON.parse(event.data);
+    streams[task] = (streams[task] || "") + text;
+    const el = $("stream-" + task);
+    if (el) { el.textContent = streams[task]; el.scrollTop = el.scrollHeight; } else scheduleRefresh();
+  });
+  source.addEventListener("finished", (event) => {
+    const { task } = JSON.parse(event.data);
+    delete streams[task];
+    scheduleRefresh();
+  });
+  source.addEventListener("run_error", (event) => toast(JSON.parse(event.data).error, true));
+}
+
+refresh().then(() => { if (state) connect(); });
+// CLI 等其他进程的变更不会推送，定期刷新。
+setInterval(() => { if (state && !document.hidden) refresh(); }, 5000);
+</script>
+</body>
+</html>

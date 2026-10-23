@@ -10,7 +10,7 @@ use ziyuan_core::{
     AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, TokenUsage,
     Verdict,
 };
-use ziyuan_governance::{Court, GovernanceError, TaskStatus, founding_events};
+use ziyuan_governance::{Court, GovernanceError, ServiceRecord, TaskStatus, founding_events};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
 use ziyuan_storage::{EventStore, StorageError};
 
@@ -351,6 +351,70 @@ impl<S: EventStore> Session<S> {
                 }
                 Err(e) => return Err(e.into()),
             }
+        }
+    }
+}
+
+// ---- 呈现：CLI 与 Web 共用的中文描述 ----
+
+/// 默认玉玺不额外显示，保持输出简洁。
+pub fn seal_note(seal: &Seal) -> String {
+    if *seal == Seal::default() {
+        String::new()
+    } else {
+        format!("〔玉玺 {seal}〕")
+    }
+}
+
+pub fn describe_record(r: &ServiceRecord) -> String {
+    format!(
+        "采纳 {}，驳回 {}，失败 {}，待评定 {}",
+        r.accepted, r.rejected, r.failed, r.unreviewed
+    )
+}
+
+pub fn describe_event(event: &CourtEvent) -> String {
+    match event {
+        CourtEvent::Founded(m) => format!("开国：{}", m.label()),
+        CourtEvent::AgentRegistered(a) => format!("登记官员 #{} {}", a.id.0, a.name),
+        CourtEvent::OfficialAppointed { agent, office } => {
+            format!("任命 #{} 为{}", agent.0, office.label())
+        }
+        CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
+        CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
+        CourtEvent::EdictIssued(e) => {
+            format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
+        }
+        CourtEvent::TaskAssigned { task, worker } => {
+            format!("诏令 #{} 派给 #{}", task.0, worker.0)
+        }
+        CourtEvent::ToolInvoked {
+            task,
+            tool,
+            args_json,
+            ok,
+        } => format!(
+            "诏令 #{} 调用 {tool} {args_json}（{}）",
+            task.0,
+            if *ok { "成功" } else { "失败" }
+        ),
+        CourtEvent::TaskCompleted { task, worker, .. } => {
+            format!("诏令 #{} 由 #{} 回奏", task.0, worker.0)
+        }
+        CourtEvent::TaskFailed { task, reason } => format!("诏令 #{} 失败：{reason}", task.0),
+        CourtEvent::TaskCancelled { task } => format!("诏令 #{} 撤销", task.0),
+        CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
+        CourtEvent::TaskReviewed {
+            task,
+            verdict,
+            note,
+        } => {
+            let note = if note.is_empty() {
+                String::new()
+            } else {
+                format!("：{note}")
+            };
+            format!("诏令 #{} 评定为{}{note}", task.0, verdict.label())
         }
     }
 }

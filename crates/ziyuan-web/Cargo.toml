@@ -1,0 +1,24 @@
+[package]
+name = "ziyuan-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
+ziyuan-app.workspace = true
+ziyuan-core.workspace = true
+ziyuan-governance.workspace = true
+ziyuan-runtime.workspace = true
+ziyuan-storage.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+ureq.workspace = true
+
+[lints]
+workspace = true

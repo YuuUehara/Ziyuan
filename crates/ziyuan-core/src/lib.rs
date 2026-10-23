@@ -46,6 +46,15 @@ pub enum Department {
 }
 
 impl Department {
+    pub const ALL: [Self; 6] = [
+        Self::Personnel,
+        Self::Revenue,
+        Self::Rites,
+        Self::War,
+        Self::Justice,
+        Self::Works,
+    ];
+
     pub fn code(self) -> &'static str {
         match self {
             Self::Personnel => "personnel",
@@ -94,6 +103,8 @@ pub enum GovernanceMode {
     Cabinet,
 }
 impl GovernanceMode {
+    pub const ALL: [Self; 3] = [Self::Chancellor, Self::DirectRule, Self::Cabinet];
+
     pub fn code(self) -> &'static str {
         match self {
             Self::Chancellor => "chancellor",

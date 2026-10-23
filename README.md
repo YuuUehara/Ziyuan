@@ -13,7 +13,7 @@
 | 玉玺 Yuxi | 职权、审批、审计 | `Seal`：每件诏令的工具与查阅范围，随事件簿审计 |
 | 诏令 ZhaoLing | 任务入口 | `Edict` 数据模型 + CLI |
 | 吏部 LiBu | 考绩、升迁 | `review` 评定、`examine` 考绩、`recommend` 荐举（只采信皇帝评定） |
-| 紫禁城 Forbidden City | 可视化与角色扮演 UI | 尚未实现 |
+| 紫禁城 Forbidden City | 可视化与角色扮演 UI | `ziyuan serve`：Web 界面（TUI 尚未实现） |
 
 ## 项目结构
 
@@ -25,6 +25,7 @@ crates/
   ziyuan-llm/         OpenAI 兼容 Chat Completions Adapter（ureq + serde_json）
   ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
   ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
+  ziyuan-web/         紫禁城 Web 界面（axum + 内嵌单页，SSE 实时推送）
   ziyuan-cli/         `ziyuan` 命令行（仅解析参数与呈现结果）
 
 docs/                 架构决策与扩展路线
@@ -32,7 +33,7 @@ docs/                 架构决策与扩展路线
 
 ## 快速开始
 
-要求：Rust 1.89 或更新的稳定版工具链（Rust 2024 edition；事件簿文件锁需要 1.89）。第三方依赖为 `ureq`、`serde_json` 与 `tokio`。
+要求：Rust 1.89 或更新的稳定版工具链（Rust 2024 edition；事件簿文件锁需要 1.89）。第三方依赖为 `ureq`、`serde_json`、`tokio`，以及 Web 界面的 `axum`、`futures-util`。
 
 ```bash
 cargo fmt --all -- --check
@@ -74,6 +75,18 @@ ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
 ```
 
 单件诏令最多 12 轮模型调用。模型调用失败、超时或被撤销都会记入事件簿（`TaskFailed` / `TaskCancelled`），每次工具调用也记为 `ToolInvoked`（参数与成败，不含输出），可用 `ziyuan history` 审计。
+
+### 紫禁城：Web 界面
+
+```bash
+cd /path/to/your/project && ziyuan serve --port 8080
+# 紫禁城已开启：http://127.0.0.1:8080/?token=…
+```
+
+- 在浏览器中下诏（含玉玺）、执行与中止、撤销、评定、改制、招募、任免与荐举；朝堂面板显示现行制度下各部的派工路线与空缺。
+- 执行中官员的回答实时流式显示；页面每 5 秒刷新一次，以反映 CLI 等其他进程的变更。
+- 只监听 127.0.0.1，且每个 API 请求都须携带启动时生成的令牌：Web 界面代表皇帝。
+- 与 CLI 共用事件簿与多进程规则：执行时取得执行者锁，CLI 正在执行时页面会提示稍后再试。
 
 ### 玉玺：限定官员的权限
 
@@ -168,7 +181,7 @@ jj bookmark set my-feature -r @- && jj git push -b my-feature
 - ~~为运行时加 Tokio 调度、任务队列、取消、超时、并发上限与审计链路~~ 已完成（工具调用审计）。
 - ~~事件簿写锁与原子追加~~ 已完成（文件锁 + 乐观并发 + 执行者锁）；~~`Yuxi` 权限令牌~~ 已完成（诏令级玉玺）；按官职设定权限上限与非 CLI 身份验证待做。
 - ~~实现可验证的 `LiBu` 考绩与候选人推荐~~ 已完成（基于皇帝评定）；自动验证（如回归测试）待做，升迁仍由皇帝批准。
-- 做「紫禁城」TUI/Web UI；人格层只影响措辞与辩论，不得越权。
+- ~~做「紫禁城」Web UI~~ 已完成（`ziyuan serve`）；TUI 与人格层待做，人格层只影响措辞与辩论，不得越权。
 
 详见 [docs/architecture.md](docs/architecture.md)。
 

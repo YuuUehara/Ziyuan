@@ -16,7 +16,8 @@ ziyuan-governance.workspace = true
 ziyuan-llm.workspace = true
 ziyuan-runtime.workspace = true
 ziyuan-storage.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+ziyuan-web.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }
 
 [lints]
 workspace = true
