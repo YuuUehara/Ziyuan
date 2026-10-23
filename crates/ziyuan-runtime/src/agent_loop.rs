@@ -66,6 +66,11 @@ pub trait ModelProvider: Send + Sync {
         tools: &[ToolSpec],
         hooks: &dyn ExecutionHooks,
     ) -> Result<ModelTurn, BoxError>;
+
+    /// 模型名，供界面显示。
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
 }
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;

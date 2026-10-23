@@ -190,6 +190,7 @@ async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     let running = app.running();
     let mut value = app.with_session(|s| Ok(court_json(s.court()))).await?;
     value["running"] = json!(running);
+    value["model"] = json!(app.0.config.backend.model_name());
     Ok(Json(value))
 }
 
@@ -215,7 +216,7 @@ async fn recommend(
                     json!({
                         "id": c.agent.id.0,
                         "name": c.agent.name,
-                        "office": c.current.map(office_json),
+                        "office": c.current.map(|o| office_json(o, court.mode())),
                         "record": record_json(&c.record),
                     })
                 })
@@ -388,11 +389,17 @@ async fn recruit(
     State(app): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let name = str_field(&body, "name")?.trim().to_owned();
+    // 姓名留空则随机取名。
+    let name = body["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned);
     let department = parse::<Department>(str_field(&body, "department")?)?;
     app.mutate(move |s| {
         let id = s.recruit(name, department)?;
-        Ok(json!({ "id": id.0 }))
+        let name = &s.court().agent(id).expect("刚招募").name;
+        Ok(json!({ "id": id.0, "name": name }))
     })
     .await
 }
@@ -438,8 +445,8 @@ where
         .map_err(|e: T::Err| ApiError::bad(e.to_string()))
 }
 
-fn office_json(office: Office) -> Value {
-    json!({ "code": office.code(), "label": office.label() })
+fn office_json(office: Office, mode: GovernanceMode) -> Value {
+    json!({ "code": office.code(), "label": office.label(), "rank": office.rank(mode) })
 }
 
 fn usage_json(usage: TokenUsage) -> Value {
@@ -493,14 +500,19 @@ fn court_json(court: &Court) -> Value {
             })
         })
         .collect();
-    let mut offices = vec![
-        office_json(Office::Chancellor),
-        office_json(Office::FirstGrandSecretary),
-    ];
-    for d in Department::ALL {
-        offices.push(office_json(Office::Minister(d)));
-        offices.push(office_json(Office::Clerk(d)));
-    }
+    // 现行制度下设置的官职；六部官职带上所属部门，供页面按专长筛选。
+    let offices: Vec<_> = Office::all()
+        .into_iter()
+        .filter(|o| o.exists_in(court.mode()))
+        .map(|o| {
+            let mut value = office_json(o, court.mode());
+            value["department"] = json!(match o {
+                Office::Minister(d) | Office::ViceMinister(d) | Office::Clerk(d) => Some(d.code()),
+                _ => None,
+            });
+            value
+        })
+        .collect();
     let officials: Vec<_> = court
         .agents()
         .map(|a| {
@@ -508,7 +520,7 @@ fn court_json(court: &Court) -> Value {
                 "id": a.id.0,
                 "name": a.name,
                 "speciality": { "code": a.speciality.code(), "label": a.speciality.label() },
-                "office": court.office_of(a.id).map(office_json),
+                "office": court.office_of(a.id).map(|o| office_json(o, court.mode())),
                 "record": record_json(&court.service_record(a.id)),
             })
         })

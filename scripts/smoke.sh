@@ -64,4 +64,10 @@ if "$BIN" review "$C" accept > /dev/null 2>&1; then echo '已撤销的诏令不�
 WORKER="$("$BIN" history | sed -n "s/.*诏令 #$A 由 #\([0-9]*\) 回奏.*/\1/p")"
 "$BIN" examine "$WORKER" | grep -q '采纳 1，'
 "$BIN" recommend clerk:works | sed -n 2p | grep -q "^#$WORKER "
+# 官制：不给姓名则随机取名；官员列表显示品级与所用模型
+RECRUITED="$("$BIN" recruit works)"
+grep -q '招募官员 #[0-9]* ..*（未授官职）' <<< "$RECRUITED"
+OFFICIALS="$("$BIN" officials)"
+grep -q '内阁首辅（正五品）.*模型 演示' <<< "$OFFICIALS"
+grep -q '工部尚书（正二品）' <<< "$OFFICIALS"
 echo 'ZiYuan smoke test PASS'

@@ -47,7 +47,7 @@ ziyuan-cli ──┬──▶ ziyuan-web (axum, SSE) ──┐
 ```
 
 - `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
-- `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。
+- `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。官制（`Office::all` / `exists_in` / `rank`）定义在 core，署理规则在 `Court::route`。`names::NameGenerator` 由种子生成姓名；种子由 `ziyuan-app` 随机给出，生成的姓名随 `AgentRegistered` 落盘，回放不依赖随机数。官职代码与 v0.1 兼容，旧事件簿可直接回放。`WorkerBackend::model_name` / `ModelProvider::model_name` 供各前端显示承办模型。
 - `ziyuan-storage`：`EventStore { load, append(expected, events) }`，`append` 只在事件数等于 `expected` 时写入（乐观并发）；`EventLog`（`.ziyuan/court.log`）与 `MemoryEventLog`。编码在私有 `codec` 模块，与文件 I/O 分离。
 - `ziyuan-runtime`：`Scheduler` 并发执行已指派的 `Job`，经通道回报 `Progress`（工具调用与结局）；不了解治理规则。Adapter 错误统一为 `BoxError`。`AgentBackend` 运行 `agent_loop`，`tools` 提供只读工具。
 - `ziyuan-llm`：`OpenAiCompatible` 实现 `ModelProvider`。HTTP/TLS 依赖只在此 crate，runtime 保持无网络依赖。
@@ -115,9 +115,9 @@ trait GovernancePolicy {
 
 ## 7. 验收标准
 
-1. 初始丞相制的路线包含丞相。
+1. 初始丞相制的路线包含中书右丞相；右丞相空缺时由左丞相署理，尚书空缺时由侍郎署理。
 2. 改为 direct 后的同类任务路线不包含丞相。
 3. 改为 cabinet 时若首辅空缺必须拒绝派工；任命后路由包含首辅。
-4. 不允许在废相制度中任命丞相；不能双丞相。
+4. 不允许在废相制度中任命丞相或内阁官职；不能双丞相。改制只撤销旧协调机构的官职，六部官员保留、品级随制度变化。
 5. 中文命令和换行内容能正确写入/解码事件簿。
 6. `DemoBackend` 回奏明确包含 `[DEMO ONLY]`，以免误以为进行了代码检查。

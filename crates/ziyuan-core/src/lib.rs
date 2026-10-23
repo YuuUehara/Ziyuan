@@ -137,28 +137,100 @@ impl FromStr for GovernanceMode {
     }
 }
 
+/// 官职。协调机构的官职只在对应制度下设置，六部官职在各制度下都保留（品级随制度变化）：
+///
+/// - 丞相制（仿元·中书省）：中书右丞相为首，中书左丞相为副；
+/// - 废相亲政（仿明初，洪武十三年罢中书省）：不设协调机构，皇帝直领六部；
+/// - 内阁制（仿明中后期）：内阁首辅为首，内阁次辅为副。
+///
+/// 每个机构的正职空缺时由副职署理；六部尚书空缺时由侍郎署理。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Office {
+    /// 中书右丞相（元以右为尊）。
     Chancellor,
+    /// 中书左丞相。
+    ViceChancellor,
+    /// 内阁首辅。
     FirstGrandSecretary,
+    /// 内阁次辅。
+    SecondGrandSecretary,
+    /// 尚书：一部之长。
     Minister(Department),
+    /// 侍郎：一部之副。
+    ViceMinister(Department),
+    /// 郎中：承办具体事务，可有多人。
     Clerk(Department),
 }
 impl Office {
+    /// 全部官职：先协调机构，再按部门列出尚书、侍郎、郎中。
+    pub fn all() -> Vec<Self> {
+        let mut offices = vec![
+            Self::Chancellor,
+            Self::ViceChancellor,
+            Self::FirstGrandSecretary,
+            Self::SecondGrandSecretary,
+        ];
+        for d in Department::ALL {
+            offices.extend([Self::Minister(d), Self::ViceMinister(d), Self::Clerk(d)]);
+        }
+        offices
+    }
+
+    /// 只在某一制度下设置的协调官职返回该制度；六部官职返回 `None`。
+    pub fn mode(self) -> Option<GovernanceMode> {
+        match self {
+            Self::Chancellor | Self::ViceChancellor => Some(GovernanceMode::Chancellor),
+            Self::FirstGrandSecretary | Self::SecondGrandSecretary => Some(GovernanceMode::Cabinet),
+            Self::Minister(_) | Self::ViceMinister(_) | Self::Clerk(_) => None,
+        }
+    }
+
+    /// 现行制度 `mode` 下是否设置此官职。
+    pub fn exists_in(self, mode: GovernanceMode) -> bool {
+        self.mode().is_none_or(|m| m == mode)
+    }
+
+    /// 同一时刻只能有一人担任（郎中可有多人）。
+    pub fn is_unique(self) -> bool {
+        !matches!(self, Self::Clerk(_))
+    }
+
+    /// 品级。元代六部隶中书省，尚书正三品；明洪武十三年罢中书省后升为正二品。
+    /// 内阁大学士本官仅正五品，其权出于票拟而非品级。
+    pub fn rank(self, mode: GovernanceMode) -> &'static str {
+        let yuan = mode == GovernanceMode::Chancellor;
+        match self {
+            Self::Chancellor | Self::ViceChancellor => "正一品",
+            Self::FirstGrandSecretary | Self::SecondGrandSecretary => "正五品",
+            Self::Minister(_) if yuan => "正三品",
+            Self::Minister(_) => "正二品",
+            Self::ViceMinister(_) if yuan => "正四品",
+            Self::ViceMinister(_) => "正三品",
+            Self::Clerk(_) if yuan => "从五品",
+            Self::Clerk(_) => "正五品",
+        }
+    }
+
     pub fn code(self) -> String {
         match self {
             Self::Chancellor => "chancellor".into(),
+            Self::ViceChancellor => "vice-chancellor".into(),
             Self::FirstGrandSecretary => "first-secretary".into(),
+            Self::SecondGrandSecretary => "second-secretary".into(),
             Self::Minister(d) => format!("minister:{}", d.code()),
+            Self::ViceMinister(d) => format!("vice-minister:{}", d.code()),
             Self::Clerk(d) => format!("clerk:{}", d.code()),
         }
     }
     pub fn label(self) -> String {
         match self {
-            Self::Chancellor => "丞相".into(),
+            Self::Chancellor => "中书右丞相".into(),
+            Self::ViceChancellor => "中书左丞相".into(),
             Self::FirstGrandSecretary => "内阁首辅".into(),
+            Self::SecondGrandSecretary => "内阁次辅".into(),
             Self::Minister(d) => format!("{}尚书", d.label()),
-            Self::Clerk(d) => format!("{}属官", d.label()),
+            Self::ViceMinister(d) => format!("{}侍郎", d.label()),
+            Self::Clerk(d) => format!("{}郎中", d.label()),
         }
     }
 }
@@ -167,7 +239,9 @@ impl FromStr for Office {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input {
             "chancellor" => Ok(Self::Chancellor),
+            "vice-chancellor" => Ok(Self::ViceChancellor),
             "first-secretary" => Ok(Self::FirstGrandSecretary),
+            "second-secretary" => Ok(Self::SecondGrandSecretary),
             _ => {
                 let (kind, department) = input
                     .split_once(':')
@@ -175,6 +249,7 @@ impl FromStr for Office {
                 let department = department.parse::<Department>()?;
                 match kind {
                     "minister" => Ok(Self::Minister(department)),
+                    "vice-minister" => Ok(Self::ViceMinister(department)),
                     "clerk" => Ok(Self::Clerk(department)),
                     _ => Err(ParseError::UnknownOffice(input.into())),
                 }

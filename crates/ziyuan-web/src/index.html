@@ -158,6 +158,7 @@
   }
   .chip.emperor { background: var(--gold); border-color: #a9802f; color: var(--lacquer-dark); }
   .arrow { color: var(--gold); font-size: 12px; }
+  .step { display: inline-flex; align-items: center; gap: 4px; }
   .vacancy { font-size: 12px; color: var(--vermilion); }
 
   .tasks { display: grid; gap: 12px; }
@@ -301,13 +302,13 @@
   <section class="card full">
     <h2>百官 <small>任免、考绩与荐举</small></h2>
     <div class="body officials-layout">
-      <div class="table-wrap"><table><thead><tr><th>#</th><th>姓名</th><th>专长</th><th>官职</th><th>考绩</th><th>用量</th><th></th></tr></thead><tbody id="officials"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>#</th><th>姓名</th><th>专长</th><th>官职</th><th>模型</th><th>考绩</th><th>用量</th><th></th></tr></thead><tbody id="officials"></tbody></table></div>
       <div>
         <div class="side">
           <h3>招募</h3>
           <form id="recruit-form">
             <div class="row">
-              <input type="text" id="recruit-name" data-keep placeholder="姓名" required>
+              <input type="text" id="recruit-name" data-keep placeholder="姓名（留空则随机）">
               <select id="recruit-dept" data-keep class="shrink"></select>
             </div>
             <div class="actions"><button type="submit">招募（不授官职）</button></div>
@@ -462,13 +463,14 @@ function render() {
   // 与 CLI 一致：默认工部承办。
   $("edict-dept").innerHTML = s.departments.map((d) => `<option value="${d.code}" ${d.code === "works" ? "selected" : ""}>${esc(d.label)}</option>`).join("");
   $("recruit-dept").innerHTML = deptOptions;
-  $("recommend-office").innerHTML = s.offices.map((o) => `<option value="${o.code}">${esc(o.label)}</option>`).join("");
+  $("recommend-office").innerHTML = s.offices.map((o) => `<option value="${o.code}">${esc(o.label)}（${esc(o.rank)}）</option>`).join("");
 
   $("modes").innerHTML = s.modes.map((m) =>
     `<button data-mode="${m.code}" class="${m.code === s.mode.code ? "current" : ""}">${esc(m.label)}</button>`).join("");
   $("routes").innerHTML = s.departments.map((d) => {
     const chain = d.route
-      ? d.route.map((p, i) => `<span class="chip ${i === 0 ? "emperor" : ""}">${esc(p)}</span>`).join('<span class="arrow">▸</span>')
+      // 箭头与其后的官职放在同一组，换行时不会孤悬在行尾。
+      ? d.route.map((p, i) => `<span class="step">${i ? '<span class="arrow">▸</span>' : ""}<span class="chip ${i === 0 ? "emperor" : ""}">${esc(p)}</span></span>`).join("")
       : `<span class="vacancy">${esc(d.vacancy)}</span>`;
     return `<div class="route"><span class="dept">${esc(d.label)}</span><div class="chain">${chain}</div></div>`;
   }).join("");
@@ -480,11 +482,12 @@ function render() {
   $("officials").innerHTML = s.officials.map((o) => {
     const action = o.office
       ? `<button class="small" data-dismiss="${o.id}">罢免</button>`
-      : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
+      : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.filter((of) => !of.department || of.department === o.speciality.code).map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
          <button class="small shrink" data-appoint="${o.id}">任命</button></div>`;
     const usage = o.record.usage.input + o.record.usage.output;
     return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}</td><td>${esc(o.speciality.label)}</td>
-      <td>${o.office ? esc(o.office.label) : '<span class="hint">未任官职</span>'}</td>
+      <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : '<span class="hint">未任官职</span>'}</td>
+      <td class="record">${s.model ? esc(s.model) : '<span class="hint">演示</span>'}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) : "—"}</td><td>${action}</td></tr>`;
   }).join("");
 }
@@ -526,8 +529,8 @@ $("run-btn").addEventListener("click", () => act(api("/run", {}), "开始执行"
 $("stop-btn").addEventListener("click", () => act(api("/run/stop", {}), "已下令中止"));
 $("recruit-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const result = await act(api("/officials", { name: $("recruit-name").value.trim(), department: $("recruit-dept").value }));
-  if (result) { $("recruit-name").value = ""; toast(`已招募官员 #${result.id}`); }
+  const result = await act(api("/officials", { name: $("recruit-name").value.trim() || null, department: $("recruit-dept").value }));
+  if (result) { $("recruit-name").value = ""; toast(`已招募官员 #${result.id} ${result.name}`); }
 });
 $("recommend-btn").addEventListener("click", async () => {
   try {

@@ -10,6 +10,7 @@ use ziyuan_core::{
     AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, TokenUsage,
     Verdict,
 };
+use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{Court, GovernanceError, ServiceRecord, TaskStatus, founding_events};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
 use ziyuan_storage::{EventStore, StorageError};
@@ -83,7 +84,7 @@ pub struct Session<S: EventStore> {
 impl<S: EventStore> Session<S> {
     /// 在空事件簿上建立默认朝廷（丞相制）。并发 init 只有一个成功。
     pub fn found(mut store: S) -> Result<Self, AppError> {
-        let history = founding_events();
+        let history = founding_events(random_seed());
         let court = Court::replay(&history)?;
         match store.append(0, &history) {
             Err(StorageError::Conflict { .. }) => return Err(AppError::AlreadyFounded),
@@ -126,10 +127,19 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    /// 招募新官员（不授官职），返回其 ID。
-    pub fn recruit(&mut self, name: String, speciality: Department) -> Result<AgentId, AppError> {
-        let committed =
-            self.commit(|court| Ok(vec![court.propose_recruitment(name.clone(), speciality)?]))?;
+    /// 招募新官员（不授官职），返回其 ID。`name` 为 `None` 时随机取一个未被占用的姓名。
+    pub fn recruit(
+        &mut self,
+        name: Option<String>,
+        speciality: Department,
+    ) -> Result<AgentId, AppError> {
+        let seed = random_seed();
+        let committed = self.commit(|court| {
+            let name = name.clone().unwrap_or_else(|| {
+                NameGenerator::new(seed).name(|n| court.agents().any(|a| a.name == n))
+            });
+            Ok(vec![court.propose_recruitment(name, speciality)?])
+        })?;
         match committed.first() {
             Some(CourtEvent::AgentRegistered(agent)) => Ok(agent.id),
             _ => unreachable!("propose_recruitment 只产生 AgentRegistered"),
@@ -386,7 +396,13 @@ impl<S: EventStore> Session<S> {
     }
 }
 
-// ---- 呈现：CLI 与 Web 共用的中文描述 ----
+/// 每次调用都不同的随机种子（标准库的 `RandomState` 由系统随机数初始化）。
+fn random_seed() -> u64 {
+    use std::hash::{BuildHasher, RandomState};
+    RandomState::new().hash_one(std::time::SystemTime::now())
+}
+
+// ---- 呈现：CLI、Web 与 TUI 共用的中文描述 ----
 
 /// 默认玉玺不额外显示，保持输出简洁。
 pub fn seal_note(seal: &Seal) -> String {
@@ -502,6 +518,26 @@ mod tests {
     }
 
     #[test]
+    fn recruits_without_a_name_get_a_fresh_random_one() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        for _ in 0..20 {
+            session.recruit(None, Department::Works).unwrap();
+        }
+        let names: std::collections::BTreeSet<_> =
+            session.court().agents().map(|a| a.name.clone()).collect();
+        assert_eq!(names.len(), 26, "开国六人与新招二十人姓名各不相同");
+        // 姓名记入事件簿，重放后不变。
+        let before: Vec<_> = session.court().agents().cloned().collect();
+        drop(session);
+        let reopened = Session::open(&mut store).unwrap();
+        assert_eq!(
+            reopened.court().agents().cloned().collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    #[test]
     fn unroutable_edict_records_nothing() {
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
@@ -523,7 +559,9 @@ mod tests {
     async fn concurrent_run_balances_clerks_and_replays() {
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
-        let id = session.recruit("新工".into(), Department::Works).unwrap();
+        let id = session
+            .recruit(Some("新工".into()), Department::Works)
+            .unwrap();
         session
             .appoint(id, Office::Clerk(Department::Works))
             .unwrap();
@@ -540,8 +578,9 @@ mod tests {
                 .iter()
                 .all(|r| matches!(r.outcome, Outcome::Completed(_)))
         );
-        // 两件同时指派：第一件给陈工（#4），第二件应计入在途负载而给新官员。
-        assert!(reports[0].path.last().unwrap().contains("陈工"));
+        // 两件同时指派：第一件给原有郎中（#4），第二件应计入在途负载而给新官员。
+        let clerk = &session.court().agent(AgentId(4)).unwrap().name;
+        assert!(reports[0].path.last().unwrap().contains(clerk.as_str()));
         assert!(reports[1].path.last().unwrap().contains("新工"));
         drop(session);
 
@@ -712,7 +751,7 @@ mod tests {
             .issue(Department::Works, "乙".into(), Seal::default())
             .unwrap();
         assert_eq!((first.id, second.id), (TaskId(1), TaskId(2)));
-        let recruited = a.recruit("新工".into(), Department::Works).unwrap();
+        let recruited = a.recruit(Some("新工".into()), Department::Works).unwrap();
         assert_eq!(recruited, AgentId(7));
 
         let reopened = Session::open(EventLog::new(&root)).unwrap();

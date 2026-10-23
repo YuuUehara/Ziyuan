@@ -22,8 +22,8 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
 用法：
   ziyuan init                          初始化朝廷（在当前目录建立 .ziyuan/）
   ziyuan court                         查看制度与朝廷状态
-  ziyuan officials                     查看官员、官职及任务完成数
-  ziyuan recruit <姓名> <部门>          招募新官（须另行 appoint 任职）
+  ziyuan officials                     查看官员、官职、品级、所用模型及任务完成数
+  ziyuan recruit [姓名] <部门>          招募新官（不给姓名则随机取名；须另行 appoint 任职）
   ziyuan edict [--dept works] [--scope <路径>]... [--tools <工具>] [--queue] <内容>
                                        下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan run [--jobs 4] [--timeout 300]
@@ -42,7 +42,12 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
   ziyuan history                       查看事件记录
   ziyuan help
 
-默认官职：chancellor、first-secretary、minister:works、clerk:personnel 等
+官制（品级随制度而变）：
+  丞相制（仿元·中书省）  chancellor 中书右丞相、vice-chancellor 中书左丞相
+  废相亲政（仿明初）    不设宰辅，皇帝直领六部
+  内阁制（仿明中后期）  first-secretary 内阁首辅、second-secretary 内阁次辅
+  六部（各制度通用）    minister:<部门> 尚书、vice-minister:<部门> 侍郎、clerk:<部门> 郎中
+  正职空缺时由副职署理。
 部门：personnel / revenue / rites / war / justice / works
 
 玉玺（承办官员的权限，随诏令记入事件簿）：
@@ -81,7 +86,7 @@ enum Command {
     Init,
     Court,
     Officials,
-    Recruit(String, Department),
+    Recruit(Option<String>, Department),
     Edict {
         department: Department,
         text: String,
@@ -137,9 +142,10 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "court" => no_args(args, Command::Court)?,
         "officials" => no_args(args, Command::Officials)?,
         "history" => no_args(args, Command::History)?,
-        "recruit" => match <[String; 2]>::try_from(args) {
-            Ok([name, dept]) => Command::Recruit(name, dept.parse()?),
-            Err(_) => return Err("用法: ziyuan recruit <姓名> <部门>".into()),
+        "recruit" => match args.as_slice() {
+            [dept] => Command::Recruit(None, dept.parse()?),
+            [name, dept] => Command::Recruit(Some(name.clone()), dept.parse()?),
+            _ => return Err("用法: ziyuan recruit [姓名] <部门>".into()),
         },
         "edict" => parse_edict(args)?,
         "run" => Command::Run(parse_limits(args)?),
@@ -195,35 +201,38 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 court.appointed_count(),
                 court.completed_count()
             );
+            println!("承办模型：{}", model_label());
             println!("模型用量：{}", court.total_usage());
             println!(
                 "调度中枢：{}",
                 match court.mode() {
-                    GovernanceMode::Chancellor => "丞相",
-                    GovernanceMode::DirectRule => "皇帝直达六部",
-                    GovernanceMode::Cabinet => "首辅",
+                    GovernanceMode::Chancellor => "中书省（右丞相，左丞相署理）",
+                    GovernanceMode::DirectRule => "皇帝直领六部",
+                    GovernanceMode::Cabinet => "内阁（首辅，次辅署理）",
                 }
             );
         }
         Command::Officials => {
             let court = session.court();
+            let model = model_label();
             for agent in court.agents() {
-                let office = court
-                    .office_of(agent.id)
-                    .map(|o| o.label())
-                    .unwrap_or("未任官职".into());
+                let office = court.office_of(agent.id).map_or("未任官职".into(), |o| {
+                    format!("{}（{}）", o.label(), o.rank(court.mode()))
+                });
                 println!(
-                    "#{:<3} {:<8} {:<12} {} (完成 {} 件)",
+                    "#{:<3} {:<6} {:<18} {} 模型 {} (完成 {} 件)",
                     agent.id.0,
                     agent.name,
                     office,
                     agent.speciality.label(),
+                    model,
                     court.recorded_completions(agent.id)
                 );
             }
         }
         Command::Recruit(name, department) => {
-            let id = session.recruit(name.clone(), department)?;
+            let id = session.recruit(name, department)?;
+            let name = &session.court().agent(id).expect("刚招募").name;
             println!("诏令已颁：招募官员 #{} {}（未授官职）。", id.0, name);
         }
         Command::Edict {
@@ -518,6 +527,11 @@ fn print_report(report: &TaskReport) {
     if report.usage.total() > 0 {
         println!("用量：{}", report.usage);
     }
+}
+
+/// 显示用的承办模型（与 [`worker_backend`] 的选择一致）：演示后端不调用模型。
+fn model_label() -> String {
+    OpenAiCompatible::from_env().map_or("演示（未接模型）".into(), |m| m.model().to_owned())
 }
 
 /// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。

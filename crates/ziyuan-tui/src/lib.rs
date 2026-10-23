@@ -121,29 +121,25 @@ enum ChooseKind {
     Appoint(AgentId),
 }
 
-impl ChooseKind {
-    fn options(self) -> Vec<String> {
-        match self {
-            Self::Reform => GovernanceMode::ALL
-                .iter()
-                .map(|m| m.label().to_owned())
-                .collect(),
-            Self::Appoint(_) => offices().iter().map(|o| o.label()).collect(),
-        }
-    }
-}
-
-fn offices() -> Vec<Office> {
-    let mut offices = vec![Office::Chancellor, Office::FirstGrandSecretary];
-    for d in Department::ALL {
-        offices.push(Office::Minister(d));
-        offices.push(Office::Clerk(d));
-    }
-    offices
+/// 现行制度下 `agent` 可任的官职：本制度的协调官职，以及本部（专长所在部门）的官职。
+fn appointable(court: &Court, agent: AgentId) -> Vec<Office> {
+    let speciality = court.agent(agent).map(|a| a.speciality);
+    Office::all()
+        .into_iter()
+        .filter(|o| o.exists_in(court.mode()))
+        .filter(|o| match o {
+            Office::Minister(d) | Office::ViceMinister(d) | Office::Clerk(d) => {
+                Some(*d) == speciality
+            }
+            _ => true,
+        })
+        .collect()
 }
 
 pub struct App {
     config: Config,
+    /// 承办官员所用的模型；演示后端为 `None`。
+    model: Option<String>,
     session: Session<EventLog>,
     sender: UnboundedSender<Message>,
     tab: Tab,
@@ -170,6 +166,7 @@ impl App {
         let (sender, receiver) = unbounded_channel();
         let selected_task = session.court().tasks().last().map(|t| t.edict.id);
         let app = Self {
+            model: config.backend.model_name().map(str::to_owned),
             config,
             session,
             sender,
@@ -358,6 +355,10 @@ impl App {
     }
 
     fn modal_key(&mut self, key: KeyEvent) {
+        let count = match &self.modal {
+            Some(Modal::Choose { kind, .. }) => self.options(*kind).len().max(1),
+            _ => 1,
+        };
         let Some(modal) = &mut self.modal else {
             return;
         };
@@ -380,15 +381,12 @@ impl App {
                 KeyCode::Enter => self.submit_input(),
                 _ => {}
             },
-            Modal::Choose { kind, selected } => {
-                let count = kind.options().len();
-                match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => *selected = (*selected + count - 1) % count,
-                    KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1) % count,
-                    KeyCode::Enter => self.submit_choice(),
-                    _ => {}
-                }
-            }
+            Modal::Choose { selected, .. } => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => *selected = (*selected + count - 1) % count,
+                KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1) % count,
+                KeyCode::Enter => self.submit_choice(),
+                _ => {}
+            },
         }
     }
 
@@ -404,7 +402,7 @@ impl App {
         let text = text.trim().to_owned();
         let department = Department::ALL[department];
         match kind {
-            InputKind::Edict | InputKind::Recruit if text.is_empty() => {
+            InputKind::Edict if text.is_empty() => {
                 self.error("内容不能为空");
             }
             InputKind::Edict => {
@@ -418,8 +416,11 @@ impl App {
             }
             InputKind::Recruit => {
                 self.mutate(
-                    |s| s.recruit(text, department),
-                    |id| format!("已招募官员 #{}（按 p 授官）", id.0),
+                    |s| {
+                        let id = s.recruit((!text.is_empty()).then_some(text), department)?;
+                        Ok((id, s.court().agent(id).expect("刚招募").name.clone()))
+                    },
+                    |(id, name)| format!("已招募官员 #{} {name}（按 p 授官）", id.0),
                 );
             }
             InputKind::Review(task, verdict) => {
@@ -441,12 +442,28 @@ impl App {
                 self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()));
             }
             ChooseKind::Appoint(agent) => {
-                let office = offices()[selected];
+                let Some(&office) = appointable(self.court(), agent).get(selected) else {
+                    return;
+                };
                 self.mutate(
                     |s| s.appoint(agent, office),
                     |_| format!("任命官员 #{} 为{}", agent.0, office.label()),
                 );
             }
+        }
+    }
+
+    fn options(&self, kind: ChooseKind) -> Vec<String> {
+        let mode = self.court().mode();
+        match kind {
+            ChooseKind::Reform => GovernanceMode::ALL
+                .iter()
+                .map(|m| m.label().to_owned())
+                .collect(),
+            ChooseKind::Appoint(agent) => appointable(self.court(), agent)
+                .iter()
+                .map(|o| format!("{}（{}）", o.label(), o.rank(mode)))
+                .collect(),
         }
     }
 
@@ -574,6 +591,10 @@ impl App {
         }
     }
 
+    fn model_label(&self) -> &str {
+        self.model.as_deref().unwrap_or("演示")
+    }
+
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let court = self.court();
         let usage = court.total_usage();
@@ -585,9 +606,10 @@ impl App {
             Span::raw("  制度 "),
             Span::styled(court.mode().label(), Style::new().fg(GOLD).bold()),
             Span::raw(format!(
-                "  在册 {} · 有职 {}  用量 输入 {} / 输出 {}",
+                "  在册 {} · 有职 {}  模型 {}  用量 输入 {} / 输出 {}",
                 court.agents().count(),
                 court.appointed_count(),
+                self.model_label(),
                 usage.input,
                 usage.output
             )),
@@ -748,7 +770,9 @@ impl App {
         let rows: Vec<Row> = court
             .agents()
             .map(|a| {
-                let office = court.office_of(a.id).map(|o| o.label());
+                let office = court
+                    .office_of(a.id)
+                    .map(|o| format!("{}·{}", o.label(), o.rank(court.mode())));
                 let record = court.service_record(a.id);
                 Row::new(vec![
                     Cell::from(format!("#{}", a.id.0)).dim(),
@@ -758,6 +782,7 @@ impl App {
                         None => Cell::from("未任官职").dim(),
                     },
                     Cell::from(a.speciality.label()),
+                    Cell::from(self.model_label()).dim(),
                     Cell::from(describe_record(&record)),
                     Cell::from(record.usage.total().to_string()),
                 ])
@@ -768,15 +793,16 @@ impl App {
             rows,
             [
                 Constraint::Length(4),
-                Constraint::Length(10),
-                Constraint::Length(12),
+                Constraint::Length(8),
+                Constraint::Length(20),
                 Constraint::Length(6),
+                Constraint::Length(16),
                 Constraint::Min(30),
                 Constraint::Length(8),
             ],
         )
         .header(
-            Row::new(["ID", "姓名", "官职", "专长", "考绩", "tokens"])
+            Row::new(["ID", "姓名", "官职·品级", "专长", "模型", "考绩", "tokens"])
                 .fg(GOLD)
                 .bold(),
         )
@@ -894,7 +920,7 @@ impl App {
             } => {
                 let (title, prompt, with_department) = match kind {
                     InputKind::Edict => ("下诏", "诏令内容：", true),
-                    InputKind::Recruit => ("招募官员", "姓名：", true),
+                    InputKind::Recruit => ("招募官员", "姓名（留空随机）：", true),
                     InputKind::Review(_, verdict) => (
                         if *verdict == Verdict::Accepted {
                             "采纳回奏"
@@ -939,7 +965,7 @@ impl App {
                 frame.set_cursor_position((cursor_x.min(popup.right() - 2), cursor_y));
             }
             Modal::Choose { kind, selected } => {
-                let options = kind.options();
+                let options = self.options(*kind);
                 let title = match kind {
                     ChooseKind::Reform => "改制".to_owned(),
                     ChooseKind::Appoint(agent) => {
@@ -1114,19 +1140,28 @@ mod tests {
         // 改为内阁制（第三项）：首辅空缺，派工路线显示空缺，下诏被拒且不留记录。
         press(&mut app, "g↓↓\n2");
         assert_eq!(app.court().mode(), GovernanceMode::Cabinet);
-        assert!(screen(&app).contains("内阁首辅空缺"));
+        assert!(screen(&app).contains("内阁首辅、次辅俱缺"));
         press(&mut app, "1n无首辅\n");
         assert!(app.court().tasks().next().is_none());
-        assert!(screen(&app).contains("空缺"));
+        assert!(screen(&app).contains("俱缺"));
 
-        // 在百官页招募新官并任命为首辅后即可下诏。
-        press(&mut app, "2n新辅\n");
+        // 在百官页招募新官（留空姓名则随机取名），任命为首辅后即可下诏。
+        press(&mut app, "2n\n");
         let id = AgentId(app.court().agents().count() as u64);
-        assert_eq!(app.court().agent(id).unwrap().name, "新辅");
+        let name = app.court().agent(id).unwrap().name.clone();
+        assert!(screen(&app).contains(&format!("已招募官员 #{} {name}", id.0)));
         for _ in 0..id.0 {
             press(&mut app, "↓");
         }
-        press(&mut app, "p↓\n");
+        // 内阁制下可任的官职只有内阁与本部（工部）官职，首辅为第一项；品级随制度显示。
+        press(&mut app, "p");
+        let shown = screen(&app);
+        assert!(shown.contains("内阁首辅（正五品）") && shown.contains("工部尚书（正二品）"));
+        assert!(
+            !shown.contains("丞相") && !shown.contains("吏部尚书（"),
+            "{shown}"
+        );
+        press(&mut app, "\n");
         assert_eq!(app.court().office_of(id), Some(Office::FirstGrandSecretary));
         press(&mut app, "1n内阁承办\n");
         assert!(app.court().task(TaskId(1)).is_some());

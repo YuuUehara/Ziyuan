@@ -19,6 +19,11 @@ pub trait WorkerBackend: Send + Sync {
         edict: &Edict,
         hooks: &dyn ExecutionHooks,
     ) -> Result<String, BoxError>;
+
+    /// 承办官员所用的模型名，供界面显示；不调用模型的后端返回 `None`。
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// 运行时在执行期间提供给后端：协作式取消、工具调用审计与流式输出。`()` 为空实现。
@@ -72,6 +77,10 @@ impl AgentBackend {
 }
 
 impl WorkerBackend for AgentBackend {
+    fn model_name(&self) -> Option<&str> {
+        self.model.model_name()
+    }
+
     fn execute(
         &self,
         actor: &Agent,

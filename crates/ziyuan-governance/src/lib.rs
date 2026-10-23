@@ -1,4 +1,6 @@
 //! 治理引擎。职权由代码校验，不由 Agent 的角色提示词决定。
+pub mod names;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path};
@@ -72,9 +74,14 @@ impl fmt::Display for GovernanceError {
             }
             Self::NotCompleted(id) => write!(f, "诏令 #{} 尚未完成，无从评定", id.0),
             Self::AlreadyReviewed(id) => write!(f, "诏令 #{} 已评定过", id.0),
-            Self::Vacant(Office::Chancellor) => f.write_str("丞相空缺。请先任命丞相，或改制。"),
+            Self::Vacant(Office::Chancellor) => {
+                f.write_str("中书右丞相、左丞相俱缺。请先任命丞相，或改制。")
+            }
             Self::Vacant(Office::FirstGrandSecretary) => {
-                f.write_str("内阁首辅空缺。请先 appoint 一名首辅。")
+                f.write_str("内阁首辅、次辅俱缺。请先 appoint 一名首辅。")
+            }
+            Self::Vacant(Office::Minister(d)) => {
+                write!(f, "{0}尚书、{0}侍郎俱缺，无法承接诏令", d.label())
             }
             Self::Vacant(office) => write!(f, "{}空缺，无法承接诏令", office.label()),
         }
@@ -175,10 +182,9 @@ impl Court {
             }
             CourtEvent::InstitutionReformed(mode) => {
                 self.propose_reform(*mode)?;
-                // 改制时自动撤销最高协调职务；部门官员保留。
-                self.appointments.retain(|_, office| {
-                    !matches!(office, Office::Chancellor | Office::FirstGrandSecretary)
-                });
+                // 改制时撤销旧制度协调机构的官职；六部官员保留（品级随制度变化）。
+                self.appointments
+                    .retain(|_, office| office.mode().is_none());
                 self.mode = *mode;
             }
             CourtEvent::EdictIssued(edict) => {
@@ -413,22 +419,18 @@ impl Court {
         if self.appointments.contains_key(&agent) {
             return Err(GovernanceError::AlreadyAppointed(agent));
         }
-        match office {
-            Office::Chancellor if self.mode != GovernanceMode::Chancellor => {
-                return Err(GovernanceError::OfficeNotInMode(office));
-            }
-            Office::FirstGrandSecretary if self.mode != GovernanceMode::Cabinet => {
-                return Err(GovernanceError::OfficeNotInMode(office));
-            }
-            Office::Minister(d) | Office::Clerk(d) if d != person.speciality => {
-                return Err(GovernanceError::SpecialityMismatch {
-                    name: person.name.clone(),
-                    department: d,
-                });
-            }
-            _ => {}
+        if !office.exists_in(self.mode) {
+            return Err(GovernanceError::OfficeNotInMode(office));
         }
-        if !matches!(office, Office::Clerk(_)) && self.appointments.values().any(|o| *o == office) {
+        if let Some(d) = department_of(office)
+            && d != person.speciality
+        {
+            return Err(GovernanceError::SpecialityMismatch {
+                name: person.name.clone(),
+                department: d,
+            });
+        }
+        if office.is_unique() && self.appointments.values().any(|o| *o == office) {
             return Err(GovernanceError::OfficeOccupied(office));
         }
         Ok(CourtEvent::OfficialAppointed { agent, office })
@@ -502,22 +504,13 @@ impl Court {
     /// 吏部荐举：列出可任 `office` 的官员（专长与制度均符合），按已评定的履历排序。
     /// 仅供参考，不产生事件；任命仍须皇帝 `appoint`。
     pub fn recommend(&self, office: Office) -> Result<Vec<Candidate<'_>>, GovernanceError> {
-        match office {
-            Office::Chancellor if self.mode != GovernanceMode::Chancellor => {
-                return Err(GovernanceError::OfficeNotInMode(office));
-            }
-            Office::FirstGrandSecretary if self.mode != GovernanceMode::Cabinet => {
-                return Err(GovernanceError::OfficeNotInMode(office));
-            }
-            _ => {}
+        if !office.exists_in(self.mode) {
+            return Err(GovernanceError::OfficeNotInMode(office));
         }
         let mut candidates: Vec<_> = self
             .agents
             .values()
-            .filter(|agent| match office {
-                Office::Minister(d) | Office::Clerk(d) => agent.speciality == d,
-                Office::Chancellor | Office::FirstGrandSecretary => true,
-            })
+            .filter(|agent| department_of(office).is_none_or(|d| agent.speciality == d))
             .map(|agent| Candidate {
                 agent,
                 current: self.office_of(agent.id),
@@ -545,42 +538,53 @@ impl Court {
         })
     }
 
+    /// 正职在任则为正职，否则由副职署理；两者俱缺时为 `None`。返回 (官员, 实际官职)。
+    fn head_or_deputy(&self, head: Office, deputy: Office) -> Option<(&Agent, Office)> {
+        self.appointed_as(head)
+            .map(|a| (a, head))
+            .or_else(|| self.appointed_as(deputy).map(|a| (a, deputy)))
+    }
+
     /// 路由说明是可观察性日志，不是给 Worker 的权限凭证。
+    ///
+    /// 皇帝 →（中书省或内阁）→ 本部尚书 → 郎中。正职空缺时由副职署理，在路线中注明。
     pub fn route(&self, edict: &Edict) -> Result<Route, GovernanceError> {
         let mut path = vec!["皇帝".to_owned()];
-        match self.mode {
-            GovernanceMode::Chancellor => {
-                let agent = self
-                    .appointed_as(Office::Chancellor)
-                    .ok_or(GovernanceError::Vacant(Office::Chancellor))?;
-                path.push(format!("丞相·{}", agent.name));
-            }
+        let step = |(agent, office): (&Agent, Office), head: Office| {
+            let acting = if office == head { "" } else { "（署理）" };
+            format!("{}·{}{acting}", office.label(), agent.name)
+        };
+        let coordinator = match self.mode {
+            GovernanceMode::Chancellor => Some((Office::Chancellor, Office::ViceChancellor)),
             GovernanceMode::Cabinet => {
-                let agent = self
-                    .appointed_as(Office::FirstGrandSecretary)
-                    .ok_or(GovernanceError::Vacant(Office::FirstGrandSecretary))?;
-                path.push(format!("首辅·{}", agent.name));
+                Some((Office::FirstGrandSecretary, Office::SecondGrandSecretary))
             }
-            GovernanceMode::DirectRule => {}
+            GovernanceMode::DirectRule => None,
+        };
+        if let Some((head, deputy)) = coordinator {
+            let found = self
+                .head_or_deputy(head, deputy)
+                .ok_or(GovernanceError::Vacant(head))?;
+            path.push(step(found, head));
         }
-        let minister = self
-            .appointed_as(Office::Minister(edict.department))
-            .ok_or(GovernanceError::Vacant(Office::Minister(edict.department)))?;
-        path.push(format!(
-            "{}尚书·{}",
-            edict.department.label(),
-            minister.name
-        ));
+        let department = edict.department;
+        let head = Office::Minister(department);
+        let found = self
+            .head_or_deputy(head, Office::ViceMinister(department))
+            .ok_or(GovernanceError::Vacant(head))?;
+        path.push(step(found, head));
+        let minister = found.0;
         // 目前只按任务量均衡派工；未来可接入可靠的考绩评分。
+        let clerk = Office::Clerk(department);
         let worker = self
             .appointments
             .iter()
-            .filter(|(_, office)| **office == Office::Clerk(edict.department))
+            .filter(|(_, office)| **office == clerk)
             .filter_map(|(id, _)| self.agents.get(id))
             .min_by_key(|candidate| (self.workload(candidate.id), candidate.id))
             .unwrap_or(minister);
         if worker.id != minister.id {
-            path.push(format!("{}属官·{}", edict.department.label(), worker.name));
+            path.push(format!("{}·{}", clerk.label(), worker.name));
         }
         Ok(Route {
             path,
@@ -661,23 +665,34 @@ pub struct Route {
     pub worker: AgentId,
 }
 
-/// 最小开局：只有工部与吏部有人，其余四部留空待扩展。
-pub fn founding_events() -> Vec<CourtEvent> {
+/// 六部官职所属的部门。
+fn department_of(office: Office) -> Option<Department> {
+    match office {
+        Office::Minister(d) | Office::ViceMinister(d) | Office::Clerk(d) => Some(d),
+        _ => None,
+    }
+}
+
+/// 最小开局（丞相制）：只有工部与吏部有人，其余四部留空待扩展。官员姓名由 `seed` 随机生成。
+pub fn founding_events(seed: u64) -> Vec<CourtEvent> {
     use CourtEvent::*;
     use Department::*;
-    let recruits = [
-        (1, "魏衡", Personnel),
-        (2, "沈衡", Works),
-        (3, "许文", Personnel),
-        (4, "陈工", Works),
-        (5, "顾吏", Personnel),
-        (6, "陆诚", Personnel),
-    ];
+    let mut generator = names::NameGenerator::new(seed);
+    let mut taken: Vec<String> = Vec::new();
+    let recruits = [Personnel, Works, Personnel, Works, Personnel, Personnel]
+        .into_iter()
+        .zip(1..)
+        .map(|(speciality, id)| {
+            let name = generator.name(|n| taken.iter().any(|t| t == n));
+            taken.push(name.clone());
+            (id, name, speciality)
+        })
+        .collect::<Vec<_>>();
     let mut events = vec![Founded(GovernanceMode::Chancellor)];
     for (id, name, speciality) in recruits {
         events.push(AgentRegistered(Agent {
             id: AgentId(id),
-            name: name.into(),
+            name,
             speciality,
         }));
     }
@@ -715,7 +730,7 @@ mod tests {
     use super::*;
     #[test]
     fn reform_changes_route() {
-        let mut court = Court::replay(&founding_events()).unwrap();
+        let mut court = Court::replay(&founding_events(1)).unwrap();
         let edict = court
             .new_edict(Department::Works, "检查源码".into(), Seal::default())
             .unwrap();
@@ -762,8 +777,81 @@ mod tests {
         );
     }
     #[test]
+    fn deputies_act_for_vacant_heads_and_ranks_follow_the_mode() {
+        let mut court = Court::replay(&founding_events(1)).unwrap();
+        let works = |court: &Court| {
+            let edict = court
+                .new_edict(Department::Works, "查".into(), Seal::default())
+                .unwrap();
+            court.route(&edict).map(|r| r.path)
+        };
+        let apply =
+            |court: &mut Court, propose: &dyn Fn(&Court) -> Result<CourtEvent, GovernanceError>| {
+                let event = propose(court).unwrap();
+                court.apply(&event).unwrap()
+            };
+        // 丞相制：右丞相（#1）罢免后，左丞相署理；尚书（#2）罢免后，侍郎署理。
+        apply(&mut court, &|c| c.propose_dismissal(AgentId(1)));
+        assert_eq!(
+            works(&court).unwrap_err(),
+            GovernanceError::Vacant(Office::Chancellor)
+        );
+        apply(&mut court, &|c| {
+            c.propose_appointment(AgentId(1), Office::ViceChancellor)
+        });
+        apply(&mut court, &|c| c.propose_dismissal(AgentId(2)));
+        assert_eq!(
+            works(&court).unwrap_err(),
+            GovernanceError::Vacant(Office::Minister(Department::Works))
+        );
+        apply(&mut court, &|c| {
+            c.propose_appointment(AgentId(2), Office::ViceMinister(Department::Works))
+        });
+        let path = works(&court).unwrap();
+        let names: Vec<String> = court.agents().map(|a| a.name.clone()).collect();
+        let name = |id: usize| names[id - 1].clone();
+        assert_eq!(
+            path,
+            [
+                "皇帝".to_owned(),
+                format!("中书左丞相·{}（署理）", name(1)),
+                format!("工部侍郎·{}（署理）", name(2)),
+                format!("工部郎中·{}", name(4)),
+            ]
+        );
+        let minister = Office::Minister(Department::Works);
+        assert_eq!(minister.rank(court.mode()), "正三品");
+
+        // 废相亲政：中书省官职随之撤销，六部官职保留并升为明制品级；内阁官职不可任命。
+        apply(&mut court, &|c| {
+            c.propose_reform(GovernanceMode::DirectRule)
+        });
+        assert_eq!(court.office_of(AgentId(1)), None);
+        assert_eq!(
+            court.office_of(AgentId(2)),
+            Some(Office::ViceMinister(Department::Works))
+        );
+        assert_eq!(minister.rank(court.mode()), "正二品");
+        assert_eq!(works(&court).unwrap().len(), 3);
+        assert_eq!(
+            court.propose_appointment(AgentId(1), Office::SecondGrandSecretary),
+            Err(GovernanceError::OfficeNotInMode(
+                Office::SecondGrandSecretary
+            ))
+        );
+        // 内阁制：次辅在首辅空缺时署理。
+        apply(&mut court, &|c| c.propose_reform(GovernanceMode::Cabinet));
+        apply(&mut court, &|c| {
+            c.propose_appointment(AgentId(1), Office::SecondGrandSecretary)
+        });
+        assert_eq!(
+            works(&court).unwrap()[1],
+            format!("内阁次辅·{}（署理）", name(1))
+        );
+    }
+    #[test]
     fn cannot_create_two_chancellors() {
-        let court = Court::replay(&founding_events()).unwrap();
+        let court = Court::replay(&founding_events(1)).unwrap();
         let mut court = court;
         court
             .apply(&court.propose_dismissal(AgentId(6)).unwrap())
@@ -776,7 +864,7 @@ mod tests {
     }
     #[test]
     fn cannot_replay_duplicate_appointment() {
-        let mut events = founding_events();
+        let mut events = founding_events(1);
         events.push(CourtEvent::OfficialAppointed {
             agent: AgentId(2),
             office: Office::Minister(Department::Works),
@@ -785,19 +873,19 @@ mod tests {
     }
     #[test]
     fn replay_applies_same_rules_as_proposals() {
-        let mut events = founding_events();
+        let mut events = founding_events(1);
         events.push(CourtEvent::OfficialDismissed { agent: AgentId(7) });
         assert_eq!(
             Court::replay(&events).unwrap_err(),
             GovernanceError::NotAppointed(AgentId(7))
         );
-        let mut events = founding_events();
+        let mut events = founding_events(1);
         events.push(CourtEvent::InstitutionReformed(GovernanceMode::Chancellor));
         assert!(Court::replay(&events).is_err());
     }
     #[test]
     fn libu_counts_only_reviewed_results_and_ranks_by_them() {
-        let mut events = founding_events();
+        let mut events = founding_events(1);
         events.push(CourtEvent::AgentRegistered(Agent {
             id: AgentId(7),
             name: "新工".into(),
@@ -853,7 +941,7 @@ mod tests {
                 });
             }
         };
-        // 陈工（#4）完成数最多，但多为驳回或未评定；新工（#7）完成少但被采纳。
+        // 工部郎中 #4 完成数最多，但多为驳回或未评定；新工（#7）完成少但被采纳。
         handle(4, true, Some(Verdict::Rejected), 0);
         handle(4, true, None, 0);
         handle(4, true, None, 0);
@@ -884,7 +972,7 @@ mod tests {
             .iter()
             .map(|c| c.agent.id.0)
             .collect();
-        // 新工居首；沈衡（#2，无履历）在被驳回过的陈工之前；吏部官员不入选。
+        // 新工居首；工部尚书 #2（无履历）在被驳回过的 #4 之前；吏部官员不入选。
         assert_eq!(ranked, [7, 2, 4]);
         assert!(court.recommend(Office::FirstGrandSecretary).is_err());
 
@@ -905,7 +993,7 @@ mod tests {
     }
     #[test]
     fn seal_scope_must_stay_inside_project() {
-        let court = Court::replay(&founding_events()).unwrap();
+        let court = Court::replay(&founding_events(1)).unwrap();
         let seal = |scope: &[&str]| Seal {
             capabilities: Default::default(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
@@ -922,7 +1010,7 @@ mod tests {
         }
         assert!(issue(&[]).is_err());
         // 回放同样拒绝：手写的日志也不能绕过。
-        let mut events = founding_events();
+        let mut events = founding_events(1);
         events.push(CourtEvent::EdictIssued(Edict {
             id: TaskId(1),
             department: Department::Works,
@@ -934,7 +1022,7 @@ mod tests {
     #[test]
     fn task_lifecycle_is_enforced_on_replay() {
         let task = TaskId(1);
-        let mut base = founding_events();
+        let mut base = founding_events(1);
         base.push(CourtEvent::EdictIssued(Edict {
             id: task,
             department: Department::Works,
@@ -1003,7 +1091,7 @@ mod tests {
     }
     #[test]
     fn recruitment_enables_dynamic_worker_pool() {
-        let mut court = Court::replay(&founding_events()).unwrap();
+        let mut court = Court::replay(&founding_events(1)).unwrap();
         let event = court
             .propose_recruitment("新工".into(), Department::Works)
             .unwrap();
@@ -1035,7 +1123,7 @@ mod tests {
     }
     #[test]
     fn appoint_validates_department() {
-        let mut court = Court::replay(&founding_events()).unwrap();
+        let mut court = Court::replay(&founding_events(1)).unwrap();
         court
             .apply(&court.propose_dismissal(AgentId(4)).unwrap())
             .unwrap();

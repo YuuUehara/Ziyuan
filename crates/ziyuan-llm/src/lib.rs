@@ -57,6 +57,10 @@ impl OpenAiCompatible {
 }
 
 impl ModelProvider for OpenAiCompatible {
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
+
     fn next_turn(
         &self,
         messages: &[Message],
