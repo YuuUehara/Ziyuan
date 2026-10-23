@@ -65,6 +65,8 @@ pub struct TaskReport {
 /// [`Session::run`] 执行期间的实时进度。
 #[derive(Clone, Copy, Debug)]
 pub enum RunUpdate<'a> {
+    /// 诏令已指派给承办官员，开始执行（已记入事件簿）。
+    Assigned(TaskId),
     /// 承办官员（模型）流式生成的文本片段；只用于显示，不写入事件簿。
     Text { task: TaskId, text: &'a str },
     /// 一件诏令在本次运行中的结局（每件恰好一次）。
@@ -114,6 +116,14 @@ impl<S: EventStore> Session<S> {
 
     pub fn history(&self) -> &[CourtEvent] {
         &self.history
+    }
+
+    /// 重新加载事件簿，看到其他进程（或会话）写入的变更。
+    pub fn reload(&mut self) -> Result<(), AppError> {
+        let history = self.store.load()?;
+        self.court = Court::replay(&history)?;
+        self.history = history;
+        Ok(())
     }
 
     /// 招募新官员（不授官职），返回其 ID。
@@ -227,6 +237,7 @@ impl<S: EventStore> Session<S> {
                         edict: edict.clone(),
                     });
                     running.push((edict, path));
+                    on_update(RunUpdate::Assigned(task));
                 }
                 CourtEvent::TaskFailed { reason, .. } => {
                     on_update(RunUpdate::Finished(&TaskReport {
@@ -322,6 +333,26 @@ impl<S: EventStore> Session<S> {
             }
         }
         Ok(())
+    }
+
+    /// 反复执行全部未结束的诏令，直到队列清空：执行期间新入队的诏令在本轮结束后接着执行。
+    /// `cancel` 触发、或一轮过后只剩未开始的诏令时停止。
+    pub async fn run_open(
+        &mut self,
+        scheduler: &Scheduler,
+        cancel: &CancelToken,
+        mut on_update: impl FnMut(RunUpdate<'_>),
+    ) -> Result<(), AppError> {
+        let mut previous = Vec::new();
+        loop {
+            self.reload()?;
+            let tasks = self.court.open_tasks();
+            if tasks.is_empty() || tasks == previous || cancel.is_cancelled() {
+                return Ok(());
+            }
+            self.run(&tasks, scheduler, cancel, &mut on_update).await?;
+            previous = tasks;
+        }
     }
 
     /// 由 `propose` 基于当前状态生成事件，校验后写入。事件簿若已被其他进程更新，
@@ -564,6 +595,7 @@ mod tests {
                 &CancelToken::new(),
                 |u| {
                     seen.push(match u {
+                        RunUpdate::Assigned(task) => format!("{}:assigned", task.0),
                         RunUpdate::Text { task, text } => format!("{}:{text}", task.0),
                         RunUpdate::Finished(r) => {
                             format!("{}:done {}", r.edict.id.0, r.usage.total())
@@ -573,7 +605,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(seen, ["1:先", "1:后", "1:done 33"]);
+        assert_eq!(seen, ["1:assigned", "1:先", "1:后", "1:done 33"]);
         // 指派、两次用量与完成；流式片段不入事件簿。
         assert_eq!(session.history().len(), before + 4);
         drop(session);

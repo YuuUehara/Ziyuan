@@ -1,0 +1,1141 @@
+//! 紫禁城终端界面（TUI）：在终端里查看朝廷、下诏、执行、评定与任免。
+//!
+//! 与 CLI、Web 一样只是 [`Session`] 的一个前端：写入以乐观并发提交，执行诏令前取得执行者锁，
+//! 并定时重新加载事件簿，因此能看到其他 ziyuan 进程的变更。
+//!
+//! [`App`] 不依赖真实终端：按键经 [`App::handle`] 处理，画面由 [`App::draw`] 绘制，
+//! 测试用 ratatui 的 `TestBackend` 即可驱动。
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{
+    Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs, Wrap,
+};
+use ratatui::{DefaultTerminal, Frame};
+use std::collections::HashMap;
+use std::error::Error;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use ziyuan_app::{AppError, RunUpdate, Session, describe_event, describe_record, seal_note};
+use ziyuan_core::{AgentId, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_governance::{Court, Task, TaskStatus};
+use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
+use ziyuan_storage::EventLog;
+
+pub struct Config {
+    /// 朝廷所在目录（含 `.ziyuan/`）。
+    pub root: PathBuf,
+    pub backend: Arc<dyn WorkerBackend>,
+    pub limits: Limits,
+}
+
+/// 接管终端运行界面，直到用户退出。
+pub async fn run(config: Config) -> Result<(), Box<dyn Error>> {
+    let (mut app, mut messages) = App::new(config)?;
+    // crossterm 的读取是阻塞的；放在独立线程，退出时不必等它。
+    let input = app.sender.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = event::read() {
+            if input.send(Message::Input(event)).is_err() {
+                break;
+            }
+        }
+    });
+    let mut terminal = ratatui::init();
+    let result = event_loop(&mut terminal, &mut app, &mut messages).await;
+    ratatui::restore();
+    result
+}
+
+async fn event_loop(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    messages: &mut UnboundedReceiver<Message>,
+) -> Result<(), Box<dyn Error>> {
+    // 定时重新加载，看到其他进程的变更。
+    let mut refresh = tokio::time::interval(Duration::from_secs(1));
+    while !app.quit {
+        terminal.draw(|frame| app.draw(frame))?;
+        tokio::select! {
+            Some(message) = messages.recv() => app.handle(message),
+            _ = refresh.tick() => app.reload(),
+        }
+    }
+    if let Some(cancel) = &app.run {
+        cancel.cancel();
+    }
+    Ok(())
+}
+
+/// 界面收到的消息：终端输入，或后台执行的进度。
+pub enum Message {
+    Input(Event),
+    Assigned(TaskId),
+    Text(TaskId, String),
+    Finished {
+        task: TaskId,
+        outcome: Outcome,
+    },
+    /// 后台执行结束；出错时带上错误。
+    RunDone(Option<String>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Edicts,
+    Officials,
+    History,
+}
+const TABS: [(Tab, &str); 3] = [
+    (Tab::Edicts, "诏令"),
+    (Tab::Officials, "百官"),
+    (Tab::History, "起居注"),
+];
+
+enum Modal {
+    /// 单行输入；`department` 只用于下诏与招募。
+    Input {
+        kind: InputKind,
+        text: String,
+        department: usize,
+    },
+    Choose {
+        kind: ChooseKind,
+        selected: usize,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum InputKind {
+    Edict,
+    Recruit,
+    Review(TaskId, Verdict),
+}
+
+#[derive(Clone, Copy)]
+enum ChooseKind {
+    Reform,
+    Appoint(AgentId),
+}
+
+impl ChooseKind {
+    fn options(self) -> Vec<String> {
+        match self {
+            Self::Reform => GovernanceMode::ALL
+                .iter()
+                .map(|m| m.label().to_owned())
+                .collect(),
+            Self::Appoint(_) => offices().iter().map(|o| o.label()).collect(),
+        }
+    }
+}
+
+fn offices() -> Vec<Office> {
+    let mut offices = vec![Office::Chancellor, Office::FirstGrandSecretary];
+    for d in Department::ALL {
+        offices.push(Office::Minister(d));
+        offices.push(Office::Clerk(d));
+    }
+    offices
+}
+
+pub struct App {
+    config: Config,
+    session: Session<EventLog>,
+    sender: UnboundedSender<Message>,
+    tab: Tab,
+    /// 选中的诏令；列表按新到旧排列。
+    selected_task: Option<TaskId>,
+    selected_official: usize,
+    /// `None` 表示跟随最新事件。
+    selected_event: Option<usize>,
+    /// 详情面板的滚动行数（执行中的诏令自动跟随末尾）。
+    detail_scroll: u16,
+    modal: Option<Modal>,
+    /// 最近一次操作的结果或错误。
+    status: Option<(String, bool)>,
+    /// 本进程正在进行的执行。
+    run: Option<CancelToken>,
+    /// 执行中诏令的流式输出（不入事件簿）。
+    live: HashMap<TaskId, String>,
+    quit: bool,
+}
+
+impl App {
+    pub fn new(config: Config) -> Result<(Self, UnboundedReceiver<Message>), AppError> {
+        let session = Session::open(EventLog::new(&config.root))?;
+        let (sender, receiver) = unbounded_channel();
+        let selected_task = session.court().tasks().last().map(|t| t.edict.id);
+        let app = Self {
+            config,
+            session,
+            sender,
+            tab: Tab::Edicts,
+            selected_task,
+            selected_official: 0,
+            selected_event: None,
+            detail_scroll: 0,
+            modal: None,
+            status: None,
+            run: None,
+            live: HashMap::new(),
+            quit: false,
+        };
+        Ok((app, receiver))
+    }
+
+    fn court(&self) -> &Court {
+        self.session.court()
+    }
+
+    fn info(&mut self, message: impl Into<String>) {
+        self.status = Some((message.into(), false));
+    }
+
+    fn error(&mut self, message: impl Into<String>) {
+        self.status = Some((message.into(), true));
+    }
+
+    pub fn reload(&mut self) {
+        if let Err(e) = self.session.reload() {
+            self.error(e.to_string());
+        }
+        if self.selected_task.is_none() {
+            self.selected_task = self.court().tasks().last().map(|t| t.edict.id);
+        }
+    }
+
+    /// 执行一个变更；成功时显示 `done`，失败时显示错误。
+    fn mutate<T>(
+        &mut self,
+        f: impl FnOnce(&mut Session<EventLog>) -> Result<T, AppError>,
+        done: impl FnOnce(&T) -> String,
+    ) -> Option<T> {
+        match f(&mut self.session) {
+            Ok(value) => {
+                self.info(done(&value));
+                Some(value)
+            }
+            Err(e) => {
+                self.error(e.to_string());
+                None
+            }
+        }
+    }
+
+    pub fn handle(&mut self, message: Message) {
+        match message {
+            Message::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => self.key(key),
+            Message::Input(_) => {}
+            Message::Assigned(_) => self.reload(),
+            Message::Text(task, text) => self.live.entry(task).or_default().push_str(&text),
+            Message::Finished { task, outcome } => {
+                self.live.remove(&task);
+                self.reload();
+                match outcome {
+                    Outcome::Completed(_) => self.info(format!("诏令 #{} 已回奏", task.0)),
+                    Outcome::Failed(reason) => {
+                        self.error(format!("诏令 #{} 失败：{reason}", task.0))
+                    }
+                    Outcome::Cancelled => self.info(format!("诏令 #{} 已撤销", task.0)),
+                    Outcome::NotStarted => {}
+                }
+            }
+            Message::RunDone(error) => {
+                self.run = None;
+                self.live.clear();
+                self.reload();
+                match error {
+                    Some(e) => self.error(format!("执行出错：{e}")),
+                    None if self.court().open_tasks().is_empty() => self.info("诏令已全部结束"),
+                    None => self.info("已停止；未开始的诏令仍在队列中"),
+                }
+            }
+        }
+    }
+
+    fn key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
+        }
+        if self.modal.is_some() {
+            self.modal_key(key);
+            return;
+        }
+        match key.code {
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Tab | KeyCode::Right => self.switch_tab(1),
+            KeyCode::BackTab | KeyCode::Left => self.switch_tab(TABS.len() - 1),
+            KeyCode::Char(c @ '1'..='3') => self.tab = TABS[c as usize - '1' as usize].0,
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(5),
+            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(5),
+            KeyCode::Char('r') => self.start_run(),
+            KeyCode::Char('s') => self.stop_run(),
+            KeyCode::Char('g') => {
+                let selected = GovernanceMode::ALL
+                    .iter()
+                    .position(|&m| m == self.court().mode())
+                    .unwrap_or(0);
+                self.modal = Some(Modal::Choose {
+                    kind: ChooseKind::Reform,
+                    selected,
+                });
+            }
+            KeyCode::Char('n') => {
+                let kind = match self.tab {
+                    Tab::Officials => InputKind::Recruit,
+                    _ => InputKind::Edict,
+                };
+                let works = Department::ALL.iter().position(|&d| d == Department::Works);
+                self.modal = Some(Modal::Input {
+                    kind,
+                    text: String::new(),
+                    department: works.unwrap_or(0),
+                });
+            }
+            code => match self.tab {
+                Tab::Edicts => self.edict_key(code),
+                Tab::Officials => self.official_key(code),
+                Tab::History => {}
+            },
+        }
+    }
+
+    fn edict_key(&mut self, code: KeyCode) {
+        let Some(task) = self.selected_task else {
+            return;
+        };
+        match code {
+            KeyCode::Char('c') => {
+                self.mutate(|s| s.cancel(task), |_| format!("诏令 #{} 已撤销", task.0));
+            }
+            KeyCode::Char('a' | 'd') => {
+                let verdict = if code == KeyCode::Char('a') {
+                    Verdict::Accepted
+                } else {
+                    Verdict::Rejected
+                };
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::Review(task, verdict),
+                    text: String::new(),
+                    department: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn official_key(&mut self, code: KeyCode) {
+        let Some(agent) = self
+            .court()
+            .agents()
+            .nth(self.selected_official)
+            .map(|a| a.id)
+        else {
+            return;
+        };
+        match code {
+            KeyCode::Char('p') => {
+                self.modal = Some(Modal::Choose {
+                    kind: ChooseKind::Appoint(agent),
+                    selected: 0,
+                })
+            }
+            KeyCode::Char('d') => {
+                self.mutate(
+                    |s| s.dismiss(agent),
+                    |_| format!("官员 #{} 已罢免现职", agent.0),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn modal_key(&mut self, key: KeyEvent) {
+        let Some(modal) = &mut self.modal else {
+            return;
+        };
+        if key.code == KeyCode::Esc {
+            self.modal = None;
+            return;
+        }
+        match modal {
+            Modal::Input {
+                text, department, ..
+            } => match key.code {
+                KeyCode::Char(c) => text.push(c),
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Tab => *department = (*department + 1) % Department::ALL.len(),
+                KeyCode::BackTab => {
+                    *department = (*department + Department::ALL.len() - 1) % Department::ALL.len()
+                }
+                KeyCode::Enter => self.submit_input(),
+                _ => {}
+            },
+            Modal::Choose { kind, selected } => {
+                let count = kind.options().len();
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => *selected = (*selected + count - 1) % count,
+                    KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1) % count,
+                    KeyCode::Enter => self.submit_choice(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn submit_input(&mut self) {
+        let Some(Modal::Input {
+            kind,
+            text,
+            department,
+        }) = self.modal.take()
+        else {
+            return;
+        };
+        let text = text.trim().to_owned();
+        let department = Department::ALL[department];
+        match kind {
+            InputKind::Edict | InputKind::Recruit if text.is_empty() => {
+                self.error("内容不能为空");
+            }
+            InputKind::Edict => {
+                if let Some(id) = self.mutate(
+                    |s| Ok(s.issue(department, text, Seal::default())?.id),
+                    |id| format!("诏令 #{} 已入队（按 r 执行）", id.0),
+                ) {
+                    self.selected_task = Some(id);
+                    self.detail_scroll = 0;
+                }
+            }
+            InputKind::Recruit => {
+                self.mutate(
+                    |s| s.recruit(text, department),
+                    |id| format!("已招募官员 #{}（按 p 授官）", id.0),
+                );
+            }
+            InputKind::Review(task, verdict) => {
+                self.mutate(
+                    |s| s.review(task, verdict, text),
+                    |_| format!("诏令 #{} 评定为{}", task.0, verdict.label()),
+                );
+            }
+        }
+    }
+
+    fn submit_choice(&mut self) {
+        let Some(Modal::Choose { kind, selected }) = self.modal.take() else {
+            return;
+        };
+        match kind {
+            ChooseKind::Reform => {
+                let mode = GovernanceMode::ALL[selected];
+                self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()));
+            }
+            ChooseKind::Appoint(agent) => {
+                let office = offices()[selected];
+                self.mutate(
+                    |s| s.appoint(agent, office),
+                    |_| format!("任命官员 #{} 为{}", agent.0, office.label()),
+                );
+            }
+        }
+    }
+
+    fn switch_tab(&mut self, step: usize) {
+        let index = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
+        self.tab = TABS[(index + step) % TABS.len()].0;
+    }
+
+    /// 新到旧排列的诏令。
+    fn task_order(&self) -> Vec<&Task> {
+        self.court().tasks().rev().collect()
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let step = |index: usize, len: usize| {
+            index
+                .saturating_add_signed(delta)
+                .min(len.saturating_sub(1))
+        };
+        match self.tab {
+            Tab::Edicts => {
+                let order: Vec<TaskId> = self.task_order().iter().map(|t| t.edict.id).collect();
+                let index = order
+                    .iter()
+                    .position(|&id| Some(id) == self.selected_task)
+                    .unwrap_or(0);
+                self.selected_task = order.get(step(index, order.len())).copied();
+                self.detail_scroll = 0;
+            }
+            Tab::Officials => {
+                self.selected_official =
+                    step(self.selected_official, self.court().agents().count());
+            }
+            Tab::History => {
+                let len = self.session.history().len();
+                let index = self.selected_event.unwrap_or(len.saturating_sub(1));
+                let next = step(index, len);
+                self.selected_event = (next + 1 < len).then_some(next);
+            }
+        }
+    }
+
+    /// 在后台执行全部未结束的诏令（含执行期间新入队的）。
+    fn start_run(&mut self) {
+        if self.run.is_some() {
+            return self.error("已在执行中");
+        }
+        let lock = match EventLog::new(&self.config.root).try_lock_executor() {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return self.error("另一个 ziyuan 进程正在执行诏令，请待其结束"),
+            Err(e) => return self.error(e.to_string()),
+        };
+        if self.court().open_tasks().is_empty() {
+            return self.info("没有未结束的诏令");
+        }
+        let cancel = CancelToken::new();
+        self.run = Some(cancel.clone());
+        self.info("执行中…（按 s 停止）");
+        let scheduler = Scheduler::new(self.config.backend.clone(), self.config.limits);
+        let root = self.config.root.clone();
+        let sender = self.sender.clone();
+        tokio::spawn(async move {
+            let _lock = lock;
+            let result = async {
+                let mut session = Session::open(EventLog::new(&root))?;
+                session
+                    .run_open(&scheduler, &cancel, |update| {
+                        let _ = sender.send(match update {
+                            RunUpdate::Assigned(task) => Message::Assigned(task),
+                            RunUpdate::Text { task, text } => Message::Text(task, text.to_owned()),
+                            RunUpdate::Finished(report) => Message::Finished {
+                                task: report.edict.id,
+                                outcome: report.outcome.clone(),
+                            },
+                        });
+                    })
+                    .await
+            }
+            .await;
+            let _ = sender.send(Message::RunDone(result.err().map(|e| e.to_string())));
+        });
+    }
+
+    fn stop_run(&mut self) {
+        match &self.run {
+            Some(cancel) => {
+                cancel.cancel();
+                self.info("正在停止：撤销执行中的诏令，排队中的保留");
+            }
+            None => self.error("当前没有执行"),
+        }
+    }
+
+    // ---- 绘制 ----
+
+    pub fn draw(&self, frame: &mut Frame) {
+        let [header, tabs, body, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .areas(frame.area());
+        self.draw_header(frame, header);
+        let titles = TABS
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name))| format!(" {} {name} ", i + 1));
+        let selected = TABS.iter().position(|(t, _)| *t == self.tab);
+        frame.render_widget(
+            Tabs::new(titles)
+                .select(selected)
+                .highlight_style(Style::new().fg(GOLD).bold().reversed())
+                .divider(""),
+            tabs,
+        );
+        match self.tab {
+            Tab::Edicts => self.draw_edicts(frame, body),
+            Tab::Officials => self.draw_officials(frame, body),
+            Tab::History => self.draw_history(frame, body),
+        }
+        self.draw_footer(frame, footer);
+        if let Some(modal) = &self.modal {
+            self.draw_modal(frame, modal);
+        }
+    }
+
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        let court = self.court();
+        let usage = court.total_usage();
+        let mut spans = vec![
+            Span::styled(
+                " 紫垣 · 紫禁城 ",
+                Style::new().fg(Color::White).bg(VERMILION).bold(),
+            ),
+            Span::raw("  制度 "),
+            Span::styled(court.mode().label(), Style::new().fg(GOLD).bold()),
+            Span::raw(format!(
+                "  在册 {} · 有职 {}  用量 输入 {} / 输出 {}",
+                court.agents().count(),
+                court.appointed_count(),
+                usage.input,
+                usage.output
+            )),
+        ];
+        if self.run.is_some() {
+            spans.push(Span::styled(
+                "  ● 执行中",
+                Style::new().fg(Color::Yellow).bold(),
+            ));
+        }
+        frame.render_widget(Line::from(spans), area);
+    }
+
+    fn draw_edicts(&self, frame: &mut Frame, area: Rect) {
+        let [list_area, detail_area] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(area);
+        let order = self.task_order();
+        let items: Vec<ListItem> = order
+            .iter()
+            .map(|task| {
+                let (label, style) = status_badge(task);
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("#{:<3}", task.edict.id.0), Style::new().dim()),
+                    Span::styled(format!("{:<6}", label), style),
+                    Span::raw(format!(
+                        " {} {}",
+                        task.edict.department.label(),
+                        task.edict.text
+                    )),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default().with_selected(
+            order
+                .iter()
+                .position(|t| Some(t.edict.id) == self.selected_task),
+        );
+        let empty = items.is_empty();
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(panel(format!("诏令（{}）", order.len())))
+                .highlight_style(Style::new().bg(Color::DarkGray).bold())
+                .highlight_symbol("▌"),
+            list_area,
+            &mut state,
+        );
+        if empty {
+            let hint = Paragraph::new("尚无诏令。按 n 下诏。").dim();
+            frame.render_widget(hint, list_area.inner(ratatui::layout::Margin::new(2, 1)));
+        }
+
+        let selected = self.selected_task.and_then(|id| self.court().task(id));
+        let Some(task) = selected else {
+            frame.render_widget(Paragraph::new("").block(panel("详情".into())), detail_area);
+            return;
+        };
+        let (text, following) = self.task_detail(task);
+        let paragraph = Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(panel(format!(
+                "诏令 #{} · {}",
+                task.edict.id.0,
+                task.edict.department.label()
+            )));
+        let inner_height = detail_area.height.saturating_sub(2) as usize;
+        let lines = paragraph.line_count(detail_area.width.saturating_sub(2));
+        let max_scroll = lines.saturating_sub(inner_height) as u16;
+        let scroll = if following {
+            max_scroll
+        } else {
+            self.detail_scroll.min(max_scroll)
+        };
+        frame.render_widget(paragraph.scroll((scroll, 0)), detail_area);
+    }
+
+    /// 诏令详情，以及是否应跟随末尾（正在流式输出）。
+    fn task_detail(&self, task: &Task) -> (Text<'static>, bool) {
+        let court = self.court();
+        let name = |id: AgentId| court.agent(id).map_or("?".to_owned(), |a| a.name.clone());
+        let label = |s: &str| Span::styled(format!("{s}　"), Style::new().fg(GOLD));
+        let (status, style) = status_badge(task);
+        let mut lines = vec![Line::from(task.edict.text.clone()).bold(), Line::default()];
+        let seal = seal_note(&task.edict.seal);
+        lines.push(Line::from(vec![
+            label("玉玺"),
+            Span::raw(if seal.is_empty() {
+                "默认（全部只读工具，整个项目）".into()
+            } else {
+                seal
+            }),
+        ]));
+        let worker = match &task.status {
+            TaskStatus::Assigned(w) | TaskStatus::Completed { worker: w, .. } => Some(*w),
+            TaskStatus::Failed { worker, .. } => *worker,
+            _ => None,
+        };
+        let mut status_line = vec![label("状态"), Span::styled(status, style)];
+        if let Some(w) = worker {
+            status_line.push(Span::raw(format!("  承办 {}", name(w))));
+        }
+        lines.push(Line::from(status_line));
+        if task.usage.total() > 0 || task.tool_calls > 0 {
+            lines.push(Line::from(vec![
+                label("用量"),
+                Span::raw(format!(
+                    "{}；工具调用 {} 次（失败 {}）",
+                    task.usage, task.tool_calls, task.tool_failures
+                )),
+            ]));
+        }
+        if let Some((verdict, note)) = &task.review {
+            let note = if note.is_empty() {
+                String::new()
+            } else {
+                format!("：{note}")
+            };
+            lines.push(Line::from(vec![
+                label("评定"),
+                Span::raw(format!("{}{note}", verdict.label())),
+            ]));
+        }
+        lines.push(Line::default());
+        let mut following = false;
+        match &task.status {
+            TaskStatus::Completed { summary, .. } => {
+                lines.push(Line::from("回奏").fg(GOLD).bold());
+                lines.extend(summary.lines().map(|l| Line::from(l.to_owned())));
+                if task.review.is_none() {
+                    lines.push(Line::default());
+                    lines.push(Line::from("按 a 采纳、d 驳回").dim());
+                }
+            }
+            TaskStatus::Failed { reason, .. } => {
+                lines.push(Line::from(format!("失败：{reason}")).fg(Color::Red));
+            }
+            TaskStatus::Pending | TaskStatus::Assigned(_) => {
+                if let Some(live) = self.live.get(&task.edict.id) {
+                    lines.push(Line::from("实时输出").fg(GOLD).bold());
+                    lines.extend(live.lines().map(|l| Line::from(l.to_owned())));
+                    following = true;
+                } else if matches!(task.status, TaskStatus::Pending) {
+                    lines.push(Line::from("排队中。按 r 执行，c 撤销。").dim());
+                }
+            }
+            TaskStatus::Cancelled => {}
+        }
+        (Text::from(lines), following)
+    }
+
+    fn draw_officials(&self, frame: &mut Frame, area: Rect) {
+        let court = self.court();
+        let [table_area, routes_area] = Layout::vertical([
+            Constraint::Min(5),
+            Constraint::Length(Department::ALL.len() as u16 + 2),
+        ])
+        .areas(area);
+        let rows: Vec<Row> = court
+            .agents()
+            .map(|a| {
+                let office = court.office_of(a.id).map(|o| o.label());
+                let record = court.service_record(a.id);
+                Row::new(vec![
+                    Cell::from(format!("#{}", a.id.0)).dim(),
+                    Cell::from(a.name.clone()),
+                    match office {
+                        Some(o) => Cell::from(o).fg(GOLD),
+                        None => Cell::from("未任官职").dim(),
+                    },
+                    Cell::from(a.speciality.label()),
+                    Cell::from(describe_record(&record)),
+                    Cell::from(record.usage.total().to_string()),
+                ])
+            })
+            .collect();
+        let count = rows.len();
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(4),
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(6),
+                Constraint::Min(30),
+                Constraint::Length(8),
+            ],
+        )
+        .header(
+            Row::new(["ID", "姓名", "官职", "专长", "考绩", "tokens"])
+                .fg(GOLD)
+                .bold(),
+        )
+        .row_highlight_style(Style::new().bg(Color::DarkGray).bold())
+        .highlight_symbol("▌")
+        .block(panel(format!("百官（{count}）")));
+        let mut state = TableState::default().with_selected(Some(self.selected_official));
+        frame.render_stateful_widget(table, table_area, &mut state);
+
+        let routes: Vec<Line> = Department::ALL
+            .iter()
+            .map(|&d| {
+                let route = court
+                    .new_edict(d, "预览".into(), Seal::default())
+                    .and_then(|edict| court.route(&edict));
+                let mut spans = vec![Span::styled(
+                    format!("{}　", d.label()),
+                    Style::new().fg(GOLD),
+                )];
+                spans.push(match route {
+                    Ok(route) => Span::raw(route.path.join(" → ")),
+                    Err(e) => Span::styled(e.to_string(), Style::new().fg(Color::Red)),
+                });
+                Line::from(spans)
+            })
+            .collect();
+        frame.render_widget(
+            Paragraph::new(routes).block(panel(format!("派工路线 · {}", court.mode().label()))),
+            routes_area,
+        );
+    }
+
+    fn draw_history(&self, frame: &mut Frame, area: Rect) {
+        let history = self.session.history();
+        let items: Vec<ListItem> = history
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:>4} ", i + 1), Style::new().dim()),
+                    Span::raw(describe_event(e)),
+                ]))
+            })
+            .collect();
+        let selected = self
+            .selected_event
+            .unwrap_or(history.len().saturating_sub(1));
+        let mut state = ListState::default().with_selected(Some(selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(panel(format!("起居注（{} 条事件）", history.len())))
+                .highlight_style(Style::new().bg(Color::DarkGray)),
+            area,
+            &mut state,
+        );
+    }
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+        let [status, keys] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        if let Some((message, is_error)) = &self.status {
+            let style = if *is_error {
+                Style::new().fg(Color::Red).bold()
+            } else {
+                Style::new().fg(Color::Green)
+            };
+            frame.render_widget(Line::styled(format!(" {message}"), style), status);
+        }
+        let hints: &[(&str, &str)] = match (&self.modal, self.tab) {
+            (Some(Modal::Input { .. }), _) => {
+                &[("Enter", "确定"), ("Tab", "换部门"), ("Esc", "取消")]
+            }
+            (Some(Modal::Choose { .. }), _) => {
+                &[("↑↓", "选择"), ("Enter", "确定"), ("Esc", "取消")]
+            }
+            (None, Tab::Edicts) => &[
+                ("n", "下诏"),
+                ("r", "执行"),
+                ("s", "停止"),
+                ("c", "撤销"),
+                ("a/d", "采纳/驳回"),
+                ("g", "改制"),
+                ("Tab", "切换"),
+                ("q", "退出"),
+            ],
+            (None, Tab::Officials) => &[
+                ("n", "招募"),
+                ("p", "任命"),
+                ("d", "罢免"),
+                ("g", "改制"),
+                ("Tab", "切换"),
+                ("q", "退出"),
+            ],
+            (None, Tab::History) => &[("↑↓", "浏览"), ("Tab", "切换"), ("q", "退出")],
+        };
+        let spans: Vec<Span> = hints
+            .iter()
+            .flat_map(|(key, action)| {
+                [
+                    Span::styled(format!(" {key} "), Style::new().fg(Color::Black).bg(GOLD)),
+                    Span::raw(format!(" {action}  ")),
+                ]
+            })
+            .collect();
+        frame.render_widget(Line::from(spans), keys);
+    }
+
+    fn draw_modal(&self, frame: &mut Frame, modal: &Modal) {
+        let area = frame.area();
+        match modal {
+            Modal::Input {
+                kind,
+                text,
+                department,
+            } => {
+                let (title, prompt, with_department) = match kind {
+                    InputKind::Edict => ("下诏", "诏令内容：", true),
+                    InputKind::Recruit => ("招募官员", "姓名：", true),
+                    InputKind::Review(_, verdict) => (
+                        if *verdict == Verdict::Accepted {
+                            "采纳回奏"
+                        } else {
+                            "驳回回奏"
+                        },
+                        "备注（可空）：",
+                        false,
+                    ),
+                };
+                let title = match kind {
+                    InputKind::Review(task, _) => format!("{title} · 诏令 #{}", task.0),
+                    _ => title.to_owned(),
+                };
+                let popup = centered(area, 64, if with_department { 6 } else { 5 });
+                let mut lines = Vec::new();
+                if with_department {
+                    let label = if matches!(kind, InputKind::Recruit) {
+                        "专长"
+                    } else {
+                        "部门"
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{label}："), Style::new().fg(GOLD)),
+                        Span::styled(
+                            format!("◀ {} ▶", Department::ALL[*department].label()),
+                            Style::new().bold(),
+                        ),
+                        Span::raw("  Tab 切换").dim(),
+                    ]));
+                }
+                let input = Line::from(vec![
+                    Span::styled(prompt, Style::new().fg(GOLD)),
+                    Span::raw(text.clone()),
+                ]);
+                let cursor_x = popup.x + 2 + input.width() as u16;
+                let cursor_y = popup.y + 1 + lines.len() as u16 + 1;
+                lines.push(Line::default());
+                lines.push(input);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(Paragraph::new(lines).block(modal_block(title)), popup);
+                frame.set_cursor_position((cursor_x.min(popup.right() - 2), cursor_y));
+            }
+            Modal::Choose { kind, selected } => {
+                let options = kind.options();
+                let title = match kind {
+                    ChooseKind::Reform => "改制".to_owned(),
+                    ChooseKind::Appoint(agent) => {
+                        let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
+                        format!("任命 #{} {name}", agent.0)
+                    }
+                };
+                let popup = centered(area, 36, options.len() as u16 + 2);
+                frame.render_widget(Clear, popup);
+                let mut state = ListState::default().with_selected(Some(*selected));
+                frame.render_stateful_widget(
+                    List::new(options)
+                        .block(modal_block(title))
+                        .highlight_style(Style::new().fg(Color::Black).bg(GOLD).bold())
+                        .highlight_symbol("▶ "),
+                    popup,
+                    &mut state,
+                );
+            }
+        }
+    }
+}
+
+const VERMILION: Color = Color::Rgb(178, 34, 34);
+const GOLD: Color = Color::Rgb(218, 165, 32);
+
+fn panel(title: String) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::new().fg(VERMILION))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::new().fg(GOLD).bold(),
+        ))
+}
+
+fn modal_block(title: String) -> Block<'static> {
+    panel(title).border_type(ratatui::widgets::BorderType::Double)
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+fn status_badge(task: &Task) -> (String, Style) {
+    match &task.status {
+        TaskStatus::Pending => ("待办".into(), Style::new().fg(Color::Gray)),
+        TaskStatus::Assigned(_) => ("执行中".into(), Style::new().fg(Color::Yellow).bold()),
+        TaskStatus::Completed { .. } => match &task.review {
+            Some((Verdict::Accepted, _)) => ("已采纳".into(), Style::new().fg(Color::Green)),
+            Some((Verdict::Rejected, _)) => ("已驳回".into(), Style::new().fg(Color::Magenta)),
+            None => ("待评定".into(), Style::new().fg(Color::Cyan).bold()),
+        },
+        TaskStatus::Failed { .. } => ("失败".into(), Style::new().fg(Color::Red)),
+        TaskStatus::Cancelled => ("已撤销".into(), Style::new().fg(Color::DarkGray)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ziyuan_runtime::DemoBackend;
+
+    fn temp_app(name: &str) -> (App, UnboundedReceiver<Message>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("ziyuan-tui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        Session::found(EventLog::new(&root)).unwrap();
+        let (app, messages) = App::new(Config {
+            root: root.clone(),
+            backend: Arc::new(DemoBackend),
+            limits: Limits {
+                max_concurrent: 2,
+                timeout: Duration::from_secs(10),
+            },
+        })
+        .unwrap();
+        (app, messages, root)
+    }
+
+    fn press(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            let code = match c {
+                '\n' => KeyCode::Enter,
+                '\t' => KeyCode::Tab,
+                '↓' => KeyCode::Down,
+                c => KeyCode::Char(c),
+            };
+            app.handle(Message::Input(Event::Key(KeyEvent::from(code))));
+        }
+    }
+
+    fn screen(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                // 宽字符（汉字）之后的占位格不输出。
+                let mut line = String::new();
+                let mut x = 0;
+                while x < buffer.area.width {
+                    let symbol = buffer[(x, y)].symbol();
+                    line.push_str(symbol);
+                    x += Span::raw(symbol).width().max(1) as u16;
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 等待后台执行结束，期间把进度交给界面。
+    async fn finish_run(app: &mut App, messages: &mut UnboundedReceiver<Message>) {
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), messages.recv())
+                .await
+                .expect("执行应在 10 秒内结束")
+                .unwrap();
+            let done = matches!(message, Message::RunDone(_));
+            app.handle(message);
+            if done {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_run_and_review_from_the_keyboard() {
+        let (mut app, mut messages, root) = temp_app("flow");
+        // 下诏时 Tab 从工部切到下一个部门（吏部之后依次为户、礼、兵、刑、工；工部后回到吏部）。
+        press(&mut app, "n\t查 unsafe\n");
+        let task = app.court().task(TaskId(1)).expect("应已下诏");
+        assert_eq!(task.edict.department, Department::Personnel);
+        assert!(screen(&app).contains("诏令 #1 已入队"));
+
+        // 另一个进程持有执行者锁时拒绝执行，诏令仍在队列。
+        let held = EventLog::new(&root).try_lock_executor().unwrap().unwrap();
+        press(&mut app, "r");
+        assert!(app.run.is_none());
+        assert!(screen(&app).contains("另一个 ziyuan 进程"));
+        drop(held);
+
+        press(&mut app, "r");
+        finish_run(&mut app, &mut messages).await;
+        let shown = screen(&app);
+        assert!(
+            shown.contains("待评定") && shown.contains("DEMO ONLY"),
+            "{shown}"
+        );
+
+        press(&mut app, "a属实\n");
+        let task = app.court().task(TaskId(1)).unwrap();
+        assert_eq!(task.review, Some((Verdict::Accepted, "属实".into())));
+        // 已评定的回奏不能再评定，错误显示在状态栏。
+        press(&mut app, "d\n");
+        assert!(screen(&app).contains("已评定"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reform_and_appointments_follow_court_rules() {
+        let (mut app, _messages, root) = temp_app("court");
+        // 改为内阁制（第三项）：首辅空缺，派工路线显示空缺，下诏被拒且不留记录。
+        press(&mut app, "g↓↓\n2");
+        assert_eq!(app.court().mode(), GovernanceMode::Cabinet);
+        assert!(screen(&app).contains("内阁首辅空缺"));
+        press(&mut app, "1n无首辅\n");
+        assert!(app.court().tasks().next().is_none());
+        assert!(screen(&app).contains("空缺"));
+
+        // 在百官页招募新官并任命为首辅后即可下诏。
+        press(&mut app, "2n新辅\n");
+        let id = AgentId(app.court().agents().count() as u64);
+        assert_eq!(app.court().agent(id).unwrap().name, "新辅");
+        for _ in 0..id.0 {
+            press(&mut app, "↓");
+        }
+        press(&mut app, "p↓\n");
+        assert_eq!(app.court().office_of(id), Some(Office::FirstGrandSecretary));
+        press(&mut app, "1n内阁承办\n");
+        assert!(app.court().task(TaskId(1)).is_some());
+
+        // 其他进程的写入在重新加载后可见。
+        let mut other = Session::open(EventLog::new(&root)).unwrap();
+        other.cancel(TaskId(1)).unwrap();
+        app.reload();
+        assert!(screen(&app).contains("已撤销"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

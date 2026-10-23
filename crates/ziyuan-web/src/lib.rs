@@ -317,31 +317,23 @@ async fn run(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
 
 async fn run_open_tasks(app: &AppState, cancel: &CancelToken) -> Result<(), ApiError> {
     let scheduler = Scheduler::new(app.0.config.backend.clone(), app.0.config.limits);
-    let mut previous = Vec::new();
-    loop {
-        let root = app.0.config.root.clone();
-        let mut session = tokio::task::spawn_blocking(move || Session::open(EventLog::new(&root)))
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))??;
-        let tasks = session.court().open_tasks();
-        // 无新任务，或撤销后只剩未开始的任务：结束本次执行。
-        if tasks.is_empty() || tasks == previous || cancel.is_cancelled() {
-            return Ok(());
-        }
-        app.emit("changed", json!({}));
-        session
-            .run(&tasks, &scheduler, cancel, |update| match update {
-                RunUpdate::Text { task, text } => {
-                    app.emit("text", json!({ "task": task.0, "text": text }));
-                }
-                RunUpdate::Finished(report) => {
-                    app.emit("finished", report_json(report));
-                    app.emit("changed", json!({}));
-                }
-            })
-            .await?;
-        previous = tasks;
-    }
+    let root = app.0.config.root.clone();
+    let mut session = tokio::task::spawn_blocking(move || Session::open(EventLog::new(&root)))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    session
+        .run_open(&scheduler, cancel, |update| match update {
+            RunUpdate::Assigned(_) => app.emit("changed", json!({})),
+            RunUpdate::Text { task, text } => {
+                app.emit("text", json!({ "task": task.0, "text": text }));
+            }
+            RunUpdate::Finished(report) => {
+                app.emit("finished", report_json(report));
+                app.emit("changed", json!({}));
+            }
+        })
+        .await?;
+    Ok(())
 }
 
 async fn stop_run(State(app): State<AppState>) -> Json<Value> {

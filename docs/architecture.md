@@ -37,6 +37,7 @@ Emperor (human / authenticated control plane)
 
 ```text
 ziyuan-cli ──┬──▶ ziyuan-web (axum, SSE) ──┐
+             ├──▶ ziyuan-tui (ratatui) ───┤
              │                            ▼
              ├──────────────────────▶ ziyuan-app (Session) ──▶ ziyuan-governance (Court)
              │                            ├──▶ ziyuan-runtime (Scheduler / WorkerBackend)
@@ -51,8 +52,9 @@ ziyuan-cli ──┬──▶ ziyuan-web (axum, SSE) ──┐
 - `ziyuan-runtime`：`Scheduler` 并发执行已指派的 `Job`，经通道回报 `Progress`（工具调用与结局）；不了解治理规则。Adapter 错误统一为 `BoxError`。`AgentBackend` 运行 `agent_loop`，`tools` 提供只读工具。
 - `ziyuan-llm`：`OpenAiCompatible` 实现 `ModelProvider`。HTTP/TLS 依赖只在此 crate，runtime 保持无网络依赖。
 - `ziyuan-app`：`Session<S: EventStore>` 是唯一的写入路径。每个用例：治理层提议事件 → 在 `Court` 副本上 `apply` 校验 → `EventStore::append` → 替换内存状态。被拒绝的操作不留事件；写入的事件一定可以回放。
-- `ziyuan-cli`：把参数解析为 `Command`，调用 `Session`，打印结果；`serve` 启动 Web 界面。
-- `ziyuan-web`：紫禁城 Web 界面。内嵌单页（`index.html`，无构建步骤）+ JSON API + SSE。每个请求在阻塞线程中各自 `Session::open`，与 CLI 一样受乐观并发保护；`POST /api/run` 取得执行者锁后在后台执行全部未结束的诏令，`RunUpdate` 经 SSE（`text` / `finished` / `changed`）推送。仅监听 127.0.0.1，全部 API 需 `Authorization: Bearer <令牌>`（SSE 用 `?token=`），令牌由 `/dev/urandom` 生成并只打印在启动输出中。中文描述（`describe_event` 等）移到 `ziyuan-app`，两个前端共用。
+- `ziyuan-cli`：把参数解析为 `Command`，调用 `Session`，打印结果；`serve` 启动 Web 界面，`tui` 启动终端界面。
+- `ziyuan-web`：紫禁城 Web 界面。内嵌单页（`index.html`，无构建步骤）+ JSON API + SSE。每个请求在阻塞线程中各自 `Session::open`，与 CLI 一样受乐观并发保护；`POST /api/run` 取得执行者锁后在后台执行全部未结束的诏令，`RunUpdate` 经 SSE（`text` / `finished` / `changed`）推送。仅监听 127.0.0.1，全部 API 需 `Authorization: Bearer <令牌>`（SSE 用 `?token=`），令牌由 `/dev/urandom` 生成并只打印在启动输出中。中文描述（`describe_event` 等）移到 `ziyuan-app`，各前端共用。
+- `ziyuan-tui`：紫禁城终端界面（ratatui）。`App` 不依赖真实终端：按键经 `App::handle`、画面经 `App::draw`，测试用 `TestBackend` 驱动。执行在 Tokio 任务中调用 `Session::run_open`（与 Web 共用：反复执行未结束的诏令直到队列清空），进度经通道送回界面；每秒 `Session::reload` 以看到其他进程的变更。
 
 初始化生成 `Founded`, `AgentRegistered`, `OfficialAppointed`。诏令的事件序列：
 

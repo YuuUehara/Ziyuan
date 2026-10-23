@@ -325,7 +325,7 @@ impl Court {
     }
 
     /// 按 ID 升序列出全部诏令。
-    pub fn tasks(&self) -> impl Iterator<Item = &Task> {
+    pub fn tasks(&self) -> impl DoubleEndedIterator<Item = &Task> {
         self.tasks.values()
     }
 

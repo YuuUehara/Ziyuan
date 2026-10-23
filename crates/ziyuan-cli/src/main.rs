@@ -30,6 +30,7 @@ const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示�
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan tasks                         查看诏令及其状态
   ziyuan serve [--port 8080]           启动紫禁城 Web 界面（仅本机，需访问令牌）
+  ziyuan tui                           启动紫禁城终端界面
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
@@ -90,6 +91,7 @@ enum Command {
     Run(Limits),
     Tasks,
     Serve(u16),
+    Tui,
     Cancel(TaskId),
     Reform(GovernanceMode),
     Dismiss(AgentId),
@@ -142,6 +144,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "edict" => parse_edict(args)?,
         "run" => Command::Run(parse_limits(args)?),
         "tasks" => no_args(args, Command::Tasks)?,
+        "tui" => no_args(args, Command::Tui)?,
         "serve" => match args.as_slice() {
             [] => Command::Serve(8080),
             [flag, port] if flag == "--port" => {
@@ -274,6 +277,19 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 println!("（仅监听本机；令牌即皇帝身份，请勿外传。Ctrl-C 关闭。）");
                 ziyuan_web::serve(listener, config).await
             })?;
+        }
+        Command::Tui => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let config = ziyuan_tui::Config {
+                root: env::current_dir()?,
+                backend: worker_backend()?,
+                limits: DEFAULT_LIMITS,
+            };
+            runtime.block_on(ziyuan_tui::run(config))?;
+            // 阻塞中的模型请求可能仍未返回；不等待它们。
+            runtime.shutdown_background();
         }
         Command::Tasks => {
             let court = session.court();
@@ -414,6 +430,7 @@ fn run_tasks(
         let mut stream = StreamPrinter::new(io::stderr());
         session
             .run(tasks, &scheduler, &cancel, |update| match update {
+                RunUpdate::Assigned(_) => {}
                 RunUpdate::Text { task, text } => stream.text(task, text),
                 RunUpdate::Finished(report) => {
                     stream.finish(report.edict.id);
