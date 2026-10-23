@@ -1,6 +1,7 @@
 //! 独立于治理层的最小 Tool Calling Loop；模型 Adapter 见 `ziyuan-llm`。
 use crate::{BoxError, ExecutionHooks};
 use std::fmt;
+use ziyuan_core::Price;
 
 #[derive(Debug)]
 pub enum LoopError {
@@ -35,6 +36,12 @@ pub enum Message {
     System(String),
     User(String),
     Assistant(String),
+    /// 一轮工具调用之前模型输出的文本与思维链；其后的 `ToolCall` 属于同一条 assistant 消息。
+    /// 思考模式下（如 DeepSeek）思维链须原样回传，否则 API 拒绝请求。
+    CallPrelude {
+        text: String,
+        reasoning: String,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -54,7 +61,13 @@ pub struct ToolRequest {
 #[derive(Debug)]
 pub enum ModelTurn {
     Final(String),
-    Calls(Vec<ToolRequest>),
+    Calls {
+        calls: Vec<ToolRequest>,
+        /// 调用前模型输出的文本（可为空）。
+        text: String,
+        /// 思维链（`reasoning_content`，可为空）。
+        reasoning: String,
+    },
 }
 
 pub trait ModelProvider: Send + Sync {
@@ -69,6 +82,11 @@ pub trait ModelProvider: Send + Sync {
 
     /// 模型名，供界面显示。
     fn model_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// 模型单价，用于估算花费。
+    fn price(&self) -> Option<Price> {
         None
     }
 }
@@ -100,7 +118,11 @@ pub fn run(
         })?;
         match turn {
             ModelTurn::Final(answer) => return Ok(answer),
-            ModelTurn::Calls(calls) => {
+            ModelTurn::Calls {
+                calls,
+                text,
+                reasoning,
+            } => {
                 if calls.is_empty() {
                     return Err(LoopError::EmptyToolCalls);
                 }
@@ -116,6 +138,7 @@ pub fn run(
                     })
                     .collect::<Result<Vec<_>, LoopError>>()?;
                 // 先记录本轮全部调用，再记录各自输出：与 OpenAI 等 API 的消息顺序一致。
+                messages.push(Message::CallPrelude { text, reasoning });
                 for (_, call) in &resolved {
                     messages.push(Message::ToolCall {
                         id: call.id.clone(),
@@ -159,11 +182,15 @@ mod tests {
             {
                 Ok(ModelTurn::Final("已完成".into()))
             } else {
-                Ok(ModelTurn::Calls(vec![ToolRequest {
-                    id: "call1".into(),
-                    name: "echo".into(),
-                    args_json: "{}".into(),
-                }]))
+                Ok(ModelTurn::Calls {
+                    calls: vec![ToolRequest {
+                        id: "call1".into(),
+                        name: "echo".into(),
+                        args_json: "{}".into(),
+                    }],
+                    text: String::new(),
+                    reasoning: String::new(),
+                })
             }
         }
     }

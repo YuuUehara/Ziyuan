@@ -22,7 +22,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, seal_note,
 };
-use ziyuan_core::{AgentId, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_core::{
+    AgentId, Department, GovernanceMode, Office, Price, Seal, TaskId, TokenUsage, Verdict,
+};
 use ziyuan_governance::{Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::EventLog;
@@ -150,6 +152,8 @@ fn appointable(court: &Court, agent: AgentId) -> Vec<Office> {
 
 pub struct App {
     config: Config,
+    /// 模型单价，用于估算花费；未知时为 `None`。
+    price: Option<Price>,
     /// 承办官员所用的模型；演示后端为 `None`。
     model: Option<String>,
     session: Session<EventLog>,
@@ -179,6 +183,7 @@ impl App {
         let selected_task = session.court().tasks().last().map(|t| t.edict.id);
         let app = Self {
             model: config.backend.model_name().map(str::to_owned),
+            price: config.backend.price(),
             config,
             session,
             sender,
@@ -663,6 +668,14 @@ impl App {
         }
     }
 
+    /// 按当前模型单价估算的花费；单价未知或未用模型时为空。
+    fn cost_note(&self, usage: TokenUsage) -> String {
+        match &self.price {
+            Some(p) if usage.total() > 0 => format!("（{}）", p.describe(usage)),
+            _ => String::new(),
+        }
+    }
+
     fn model_label(&self) -> &str {
         self.model.as_deref().unwrap_or("演示")
     }
@@ -678,12 +691,13 @@ impl App {
             Span::raw("  制度 "),
             Span::styled(court.mode().label(), Style::new().fg(GOLD).bold()),
             Span::raw(format!(
-                "  在册 {} · 有职 {}  模型 {}  用量 输入 {} / 输出 {}",
+                "  在册 {} · 有职 {}  模型 {}  用量 输入 {} / 输出 {}{}",
                 court.agents().count(),
                 court.appointed_count(),
                 self.model_label(),
                 usage.input,
-                usage.output
+                usage.output,
+                self.cost_note(usage),
             )),
         ];
         if self.run.is_some() {
@@ -788,8 +802,11 @@ impl App {
             lines.push(Line::from(vec![
                 label("用量"),
                 Span::raw(format!(
-                    "{}；工具调用 {} 次（失败 {}）",
-                    task.usage, task.tool_calls, task.tool_failures
+                    "{}{}；工具调用 {} 次（失败 {}）",
+                    task.usage,
+                    self.cost_note(task.usage),
+                    task.tool_calls,
+                    task.tool_failures
                 )),
             ]));
         }

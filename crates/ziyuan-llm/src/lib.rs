@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::env;
 use std::io::{BufRead, BufReader};
 use std::time::Duration;
-use ziyuan_core::TokenUsage;
+use ziyuan_core::{Price, TokenUsage};
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
 use ziyuan_runtime::{BoxError, ExecutionHooks};
 
@@ -56,9 +56,44 @@ impl OpenAiCompatible {
     }
 }
 
+/// 估算花费所用的单价：`ZIYUAN_LLM_PRICE`（「输入,输出[,币种]」，每百万 token）优先，
+/// 否则查内置价目。内置价目取 DeepSeek 官方 2026-10 的高峰时段、未命中缓存价，是估算上限：
+/// 空闲时段与缓存命中都更便宜。未知模型返回 `None`。
+pub fn price_for(model: &str) -> Option<Price> {
+    if let Ok(spec) = env::var("ZIYUAN_LLM_PRICE") {
+        return parse_price(&spec);
+    }
+    let (input, output) = match model {
+        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => (2.0, 8.0),
+        "deepseek-v4-pro" => (9.0, 27.0),
+        _ => return None,
+    };
+    Some(Price {
+        input_per_million: input,
+        output_per_million: output,
+        currency: "元".into(),
+    })
+}
+
+fn parse_price(spec: &str) -> Option<Price> {
+    let mut parts = spec.split(',').map(str::trim);
+    let input = parts.next()?.parse().ok()?;
+    let output = parts.next()?.parse().ok()?;
+    let currency = parts.next().filter(|c| !c.is_empty()).unwrap_or("元");
+    Some(Price {
+        input_per_million: input,
+        output_per_million: output,
+        currency: currency.into(),
+    })
+}
+
 impl ModelProvider for OpenAiCompatible {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
+    }
+
+    fn price(&self) -> Option<Price> {
+        price_for(&self.model)
     }
 
     fn next_turn(
@@ -123,6 +158,7 @@ struct PartialCall {
 /// 工具调用按 `index` 拼接。每读一行检查一次撤销。
 fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<ModelTurn, BoxError> {
     let mut content = String::new();
+    let mut reasoning = String::new();
     let mut calls: Vec<PartialCall> = Vec::new();
     let mut done = false;
     for line in reader.lines() {
@@ -143,6 +179,10 @@ fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<Model
         }
         report_usage(&chunk, hooks);
         let delta = &chunk["choices"][0]["delta"];
+        // 思考模式的思维链不显示，但须保留以便回传。
+        if let Some(text) = delta["reasoning_content"].as_str() {
+            reasoning.push_str(text);
+        }
         if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
             hooks.text_delta(text);
             content.push_str(text);
@@ -174,6 +214,10 @@ fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<Model
     if calls.is_empty() {
         return Ok(ModelTurn::Final(content));
     }
+    // 调用工具前的话自成一行，不与之后的回奏粘连。
+    if !content.is_empty() && !content.ends_with('\n') {
+        hooks.text_delta("\n");
+    }
     calls
         .into_iter()
         .map(|call| {
@@ -187,7 +231,11 @@ fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<Model
             })
         })
         .collect::<Result<_, _>>()
-        .map(ModelTurn::Calls)
+        .map(|calls| ModelTurn::Calls {
+            calls,
+            text: content,
+            reasoning,
+        })
 }
 
 fn encode_tools(tools: &[ToolSpec]) -> Result<Value, BoxError> {
@@ -215,6 +263,17 @@ fn encode_messages(messages: &[Message]) -> Vec<Value> {
             Message::System(text) => out.push(json!({"role": "system", "content": text})),
             Message::User(text) => out.push(json!({"role": "user", "content": text})),
             Message::Assistant(text) => out.push(json!({"role": "assistant", "content": text})),
+            Message::CallPrelude { text, reasoning } => {
+                let mut message = json!({
+                    "role": "assistant",
+                    "content": if text.is_empty() { Value::Null } else { json!(text) },
+                    "tool_calls": [],
+                });
+                if !reasoning.is_empty() {
+                    message["reasoning_content"] = json!(reasoning);
+                }
+                out.push(message);
+            }
             Message::ToolCall {
                 id,
                 name,
@@ -272,7 +331,14 @@ fn decode_turn(response: &Value) -> Result<ModelTurn, BoxError> {
                 })
             })
             .collect::<Result<_, BoxError>>()
-            .map(ModelTurn::Calls);
+            .map(|calls| ModelTurn::Calls {
+                calls,
+                text: message["content"].as_str().unwrap_or_default().to_owned(),
+                reasoning: message["reasoning_content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
     }
     match message["content"].as_str() {
         Some(content) => Ok(ModelTurn::Final(content.to_owned())),
@@ -449,7 +515,8 @@ mod tests {
     fn streamed_tool_calls_are_assembled_across_chunks() {
         let reply = sse(
             &[
-                delta(json!({"role": "assistant", "content": "先查"})),
+                delta(json!({"role": "assistant", "reasoning_content": "想一想"})),
+                delta(json!({"content": "先查"})),
                 delta(
                     json!({"tool_calls": [{"index": 0, "id": "a", "type": "function",
                     "function": {"name": "read_file", "arguments": "{\"pa"}}]}),
@@ -469,9 +536,27 @@ mod tests {
         let turn = OpenAiCompatible::new(url, None, "m")
             .next_turn(&[Message::User("q".into())], &[], &hooks)
             .unwrap();
-        let ModelTurn::Calls(calls) = turn else {
+        let ModelTurn::Calls {
+            calls,
+            text,
+            reasoning,
+        } = turn
+        else {
             panic!("应为工具调用: {turn:?}");
         };
+        assert_eq!((text.as_str(), reasoning.as_str()), ("先查", "想一想"));
+        // 思维链与调用前的话随下一次请求回传（DeepSeek 思考模式要求），且与工具调用同在一条消息。
+        let mut history = vec![Message::CallPrelude { text, reasoning }];
+        history.extend(calls.iter().map(|c| Message::ToolCall {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            args_json: c.args_json.clone(),
+        }));
+        let encoded = encode_messages(&history);
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0]["reasoning_content"], "想一想");
+        assert_eq!(encoded[0]["content"], "先查");
+        assert_eq!(encoded[0]["tool_calls"].as_array().unwrap().len(), 2);
         let calls: Vec<_> = calls
             .iter()
             .map(|c| (c.id.as_str(), c.name.as_str(), c.args_json.as_str()))
@@ -483,7 +568,11 @@ mod tests {
                 ("b", "search_code", "{}")
             ]
         );
-        assert_eq!(*hooks.deltas.borrow(), ["先查"]);
+        assert_eq!(
+            *hooks.deltas.borrow(),
+            ["先查", "\n"],
+            "思维链不显示；调用前的话以换行结束"
+        );
         assert_eq!(seen.lock().unwrap()[0].0["stream"], true);
     }
 
@@ -533,6 +622,19 @@ mod tests {
 
         let err = model.next_turn(&messages, &[], &()).unwrap_err();
         assert!(err.to_string().contains("[DONE]"), "{err}");
+    }
+
+    #[test]
+    fn prices_parse_and_estimate_cost() {
+        let price = parse_price("2, 8").unwrap();
+        let usage = TokenUsage {
+            input: 1_000_000,
+            output: 500_000,
+        };
+        assert_eq!(price.cost(usage), 6.0);
+        assert_eq!(price.describe(usage), "约 6.0000 元");
+        assert_eq!(parse_price("0.5,1.5,USD").unwrap().currency, "USD");
+        assert!(parse_price("免费").is_none() && parse_price("1").is_none());
     }
 
     #[test]

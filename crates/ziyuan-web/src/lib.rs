@@ -194,6 +194,12 @@ async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut value = app.with_session(|s| Ok(court_json(s.court()))).await?;
     value["running"] = json!(running);
     value["model"] = json!(app.0.config.backend.model_name());
+    // 单价供页面估算花费；未知时为 null。
+    value["price"] = json!(app.0.config.backend.price().map(|p| json!({
+        "input": p.input_per_million,
+        "output": p.output_per_million,
+        "currency": p.currency,
+    })));
     Ok(Json(value))
 }
 

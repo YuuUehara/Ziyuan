@@ -3,7 +3,7 @@
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::path::PathBuf;
-use ziyuan_core::{Agent, Edict, TokenUsage};
+use ziyuan_core::{Agent, Edict, Price, TokenUsage};
 
 mod scheduler;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
@@ -22,6 +22,11 @@ pub trait WorkerBackend: Send + Sync {
 
     /// 承办官员所用的模型名，供界面显示；不调用模型的后端返回 `None`。
     fn model_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// 模型单价，用于估算花费；未知时为 `None`。
+    fn price(&self) -> Option<Price> {
         None
     }
 }
@@ -79,6 +84,10 @@ impl AgentBackend {
 impl WorkerBackend for AgentBackend {
     fn model_name(&self) -> Option<&str> {
         self.model.model_name()
+    }
+
+    fn price(&self) -> Option<Price> {
+        self.model.price()
     }
 
     fn execute(

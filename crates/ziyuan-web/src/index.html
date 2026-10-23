@@ -268,7 +268,7 @@
   <div class="header-stats">
     <span class="stat">制度 <b id="mode-label">—</b></span>
     <span class="stat">诏令 <b id="task-count">0</b> · 待办 <b id="open-count">0</b></span>
-    <span class="stat">用量 <b id="usage-total">0</b> tokens</span>
+    <span class="stat">用量 <b id="usage-total">0</b> tokens<span id="cost-total"></span></span>
     <span class="stat" id="run-state">待命</span>
     <button class="gold" id="run-btn">执行待办诏令</button>
     <button id="stop-btn" hidden>中止执行</button>
@@ -389,6 +389,14 @@ async function api(path, body) {
   return data;
 }
 
+// 按当前模型单价估算花费（高峰、未命中缓存价，为估算上限）；单价未知时不显示。
+function cost(usage) {
+  const p = state && state.price;
+  if (!p || !(usage.input + usage.output)) return "";
+  const value = (usage.input * p.input + usage.output * p.output) / 1e6;
+  return `（约 ${value.toFixed(4)} ${p.currency}）`;
+}
+
 function chronicle(note) {
   if (!note) return;
   $("chronicle-text").textContent = note;
@@ -447,7 +455,7 @@ function taskHtml(t) {
   const meta = [
     t.worker ? `承办：${esc(t.worker)}` : "",
     t.tool_calls ? `工具 ${t.tool_calls} 次${t.tool_failures ? `（失败 ${t.tool_failures}）` : ""}` : "",
-    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}` : "",
+    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${cost(t.usage)}` : "",
   ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
   let body = "";
   if (streams[t.id] !== undefined && open) {
@@ -484,6 +492,7 @@ function render() {
   $("task-count").textContent = s.tasks.length;
   $("open-count").textContent = open;
   $("usage-total").textContent = fmt(s.usage.input + s.usage.output);
+  $("cost-total").textContent = cost(s.usage);
   $("run-state").textContent = s.running ? "执行中" : "待命";
   $("run-state").classList.toggle("live", s.running);
   $("run-btn").disabled = s.running || open === 0;
@@ -522,7 +531,7 @@ function render() {
     return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}</td><td>${esc(o.speciality.label)}</td>
       <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
       <td class="record">${s.model ? esc(s.model) : '<span class="hint">演示</span>'}</td>
-      <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) : "—"}</td><td>${action}</td></tr>`;
+      <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.record.usage) : "—"}</td><td>${action}</td></tr>`;
   }).join("");
 }
 

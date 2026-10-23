@@ -11,9 +11,11 @@ use std::time::Duration;
 use ziyuan_app::{
     ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, seal_note,
 };
-use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_core::{
+    AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
+};
 use ziyuan_governance::TaskStatus;
-use ziyuan_llm::OpenAiCompatible;
+use ziyuan_llm::{OpenAiCompatible, price_for};
 use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
 };
@@ -67,6 +69,8 @@ const HELP: &str = concat!(
   ZIYUAN_LLM_MODEL     模型名；设置后 edict 由模型以只读工具查阅当前目录
   ZIYUAN_LLM_BASE_URL  默认 https://api.openai.com/v1（如 https://api.deepseek.com/v1、http://localhost:11434/v1）
   ZIYUAN_LLM_API_KEY   API Key（本地 Ollama 可不设）
+  ZIYUAN_LLM_PRICE     估算花费用的单价「输入,输出[,币种]」（每百万 token）；
+                       deepseek-flash / deepseek-v4-pro 内置官方高峰价（估算上限）
 
 示例：
   ziyuan init
@@ -224,7 +228,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 court.completed_count()
             );
             println!("承办模型：{}", model_label());
-            println!("模型用量：{}", court.total_usage());
+            println!(
+                "模型用量：{}{}",
+                court.total_usage(),
+                cost_note(court.total_usage())
+            );
             println!(
                 "调度中枢：{}",
                 match court.mode() {
@@ -359,7 +367,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     TaskStatus::Cancelled => "已撤销".to_owned(),
                 };
                 let usage = if task.usage.total() > 0 {
-                    format!("（{} tokens）", task.usage.total())
+                    format!("（{} tokens{}）", task.usage.total(), cost_note(task.usage))
                 } else {
                     String::new()
                 };
@@ -445,7 +453,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 "  工具调用 {} 次，其中失败 {} 次（含越出玉玺的尝试）",
                 r.tool_calls, r.tool_failures
             );
-            println!("  模型用量：{}", r.usage);
+            println!("  模型用量：{}{}", r.usage, cost_note(r.usage));
             if r.unreviewed > 0 {
                 println!(
                     "  另有 {} 件回奏未经评定，不计入考绩。可用 `ziyuan review <诏令ID> accept|reject` 评定。",
@@ -608,11 +616,18 @@ fn print_report(report: &TaskReport) {
     }
     // 演示后端不调用模型；服务端未报告用量时也不显示。
     if report.usage.total() > 0 {
-        println!("用量：{}", report.usage);
+        println!("用量：{}{}", report.usage, cost_note(report.usage));
     }
 }
 
 /// 显示用的承办模型（与 [`worker_backend`] 的选择一致）：演示后端不调用模型。
+/// 按当前模型单价估算的花费（见 `ziyuan_llm::price_for`）；单价未知时为空。
+fn cost_note(usage: TokenUsage) -> String {
+    OpenAiCompatible::from_env()
+        .and_then(|m| price_for(m.model()))
+        .map_or(String::new(), |p| format!("，{}", p.describe(usage)))
+}
+
 fn model_label() -> String {
     OpenAiCompatible::from_env().map_or("演示（未接模型）".into(), |m| m.model().to_owned())
 }

@@ -68,12 +68,17 @@ cd /tmp/ziyuan-demo
 ### 接入真实模型
 
 ```bash
-export ZIYUAN_LLM_MODEL=deepseek-chat
+export ZIYUAN_LLM_MODEL=deepseek-flash                   # 或 deepseek-v4-pro
 export ZIYUAN_LLM_BASE_URL=https://api.deepseek.com/v1   # 默认 https://api.openai.com/v1
 export ZIYUAN_LLM_API_KEY=...                            # 本地 Ollama 可不设
+export ZIYUAN_LLM_PRICE=2,8                              # 可选：每百万 token 输入,输出[,币种]
 cd /path/to/your/project && ziyuan init
 ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
 ```
+
+**实测情况（2026-10）：** 已用 DeepSeek `deepseek-flash`（默认思考模式）与 `deepseek-v4-pro` 端到端实测：多轮工具调用、流式输出、玉玺越权拦截、超时与 Ctrl-C 撤销均正常。思考模式的思维链（`reasoning_content`）不显示，但会按 DeepSeek 要求在后续请求中回传。其他 OpenAI 兼容服务（OpenAI、Ollama 等）协议兼容、由模拟服务测试覆盖，**未经真实实测**。
+
+**花费估算：** 用量后附「约 X 元」。`deepseek-flash`、`deepseek-v4-pro` 内置官方高峰时段、未命中缓存的单价，是估算上限（空闲时段半价，缓存命中更便宜）；其他模型设置 `ZIYUAN_LLM_PRICE` 后才显示。估算按当前模型单价计算全部历史用量，以服务商账单为准。
 
 单件诏令最多 12 轮模型调用。模型调用失败、超时或被撤销都会记入事件簿（`TaskFailed` / `TaskCancelled`），每次工具调用也记为 `ToolInvoked`（参数与成败，不含输出），可用 `ziyuan history` 审计。
 
@@ -214,7 +219,7 @@ v0.2.0 还加入了：元/明官制（品级、署理）、随机官名、各角
 
 按优先级排列：
 
-1. **真实模型实测与成本**：在 OpenAI、DeepSeek、Ollama 上跑通端到端（v0.2 只用模拟模型验证过）；按模型价格表估算每件诏令、每位官员、整个朝廷的花费。
+1. ~~**真实模型实测与成本**~~ 已完成：DeepSeek 实测（含思考模式思维链回传）、花费估算；OpenAI、Ollama 待实测。
 2. **按官职配模型与权限上限**：尚书、首辅用强模型，郎中用便宜模型；每个官职有玉玺上限，诏令的玉玺不能超出承办者官职的上限。
 3. **内阁真正票拟**：首辅（模型）读诏令后拟票，给出派工人选、拆分方案和理由；皇帝可以改票再批红。丞相制下丞相则自行决断，不经皇帝。
 4. **工部动手：受控写权限**：新增写文件与运行测试的工具，限定在沙箱或工作树中；改动以 diff 形式呈报，皇帝批红后才落盘。
