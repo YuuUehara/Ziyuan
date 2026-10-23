@@ -1,11 +1,12 @@
 //! 模型 Adapter：OpenAI 兼容的 Chat Completions API（OpenAI、DeepSeek、通义千问、Kimi、Ollama 等）。
 //!
-//! 同步、非流式；只实现 Tool Calling 所需的最小字段。
+//! 同步、流式（SSE）；文本片段经 `ExecutionHooks::text_delta` 实时报告。只实现 Tool Calling 所需的最小字段。
 use serde_json::{Value, json};
 use std::env;
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
-use ziyuan_runtime::BoxError;
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
+use ziyuan_runtime::{BoxError, ExecutionHooks};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -55,10 +56,16 @@ impl OpenAiCompatible {
 }
 
 impl ModelProvider for OpenAiCompatible {
-    fn next_turn(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, BoxError> {
+    fn next_turn(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        hooks: &dyn ExecutionHooks,
+    ) -> Result<ModelTurn, BoxError> {
         let mut body = json!({
             "model": self.model,
             "messages": encode_messages(messages),
+            "stream": true,
         });
         if !tools.is_empty() {
             body["tools"] = encode_tools(tools)?;
@@ -70,15 +77,107 @@ impl ModelProvider for OpenAiCompatible {
         if let Some(key) = &self.api_key {
             request = request.header("Authorization", format!("Bearer {key}"));
         }
-        let mut response = request.send(body.to_string())?;
+        let response = request.send(body.to_string())?;
         let status = response.status();
-        let text = response.body_mut().read_to_string()?;
+        let is_stream = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
+        let mut body = response.into_body();
         if !status.is_success() {
+            let text = body.read_to_string()?;
             let snippet: String = text.chars().take(500).collect();
             return Err(format!("模型 API 返回 {status}: {snippet}").into());
         }
-        decode_turn(&serde_json::from_str(&text)?)
+        if !is_stream {
+            // 不支持流式的服务会忽略 `stream`，直接返回完整 JSON。
+            let turn = decode_turn(&serde_json::from_str(&body.read_to_string()?)?)?;
+            if let ModelTurn::Final(text) = &turn {
+                hooks.text_delta(text);
+            }
+            return Ok(turn);
+        }
+        read_stream(BufReader::new(body.into_reader()), hooks)
     }
+}
+
+/// 流式响应中逐片拼接的工具调用。
+#[derive(Default)]
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// 解析 SSE（`data: {chunk}` … `data: [DONE]`）。文本片段实时交给 `hooks`；
+/// 工具调用按 `index` 拼接。每读一行检查一次撤销。
+fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<ModelTurn, BoxError> {
+    let mut content = String::new();
+    let mut calls: Vec<PartialCall> = Vec::new();
+    let mut done = false;
+    for line in reader.lines() {
+        if hooks.is_cancelled() {
+            return Err("已撤销，中止流式响应".into());
+        }
+        let line = line?;
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            done = true;
+            break;
+        }
+        let chunk: Value = serde_json::from_str(data)?;
+        if let Some(error) = chunk.get("error") {
+            return Err(format!("模型流式响应返回错误: {error}").into());
+        }
+        let delta = &chunk["choices"][0]["delta"];
+        if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
+            hooks.text_delta(text);
+            content.push_str(text);
+        }
+        for part in delta["tool_calls"].as_array().into_iter().flatten() {
+            let index = part["index"]
+                .as_u64()
+                .map(|i| i as usize)
+                .filter(|i| *i <= calls.len())
+                .ok_or_else(|| format!("tool_call 的 index 无效: {part}"))?;
+            if index == calls.len() {
+                calls.push(PartialCall::default());
+            }
+            let call = &mut calls[index];
+            if let Some(id) = part["id"].as_str() {
+                call.id = id.to_owned();
+            }
+            if let Some(name) = part.pointer("/function/name").and_then(Value::as_str) {
+                call.name.push_str(name);
+            }
+            if let Some(args) = part.pointer("/function/arguments").and_then(Value::as_str) {
+                call.arguments.push_str(args);
+            }
+        }
+    }
+    if !done {
+        return Err("流式响应在 [DONE] 之前中断".into());
+    }
+    if calls.is_empty() {
+        return Ok(ModelTurn::Final(content));
+    }
+    calls
+        .into_iter()
+        .map(|call| {
+            if call.id.is_empty() || call.name.is_empty() {
+                return Err(BoxError::from("流式 tool_call 缺少 id 或 name"));
+            }
+            Ok(ToolRequest {
+                id: call.id,
+                name: call.name,
+                args_json: call.arguments,
+            })
+        })
+        .collect::<Result<_, _>>()
+        .map(ModelTurn::Calls)
 }
 
 fn encode_tools(tools: &[ToolSpec]) -> Result<Value, BoxError> {
@@ -203,9 +302,15 @@ mod tests {
                     .unwrap()
                     .push((serde_json::from_slice(&body).unwrap(), auth));
                 let mut stream = reader.into_inner();
+                // 以 `data:` 开头的回复按 SSE 流发送，其余按普通 JSON。
+                let content_type = if reply.starts_with("data:") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                     reply.len()
                 )
                 .unwrap();
@@ -286,12 +391,122 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 记录流式文本；可在收到 `cancel_after` 个片段后报告已撤销。
+    #[derive(Default)]
+    struct Recorder {
+        deltas: std::cell::RefCell<Vec<String>>,
+        cancel_after: Option<usize>,
+    }
+    impl ExecutionHooks for Recorder {
+        fn is_cancelled(&self) -> bool {
+            self.cancel_after
+                .is_some_and(|n| self.deltas.borrow().len() >= n)
+        }
+        fn text_delta(&self, text: &str) {
+            self.deltas.borrow_mut().push(text.into());
+        }
+    }
+
+    fn sse(chunks: &[Value], done: bool) -> String {
+        let mut out: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+        if done {
+            out.push_str("data: [DONE]\n\n");
+        }
+        out
+    }
+
+    fn delta(delta: Value) -> Value {
+        json!({"choices": [{"index": 0, "delta": delta}]})
+    }
+
+    #[test]
+    fn streamed_tool_calls_are_assembled_across_chunks() {
+        let reply = sse(
+            &[
+                delta(json!({"role": "assistant", "content": "先查"})),
+                delta(
+                    json!({"tool_calls": [{"index": 0, "id": "a", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{\"pa"}}]}),
+                ),
+                delta(
+                    json!({"tool_calls": [{"index": 0, "function": {"arguments": "th\":\"x\"}"}}]}),
+                ),
+                delta(
+                    json!({"tool_calls": [{"index": 1, "id": "b", "type": "function",
+                    "function": {"name": "search_code", "arguments": "{}"}}]}),
+                ),
+            ],
+            true,
+        );
+        let (url, seen) = mock_server(vec![(200, reply)]);
+        let hooks = Recorder::default();
+        let turn = OpenAiCompatible::new(url, None, "m")
+            .next_turn(&[Message::User("q".into())], &[], &hooks)
+            .unwrap();
+        let ModelTurn::Calls(calls) = turn else {
+            panic!("应为工具调用: {turn:?}");
+        };
+        let calls: Vec<_> = calls
+            .iter()
+            .map(|c| (c.id.as_str(), c.name.as_str(), c.args_json.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("a", "read_file", r#"{"path":"x"}"#),
+                ("b", "search_code", "{}")
+            ]
+        );
+        assert_eq!(*hooks.deltas.borrow(), ["先查"]);
+        assert_eq!(seen.lock().unwrap()[0].0["stream"], true);
+    }
+
+    #[test]
+    fn streamed_text_is_reported_as_it_arrives() {
+        let chunks: Vec<_> = ["紫", "垣", "回奏"]
+            .iter()
+            .map(|t| delta(json!({"content": t})))
+            .collect();
+        let (url, _) = mock_server(vec![(200, sse(&chunks, true))]);
+        let hooks = Recorder::default();
+        let turn = OpenAiCompatible::new(url, None, "m")
+            .next_turn(&[Message::User("q".into())], &[], &hooks)
+            .unwrap();
+        assert!(
+            matches!(turn, ModelTurn::Final(ref t) if t == "紫垣回奏"),
+            "{turn:?}"
+        );
+        assert_eq!(*hooks.deltas.borrow(), ["紫", "垣", "回奏"]);
+    }
+
+    #[test]
+    fn stream_stops_when_cancelled_or_cut_off() {
+        let chunks: Vec<_> = ["一", "二", "三"]
+            .iter()
+            .map(|t| delta(json!({"content": t})))
+            .collect();
+        let (url, _) = mock_server(vec![(200, sse(&chunks, true)), (200, sse(&chunks, false))]);
+        let model = OpenAiCompatible::new(url, None, "m");
+        let messages = [Message::User("q".into())];
+
+        let hooks = Recorder {
+            cancel_after: Some(1),
+            ..Recorder::default()
+        };
+        let err = model.next_turn(&messages, &[], &hooks).unwrap_err();
+        assert!(err.to_string().contains("撤销"), "{err}");
+        assert_eq!(*hooks.deltas.borrow(), ["一"], "撤销后不应再读取");
+
+        let err = model.next_turn(&messages, &[], &()).unwrap_err();
+        assert!(err.to_string().contains("[DONE]"), "{err}");
+    }
+
     #[test]
     fn http_error_is_reported_with_status() {
         let (url, _) = mock_server(vec![(401, r#"{"error":"bad key"}"#.into())]);
         let model = OpenAiCompatible::new(url, None, "m");
         let err = model
-            .next_turn(&[Message::User("hi".into())], &[])
+            .next_turn(&[Message::User("hi".into())], &[], &())
             .unwrap_err()
             .to_string();
         assert!(err.contains("401") && err.contains("bad key"), "{err}");

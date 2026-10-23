@@ -59,6 +59,15 @@ pub struct TaskReport {
     pub outcome: Outcome,
 }
 
+/// [`Session::run`] 执行期间的实时进度。
+#[derive(Clone, Copy, Debug)]
+pub enum RunUpdate<'a> {
+    /// 承办官员（模型）流式生成的文本片段；只用于显示，不写入事件簿。
+    Text { task: TaskId, text: &'a str },
+    /// 一件诏令在本次运行中的结局（每件恰好一次）。
+    Finished(&'a TaskReport),
+}
+
 /// 一个已打开的朝廷：事件簿与由它重放出的当前状态。
 pub struct Session<S: EventStore> {
     store: S,
@@ -162,7 +171,7 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    /// 按当前制度逐件指派 `tasks`，交给调度器并发执行，并在每件结束时调用 `on_report`。
+    /// 按当前制度逐件指派 `tasks`，交给调度器并发执行，并经 `on_update` 报告流式文本与每件的结局。
     ///
     /// 结局都会记入事件簿：完成、失败（含运行时路由失败与超时）、撤销。
     /// `cancel` 触发时尚未开始的诏令保持未结束，可下次再运行。
@@ -172,7 +181,7 @@ impl<S: EventStore> Session<S> {
         tasks: &[TaskId],
         scheduler: &Scheduler,
         cancel: &CancelToken,
-        mut on_report: impl FnMut(&TaskReport),
+        mut on_update: impl FnMut(RunUpdate<'_>),
     ) -> Result<(), AppError> {
         let mut jobs = Vec::new();
         let mut running = Vec::new();
@@ -216,11 +225,13 @@ impl<S: EventStore> Session<S> {
                     });
                     running.push((edict, path));
                 }
-                CourtEvent::TaskFailed { reason, .. } => on_report(&TaskReport {
-                    edict,
-                    path: Vec::new(),
-                    outcome: Outcome::Failed(reason),
-                }),
+                CourtEvent::TaskFailed { reason, .. } => {
+                    on_update(RunUpdate::Finished(&TaskReport {
+                        edict,
+                        path: Vec::new(),
+                        outcome: Outcome::Failed(reason),
+                    }))
+                }
                 _ => unreachable!("指派只产生 TaskAssigned 或 TaskFailed"),
             }
         }
@@ -231,6 +242,12 @@ impl<S: EventStore> Session<S> {
                 break;
             };
             match update {
+                Progress::TextDelta { task, text } => {
+                    // 超时/撤销后仍在收尾的线程可能继续输出；只转发仍在执行的诏令。
+                    if running.iter().any(|(e, _)| e.id == task) {
+                        on_update(RunUpdate::Text { task, text: &text });
+                    }
+                }
                 Progress::ToolInvoked {
                     task,
                     tool,
@@ -281,11 +298,11 @@ impl<S: EventStore> Session<S> {
                     } else {
                         outcome
                     };
-                    on_report(&TaskReport {
+                    on_update(RunUpdate::Finished(&TaskReport {
                         edict,
                         path,
                         outcome,
-                    });
+                    }));
                 }
             }
         }
@@ -349,8 +366,10 @@ mod tests {
         let tasks = session.court().open_tasks();
         let mut reports = Vec::new();
         session
-            .run(&tasks, scheduler, &CancelToken::new(), |r| {
-                reports.push(r.clone())
+            .run(&tasks, scheduler, &CancelToken::new(), |update| {
+                if let RunUpdate::Finished(r) = update {
+                    reports.push(r.clone())
+                }
             })
             .await
             .unwrap();
@@ -425,6 +444,49 @@ mod tests {
             court.task(second.id).unwrap().status,
             TaskStatus::Completed { worker, .. } if worker == id
         ));
+    }
+
+    /// 分两段流式输出后完成。
+    struct Streaming;
+    impl WorkerBackend for Streaming {
+        fn execute(
+            &self,
+            _: &Agent,
+            _: &Edict,
+            hooks: &dyn ExecutionHooks,
+        ) -> Result<String, BoxError> {
+            hooks.text_delta("先");
+            hooks.text_delta("后");
+            Ok("先后".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_text_arrives_before_finish_and_is_not_persisted() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let edict = session
+            .issue(Department::Works, "流".into(), Seal::default())
+            .unwrap();
+        let before = session.history().len();
+        let mut seen = Vec::new();
+        session
+            .run(
+                &[edict.id],
+                &scheduler(Streaming),
+                &CancelToken::new(),
+                |u| {
+                    seen.push(match u {
+                        RunUpdate::Text { task, text } => format!("{}:{text}", task.0),
+                        RunUpdate::Finished(r) => format!("{}:done", r.edict.id.0),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(seen, ["1:先", "1:后", "1:done"]);
+        // 只多了指派与完成两条事件，流式片段不入事件簿。
+        assert_eq!(session.history().len(), before + 2);
     }
 
     /// 调用一次工具后失败。

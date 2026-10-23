@@ -60,6 +60,8 @@ pub enum Progress {
         args_json: String,
         ok: bool,
     },
+    /// 模型流式生成的文本片段，只用于实时显示。
+    TextDelta { task: TaskId, text: String },
     /// 每个 Job 恰好一条。
     Finished { task: TaskId, outcome: Outcome },
 }
@@ -176,6 +178,13 @@ struct TaskHooks {
 impl ExecutionHooks for TaskHooks {
     fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    fn text_delta(&self, text: &str) {
+        let _ = self.progress.send(Progress::TextDelta {
+            task: self.task,
+            text: text.into(),
+        });
     }
 
     fn tool_invoked(&self, tool: &str, args_json: &str, ok: bool) {

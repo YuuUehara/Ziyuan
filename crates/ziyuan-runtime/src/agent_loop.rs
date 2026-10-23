@@ -58,7 +58,14 @@ pub enum ModelTurn {
 }
 
 pub trait ModelProvider: Send + Sync {
-    fn next_turn(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, BoxError>;
+    /// 实现可以通过 `hooks.text_delta` 流式报告生成的文本，并应在 `hooks.is_cancelled()`
+    /// 为真时尽快中止请求。
+    fn next_turn(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        hooks: &dyn ExecutionHooks,
+    ) -> Result<ModelTurn, BoxError>;
 }
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
@@ -78,10 +85,15 @@ pub fn run(
         if hooks.is_cancelled() {
             return Err(LoopError::Cancelled);
         }
-        match model
-            .next_turn(&messages, &specs)
-            .map_err(LoopError::Model)?
-        {
+        let turn = model.next_turn(&messages, &specs, hooks).map_err(|e| {
+            // 撤销导致的中止不算模型故障。
+            if hooks.is_cancelled() {
+                LoopError::Cancelled
+            } else {
+                LoopError::Model(e)
+            }
+        })?;
+        match turn {
             ModelTurn::Final(answer) => return Ok(answer),
             ModelTurn::Calls(calls) => {
                 if calls.is_empty() {
@@ -134,6 +146,7 @@ mod tests {
             &self,
             messages: &[Message],
             _tools: &[ToolSpec],
+            _hooks: &dyn ExecutionHooks,
         ) -> Result<ModelTurn, BoxError> {
             if messages
                 .iter()

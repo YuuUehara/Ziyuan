@@ -21,13 +21,15 @@ pub trait WorkerBackend: Send + Sync {
     ) -> Result<String, BoxError>;
 }
 
-/// 运行时在执行期间提供给后端：协作式取消与工具调用审计。`()` 为空实现。
+/// 运行时在执行期间提供给后端：协作式取消、工具调用审计与流式输出。`()` 为空实现。
 pub trait ExecutionHooks {
     /// 超时或被撤销后为真；后端应尽快停止并返回。
     fn is_cancelled(&self) -> bool {
         false
     }
     fn tool_invoked(&self, _tool: &str, _args_json: &str, _ok: bool) {}
+    /// 模型生成的一段文本（流式）。只用于实时显示，不写入事件簿。
+    fn text_delta(&self, _text: &str) {}
 }
 impl ExecutionHooks for () {}
 

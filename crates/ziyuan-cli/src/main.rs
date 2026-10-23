@@ -4,10 +4,11 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
-use ziyuan_app::{Session, TaskReport};
+use ziyuan_app::{RunUpdate, Session, TaskReport};
 use ziyuan_core::{
     AgentId, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId, Verdict,
 };
@@ -378,12 +379,17 @@ fn run_tasks(
                 on_interrupt.cancel();
             }
         });
+        let mut stream = StreamPrinter::new(io::stderr());
         session
-            .run(tasks, &scheduler, &cancel, |report| {
-                if !matches!(report.outcome, Outcome::Completed(_)) {
-                    unfinished += 1;
+            .run(tasks, &scheduler, &cancel, |update| match update {
+                RunUpdate::Text { task, text } => stream.text(task, text),
+                RunUpdate::Finished(report) => {
+                    stream.finish(report.edict.id);
+                    if !matches!(report.outcome, Outcome::Completed(_)) {
+                        unfinished += 1;
+                    }
+                    print_report(report);
                 }
-                print_report(report);
             })
             .await
     });
@@ -394,6 +400,58 @@ fn run_tasks(
         return Err(format!("{unfinished} 件诏令未完成").into());
     }
     Ok(())
+}
+
+/// 把模型的流式输出实时写到 stderr，每行以 `#诏令ID│` 开头，并发任务不会混在同一行。
+/// 最终回奏仍由 [`print_report`] 写到 stdout，便于脚本处理。
+struct StreamPrinter<W: Write> {
+    out: W,
+    /// 当前行未结束的诏令。
+    open: Option<TaskId>,
+    /// 行被其他诏令打断（已代为换行）的诏令：其后紧接的换行符不再重复输出。
+    interrupted: BTreeSet<TaskId>,
+}
+
+impl<W: Write> StreamPrinter<W> {
+    fn new(out: W) -> Self {
+        Self {
+            out,
+            open: None,
+            interrupted: BTreeSet::new(),
+        }
+    }
+
+    /// 结束当前未完成的行（属于其他诏令时记为被打断）。
+    fn break_line(&mut self, task: Option<TaskId>) {
+        if let Some(open) = self.open.take() {
+            let _ = writeln!(self.out);
+            if Some(open) != task {
+                self.interrupted.insert(open);
+            }
+        }
+    }
+
+    fn text(&mut self, task: TaskId, text: &str) {
+        for piece in text.split_inclusive('\n') {
+            if self.open != Some(task) {
+                self.break_line(None);
+                if self.interrupted.remove(&task) && piece == "\n" {
+                    continue;
+                }
+                let _ = write!(self.out, "#{}│ ", task.0);
+            }
+            let _ = write!(self.out, "{piece}");
+            self.open = (!piece.ends_with('\n')).then_some(task);
+        }
+        let _ = self.out.flush();
+    }
+
+    /// `task` 已结束：在打印回奏前结束任何未完成的行。
+    fn finish(&mut self, task: TaskId) {
+        self.break_line(Some(task));
+        self.interrupted.remove(&task);
+        let _ = self.out.flush();
+    }
 }
 
 fn print_report(report: &TaskReport) {
@@ -587,5 +645,29 @@ fn describe_event(event: &CourtEvent) -> String {
             };
             format!("诏令 #{} 评定为{}{note}", task.0, verdict.label())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_printer_keeps_concurrent_lines_apart() {
+        let mut p = StreamPrinter::new(Vec::new());
+        let (a, b) = (TaskId(1), TaskId(2));
+        p.text(a, "甲一\n甲");
+        p.text(b, "乙");
+        // 甲的行被乙打断后，紧接的换行符只是结束那一行，不应产生空行。
+        p.text(a, "\n甲三");
+        p.text(a, "\n\n");
+        p.text(b, "乙二");
+        p.finish(a);
+        p.text(b, "尾");
+        p.finish(b);
+        assert_eq!(
+            String::from_utf8(p.out).unwrap(),
+            "#1│ 甲一\n#1│ 甲\n#2│ 乙\n#1│ 甲三\n#1│ \n#2│ 乙二\n#2│ 尾\n"
+        );
     }
 }

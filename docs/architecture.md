@@ -73,11 +73,13 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 `ziyuan-runtime::WorkerBackend` 是实际执行者接口（同步，`Send + Sync`）；`DemoBackend` 不执行任务。
 
-`Scheduler` 基于 Tokio：信号量限制并发，每件任务在阻塞线程池中执行；许可随执行线程释放，因此超时后仍在收尾的线程也计入并发数。取消是协作式的：超时或 `CancelToken` 触发时调度器立即给出结局，并通过 `ExecutionHooks::is_cancelled` 通知后端；`agent_loop` 在每轮模型调用前与执行工具前检查。撤销时尚未开始的任务报告为 `NotStarted`，保持未结束。CLI 退出时不等待仍阻塞的 HTTP 请求。
+流式文本的路径：`text_delta` → `Progress::TextDelta` → `RunUpdate::Text` → CLI（stderr，按诏令 ID 分行）。它只用于显示，不进入事件簿。
+
+`Scheduler` 基于 Tokio：信号量限制并发，每件任务在阻塞线程池中执行；许可随执行线程释放，因此超时后仍在收尾的线程也计入并发数。取消是协作式的：超时或 `CancelToken` 触发时调度器立即给出结局，并通过 `ExecutionHooks::is_cancelled` 通知后端；`agent_loop` 在每轮模型调用前与执行工具前检查，`OpenAiCompatible` 在流式响应的每一行检查并中止请求。撤销时尚未开始的任务报告为 `NotStarted`，保持未结束。CLI 退出时不等待仍阻塞的 HTTP 请求。
 
 `ziyuan-runtime::agent_loop` 提供独立的 `ModelProvider`, `Tool`, `ModelTurn`, `Message` 等抽象，并实现最小 Tool Calling 循环。一轮内的全部工具调用先于其输出写入消息（与 Chat API 的顺序一致）；任一调用未注册则整轮拒绝，不执行任何工具。
 
-`ziyuan-llm::OpenAiCompatible` 对接 OpenAI 兼容的 `/chat/completions`（同步、非流式），由 `ZIYUAN_LLM_MODEL` / `ZIYUAN_LLM_BASE_URL` / `ZIYUAN_LLM_API_KEY` 配置。
+`ziyuan-llm::OpenAiCompatible` 对接 OpenAI 兼容的 `/chat/completions`（同步，`stream: true`；SSE 中的文本经 `ExecutionHooks::text_delta` 实时上报，工具调用按 `index` 拼接；服务若忽略 `stream` 而返回普通 JSON 也能处理），由 `ZIYUAN_LLM_MODEL` / `ZIYUAN_LLM_BASE_URL` / `ZIYUAN_LLM_API_KEY` 配置。
 
 `ziyuan-runtime::tools::read_only_tools(root)` 提供 `read_file`（64 KiB 截断）与 `search_code`（字面量、最多 50 条）。路径先 canonicalize 再检查是否在根目录内，因此 `..`、绝对路径与指向外部的符号链接都被拒绝；搜索跳过 `.git`、`.jj`、`.ziyuan`、`target`。
 
