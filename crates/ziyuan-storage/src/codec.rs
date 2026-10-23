@@ -11,7 +11,7 @@ fn to_hex(value: &str) -> String {
     out
 }
 fn from_hex(s: &str) -> Result<String, String> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("hex 长度不合法".into());
     }
     let mut out = Vec::new();

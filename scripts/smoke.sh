@@ -43,4 +43,9 @@ grep -q "#$C .*已撤销" <<< "$TASKS"
 if grep -q '待办\|未结束' <<< "$TASKS"; then echo '仍有未结束诏令' >&2; exit 1; fi
 grep -q '没有未结束的诏令' <<< "$("$BIN" run)"
 "$BIN" history | grep -q "诏令 #$A 派给"
+# 多进程同时入队：每件诏令编号唯一，事件簿保持可回放
+for i in $(seq 1 10); do "$BIN" edict --queue --dept works "并发$i" > /dev/null & done
+wait
+[ "$("$BIN" tasks | grep -c '并发')" -eq 10 ]
+"$BIN" run --jobs 4 > /dev/null
 echo 'ZiYuan smoke test PASS'

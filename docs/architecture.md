@@ -37,7 +37,7 @@ ziyuan-cli ──▶ ziyuan-app (Session) ──▶ ziyuan-governance (Court)
 
 - `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
 - `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。
-- `ziyuan-storage`：`EventStore { load, append }`；`EventLog`（`.ziyuan/court.log`）与 `MemoryEventLog`。编码在私有 `codec` 模块，与文件 I/O 分离。
+- `ziyuan-storage`：`EventStore { load, append(expected, events) }`，`append` 只在事件数等于 `expected` 时写入（乐观并发）；`EventLog`（`.ziyuan/court.log`）与 `MemoryEventLog`。编码在私有 `codec` 模块，与文件 I/O 分离。
 - `ziyuan-runtime`：`Scheduler` 并发执行已指派的 `Job`，经通道回报 `Progress`（工具调用与结局）；不了解治理规则。Adapter 错误统一为 `BoxError`。`AgentBackend` 运行 `agent_loop`，`tools` 提供只读工具。
 - `ziyuan-llm`：`OpenAiCompatible` 实现 `ModelProvider`。HTTP/TLS 依赖只在此 crate，runtime 保持无网络依赖。
 - `ziyuan-app`：`Session<S: EventStore>` 是唯一的写入路径。每个用例：治理层提议事件 → 在 `Court` 副本上 `apply` 校验 → `EventStore::append` → 替换内存状态。被拒绝的操作不留事件；写入的事件一定可以回放。
@@ -52,7 +52,13 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 `Session::issue` 只写 `EdictIssued`（路由不通则拒绝）。`Session::run` 按当前制度逐件写 `TaskAssigned`，交给 `Scheduler`，再把每条 `Progress` 作为事件提交。`Court::apply` 校验生命周期：结束后的诏令不能再变更；`ToolInvoked` 只能出现在已指派的诏令上；完成者必须是被指派者。未结束且已指派的诏令（进程中断）可重新指派。v0.1 日志中没有 `TaskAssigned` 的完成记录仍可回放。`Court::replay` 根据完整日志恢复当前朝廷状态；`InstitutionReformed` 在回放时清理最高协调职务。
 
-注意：EventLog 只适合单进程：同一时刻只应有一个 `ziyuan` 进程写入（`Session` 在进程内是唯一写入者）。后续迁移 SQLite 的单事务批次写入；另需锁、Schema 版本、幂等键、快照与事件去重。
+### 多进程
+
+- **读写锁**：`EventLog::load` 持共享文件锁，`append` 持独占文件锁，并在锁内核对事件数后整批写入、`fsync`。读者不会看到写了一半的批次。
+- **乐观并发**：`Session::commit` 接收一个基于 `Court` 生成事件的闭包。若事件簿已被其他进程更新（`Conflict`），重新加载、重放并再次调用闭包，因此诏令/官员 ID 与规则检查总以最新状态为准，不会产生重复 ID。
+- **残行**：末尾没有换行符的行来自崩溃中断的写入，读取时忽略，下次追加前截掉。多事件批次（仅 `init`）若在写入中途崩溃，可能留下完整的前几行。
+- **执行者锁**：`.ziyuan/executor.lock`（`try_lock`，进程退出即释放）。同一时刻只有一个进程执行诏令，因此“已指派但未结束”的诏令只可能来自中断的进程，`run` 可以安全地重新指派。其他进程仍可入队、撤销、任免；`run` 在每次提交时都会看到这些变化：被撤销的诏令跳过，执行中被撤销的结果作废。
+- **代价**：每次追加会重读全文（O(n)）。后续迁移 SQLite 时用单事务实现同一 `append(expected, events)` 语义，并补充快照与 Schema 版本。
 
 ## 4. Runtime 与 LLM
 

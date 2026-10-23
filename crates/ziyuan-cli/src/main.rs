@@ -14,7 +14,7 @@ use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
     tools::read_only_tools,
 };
-use ziyuan_storage::EventLog;
+use ziyuan_storage::{EventLog, ExecutorLock};
 
 const HELP: &str = r#"紫垣 ZiYuan 0.1 — 朝廷式多 Agent 框架（演示版）
 
@@ -194,6 +194,8 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             text,
             queue,
         } => {
+            // 先取得执行者锁再下诏，避免被拒绝的诏令残留在队列中。
+            let executor = if queue { None } else { Some(lock_executor()?) };
             let edict = session.issue(department, text)?;
             if queue {
                 println!("诏令 #{} 已入队：{}", edict.id.0, edict.text);
@@ -204,8 +206,10 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 };
                 run_tasks(session, &[edict.id], limits)?;
             }
+            drop(executor);
         }
         Command::Run(limits) => {
+            let _executor = lock_executor()?;
             let tasks = session.court().open_tasks();
             if tasks.is_empty() {
                 println!("没有未结束的诏令。");
@@ -275,6 +279,16 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
     }
     Ok(())
+}
+
+/// 同一朝廷同一时刻只有一个进程执行诏令；入队、撤销、任免等不受限制。
+fn lock_executor() -> Result<ExecutorLock, Box<dyn Error>> {
+    EventLog::new(&env::current_dir()?)
+        .try_lock_executor()?
+        .ok_or_else(|| {
+            "另一个 ziyuan 进程正在执行诏令。可用 `edict --queue` 入队，待其结束后 `ziyuan run`。"
+                .into()
+        })
 }
 
 /// 在 Tokio 上执行 `tasks` 并逐件打印结局；有未完成的诏令时返回错误。

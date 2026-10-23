@@ -248,7 +248,7 @@ mod tests {
             let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(40));
-            hooks.tool_invoked("echo", "{}", actor.id.0 % 2 == 0);
+            hooks.tool_invoked("echo", "{}", actor.id.0.is_multiple_of(2));
             self.running.fetch_sub(1, Ordering::SeqCst);
             Ok(format!("done {}", actor.id.0))
         }

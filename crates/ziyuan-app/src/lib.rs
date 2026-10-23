@@ -65,14 +65,14 @@ pub struct Session<S: EventStore> {
 }
 
 impl<S: EventStore> Session<S> {
-    /// 在空事件簿上建立默认朝廷（丞相制）。
+    /// 在空事件簿上建立默认朝廷（丞相制）。并发 init 只有一个成功。
     pub fn found(mut store: S) -> Result<Self, AppError> {
-        if !store.load()?.is_empty() {
-            return Err(AppError::AlreadyFounded);
-        }
         let history = founding_events();
         let court = Court::replay(&history)?;
-        store.append(&history)?;
+        match store.append(0, &history) {
+            Err(StorageError::Conflict { .. }) => return Err(AppError::AlreadyFounded),
+            result => result?,
+        }
         Ok(Self {
             store,
             court,
@@ -104,48 +104,55 @@ impl<S: EventStore> Session<S> {
 
     /// 招募新官员（不授官职），返回其 ID。
     pub fn recruit(&mut self, name: String, speciality: Department) -> Result<AgentId, AppError> {
-        let event = self.court.propose_recruitment(name, speciality)?;
-        let CourtEvent::AgentRegistered(agent) = &event else {
-            unreachable!("propose_recruitment 只产生 AgentRegistered");
-        };
-        let id = agent.id;
-        self.commit(vec![event])?;
-        Ok(id)
+        let committed =
+            self.commit(|court| Ok(vec![court.propose_recruitment(name.clone(), speciality)?]))?;
+        match committed.first() {
+            Some(CourtEvent::AgentRegistered(agent)) => Ok(agent.id),
+            _ => unreachable!("propose_recruitment 只产生 AgentRegistered"),
+        }
     }
 
     pub fn appoint(&mut self, agent: AgentId, office: Office) -> Result<(), AppError> {
-        let event = self.court.propose_appointment(agent, office)?;
-        self.commit(vec![event])
+        self.commit(|court| Ok(vec![court.propose_appointment(agent, office)?]))?;
+        Ok(())
     }
 
     pub fn dismiss(&mut self, agent: AgentId) -> Result<(), AppError> {
-        let event = self.court.propose_dismissal(agent)?;
-        self.commit(vec![event])
+        self.commit(|court| Ok(vec![court.propose_dismissal(agent)?]))?;
+        Ok(())
     }
 
     pub fn reform(&mut self, mode: GovernanceMode) -> Result<(), AppError> {
-        let event = self.court.propose_reform(mode)?;
-        self.commit(vec![event])
+        self.commit(|court| Ok(vec![court.propose_reform(mode)?]))?;
+        Ok(())
     }
 
     /// 下诏入队。现行制度下无法路由（如职位空缺）时拒绝，不留记录。
     pub fn issue(&mut self, department: Department, text: String) -> Result<Edict, AppError> {
-        let edict = self.court.new_edict(department, text)?;
-        self.court.route(&edict)?;
-        self.commit(vec![CourtEvent::EdictIssued(edict.clone())])?;
-        Ok(edict)
+        let committed = self.commit(|court| {
+            let edict = court.new_edict(department, text.clone())?;
+            court.route(&edict)?;
+            Ok(vec![CourtEvent::EdictIssued(edict)])
+        })?;
+        match committed.into_iter().next() {
+            Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
+            _ => unreachable!("issue 只产生 EdictIssued"),
+        }
     }
 
     /// 撤销尚未结束的诏令。
+    ///
+    /// 若该诏令正由另一进程执行，执行不会被打断，但其结果会被作废、不再记录。
     pub fn cancel(&mut self, task: TaskId) -> Result<(), AppError> {
-        let event = self.court.propose_cancellation(task)?;
-        self.commit(vec![event])
+        self.commit(|court| Ok(vec![court.propose_cancellation(task)?]))?;
+        Ok(())
     }
 
     /// 按当前制度逐件指派 `tasks`，交给调度器并发执行，并在每件结束时调用 `on_report`。
     ///
     /// 结局都会记入事件簿：完成、失败（含运行时路由失败与超时）、撤销。
     /// `cancel` 触发时尚未开始的诏令保持未结束，可下次再运行。
+    /// 期间已被其他进程撤销的诏令会被跳过；执行中被撤销的，结果作废并报告为撤销。
     pub async fn run(
         &mut self,
         tasks: &[TaskId],
@@ -156,41 +163,51 @@ impl<S: EventStore> Session<S> {
         let mut jobs = Vec::new();
         let mut running = Vec::new();
         for &task in tasks {
-            let edict = self
-                .court
-                .task(task)
-                .ok_or(GovernanceError::UnknownEdict(task))?
-                .edict
-                .clone();
-            match self.court.route(&edict) {
-                Ok(route) => {
-                    self.commit(vec![CourtEvent::TaskAssigned {
+            let mut path = Vec::new();
+            let committed = self.commit(|court| {
+                let entry = court
+                    .task(task)
+                    .ok_or(GovernanceError::UnknownEdict(task))?;
+                if !entry.status.is_open() {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![match court.route(&entry.edict) {
+                    Ok(route) => {
+                        path = route.path;
+                        CourtEvent::TaskAssigned {
+                            task,
+                            worker: route.worker,
+                        }
+                    }
+                    Err(error) => CourtEvent::TaskFailed {
                         task,
-                        worker: route.worker,
-                    }])?;
+                        reason: error.to_string(),
+                    },
+                }])
+            })?;
+            let Some(event) = committed.into_iter().next() else {
+                continue;
+            };
+            let edict = self.court.task(task).expect("刚提交的诏令").edict.clone();
+            match event {
+                CourtEvent::TaskAssigned { worker, .. } => {
                     let actor = self
                         .court
-                        .agent(route.worker)
+                        .agent(worker)
                         .expect("路由只指向在册官员")
                         .clone();
                     jobs.push(Job {
                         actor,
                         edict: edict.clone(),
                     });
-                    running.push((edict, route.path));
+                    running.push((edict, path));
                 }
-                Err(error) => {
-                    let reason = error.to_string();
-                    self.commit(vec![CourtEvent::TaskFailed {
-                        task,
-                        reason: reason.clone(),
-                    }])?;
-                    on_report(&TaskReport {
-                        edict,
-                        path: Vec::new(),
-                        outcome: Outcome::Failed(reason),
-                    });
-                }
+                CourtEvent::TaskFailed { reason, .. } => on_report(&TaskReport {
+                    edict,
+                    path: Vec::new(),
+                    outcome: Outcome::Failed(reason),
+                }),
+                _ => unreachable!("指派只产生 TaskAssigned 或 TaskFailed"),
             }
         }
 
@@ -207,42 +224,49 @@ impl<S: EventStore> Session<S> {
                     ok,
                 } => {
                     // 超时/撤销后，后端线程仍可能报告工具调用；此时任务已结束，不再记录。
-                    if matches!(
-                        self.court.task(task).map(|t| &t.status),
-                        Some(TaskStatus::Assigned(_))
-                    ) {
-                        self.commit(vec![CourtEvent::ToolInvoked {
-                            task,
-                            tool,
-                            args_json,
-                            ok,
-                        }])?;
-                    }
+                    self.commit(|court| {
+                        Ok(match court.task(task).map(|t| &t.status) {
+                            Some(TaskStatus::Assigned(_)) => vec![CourtEvent::ToolInvoked {
+                                task,
+                                tool: tool.clone(),
+                                args_json: args_json.clone(),
+                                ok,
+                            }],
+                            _ => Vec::new(),
+                        })
+                    })?;
                 }
                 Progress::Finished { task, outcome } => {
                     let Some(index) = running.iter().position(|(e, _)| e.id == task) else {
                         continue;
                     };
                     let (edict, path) = running.swap_remove(index);
-                    let event = match &outcome {
-                        Outcome::Completed(summary) => Some(CourtEvent::TaskCompleted {
-                            task,
-                            worker: match self.court.task(task).map(|t| &t.status) {
-                                Some(TaskStatus::Assigned(worker)) => *worker,
-                                _ => unreachable!("执行中的诏令必已指派"),
-                            },
-                            summary: summary.clone(),
-                        }),
-                        Outcome::Failed(reason) => Some(CourtEvent::TaskFailed {
-                            task,
-                            reason: reason.clone(),
-                        }),
-                        Outcome::Cancelled => Some(CourtEvent::TaskCancelled { task }),
-                        Outcome::NotStarted => None,
+                    let committed = self.commit(|court| {
+                        let Some(TaskStatus::Assigned(worker)) =
+                            court.task(task).map(|t| &t.status)
+                        else {
+                            return Ok(Vec::new());
+                        };
+                        Ok(match &outcome {
+                            Outcome::Completed(summary) => vec![CourtEvent::TaskCompleted {
+                                task,
+                                worker: *worker,
+                                summary: summary.clone(),
+                            }],
+                            Outcome::Failed(reason) => vec![CourtEvent::TaskFailed {
+                                task,
+                                reason: reason.clone(),
+                            }],
+                            Outcome::Cancelled => vec![CourtEvent::TaskCancelled { task }],
+                            Outcome::NotStarted => Vec::new(),
+                        })
+                    })?;
+                    // 执行期间被其他进程撤销：结果作废。
+                    let outcome = if committed.is_empty() && outcome != Outcome::NotStarted {
+                        Outcome::Cancelled
+                    } else {
+                        outcome
                     };
-                    if let Some(event) = event {
-                        self.commit(vec![event])?;
-                    }
                     on_report(&TaskReport {
                         edict,
                         path,
@@ -254,15 +278,34 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    fn commit(&mut self, events: Vec<CourtEvent>) -> Result<(), AppError> {
-        let mut next = self.court.clone();
-        for event in &events {
-            next.apply(event)?;
+    /// 由 `propose` 基于当前状态生成事件，校验后写入。事件簿若已被其他进程更新，
+    /// 则重新加载并重新生成，因此 ID 分配与规则检查总是基于最新状态。返回实际写入的事件。
+    fn commit(
+        &mut self,
+        mut propose: impl FnMut(&Court) -> Result<Vec<CourtEvent>, GovernanceError>,
+    ) -> Result<Vec<CourtEvent>, AppError> {
+        loop {
+            let events = propose(&self.court)?;
+            if events.is_empty() {
+                return Ok(events);
+            }
+            let mut next = self.court.clone();
+            for event in &events {
+                next.apply(event)?;
+            }
+            match self.store.append(self.history.len(), &events) {
+                Ok(()) => {
+                    self.court = next;
+                    self.history.extend(events.iter().cloned());
+                    return Ok(events);
+                }
+                Err(StorageError::Conflict { .. }) => {
+                    self.history = self.store.load()?;
+                    self.court = Court::replay(&self.history)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
-        self.store.append(&events)?;
-        self.court = next;
-        self.history.extend(events);
-        Ok(())
     }
 }
 
@@ -273,7 +316,7 @@ mod tests {
     use std::time::Duration;
     use ziyuan_core::Agent;
     use ziyuan_runtime::{BoxError, DemoBackend, ExecutionHooks, Limits, WorkerBackend};
-    use ziyuan_storage::MemoryEventLog;
+    use ziyuan_storage::{EventLog, MemoryEventLog};
 
     fn scheduler(backend: impl WorkerBackend + 'static) -> Scheduler {
         Scheduler::new(
@@ -433,5 +476,70 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ziyuan-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn stale_session_reproposes_on_fresh_state() {
+        let root = temp_root("stale");
+        let mut a = Session::found(EventLog::new(&root)).unwrap();
+        let mut b = Session::open(EventLog::new(&root)).unwrap();
+        let first = a.issue(Department::Works, "甲".into()).unwrap();
+        // b 尚未看到 #1；若不重新提议，会再次分配 #1 并写坏事件簿。
+        let second = b.issue(Department::Works, "乙".into()).unwrap();
+        assert_eq!((first.id, second.id), (TaskId(1), TaskId(2)));
+        let recruited = a.recruit("新工".into(), Department::Works).unwrap();
+        assert_eq!(recruited, AgentId(7));
+
+        let reopened = Session::open(EventLog::new(&root)).unwrap();
+        assert_eq!(reopened.court().open_tasks(), [TaskId(1), TaskId(2)]);
+        assert!(reopened.court().agent(recruited).is_some());
+        assert!(matches!(
+            Session::found(EventLog::new(&root)),
+            Err(AppError::AlreadyFounded)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 执行期间，另一个进程（此处为另一个 Session）撤销了这件诏令。
+    struct CancelledElsewhere(std::path::PathBuf);
+    impl WorkerBackend for CancelledElsewhere {
+        fn execute(
+            &self,
+            _: &Agent,
+            edict: &Edict,
+            _: &dyn ExecutionHooks,
+        ) -> Result<String, BoxError> {
+            let mut other = Session::open(EventLog::new(&self.0))?;
+            other.cancel(edict.id)?;
+            Ok("本不该被记录".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn result_of_task_cancelled_elsewhere_is_discarded() {
+        let root = temp_root("cancel");
+        let mut session = Session::found(EventLog::new(&root)).unwrap();
+        let edict = session.issue(Department::Works, "查".into()).unwrap();
+        let reports = run_all(&mut session, &scheduler(CancelledElsewhere(root.clone()))).await;
+        assert_eq!(reports[0].outcome, Outcome::Cancelled);
+
+        let reopened = Session::open(EventLog::new(&root)).unwrap();
+        assert_eq!(
+            reopened.court().task(edict.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
+        assert!(
+            !reopened
+                .history()
+                .iter()
+                .any(|e| matches!(e, CourtEvent::TaskCompleted { .. }))
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
