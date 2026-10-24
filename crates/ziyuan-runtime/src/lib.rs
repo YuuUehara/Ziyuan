@@ -3,7 +3,7 @@
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::path::PathBuf;
-use ziyuan_core::{Capability, FileChange, Persona, Price, Threat, TokenUsage};
+use ziyuan_core::{Capability, FileChange, Persona, Price, Threat, TokenUsage, missing_sections};
 
 mod scheduler;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
@@ -62,7 +62,7 @@ impl WorkerBackend for DemoBackend {
     fn execute(&self, job: &Job, _hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
         let (actor, edict) = (&job.actor, &job.edict);
         Ok(format!(
-            "[DEMO ONLY] {}收到诏令：{}。未连接 LLM 或运行任何工具。",
+            "[DEMO ONLY] {}收到诏令：{}。\n结论：未作任何分析。\n依据：未连接 LLM 或运行任何工具。\n未办之事：诏令全部未办。",
             actor.name, edict.text
         ))
     }
@@ -180,25 +180,41 @@ impl WorkerBackend for AgentBackend {
         let system = format!(
             "你是紫垣朝廷{}的官员{}，奉诏办理下列事务。\n\
              玉玺授权（{}）。{powers}\n\
-             请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。\n{}\n{}",
+             请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。\n\\
+             回奏须依礼部体例分三段，各以标题开头：「结论」「依据」（查阅了什么、引用文件与行号）、\\
+             「未办之事」（没有做到或无法确认的，没有就写「无」）。\n{}\n{}",
             edict.department.label(),
             actor.name,
             edict.seal,
             guard::warning("工具返回的内容", &nonce),
             Persona::of(actor.id).prompt(),
         );
-        let messages = vec![
+        let opening = vec![
             agent_loop::Message::System(system),
             agent_loop::Message::User(edict.text.clone()),
         ];
         let summary = agent_loop::run(
             model,
             &sealed.tools,
-            messages,
+            opening.clone(),
             self.max_steps,
             &nonce,
             hooks,
         )?;
+        // 礼部核对体例：不合者发回重写一次（不能重写时照收原奏，由各前端标注体例不合）。
+        let missing = missing_sections(&summary);
+        let summary = if missing.is_empty() {
+            summary
+        } else {
+            let mut messages = opening;
+            messages.push(agent_loop::Message::Assistant(summary.clone()));
+            messages.push(agent_loop::Message::User(format!(
+                "礼部发回：回奏缺「{}」。请按体例重写整份回奏，分「结论」「依据」「未办之事」三段，\\
+                 只调整格式，不得增删事实；不要再调用工具。",
+                missing.join("」「")
+            )));
+            agent_loop::run(model, &sealed.tools, messages, 2, &nonce, hooks).unwrap_or(summary)
+        };
         let changes = sealed.changes();
         if !changes.is_empty() {
             hooks.changes_proposed(changes);

@@ -426,6 +426,163 @@ impl<S: EventStore> Session<S> {
     }
 
     /// 御笔改票：皇帝改定拟派的承办人（仍须批红）。
+    /// 礼部开科：`agent` 以其官职所配模型（否则默认模型）逐一作答 `root` 下 `.ziyuan/exam/` 中的考题，
+    /// 按要点判分，每道题记一条 `ExamTaken`，并经 `on_result` 报告。不能查阅文件，单轮作答。
+    /// 没有考题、模型不可用（含演示后端）时报错；中途出错则已考的照记。阻塞直到全部考完。
+    pub fn exam(
+        &mut self,
+        agent: AgentId,
+        root: &Path,
+        backend: &dyn WorkerBackend,
+        mut on_result: impl FnMut(&ExamPaper, u8),
+    ) -> Result<usize, AppError> {
+        self.reload()?;
+        self.court.propose_exam(agent)?;
+        let papers = exam_papers(root)?;
+        let person = self.court.agent(agent).expect("已确认在册").clone();
+        let office = self
+            .court
+            .office_of(agent)
+            .map_or("未任官职的".to_owned(), |o| o.label());
+        let model = self
+            .court
+            .model_of(agent)
+            .or(backend.model_name())
+            .map(str::to_owned);
+        let system = format!(
+            "你是紫垣朝廷{office}{}，赴礼部应试。{}\n\\
+             不能查阅任何文件，凭所知作答，不超过 300 字。",
+            person.name,
+            Persona::of(agent).prompt()
+        );
+        let mut taken = 0;
+        for paper in &papers {
+            self.court.check_treasury(0)?;
+            let (answer, usage) = match backend.complete(model.as_deref(), &system, &paper.question)
+            {
+                Ok(reply) => reply,
+                Err(e) if taken == 0 => {
+                    let why = format!("{}未能应试（{e}）", person.name);
+                    return Err(GovernanceError::InvalidExam(why).into());
+                }
+                Err(_) => break,
+            };
+            let answer = truncate(answer.trim(), 2000);
+            let score = paper.grade(&answer);
+            self.commit(|court| {
+                court.propose_exam(agent)?;
+                Ok(vec![CourtEvent::ExamTaken {
+                    agent,
+                    exam: paper.name.clone(),
+                    score,
+                    answer: answer.clone(),
+                    model: model.clone(),
+                    usage,
+                }])
+            })?;
+            on_result(paper, score);
+            taken += 1;
+        }
+        Ok(taken)
+    }
+
+    /// 殿试：皇帝亲自出题，在任官员（至多八位，按 ID）以其官职所配模型各答一卷，经 `on_answer` 报告。
+    /// 有人未能作答（模型出错、国库告罄）时停止，已有的答卷照记并返回原因；一卷也没有则报错。
+    pub fn palace_exam(
+        &mut self,
+        question: &str,
+        backend: &dyn WorkerBackend,
+        mut on_answer: impl FnMut(&Agent, &Speech),
+    ) -> Result<Option<String>, AppError> {
+        self.reload()?;
+        let court = &self.court;
+        if question.trim().is_empty() {
+            return Err(GovernanceError::InvalidExam("殿试须有题目".into()).into());
+        }
+        let attendees: Vec<(Agent, Office)> = court
+            .agents()
+            .filter_map(|a| Some((a.clone(), court.office_of(a.id)?)))
+            .take(8)
+            .collect();
+        if attendees.is_empty() {
+            return Err(GovernanceError::InvalidExam("朝中无人在任，殿试无人应考".into()).into());
+        }
+        let mut answers: Vec<Speech> = Vec::new();
+        let mut stopped = None;
+        for (agent, office) in &attendees {
+            let model = court
+                .model_of(agent.id)
+                .or(backend.model_name())
+                .map(str::to_owned);
+            let system = format!(
+                "你是紫垣朝廷{}{}，今日殿试，天子亲策于奉天殿。{}\n\\
+                 对策须切题、有见地，不超过 200 字；不要客套，不要复述题目。",
+                office.label(),
+                agent.name,
+                Persona::of(agent.id).prompt()
+            );
+            let spent = answers.iter().map(|a| a.usage.total()).sum();
+            let answer = court
+                .check_treasury(spent)
+                .map_err(BoxError::from)
+                .and_then(|()| backend.complete(model.as_deref(), &system, question));
+            match answer {
+                Ok((reply, usage)) => {
+                    let speech = Speech {
+                        speaker: agent.id,
+                        office: *office,
+                        text: truncate(reply.trim(), 800),
+                        model,
+                        usage,
+                    };
+                    on_answer(agent, &speech);
+                    answers.push(speech);
+                }
+                Err(e) => {
+                    stopped = Some(format!("{}{}未能作答（{e}）", office.label(), agent.name));
+                    break;
+                }
+            }
+        }
+        if answers.is_empty() {
+            let why = stopped.unwrap_or_default();
+            return Err(GovernanceError::InvalidExam(why).into());
+        }
+        let question = question.trim().to_owned();
+        self.commit(|court| {
+            court.propose_palace_exam(&question, &answers)?;
+            Ok(vec![CourtEvent::PalaceExamHeld {
+                question: question.clone(),
+                answers: answers.clone(),
+            }])
+        })?;
+        Ok(stopped)
+    }
+
+    /// 钦点状元（最近一次殿试的答卷者之一），返回传胪的史官记。
+    pub fn crown(&mut self, agent: AgentId) -> Result<String, AppError> {
+        self.commit(|court| Ok(vec![court.propose_zhuangyuan(agent)?]))?;
+        let court = &self.court;
+        let name = &court.agent(agent).expect("答卷者在册").name;
+        let rank = match court.office_of(agent) {
+            Some(Office::Chancellor | Office::FirstGrandSecretary) => {
+                "以宰辅之尊下场应试，礼部翻遍旧档，从无此例。"
+            }
+            Some(Office::Clerk(_)) => "郎中一跃而魁天下，满朝侧目。",
+            _ => "",
+        };
+        let times = court.service_record(agent).zhuangyuan;
+        let again = if times > 1 {
+            format!("此已是第 {times} 次大魁天下，连中三元亦不过如此。")
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "传胪：一甲第一名{name}，赐进士及第，跨马游街，琼林赐宴。{rank}{again}\n\
+             ——洪武四年首开科举，状元吴伯宗；殿试由天子亲策，名次出自圣裁。"
+        ))
+    }
+
     pub fn redraft(&mut self, task: TaskId, worker: AgentId, note: String) -> Result<(), AppError> {
         let note = if note.trim().is_empty() {
             "御笔改票".to_owned()
@@ -1370,8 +1527,22 @@ pub fn seal_note(seal: &Seal) -> String {
 
 pub fn describe_record(r: &ServiceRecord) -> String {
     format!(
-        "采纳 {}，驳回 {}，失败 {}，待评定 {}；御史背书 {}，弹劾 {}；实证 {}",
-        r.accepted, r.rejected, r.failed, r.unreviewed, r.endorsed, r.impeached, r.verified
+        "采纳 {}，驳回 {}，失败 {}，待评定 {}；御史背书 {}，弹劾 {}；实证 {}{}{}",
+        r.accepted,
+        r.rejected,
+        r.failed,
+        r.unreviewed,
+        r.endorsed,
+        r.impeached,
+        r.verified,
+        match r.exams {
+            0 => String::new(),
+            n => format!("；科举及格 {}/{n}", r.exams_passed),
+        },
+        match r.zhuangyuan {
+            0 => String::new(),
+            n => format!("；状元 {n}"),
+        }
     )
 }
 
@@ -1478,31 +1649,43 @@ pub fn duzhi_report(
     // (tokens, 花费, 币种)；花费只计查得到单价的部分。
     type Tally = BTreeMap<String, (u64, f64, String)>;
     let (mut by_use, mut by_model, mut by_official) = (Tally::new(), Tally::new(), Tally::new());
+    let who = |id: AgentId| {
+        court
+            .agent(id)
+            .map_or("?".to_owned(), |a| format!("#{} {}", a.id.0, a.name))
+    };
+    // (用途, 用量, 模型, 经手官员)：诏令各项开销，以及不属于任何诏令的科举、殿试。
+    let mut items: Vec<(&str, TokenUsage, Option<&str>, String)> = Vec::new();
     for task in court.tasks() {
-        let handler = task
-            .handler()
-            .and_then(|id| court.agent(id))
-            .map_or("未承办".to_owned(), |a| {
-                format!("#{} {}", a.id.0, a.name)
-            });
+        let handler = task.handler().map_or("未承办".to_owned(), who);
         for (purpose, usage, model) in spending(task) {
-            if usage.total() == 0 {
-                continue;
-            }
-            let model = model.or(default_model);
-            let cost = model.and_then(&price).map(|p| (p.cost(usage), p.currency));
-            let keys = [
-                (&mut by_use, purpose.to_owned()),
-                (&mut by_model, model.unwrap_or("未记模型").to_owned()),
-                (&mut by_official, handler.clone()),
-            ];
-            for (tally, key) in keys {
-                let entry = tally.entry(key).or_default();
-                entry.0 += usage.total();
-                if let Some((cost, currency)) = &cost {
-                    entry.1 += cost;
-                    entry.2.clone_from(currency);
-                }
+            items.push((purpose, usage, model, handler.clone()));
+        }
+    }
+    for exam in court.exams() {
+        items.push(("科举", exam.usage, exam.model.as_deref(), who(exam.agent)));
+    }
+    for answer in court.palace_exams().iter().flat_map(|p| &p.answers) {
+        let model = answer.model.as_deref();
+        items.push(("殿试", answer.usage, model, who(answer.speaker)));
+    }
+    for (purpose, usage, model, official) in items {
+        if usage.total() == 0 {
+            continue;
+        }
+        let model = model.or(default_model);
+        let cost = model.and_then(&price).map(|p| (p.cost(usage), p.currency));
+        let keys = [
+            (&mut by_use, purpose.to_owned()),
+            (&mut by_model, model.unwrap_or("未记模型").to_owned()),
+            (&mut by_official, official),
+        ];
+        for (tally, key) in keys {
+            let entry = tally.entry(key).or_default();
+            entry.0 += usage.total();
+            if let Some((cost, currency)) = &cost {
+                entry.1 += cost;
+                entry.2.clone_from(currency);
             }
         }
     }
@@ -1538,6 +1721,90 @@ pub fn duzhi_report(
         }
     });
     out
+}
+
+/// 礼部的一道考题：`.ziyuan/exam/<名>.txt`，格式为题目（可带「题：」前缀、可多行），
+/// 其后一行「要点：甲；乙；丙」。官员读不到 `.ziyuan/`，因此看不到要点。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExamPaper {
+    pub name: String,
+    pub question: String,
+    pub points: Vec<String>,
+}
+impl ExamPaper {
+    pub fn parse(name: &str, text: &str) -> Result<Self, String> {
+        let at = text
+            .find("要点：")
+            .or_else(|| text.find("要点:"))
+            .ok_or("缺少「要点：」一行")?;
+        let question = text[..at].trim();
+        let question = question
+            .strip_prefix("题：")
+            .or_else(|| question.strip_prefix("题:"))
+            .unwrap_or(question)
+            .trim();
+        let rest = &text[at..];
+        let rest = &rest[rest.find([':', '：']).expect("已找到要点")..];
+        let rest = &rest[rest.chars().next().expect("有冒号").len_utf8()..];
+        let points: Vec<String> = rest
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split(['；', ';', '，', ',', '、'])
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if question.is_empty() || points.is_empty() {
+            return Err("题目与要点都不能为空".into());
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            question: question.to_owned(),
+            points,
+        })
+    }
+
+    /// 答案命中要点的比例（0–100，向下取整）；英文不分大小写。
+    pub fn grade(&self, answer: &str) -> u8 {
+        let answer = answer.to_lowercase();
+        let hit = self
+            .points
+            .iter()
+            .filter(|p| answer.contains(&p.to_lowercase()))
+            .count();
+        (hit * 100 / self.points.len()) as u8
+    }
+}
+
+/// 读取 `root/.ziyuan/exam/*.txt`，按文件名排序。没有考题或格式不合时报错。
+pub fn exam_papers(root: &Path) -> Result<Vec<ExamPaper>, AppError> {
+    let dir = root.join(".ziyuan").join("exam");
+    let invalid = |why: String| AppError::from(GovernanceError::InvalidExam(why));
+    let hint = "礼部尚未出题：在 .ziyuan/exam/ 下放 .txt 考题，先写题目，再写一行「要点：甲；乙」";
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(invalid(hint.into())),
+        Err(e) => return Err(invalid(format!("读不到考题：{e}"))),
+    };
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+        .collect();
+    paths.sort();
+    let mut papers = Vec::new();
+    for path in paths {
+        let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("?");
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| invalid(format!("读不到考题 {name}：{e}")))?;
+        let paper =
+            ExamPaper::parse(name, &text).map_err(|e| invalid(format!("考题 {name}：{e}")))?;
+        papers.push(paper);
+    }
+    if papers.is_empty() {
+        return Err(invalid(hint.into()));
+    }
+    Ok(papers)
 }
 
 /// 截取前 `max` 个字符，超出时注明。
@@ -1919,6 +2186,15 @@ pub fn describe_event(event: &CourtEvent) -> String {
             };
             format!("诏令 #{} {bureau}：{}「{excerpt}」", task.0, threat.label())
         }
+        CourtEvent::ExamTaken {
+            agent, exam, score, ..
+        } => format!("礼部科举：#{} 应试「{exam}」，得 {score} 分", agent.0),
+        CourtEvent::PalaceExamHeld { question, answers } => format!(
+            "殿试：「{}」，{} 人对策",
+            truncate(question, 40),
+            answers.len()
+        ),
+        CourtEvent::ZhuangyuanNamed { agent } => format!("殿试传胪：钦点 #{} 为状元", agent.0),
         CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
         CourtEvent::TaskReviewed {
             task,
@@ -2309,6 +2585,156 @@ mod tests {
             Some("flash")
         );
         assert_eq!(reopened.court().office_model(clerk), None);
+    }
+
+    /// 单轮问答：按官员 ID 作答（#2 答得全，其余只答一半）；`fail_after` 次后出错。
+    struct Examinee {
+        fail_after: usize,
+        calls: std::sync::Mutex<usize>,
+    }
+    impl WorkerBackend for Examinee {
+        fn execute(&self, _: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            Ok("办毕".into())
+        }
+        fn model_name(&self) -> Option<&str> {
+            Some("flash")
+        }
+        fn complete(
+            &self,
+            _: Option<&str>,
+            system: &str,
+            _: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls > self.fail_after {
+                return Err("断线".into());
+            }
+            let usage = TokenUsage {
+                input: 10,
+                output: 5,
+            };
+            let full =
+                system.contains(&Persona::of(AgentId(2)).prompt()) && system.contains("工部尚书");
+            Ok((
+                if full {
+                    "文件锁与乐观并发，残行截掉"
+                } else {
+                    "用文件锁"
+                }
+                .into(),
+                usage,
+            ))
+        }
+    }
+
+    #[test]
+    fn exams_are_graded_recorded_and_crowned() {
+        // 考题解析：「题：」前缀可省，要点以各种分隔符分开；缺要点则拒绝。
+        let paper = ExamPaper::parse(
+            "锁",
+            "题：事件簿如何防并发？\n多行也可。\n要点：文件锁；乐观并发、残行",
+        )
+        .unwrap();
+        assert_eq!(paper.question, "事件簿如何防并发？\n多行也可。");
+        assert_eq!(paper.points, ["文件锁", "乐观并发", "残行"]);
+        assert_eq!(paper.grade("只说了文件锁"), 33);
+        assert_eq!(paper.grade("文件锁、乐观并发与残行"), 100);
+        assert!(ExamPaper::parse("x", "没有要点").is_err());
+
+        let root = std::env::temp_dir().join(format!("ziyuan-app-exam-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Session::found(EventLog::new(&root)).unwrap();
+        let many = Examinee {
+            fail_after: usize::MAX,
+            calls: Default::default(),
+        };
+        // 未出题：报错，不调用模型。
+        let err = session
+            .exam(AgentId(2), &root, &many, |_, _| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("礼部尚未出题"), "{err}");
+        std::fs::create_dir_all(root.join(".ziyuan/exam")).unwrap();
+        std::fs::write(
+            root.join(".ziyuan/exam/a.txt"),
+            "事件簿如何防并发？\n要点：文件锁；乐观并发",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".ziyuan/exam/b.txt"),
+            "残行如何处理？\n要点：残行；截掉",
+        )
+        .unwrap();
+        std::fs::write(root.join(".ziyuan/exam/notes.md"), "不是考题").unwrap();
+        // 演示后端不能应试。
+        assert!(
+            session
+                .exam(AgentId(2), &root, &DemoBackend, |_, _| {})
+                .is_err()
+        );
+
+        let mut scores = Vec::new();
+        assert_eq!(
+            session
+                .exam(AgentId(2), &root, &many, |p, s| scores
+                    .push((p.name.clone(), s)))
+                .unwrap(),
+            2
+        );
+        assert_eq!(scores, [("a".to_owned(), 100), ("b".to_owned(), 100)]);
+        session.exam(AgentId(4), &root, &many, |_, _| {}).unwrap();
+        // 第二题时断线：第一题照记。
+        let flaky = Examinee {
+            fail_after: 1,
+            calls: Default::default(),
+        };
+        assert_eq!(
+            session.exam(AgentId(5), &root, &flaky, |_, _| {}).unwrap(),
+            1
+        );
+        let record = session.court().service_record(AgentId(4));
+        // 只答了「文件锁」：第一题 50 分、第二题 0 分，都不及格。
+        assert_eq!((record.exams, record.exams_passed), (2, 0));
+        assert!(describe_record(&record).contains("科举及格 0/2"));
+        let scores: Vec<_> = session
+            .court()
+            .exams()
+            .iter()
+            .filter(|e| e.agent == AgentId(4))
+            .map(|e| e.score)
+            .collect();
+        assert_eq!(scores, [50, 0]);
+        // 科举用量计入朝廷总用量与度支奏销。
+        assert_eq!(session.court().total_usage().total(), 5 * 15);
+        let report = duzhi_report(session.court(), None, |_| None);
+        assert!(report.contains("按用途：科举 75"), "{report}");
+
+        // 殿试：在任官员都作答；钦点状元须为答卷者，每科一次。
+        assert!(session.crown(AgentId(2)).is_err(), "尚未殿试");
+        assert!(session.palace_exam("  ", &many, |_, _| {}).is_err());
+        let mut heard = Vec::new();
+        assert_eq!(
+            session
+                .palace_exam("何为治国之本？", &many, |a, _| heard.push(a.id.0))
+                .unwrap(),
+            None
+        );
+        assert_eq!(heard, [1, 2, 3, 4, 5, 6]);
+        assert!(session.crown(AgentId(99)).is_err());
+        let note = session.crown(AgentId(4)).unwrap();
+        assert!(note.contains("郎中一跃而魁天下"), "{note}");
+        assert!(session.crown(AgentId(2)).is_err(), "本科状元已点");
+        assert_eq!(session.court().service_record(AgentId(4)).zhuangyuan, 1);
+        // 荐举：状元与科举及格计入。
+        let ranked = session
+            .court()
+            .recommend(Office::Clerk(Department::Works))
+            .unwrap();
+        assert_eq!(ranked[0].agent.id, AgentId(2));
+        let replayed = Court::replay(session.history()).unwrap();
+        assert_eq!(replayed.palace_exams(), session.court().palace_exams());
+        assert_eq!(replayed.exams(), session.court().exams());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 读到一份藏有劫持指令的文件，回奏里又请求扩大玉玺；复核时记下御史看到的提示。

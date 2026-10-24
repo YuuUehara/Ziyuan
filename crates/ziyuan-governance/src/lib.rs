@@ -76,6 +76,8 @@ pub enum GovernanceError {
     RetreatUnchanged(bool),
     /// 皇帝修道期间，批红与评定由司礼监代批，须先回朝。
     InRetreat,
+    /// 科举或殿试不合规矩（原因）。
+    InvalidExam(String),
     /// 廷议须在诏令待办时进行。
     CannotDebate(TaskId),
     /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
@@ -172,6 +174,7 @@ impl fmt::Display for GovernanceError {
             Self::RetreatUnchanged(false) => f.write_str("陛下本在朝中"),
             Self::CannotDebate(id) => write!(f, "诏令 #{} 不能廷议：须尚未执行", id.0),
             Self::InvalidDebate(why) => write!(f, "廷议未成：{why}"),
+            Self::InvalidExam(why) => write!(f, "礼部不准：{why}"),
             Self::InvalidBudget => f.write_str("度支须为正数（tokens）"),
             Self::TreasuryExhausted(limit) => write!(
                 f,
@@ -213,6 +216,36 @@ pub struct Court {
     next_task_id: u64,
     next_agent_id: u64,
     tasks: BTreeMap<TaskId, Task>,
+    /// 礼部科举的成绩，按应试先后。
+    exams: Vec<ExamRecord>,
+    /// 历次殿试。
+    palace_exams: Vec<PalaceExam>,
+}
+
+/// 一次科举应试（见 `CourtEvent::ExamTaken`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExamRecord {
+    pub agent: AgentId,
+    pub exam: String,
+    pub score: u8,
+    pub answer: String,
+    pub model: Option<String>,
+    pub usage: TokenUsage,
+}
+impl ExamRecord {
+    /// 及格线。
+    pub const PASS: u8 = 60;
+    pub fn passed(&self) -> bool {
+        self.score >= Self::PASS
+    }
+}
+
+/// 一次殿试：皇帝的题目、各官员的答卷与钦点的状元。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PalaceExam {
+    pub question: String,
+    pub answers: Vec<Speech>,
+    pub zhuangyuan: Option<AgentId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -379,6 +412,8 @@ impl Court {
             next_task_id: 1,
             next_agent_id: 1,
             tasks: BTreeMap::new(),
+            exams: Vec::new(),
+            palace_exams: Vec::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -632,6 +667,40 @@ impl Court {
                     usage: *usage,
                 });
             }
+            CourtEvent::ExamTaken {
+                agent,
+                exam,
+                score,
+                answer,
+                model,
+                usage,
+            } => {
+                self.propose_exam(*agent)?;
+                if *score > 100 {
+                    return Err(GovernanceError::InvalidExam("分数须为 0–100".into()));
+                }
+                self.exams.push(ExamRecord {
+                    agent: *agent,
+                    exam: exam.clone(),
+                    score: *score,
+                    answer: answer.clone(),
+                    model: model.clone(),
+                    usage: *usage,
+                });
+            }
+            CourtEvent::PalaceExamHeld { question, answers } => {
+                self.propose_palace_exam(question, answers)?;
+                self.palace_exams.push(PalaceExam {
+                    question: question.clone(),
+                    answers: answers.clone(),
+                    zhuangyuan: None,
+                });
+            }
+            CourtEvent::ZhuangyuanNamed { agent } => {
+                self.propose_zhuangyuan(*agent)?;
+                let last = self.palace_exams.last_mut().expect("已确认有殿试");
+                last.zhuangyuan = Some(*agent);
+            }
             CourtEvent::CourtDebated { task, speeches } => {
                 self.propose_debate(*task, speeches)?;
                 let entry = self.tasks.get_mut(task).expect("已确认存在");
@@ -764,6 +833,19 @@ impl Court {
         let mut total = TokenUsage::default();
         for task in self.tasks.values() {
             total += task.usage;
+        }
+        total += self.exam_usage();
+        total
+    }
+
+    /// 科举与殿试所用的 token（不属于任何诏令）。
+    pub fn exam_usage(&self) -> TokenUsage {
+        let mut total = TokenUsage::default();
+        for exam in &self.exams {
+            total += exam.usage;
+        }
+        for answer in self.palace_exams.iter().flat_map(|p| &p.answers) {
+            total += answer.usage;
         }
         total
     }
@@ -1155,6 +1237,65 @@ impl Court {
         Ok(())
     }
 
+    /// 应试者须在册、未被革职。
+    pub fn propose_exam(&self, agent: AgentId) -> Result<(), GovernanceError> {
+        if !self.agents.contains_key(&agent) {
+            return Err(GovernanceError::UnknownAgent(agent));
+        }
+        if self.purged.contains(&agent) {
+            return Err(GovernanceError::Purged(agent));
+        }
+        Ok(())
+    }
+
+    /// 殿试：题目非空，至少一份答卷，答卷者在任所记官职且不重复。
+    pub fn propose_palace_exam(
+        &self,
+        question: &str,
+        answers: &[Speech],
+    ) -> Result<(), GovernanceError> {
+        if question.trim().is_empty() {
+            return Err(GovernanceError::InvalidExam("殿试须有题目".into()));
+        }
+        if answers.is_empty() {
+            return Err(GovernanceError::InvalidExam("无人作答".into()));
+        }
+        for (i, answer) in answers.iter().enumerate() {
+            if self.appointments.get(&answer.speaker) != Some(&answer.office) {
+                return Err(GovernanceError::NotAppointed(answer.speaker));
+            }
+            if answers[..i].iter().any(|a| a.speaker == answer.speaker) {
+                let why = format!("官员 #{} 重复作答", answer.speaker.0);
+                return Err(GovernanceError::InvalidExam(why));
+            }
+        }
+        Ok(())
+    }
+
+    /// 钦点状元：须在最近一次殿试的答卷者中，且该次尚未点过。
+    pub fn propose_zhuangyuan(&self, agent: AgentId) -> Result<CourtEvent, GovernanceError> {
+        let last = self
+            .palace_exams
+            .last()
+            .ok_or_else(|| GovernanceError::InvalidExam("尚未举行殿试".into()))?;
+        if last.zhuangyuan.is_some() {
+            return Err(GovernanceError::InvalidExam("本科状元已点".into()));
+        }
+        if !last.answers.iter().any(|a| a.speaker == agent) {
+            let why = format!("官员 #{} 未参加本科殿试", agent.0);
+            return Err(GovernanceError::InvalidExam(why));
+        }
+        Ok(CourtEvent::ZhuangyuanNamed { agent })
+    }
+
+    pub fn exams(&self) -> &[ExamRecord] {
+        &self.exams
+    }
+
+    pub fn palace_exams(&self) -> &[PalaceExam] {
+        &self.palace_exams
+    }
+
     /// 默认的廷议人选（至多四位）：协调者（丞相或首辅）、本部长官、左都御史，不足再由本部官员补上。
     pub fn debate_candidates(&self, department: Department) -> Vec<(&Agent, Office)> {
         let mut chosen: Vec<(&Agent, Office)> = Vec::new();
@@ -1394,6 +1535,15 @@ impl Court {
                 record.verified += u32::from(censure.evidence.verified());
             }
         }
+        for exam in self.exams.iter().filter(|e| e.agent == agent) {
+            record.exams += 1;
+            record.exams_passed += u32::from(exam.passed());
+        }
+        let crowned = self
+            .palace_exams
+            .iter()
+            .filter(|p| p.zhuangyuan == Some(agent));
+        record.zhuangyuan = crowned.count() as u32;
         record
     }
 
@@ -1596,6 +1746,10 @@ pub struct ServiceRecord {
     pub impeached: u32,
     /// 经核验有据可查（引用属实或测试通过）的件数。
     pub verified: u32,
+    /// 科举应试次数、及格次数，与殿试钦点状元的次数。
+    pub exams: u32,
+    pub exams_passed: u32,
+    pub zhuangyuan: u32,
 }
 
 impl ServiceRecord {
@@ -1604,10 +1758,13 @@ impl ServiceRecord {
         i64::from(self.accepted) - i64::from(self.rejected)
     }
 
-    /// 荐举排序的依据：皇帝评定（采纳 − 驳回）加都察院复核（背书 − 弹劾）与实证件数。
+    /// 荐举排序的依据：皇帝评定（采纳 − 驳回）加都察院复核（背书 − 弹劾）、实证件数、
+    /// 科举及格次数与状元次数。
     pub fn merit(&self) -> i64 {
         self.net_accepted() + i64::from(self.endorsed) - i64::from(self.impeached)
             + i64::from(self.verified)
+            + i64::from(self.exams_passed)
+            + i64::from(self.zhuangyuan)
     }
 }
 

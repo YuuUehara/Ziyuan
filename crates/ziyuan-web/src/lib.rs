@@ -29,7 +29,7 @@ use ziyuan_app::{
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
-    TokenUsage, Verdict,
+    TokenUsage, Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -124,6 +124,9 @@ pub fn router(config: Config) -> Router {
         .route("/officials/{id}/appoint", post(appoint))
         .route("/officials/{id}/dismiss", post(dismiss))
         .route("/officials/{id}/purge", post(purge))
+        .route("/officials/{id}/exam", post(exam))
+        .route("/officials/{id}/crown", post(crown))
+        .route("/palace", post(palace))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
     Router::new()
         .route("/", get(index))
@@ -742,6 +745,57 @@ async fn approve(
     .await
 }
 
+/// 礼部科举（会等待模型作答）：应试 `.ziyuan/exam/` 下全部考题，按要点判分。
+async fn exam(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    let root = app.0.config.root.clone();
+    app.mutate(move |s| {
+        let mut results = Vec::new();
+        s.exam(AgentId(id), &root, backend.as_ref(), |paper, score| {
+            results.push(json!({ "exam": paper.name, "score": score }));
+        })?;
+        Ok(json!({ "results": results }))
+    })
+    .await
+}
+
+/// 殿试（会等待全部答卷）：`{ question }`。每份答卷以 SSE `palace` 事件实时推送。
+async fn palace(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let question = str_field(&body, "question")?.to_owned();
+    let backend = app.0.config.backend.clone();
+    let live = app.clone();
+    app.mutate(move |s| {
+        let stopped = s.palace_exam(&question, backend.as_ref(), |agent, answer| {
+            live.emit(
+                "palace",
+                json!({
+                    "name": agent.name,
+                    "office": answer.office.label(),
+                    "persona": Persona::of(agent.id).label(),
+                    "text": answer.text,
+                }),
+            )
+        })?;
+        Ok(json!({ "stopped": stopped }))
+    })
+    .await
+}
+
+/// 钦点状元，返回传胪史官记。
+async fn crown(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    app.mutate(move |s| Ok(json!({ "note": s.crown(AgentId(id))? })))
+        .await
+}
+
 async fn purge(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
@@ -832,6 +886,9 @@ fn record_json(r: &ServiceRecord) -> Value {
         "endorsed": r.endorsed,
         "impeached": r.impeached,
         "verified": r.verified,
+        "exams": r.exams,
+        "exams_passed": r.exams_passed,
+        "zhuangyuan": r.zhuangyuan,
         "grade": kaocheng_grade(r),
         "usage": usage_json(r.usage),
     })
@@ -970,6 +1027,11 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                     })).collect::<Vec<_>>(),
                 })),
                 "worker": worker.and_then(name),
+                // 礼部：回奏缺了哪些体例段落（发回重写后仍缺的照收并标注）。
+                "missing_sections": match &t.status {
+                    TaskStatus::Completed { summary, .. } => missing_sections(summary),
+                    _ => Vec::new(),
+                },
                 "detail": detail,
                 "review": t.review.as_ref().map(|(v, note)| json!({
                     "verdict": v.code(), "label": v.label(), "note": note,
@@ -1027,6 +1089,19 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
         "offices": offices,
         "officials": officials,
         "tasks": tasks,
+        // 最近一次殿试。
+        "palace": court.palace_exams().last().map(|p| json!({
+            "question": p.question,
+            "zhuangyuan": p.zhuangyuan.map(|a| a.0),
+            "answers": p.answers.iter().map(|a| json!({
+                "id": a.speaker.0,
+                "name": name(a.speaker),
+                "office": a.office.label(),
+                "persona": Persona::of(a.speaker).label(),
+                "text": a.text,
+                "model": a.model,
+            })).collect::<Vec<_>>(),
+        })),
         "usage": usage_json(court.total_usage()),
         "model": default_model,
         "cost": cost(court.tasks().collect()),
@@ -1391,8 +1466,25 @@ mod tests {
             error["error"].as_str().unwrap().contains("廷议未成"),
             "{error}"
         );
+        // 礼部：未出题、演示后端不能作答、未殿试不能钦点，都拒绝且不留记录。
+        let (status, error) = call(&base, "/officials/1/exam", t, Some(json!({}))).await;
+        assert!(status == 400 && error["error"].as_str().unwrap().contains("尚未出题"));
+        std::fs::create_dir_all(root.join(".ziyuan/exam")).unwrap();
+        std::fs::write(
+            root.join(".ziyuan/exam/lock.txt"),
+            "何以防争写？\n要点：文件锁\n",
+        )
+        .unwrap();
+        let (status, error) = call(&base, "/officials/1/exam", t, Some(json!({}))).await;
+        assert!(status == 400 && error["error"].as_str().unwrap().contains("未能应试"));
+        let palace = json!({ "question": "何以治国" });
+        assert_eq!(call(&base, "/palace", t, Some(palace)).await.0, 400);
+        let (status, error) = call(&base, "/officials/1/crown", t, Some(json!({}))).await;
+        assert!(status == 400 && error["error"].as_str().unwrap().contains("尚未举行殿试"));
         let (_, state) = call(&base, "/state", t, None).await;
         assert_eq!(state["tasks"][0]["debates"], json!([]));
+        assert_eq!(state["palace"], Value::Null);
+        assert_eq!(state["officials"][0]["record"]["exams"], 0);
         assert!(
             state["officials"][0]["persona"]
                 .as_str()
@@ -1417,6 +1509,8 @@ mod tests {
         }
         assert_eq!(task["status"], "completed", "{task}");
         assert!(task["detail"].as_str().unwrap().contains("DEMO ONLY"));
+        // 演示回奏合乎礼部体例。
+        assert_eq!(task["missing_sections"], json!([]));
         assert_eq!(task["seal"]["tools"], json!(["search_code"]));
 
         let review = json!({ "verdict": "accept", "note": "属实" });

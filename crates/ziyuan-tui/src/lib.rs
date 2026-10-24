@@ -25,7 +25,7 @@ use ziyuan_app::{
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech,
-    TaskId, Verdict,
+    TaskId, Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -97,6 +97,8 @@ pub enum Message {
     Speech(TaskId, String),
     /// 后台廷议结束：中止原因（`None` 为议毕），或错误。
     Debated(TaskId, Result<Option<String>, String>),
+    /// 后台礼部科举结束：各题「题名 分数」，或错误。
+    Examined(AgentId, Result<Vec<String>, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -306,6 +308,15 @@ impl App {
                     Err(e) => self.error(format!("廷议失败：{e}")),
                 }
             }
+            Message::Examined(agent, result) => {
+                self.reload();
+                match result {
+                    Ok(scores) => {
+                        self.info(format!("礼部判卷 #{}：{}", agent.0, scores.join("，")))
+                    }
+                    Err(e) => self.error(format!("科举未成：{e}")),
+                }
+            }
             Message::Censured(task, result) => {
                 self.reload();
                 match result {
@@ -466,6 +477,7 @@ impl App {
                 })
             }
             KeyCode::Char('x') => self.modal = Some(Modal::Confirm(ConfirmKind::Purge(agent))),
+            KeyCode::Char('e') => self.start_exam(agent),
             KeyCode::Char('d') => {
                 self.mutate(
                     |s| s.dismiss(agent),
@@ -707,6 +719,26 @@ impl App {
                 .map(|v| v.label())
                 .map_err(|e| e.to_string());
             let _ = sender.send(Message::Censured(task, result));
+        });
+    }
+
+    /// 在阻塞线程中让官员应试 `.ziyuan/exam/` 下的考题（会等待模型作答），结果经消息送回。
+    fn start_exam(&mut self, agent: AgentId) {
+        self.info(format!("官员 #{} 应试中…", agent.0));
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut scores = Vec::new();
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| {
+                    s.exam(agent, &root, backend.as_ref(), |paper, score| {
+                        scores.push(format!("「{}」{score} 分", paper.name));
+                    })
+                })
+                .map(|_| scores)
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Examined(agent, result));
         });
     }
 
@@ -1097,6 +1129,19 @@ impl App {
             lines.push(Line::styled(title, Style::new().fg(Color::Magenta).bold()));
             lines.extend(speeches.into_iter().map(Line::from));
         }
+        if let TaskStatus::Completed { summary, .. } = &task.status {
+            let missing = missing_sections(summary);
+            if !missing.is_empty() {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    format!(
+                        "礼部：回奏体例不合，缺「{}」（发回重写后照收）",
+                        missing.join("」「")
+                    ),
+                    Style::new().fg(Color::Yellow).bold(),
+                ));
+            }
+        }
         if !task.suspicions.is_empty() {
             lines.push(Line::default());
             lines.push(Line::styled(
@@ -1378,6 +1423,7 @@ impl App {
                 ("p", "任命"),
                 ("d", "罢免"),
                 ("x", "革职"),
+                ("e", "应试"),
                 ("g", "改制"),
                 ("Tab", "切换"),
                 ("q", "退出"),
@@ -1765,6 +1811,16 @@ mod tests {
         );
         press(&mut app, "\n");
         assert_eq!(app.court().office_of(id), Some(Office::FirstGrandSecretary));
+        // e 礼部科举：尚未出题，错误经后台消息显示在状态栏，履历不变。
+        press(&mut app, "e");
+        let message = tokio::time::timeout(Duration::from_secs(10), messages.recv())
+            .await
+            .expect("应试应在 10 秒内结束")
+            .unwrap();
+        assert!(matches!(message, Message::Examined(a, Err(_)) if a == id));
+        app.handle(message);
+        assert!(screen(&app).contains("尚未出题"), "{}", screen(&app));
+        assert_eq!(app.court().service_record(id).exams, 0);
         press(&mut app, "1n内阁承办\n");
         assert!(app.court().task(TaskId(1)).is_some());
 

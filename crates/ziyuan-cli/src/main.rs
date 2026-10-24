@@ -14,7 +14,7 @@ use ziyuan_app::{
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
-    Verdict,
+    Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
@@ -70,6 +70,9 @@ const HELP: &str = concat!(
   ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]
                                        户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支；
                                        不带参数则出具度支奏销（按用途、模型、官员汇总花费）
+  ziyuan exam <官员ID>                   礼部科举：官员应试 .ziyuan/exam/ 下的考题，按要点判分，记入履历
+  ziyuan exam --palace <题目>            殿试：天子亲策，在任官员各答一卷
+  ziyuan crown <官员ID>                  钦点状元（须为最近一次殿试的答卷者）
   ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
@@ -174,6 +177,12 @@ enum Command {
     Kaocheng,
     /// `None` 列出全部诏令的密报。
     Flags(Option<TaskId>),
+    /// 礼部科举：官员应试 `.ziyuan/exam/` 中的考题。
+    Exam(AgentId),
+    /// 殿试：皇帝出题，在任官员作答。
+    Palace(String),
+    /// 钦点状元。
+    Crown(AgentId),
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
     /// 准奏（`true`）或驳回改动。
@@ -297,6 +306,14 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
         "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
         "kaocheng" => no_args(args, Command::Kaocheng)?,
+        "exam" => match args.as_slice() {
+            [flag, rest @ ..] if flag == "--palace" && !rest.is_empty() => {
+                Command::Palace(rest.join(" "))
+            }
+            [id] => Command::Exam(agent_id(id)?),
+            _ => return Err("用法: ziyuan exam <官员ID> | ziyuan exam --palace <题目>".into()),
+        },
+        "crown" => Command::Crown(parse_id(&args, "ziyuan crown <官员ID>")?),
         "flags" => match args.as_slice() {
             [] => Command::Flags(None),
             [id] => Command::Flags(Some(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?))),
@@ -577,8 +594,17 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                             .censure
                             .as_ref()
                             .map_or(String::new(), |c| format!("；御史{}", c.verdict.label()));
+                        // 礼部：回奏发回重写后仍不合体例的，照收并标注。
+                        let style = match &task.status {
+                            TaskStatus::Completed { summary, .. }
+                                if !missing_sections(summary).is_empty() =>
+                            {
+                                "；体例不合"
+                            }
+                            _ => "",
+                        };
                         format!(
-                            "已完成（{}），{review}{censure}{}",
+                            "已完成（{}），{review}{censure}{style}{}",
                             name(*worker),
                             changes_note(task)
                         )
@@ -745,6 +771,48 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
+        Command::Exam(agent) => {
+            let backend = worker_backend()?;
+            let name = session
+                .court()
+                .agent(agent)
+                .map_or("?".to_owned(), |a| a.name.clone());
+            println!("礼部开科：#{} {name} 应试。", agent.0);
+            let taken = session.exam(
+                agent,
+                &env::current_dir()?,
+                backend.as_ref(),
+                |paper, score| {
+                    let mark = if score >= 60 { "及格" } else { "不及格" };
+                    println!("  「{}」{score} 分（{mark}）", paper.name);
+                },
+            )?;
+            let record = session.court().service_record(agent);
+            println!(
+                "考毕 {taken} 题；履历：科举及格 {}/{}。成绩供吏部荐举参考，任命仍由皇帝决定。",
+                record.exams_passed, record.exams
+            );
+        }
+        Command::Palace(question) => {
+            let backend = worker_backend()?;
+            println!("殿试，天子亲策：{question}");
+            let stopped = session.palace_exam(&question, backend.as_ref(), |agent, answer| {
+                println!(
+                    "【#{} {}{}·{}】{}",
+                    agent.id.0,
+                    answer.office.label(),
+                    agent.name,
+                    Persona::of(agent.id).label(),
+                    answer.text
+                );
+                let _ = io::stdout().flush();
+            })?;
+            if let Some(reason) = stopped {
+                println!("殿试中止：{reason}；已交的答卷照记。");
+            }
+            println!("请 `ziyuan crown <官员ID>` 钦点状元。");
+        }
+        Command::Crown(agent) => println!("{}", session.crown(agent)?),
         Command::Flags(only) => {
             let court = session.court();
             let mut any = false;

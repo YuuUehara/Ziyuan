@@ -162,4 +162,13 @@ if "$BIN" budget court 0 > /dev/null 2>&1; then echo '度支须为正数' >&2; e
 # 刑部与锦衣卫：演示回奏无可疑内容
 "$BIN" flags | has '无所奏报'
 if "$BIN" flags x > /dev/null 2>&1; then echo '诏令 ID 须为数字' >&2; exit 1; fi
+# 礼部：未出题、演示后端不能应试或殿试、未殿试不能钦点，都不留记录；演示回奏合乎体例
+{ "$BIN" exam 1 2>&1 || true; } | has '尚未出题'
+mkdir -p .ziyuan/exam && printf '何以防争写？\n要点：文件锁\n' > .ziyuan/exam/lock.txt
+if "$BIN" exam 1 > /dev/null 2>&1; then echo '演示后端不应能应试' >&2; exit 1; fi
+if "$BIN" exam --palace 何以治国 > /dev/null 2>&1; then echo '演示后端不应能殿试' >&2; exit 1; fi
+{ "$BIN" crown 1 2>&1 || true; } | has '尚未举行殿试'
+if "$BIN" history | has '礼部科举'; then echo '科举失败不应留记录' >&2; exit 1; fi
+if "$BIN" history | has '殿试：'; then echo '殿试失败不应留记录' >&2; exit 1; fi
+if "$BIN" tasks | has '体例不合'; then echo '演示回奏应合体例' >&2; exit 1; fi
 echo 'ZiYuan smoke test PASS'

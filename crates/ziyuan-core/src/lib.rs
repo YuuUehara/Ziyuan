@@ -357,6 +357,33 @@ impl BudgetScope {
     }
 }
 
+/// 礼部回奏体例：回奏须分这三段，各段以标题开头（如「结论：」「## 依据」）。
+pub const REPORT_SECTIONS: [&str; 3] = ["结论", "依据", "未办之事"];
+
+/// 回奏缺少的体例段落（按 [`REPORT_SECTIONS`] 的顺序）；合乎体例时为空。
+/// 段落标题须在行首，可带 Markdown 标记或序号；「未办之事」也可写作「未办」。
+pub fn missing_sections(report: &str) -> Vec<&'static str> {
+    let heads: Vec<&str> = report
+        .lines()
+        .map(|line| {
+            line.trim_start_matches(|c: char| {
+                c.is_whitespace() || "#*>-【[（(一二三四1234.、)）".contains(c)
+            })
+        })
+        .collect();
+    REPORT_SECTIONS
+        .into_iter()
+        .filter(|section| {
+            let key = if *section == "未办之事" {
+                "未办"
+            } else {
+                section
+            };
+            !heads.iter().any(|h| h.starts_with(key))
+        })
+        .collect()
+}
+
 /// 廷议中一位官员的一段发言。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Speech {
@@ -802,6 +829,25 @@ pub enum CourtEvent {
         threat: Threat,
         excerpt: String,
     },
+    /// 礼部开科：官员以其官职所配模型（未任官职用默认模型）作答一道考题，按要点程序判分（0–100）。
+    ExamTaken {
+        agent: AgentId,
+        /// 考题名（`.ziyuan/exam/` 下的文件名，不含扩展名）。
+        exam: String,
+        score: u8,
+        answer: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    },
+    /// 殿试：皇帝亲自出题，在任官员作答（`Speech` 即一份答卷）。
+    PalaceExamHeld {
+        question: String,
+        answers: Vec<Speech>,
+    },
+    /// 皇帝在最近一次殿试的答卷中钦点状元。
+    ZhuangyuanNamed {
+        agent: AgentId,
+    },
     /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。
     ModelUsage {
         task: TaskId,
@@ -824,6 +870,19 @@ mod tests {
             capabilities: tools.iter().copied().collect(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn report_sections_are_found_at_line_starts() {
+        let good = "## 结论\n可以。\n**依据**：src/lib.rs:3\n3. 未办：无";
+        assert!(missing_sections(good).is_empty());
+        assert!(missing_sections("【结论】行\n- 依据：甲\n未办之事：无").is_empty());
+        // 段落标题须在行首；正文里提到「结论」不算。
+        assert_eq!(
+            missing_sections("我的结论是可以，依据如下。\n依据：甲"),
+            ["结论", "未办之事"]
+        );
+        assert_eq!(missing_sections(""), REPORT_SECTIONS);
     }
 
     #[test]

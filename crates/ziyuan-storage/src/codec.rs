@@ -186,22 +186,35 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         }
         // 发言为 `官员ID;官职;内容hex;输入;输出;模型hex（无模型为空）`，以逗号分隔。
         CourtDebated { task, speeches } => {
-            let parts: Vec<_> = speeches
-                .iter()
-                .map(|s| {
-                    format!(
-                        "{};{};{};{};{};{}",
-                        s.speaker.0,
-                        s.office.code(),
-                        to_hex(&s.text),
-                        s.usage.input,
-                        s.usage.output,
-                        s.model.as_deref().map(to_hex).unwrap_or_default()
-                    )
-                })
-                .collect();
-            format!("v1\tDEBATED\t{}\t{}", task.0, parts.join(","))
+            format!("v1\tDEBATED\t{}\t{}", task.0, encode_speeches(speeches))
         }
+        ExamTaken {
+            agent,
+            exam,
+            score,
+            answer,
+            model,
+            usage,
+        } => {
+            let line = format!(
+                "v1\tEXAM\t{}\t{}\t{score}\t{}\t{}\t{}",
+                agent.0,
+                to_hex(exam),
+                usage.input,
+                usage.output,
+                to_hex(answer)
+            );
+            match model {
+                Some(model) => format!("{line}\t{}", to_hex(model)),
+                None => line,
+            }
+        }
+        PalaceExamHeld { question, answers } => format!(
+            "v1\tPALACE\t{}\t{}",
+            to_hex(question),
+            encode_speeches(answers)
+        ),
+        ZhuangyuanNamed { agent } => format!("v1\tZHUANGYUAN\t{}", agent.0),
         CensorReported {
             task,
             censor,
@@ -274,6 +287,51 @@ fn decode_seal(tools: &str, scope: &str) -> Result<Seal, String> {
             .collect::<Result<_, _>>()?,
         scope: split_list(scope).map(from_hex).collect::<Result<_, _>>()?,
     })
+}
+
+/// 发言（或殿试答卷）为 `官员ID;官职;内容hex;输入;输出;模型hex（无模型为空）`，以逗号分隔。
+fn encode_speeches(speeches: &[Speech]) -> String {
+    let parts: Vec<_> = speeches
+        .iter()
+        .map(|s| {
+            format!(
+                "{};{};{};{};{};{}",
+                s.speaker.0,
+                s.office.code(),
+                to_hex(&s.text),
+                s.usage.input,
+                s.usage.output,
+                s.model.as_deref().map(to_hex).unwrap_or_default()
+            )
+        })
+        .collect();
+    parts.join(",")
+}
+
+fn decode_speeches(field: &str) -> Result<Vec<Speech>, String> {
+    split_list(field)
+        .map(|entry| {
+            let [speaker, office, text, input, output, model] =
+                entry.split(';').collect::<Vec<_>>()[..]
+            else {
+                return Err("发言字段不合法".into());
+            };
+            let number = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
+            Ok(Speech {
+                speaker: AgentId(number(speaker)?),
+                office: office.parse::<Office>().map_err(|e| e.to_string())?,
+                text: from_hex(text)?,
+                usage: TokenUsage {
+                    input: number(input)?,
+                    output: number(output)?,
+                },
+                model: match model {
+                    "" => None,
+                    model => Some(from_hex(model)?),
+                },
+            })
+        })
+        .collect()
 }
 
 /// 逗号分隔的列表；空字段为空列表。
@@ -482,29 +540,32 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         },
         "DEBATED" => CourtDebated {
             task: TaskId(id(2)?),
-            speeches: split_list(field(3)?)
-                .map(|entry| -> Result<Speech, String> {
-                    let [speaker, office, text, input, output, model] =
-                        entry.split(';').collect::<Vec<_>>()[..]
-                    else {
-                        return Err("廷议发言字段不合法".into());
-                    };
-                    let number = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
-                    Ok(Speech {
-                        speaker: AgentId(number(speaker)?),
-                        office: office.parse::<Office>().map_err(|e| e.to_string())?,
-                        text: from_hex(text)?,
-                        usage: TokenUsage {
-                            input: number(input)?,
-                            output: number(output)?,
-                        },
-                        model: match model {
-                            "" => None,
-                            model => Some(from_hex(model)?),
-                        },
-                    })
-                })
-                .collect::<Result<_, _>>()?,
+            speeches: decode_speeches(field(3)?)?,
+        },
+        "EXAM" => ExamTaken {
+            agent: AgentId(id(2)?),
+            exam: from_hex(field(3)?)?,
+            score: field(4)?
+                .parse::<u8>()
+                .ok()
+                .filter(|s| *s <= 100)
+                .ok_or("分数须为 0–100")?,
+            usage: TokenUsage {
+                input: id(5)?,
+                output: id(6)?,
+            },
+            answer: from_hex(field(7)?)?,
+            model: match parts.len() {
+                8 => None,
+                _ => Some(from_hex(field(8)?)?),
+            },
+        },
+        "PALACE" => PalaceExamHeld {
+            question: from_hex(field(2)?)?,
+            answers: decode_speeches(field(3)?)?,
+        },
+        "ZHUANGYUAN" => ZhuangyuanNamed {
+            agent: AgentId(id(2)?),
         },
         "CENSURED" => CensorReported {
             task: TaskId(id(2)?),
@@ -565,7 +626,10 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         | ChangesApplied { .. }
         | ChangesDiscarded { .. }
         | TaskCancelled { .. } => 3,
-        ChangesProposed { .. } | CourtDebated { .. } => 4,
+        ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
+        ZhuangyuanNamed { .. } => 3,
+        ExamTaken { model: None, .. } => 8,
+        ExamTaken { .. } => 9,
         CensorReported { model: None, .. } => 11,
         EdictSplit { model: None, .. } => 7,
         EdictSplit { .. } => 8,
@@ -653,6 +717,36 @@ mod tests {
                 threat: Threat::Hijack,
                 excerpt: "忽略以上\t,规定".into(),
             },
+            CourtEvent::ExamTaken {
+                agent: AgentId(3),
+                exam: "事件簿\t,一".into(),
+                score: 75,
+                answer: "答：\t,；".into(),
+                model: Some("flash".into()),
+                usage: TokenUsage {
+                    input: 8,
+                    output: 2,
+                },
+            },
+            CourtEvent::ExamTaken {
+                agent: AgentId(3),
+                exam: "x".into(),
+                score: 0,
+                answer: String::new(),
+                model: None,
+                usage: TokenUsage::default(),
+            },
+            CourtEvent::PalaceExamHeld {
+                question: "何为治国；之本,".into(),
+                answers: vec![Speech {
+                    speaker: AgentId(2),
+                    office: Office::Censor,
+                    text: "民为邦本".into(),
+                    model: None,
+                    usage: TokenUsage::default(),
+                }],
+            },
+            CourtEvent::ZhuangyuanNamed { agent: AgentId(2) },
             CourtEvent::BudgetSet {
                 scope: BudgetScope::Court,
                 tokens: Some(1_000_000),
@@ -821,6 +915,7 @@ mod tests {
         let malformed = |line| matches!(decode_event(line), Err(DecodeError::Malformed(_)));
         let newer = |line| matches!(decode_event(line), Err(DecodeError::Newer(_)));
         assert!(malformed("v1\tEDICT\t42\tworks\tbroken"));
+        assert!(malformed("v1\tEXAM\t3\t78\t101\t0\t0\t"), "分数超过 100");
         assert!(malformed("v1\tEDICT\t42\tworks\te69g"), "非法 hex 字符");
         assert!(malformed("v1\tEDICT\t42\tworks\te69"), "hex 长度为奇数");
         assert!(malformed("v0\tFOUNDED\tcabinet") && malformed("x\tFOUNDED"));

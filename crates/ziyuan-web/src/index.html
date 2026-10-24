@@ -243,6 +243,9 @@
   th { font-weight: normal; font-size: 12px; color: var(--muted); }
   td.name { font-family: var(--serif); font-size: 15px; }
   td .row select { min-width: 130px; }
+  td .row { flex-wrap: wrap; max-width: 230px; }
+  td .row > button { flex: 0 0 auto; }
+  #palace .debate { max-height: 460px; overflow-y: auto; }
   .record { font-size: 12px; white-space: nowrap; }
   .record .a { color: var(--jade); }
   .record .r { color: var(--vermilion); }
@@ -410,6 +413,14 @@
             <button class="small shrink" id="court-budget-clear">取消</button>
           </div>
         </div>
+        <div class="side">
+          <h3>礼部 <small class="hint">科举在百官表「应试」；考题放 .ziyuan/exam/*.txt</small></h3>
+          <div class="row">
+            <input type="text" id="palace-question" data-keep placeholder="殿试策问，天子亲出">
+            <button class="small shrink" id="palace-btn">殿试</button>
+          </div>
+          <div id="palace"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -440,6 +451,7 @@ const fmt = (n) => Number(n).toLocaleString("zh-CN");
 
 let state = null;
 const streams = {};   // 诏令 ID → 执行中流式文本
+let palaceLive = null;  // 殿试进行中已推送的答卷
 const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
 
 async function api(path, body) {
@@ -514,7 +526,7 @@ function preserve(render) {
 }
 
 function recordHtml(r) {
-  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}<br>御史背书 ${r.endorsed} · 弹劾 ${r.impeached} · 实证 ${r.verified} · 考成 <b>${esc(r.grade)}</b></span>`;
+  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}<br>御史背书 ${r.endorsed} · 弹劾 ${r.impeached} · 实证 ${r.verified} · 考成 <b>${esc(r.grade)}</b>${r.exams ? `<br>科举及格 ${r.exams_passed}/${r.exams}${r.zhuangyuan ? ` · <b class="a">状元 ${r.zhuangyuan}</b>` : ""}` : ""}</span>`;
 }
 
 const statusLabel = { pending: "待办", assigned: "执行中", completed: "已完成", failed: "失败", cancelled: "已撤销" };
@@ -615,7 +627,7 @@ function taskHtml(t) {
   }
   return `<article class="task ${t.status}">
     <div class="task-head"><span class="task-id">#${t.id}</span><span>${esc(t.department)}</span>
-      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
+      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
     <div class="task-text">${esc(t.text)}</div>
     <div class="meta">${meta}</div>${body}${actions}</article>`;
 }
@@ -663,7 +675,7 @@ function render() {
   $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。请在左侧下诏。</div>`;
 
   $("officials").innerHTML = s.officials.map((o) => {
-    const purge = `<button class="small reject" data-purge="${o.id}">革职</button>`;
+    const purge = `<button class="small" data-exam="${o.id}" title="礼部科举：应试 .ziyuan/exam/ 下的考题">应试</button><button class="small reject" data-purge="${o.id}">革职</button>`;
     const action = o.purged
       ? ""
       : o.office
@@ -676,6 +688,18 @@ function render() {
       <td class="record">${o.model ? esc(o.model) : '<span class="hint">演示</span>'}${o.ceiling ? `<br><span class="hint">上限 ${esc(o.ceiling)}</span>` : ""}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.cost) : "—"}</td><td>${action}</td></tr>`;
   }).join("");
+
+  const answerHtml = (a, p) => {
+    const crown = p && p.zhuangyuan === null ? ` <button class="small" data-crown="${a.id}">钦点状元</button>` : "";
+    const first = p && p.zhuangyuan === a.id ? ' <span class="badge accept">状元</span>' : "";
+    return `<p><span class="who">${esc(a.office)}${esc(a.name || "?")}</span> <span class="persona">${esc(a.persona)}</span>${first}：${esc(a.text)}${crown}</p>`;
+  };
+  const p = s.palace;
+  $("palace").innerHTML = palaceLive
+    ? `<div class="debate live"><b>殿试进行中…</b>${palaceLive.map((a) => answerHtml(a)).join("")}</div>`
+    : p
+    ? `<div class="debate"><b>殿试策问</b>：${esc(p.question)}${p.answers.map((a) => answerHtml(a, p)).join("")}</div>`
+    : `<p class="hint">尚未举行殿试。</p>`;
 }
 
 async function refresh() {
@@ -770,6 +794,16 @@ $("ceiling-set").addEventListener("click", () => act(api("/offices/ceiling", {
 }), "已设玉玺上限"));
 $("ceiling-clear").addEventListener("click", () =>
   act(api("/offices/ceiling", { office: configOffice(), clear: true }), "已取消玉玺上限"));
+$("palace-btn").addEventListener("click", () => {
+  const question = $("palace-question").value.trim();
+  if (!question) return toast("请先出策问", true);
+  palaceLive = [];
+  preserve(render);
+  api("/palace", { question })
+    .then((r) => toast(r.stopped ? `殿试中止：${r.stopped}` : "殿试毕，请钦点状元", !!r.stopped))
+    .catch((e) => toast(e.message, true))
+    .finally(() => { palaceLive = null; refresh(); });
+});
 $("history").addEventListener("toggle", () => { if ($("history").open) loadHistory(); });
 
 document.addEventListener("click", (event) => {
@@ -831,6 +865,13 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.discard}/changes/discard`, {}), "已驳回改动");
   } else if (d.approve) {
     act(api(`/tasks/${d.approve}/approve`, {}), `诏令 #${d.approve} 已批红`);
+  } else if (d.exam) {
+    el.disabled = true;
+    el.textContent = "应试中…";
+    act(api(`/officials/${d.exam}/exam`, {})).then((r) => r &&
+      toast(`礼部判卷：${r.results.map((x) => `「${x.exam}」${x.score} 分`).join("，")}`));
+  } else if (d.crown) {
+    act(api(`/officials/${d.crown}/crown`, {})).then((r) => r && chronicle(r.note));
   } else if (d.purge) {
     if (confirm(`革去官员 #${d.purge}？削去仕籍，永不叙用。`)) act(api(`/officials/${d.purge}/purge`, {}), "已革职");
   } else if (d.review) {
@@ -867,6 +908,11 @@ function connect() {
     const sp = JSON.parse(event.data);
     if (!debating[sp.task]) return;
     debating[sp.task].push(sp);
+    preserve(render);
+  });
+  source.addEventListener("palace", (event) => {
+    if (!palaceLive) return;
+    palaceLive.push(JSON.parse(event.data));
     preserve(render);
   });
   source.addEventListener("run_error", (event) => toast(JSON.parse(event.data).error, true));
