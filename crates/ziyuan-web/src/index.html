@@ -196,7 +196,7 @@
     background: #fbf5e6; font-family: var(--serif); line-height: 1.7;
   }
   .chronicle h3 { margin: 0 0 4px; font-size: 14px; color: var(--lacquer); }
-  .chronicle p { margin: 0 0 8px; }
+  .chronicle p { margin: 0 0 8px; white-space: pre-line; }
   .badge.cancelled { color: var(--muted); border-color: var(--line); background: var(--paper-dark); }
   .badge.accept { color: #fff; background: var(--jade); border-color: var(--jade); }
   .badge.reject { color: #fff; background: var(--vermilion); border-color: var(--vermilion); }
@@ -308,7 +308,7 @@
           <h3>罢中书省，丞相如何处置？</h3>
           <div class="actions">
             <button id="reform-direct">罢免丞相（留仕籍，可再起用）</button>
-            <button class="zhu" id="abolish-btn">一键朱元璋：革职削籍，永不叙用</button>
+            <button class="zhu" id="abolish-btn">一键朱元璋（株连百官，革职削籍）</button>
             <button class="small" id="abolish-cancel">取消</button>
           </div>
         </div>
@@ -669,11 +669,9 @@ document.addEventListener("click", (event) => {
     reform("direct", "废相亲政");
   } else if (el.id === "abolish-btn") {
     $("abolish-choice").hidden = true;
-    act(api("/abolish", {})).then((r) => {
-      if (!r) return;
-      const names = r.purged.map((p) => p.name).join("、");
-      chronicle((names ? `丞相${names}革职削籍。` : "") + r.note);
-    });
+    if (confirm("一键朱元璋：罢中书省，全部在任官员株连革职、永不叙用？")) {
+      act(api("/abolish", {})).then((r) => r && chronicle(`${r.summary}\n${r.note}`));
+    }
   } else if (el.id === "abolish-cancel") {
     $("abolish-choice").hidden = true;
   } else if (el.id === "chronicle-close") {

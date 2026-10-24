@@ -41,7 +41,7 @@ const HELP: &str = concat!(
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan dismiss <官员ID>               罢免现任官职
   ziyuan purge <官员ID>                 革职：削去仕籍，永不叙用
-  ziyuan abolish                       一键朱元璋：革去全部丞相，罢中书省（改为废相亲政）
+  ziyuan abolish                       一键朱元璋：罢中书省，株连百官（全部在任官员革职削籍）
   ziyuan model <官职> <模型|default>     为官职指定承办模型（同一服务地址与 Key）
   ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
@@ -458,18 +458,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             println!("诏令已颁：官员 #{} 革职，削去仕籍，永不叙用。", id.0);
         }
         Command::Abolish => {
-            let purged = session.abolish_chancellery()?;
-            let court = session.court();
-            let names: Vec<_> = purged
-                .iter()
-                .filter_map(|&id| court.agent(id))
-                .map(|a| format!("#{} {}", a.id.0, a.name))
-                .collect();
-            if names.is_empty() {
-                println!("中书省本无丞相在任。");
-            } else {
-                println!("丞相 {} 革职削籍。", names.join("、"));
-            }
+            println!("{}", session.abolish_chancellery()?);
             println!("诏令已颁：罢中书省，制度改为废相亲政。");
             println!("史官记：{ABOLITION_NOTE}");
         }

@@ -83,10 +83,18 @@ grep -q '工部尚书（正二品）' <<< "$OFFICIALS"
 # 改制已撤销 #6 的首辅之职
 grep -q '大元，杀回来了' <<< "$("$BIN" reform chancellor)"
 "$BIN" appoint 6 chancellor
-grep -q '胡惟庸' <<< "$("$BIN" abolish)"
+OUT="$("$BIN" abolish)"
+grep -q '胡惟庸' <<< "$OUT"
+grep -q '株连所及' <<< "$OUT"
+if "$BIN" officials | grep -qE '（(正|从)'; then echo '一键朱元璋后不应再有在任官员' >&2; exit 1; fi
 "$BIN" officials | grep -q '^#6 .*已革职'
 if "$BIN" appoint 6 minister:personnel > /dev/null 2>&1; then echo '革职者不应再任官' >&2; exit 1; fi
 "$BIN" court | grep -q '废相亲政'
+# 六部为之一空：重新招募工部尚书与郎中
+for OFFICE in minister:works clerk:works; do
+  NEW="$("$BIN" recruit works | grep -o '#[0-9]*' | head -1 | tr -d '#')"
+  "$BIN" appoint "$NEW" "$OFFICE" > /dev/null
+done
 # 官职配置：指定模型、玉玺上限（诏令范围全在上限外则不予承办）
 "$BIN" model clerk:works deepseek-v4-pro | grep -q '工部郎中改用模型 deepseek-v4-pro'
 "$BIN" officials | grep -q '工部郎中.*模型 deepseek-v4-pro'

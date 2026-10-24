@@ -543,20 +543,11 @@ impl App {
                 }
             }
             ChooseKind::Abolish => {
-                if let Some(purged) =
-                    self.mutate(|s| s.abolish_chancellery(), |_| "罢中书省，废相亲政".into())
-                {
-                    let names: Vec<_> = purged
-                        .iter()
-                        .filter_map(|&id| self.court().agent(id))
-                        .map(|a| a.name.clone())
-                        .collect();
-                    let purged = if names.is_empty() {
-                        String::new()
-                    } else {
-                        format!("丞相{}革职削籍。\n\n", names.join("、"))
-                    };
-                    self.modal = Some(Modal::Notice(format!("{purged}{ABOLITION_NOTE}")));
+                if let Some(summary) = self.mutate(
+                    |s| s.abolish_chancellery(),
+                    |_| "罢中书省，株连百官，废相亲政".into(),
+                ) {
+                    self.modal = Some(Modal::Notice(format!("{summary}\n\n{ABOLITION_NOTE}")));
                 }
             }
             ChooseKind::Redraft(task) => {
@@ -615,7 +606,7 @@ impl App {
                 .collect(),
             ChooseKind::Abolish => vec![
                 "罢免丞相（留仕籍，可再起用）".to_owned(),
-                "一键朱元璋（革职削籍，永不叙用）".to_owned(),
+                "一键朱元璋（株连百官，革职削籍）".to_owned(),
             ],
             ChooseKind::Redraft(task) => self
                 .redraft_candidates(task)
@@ -1466,14 +1457,16 @@ mod tests {
         assert!(screen(&app).contains("大元，杀回来了"));
         press(&mut app, " ");
         assert!(app.modal.is_none());
-        // 丞相制下改为亲政时选丞相的处置：Esc 取消不生效；选一键朱元璋则丞相革职、改为亲政。
+        // 丞相制下改为亲政时选丞相的处置：Esc 取消不生效；选一键朱元璋则株连百官、改为亲政。
         press(&mut app, "g↓\n");
-        assert!(screen(&app).contains("一键朱元璋（革职削籍"));
+        assert!(screen(&app).contains("一键朱元璋（株连百官"));
         press(&mut app, "⎋");
         assert_eq!(app.court().mode(), GovernanceMode::Chancellor);
         press(&mut app, "g↓\n↓\n");
         assert_eq!(app.court().mode(), GovernanceMode::DirectRule);
-        assert!(screen(&app).contains("胡惟庸"));
+        assert!(screen(&app).contains("胡惟庸") && screen(&app).contains("株连所及"));
+        let court = app.court();
+        assert!(court.agents().all(|a| court.office_of(a.id).is_none()));
         press(&mut app, " ");
 
         // 其他进程的写入在重新加载后可见。

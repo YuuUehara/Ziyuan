@@ -444,17 +444,11 @@ fn string_list(value: &Value) -> Vec<String> {
         .collect()
 }
 
-/// 一键朱元璋。
+/// 一键朱元璋：罢中书省，株连百官。
 async fn abolish(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     app.mutate(|s| {
-        let purged = s.abolish_chancellery()?;
-        let court = s.court();
-        let purged: Vec<_> = purged
-            .iter()
-            .filter_map(|&id| court.agent(id))
-            .map(|a| json!({ "id": a.id.0, "name": a.name }))
-            .collect();
-        Ok(json!({ "purged": purged, "note": ABOLITION_NOTE }))
+        let summary = s.abolish_chancellery()?;
+        Ok(json!({ "summary": summary, "note": ABOLITION_NOTE }))
     })
     .await
 }
@@ -870,9 +864,15 @@ mod tests {
     async fn abolition_and_cabinet_approval() {
         let (base, root) = start("cabinet").await;
         let t = Some(TOKEN);
-        let (status, abolished) = call(&base, "/abolish", t, Some(json!({}))).await;
-        assert_eq!(status, 200);
-        assert_eq!(abolished["purged"][0]["id"], 1);
+        // 革去丞相 #1 并废相；废相后不能再一键朱元璋（本测试末尾在丞相制下一键株连）。
+        assert_eq!(
+            call(&base, "/officials/1/purge", t, Some(json!({})))
+                .await
+                .0,
+            200
+        );
+        let direct = json!({ "mode": "direct" });
+        assert_eq!(call(&base, "/reform", t, Some(direct)).await.0, 200);
         assert_eq!(call(&base, "/abolish", t, Some(json!({}))).await.0, 400);
         let (_, reformed) = call(&base, "/reform", t, Some(json!({ "mode": "cabinet" }))).await;
         assert!(reformed["note"].as_str().unwrap().contains("四叔"));
@@ -930,6 +930,20 @@ mod tests {
         );
         let (_, state) = call(&base, "/state", t, None).await;
         assert_eq!(state["tasks"][0]["needs_approval"], false);
+
+        // 一键朱元璋：在任官员全部株连革职，无人再有官职。
+        let chancellor = json!({ "mode": "chancellor" });
+        call(&base, "/reform", t, Some(chancellor)).await;
+        let (status, abolished) = call(&base, "/abolish", t, Some(json!({}))).await;
+        assert_eq!(status, 200);
+        assert!(abolished["summary"].as_str().unwrap().contains("株连所及"));
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(state["mode"]["code"], "direct");
+        let officials = state["officials"].as_array().unwrap();
+        assert!(
+            officials.iter().all(|o| o["office"].is_null()),
+            "{officials:?}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

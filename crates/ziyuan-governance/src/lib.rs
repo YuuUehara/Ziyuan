@@ -638,7 +638,8 @@ impl Court {
         }
     }
 
-    /// 一键朱元璋：革去中书省全部丞相，罢中书省，改为废相亲政。
+    /// 一键朱元璋：罢中书省，株连百官——丞相与全部在任官员革职削籍，改为废相亲政。
+    /// 未任官职者（白身）不受牵连。
     pub fn propose_abolition(&self) -> Result<Vec<CourtEvent>, GovernanceError> {
         if self.mode != GovernanceMode::Chancellor {
             return Err(GovernanceError::NoChancellery);
@@ -646,7 +647,6 @@ impl Court {
         let mut events: Vec<_> = self
             .appointments
             .iter()
-            .filter(|(_, office)| office.mode() == Some(GovernanceMode::Chancellor))
             .map(|(&agent, _)| CourtEvent::OfficialPurged { agent })
             .collect();
         events.push(CourtEvent::InstitutionReformed(GovernanceMode::DirectRule));
@@ -1186,9 +1186,14 @@ mod tests {
                 court.apply(&e).unwrap();
             }
         };
-        // 一键朱元璋：右丞相 #1 被革职，改为亲政；被革者不能再任官，也不入荐举。
-        apply(court.propose_abolition().unwrap(), &mut court);
-        assert_eq!(court.mode(), GovernanceMode::DirectRule);
+        // 革去右丞相 #1 并废相；被革者不能再任官，也不入荐举（一键朱元璋见本测试末尾）。
+        apply(
+            vec![
+                court.propose_purge(AgentId(1)).unwrap(),
+                court.propose_reform(GovernanceMode::DirectRule).unwrap(),
+            ],
+            &mut court,
+        );
         assert!(court.is_purged(AgentId(1)) && court.office_of(AgentId(1)).is_none());
         assert!(!court.is_purged(AgentId(2)));
         assert_eq!(
@@ -1287,6 +1292,38 @@ mod tests {
             court.propose_approval(id),
             Err(GovernanceError::ApprovalNotNeeded)
         );
+
+        // 一键朱元璋：复设丞相后一键株连——在任官员（含六部）全部革职，白身 #7 幸免。
+        apply(
+            vec![
+                court.propose_reform(GovernanceMode::Chancellor).unwrap(),
+                CourtEvent::AgentRegistered(Agent {
+                    id: AgentId(7),
+                    name: "白身".into(),
+                    speciality: Department::Works,
+                }),
+            ],
+            &mut court,
+        );
+        apply(
+            vec![
+                court
+                    .propose_appointment(AgentId(6), Office::Chancellor)
+                    .unwrap(),
+            ],
+            &mut court,
+        );
+        let holders: Vec<_> = court
+            .agents()
+            .filter(|a| court.office_of(a.id).is_some())
+            .map(|a| a.id)
+            .collect();
+        assert!(holders.len() >= 3, "{holders:?}");
+        apply(court.propose_abolition().unwrap(), &mut court);
+        assert_eq!(court.mode(), GovernanceMode::DirectRule);
+        assert!(holders.iter().all(|&a| court.is_purged(a)));
+        assert!(court.agents().all(|a| court.office_of(a.id).is_none()));
+        assert!(!court.is_purged(AgentId(7)));
     }
     #[test]
     fn cannot_create_two_chancellors() {

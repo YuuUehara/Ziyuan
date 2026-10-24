@@ -5,6 +5,7 @@
 //!
 //! 诏令分两步：[`Session::issue`] 入队（路由不通则拒绝、不留记录），
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
+use std::collections::BTreeMap;
 use std::fmt;
 use ziyuan_core::{
     AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Price, Seal, TaskId,
@@ -294,16 +295,40 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    /// 一键朱元璋：革去全部丞相并罢中书省（改为废相亲政）。返回被革职的官员。
-    pub fn abolish_chancellery(&mut self) -> Result<Vec<AgentId>, AppError> {
-        let committed = self.commit(|court| court.propose_abolition())?;
-        Ok(committed
+    /// 一键朱元璋：罢中书省，株连百官（全部在任官员革职削籍），改为废相亲政。
+    /// 返回株连的文字记述（丞相在前，各附原官职）。
+    pub fn abolish_chancellery(&mut self) -> Result<String, AppError> {
+        let mut offices = BTreeMap::new();
+        let committed = self.commit(|court| {
+            offices = court
+                .agents()
+                .filter_map(|a| Some((a.id, court.office_of(a.id)?)))
+                .collect();
+            court.propose_abolition()
+        })?;
+        let mut purged: Vec<_> = committed
             .iter()
             .filter_map(|e| match e {
-                CourtEvent::OfficialPurged { agent } => Some(*agent),
+                CourtEvent::OfficialPurged { agent } => Some((*agent, offices.get(agent)?)),
                 _ => None,
             })
-            .collect())
+            .collect();
+        if purged.is_empty() {
+            return Ok("朝中本无在任官员。".into());
+        }
+        purged.sort_by_key(|(_, office)| office.mode() != Some(GovernanceMode::Chancellor));
+        let names: Vec<_> = purged
+            .iter()
+            .map(|(id, office)| {
+                let name = self.court.agent(*id).map_or("?", |a| a.name.as_str());
+                format!("{}{name}", office.label())
+            })
+            .collect();
+        Ok(format!(
+            "株连所及，凡 {} 人：{}，一并革职削籍，永不叙用。六部为之一空，请重新招募任官。",
+            names.len(),
+            names.join("、")
+        ))
     }
 
     /// 下诏入队。现行制度下无法路由（如职位空缺）时拒绝，不留记录。
@@ -821,8 +846,7 @@ mod tests {
     async fn cabinet_runs_only_approved_edicts_and_reforms_leave_notes() {
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
-        let purged = session.abolish_chancellery().unwrap();
-        assert_eq!(purged, [AgentId(1)]);
+        session.reform(GovernanceMode::DirectRule).unwrap();
         assert!(
             session
                 .reform(GovernanceMode::Cabinet)
@@ -851,6 +875,15 @@ mod tests {
                 .unwrap()
                 .contains("大元，杀回来了")
         );
+        // 一键朱元璋：在任官员全部株连，白身幸免；丞相排在名单之首。
+        let commoner = session.recruit(None, Department::Works).unwrap();
+        session.appoint(AgentId(6), Office::Chancellor).unwrap();
+        let summary = session.abolish_chancellery().unwrap();
+        assert!(summary.contains("凡 5 人：中书右丞相"), "{summary}");
+        let court = session.court();
+        assert_eq!(court.mode(), GovernanceMode::DirectRule);
+        assert!(court.agents().all(|a| court.office_of(a.id).is_none()));
+        assert!(court.is_purged(AgentId(2)) && !court.is_purged(commoner));
     }
 
     #[test]
