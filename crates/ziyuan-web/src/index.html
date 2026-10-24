@@ -498,8 +498,20 @@ function taskHtml(t) {
     const approve = t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
     actions = `<div class="review-row"><span style="flex:1"></span>${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
   }
-  if (t.draft) {
-    body += `<div class="draft"><b>内阁票拟</b>　${t.draft.route ? t.draft.route.map(esc).join(" ▸ ") : esc(t.draft.error)}</div>`;
+  if (t.needs_approval) {
+    const d = t.draft;
+    const route = t.preview.route ? t.preview.route.map(esc).join(" ▸ ") : esc(t.preview.error);
+    const opinion = d
+      ? `拟派 <b>${esc(d.name)}</b>${d.model ? `（${esc(d.model)}）` : ""}：${esc(d.note)}`
+      : "尚未票拟；未票拟即批红为中旨，按旧例派工。";
+    const options = t.candidates.map((c) =>
+      `<option value="${c.id}" ${d && d.worker === c.id ? "selected" : ""}>${esc(c.name)}（${esc(c.office)}）</option>`).join("");
+    body += `<div class="draft"><b>内阁票拟</b>　${opinion}<br>${route}</div>
+      <div class="review-row">
+        <button class="small" data-draft="${t.id}">${d ? "重新票拟" : "内阁票拟"}</button>
+        <span style="flex:1"></span>
+        <select id="redraft-${t.id}" data-keep class="shrink">${options}</select>
+        <button class="small" data-redraft="${t.id}">御笔改票</button></div>`;
   }
   return `<article class="task ${t.status}">
     <div class="task-head"><span class="task-id">#${t.id}</span><span>${esc(t.department)}</span>
@@ -591,8 +603,11 @@ $("edict-form").addEventListener("submit", async (event) => {
   if (!result) return;
   $("edict-text").value = "";
   toast(`诏令 #${result.id} 已颁布${state.mode.code === "cabinet" && !run ? "，待批红" : ""}`);
-  // 皇帝亲自「下诏并执行」：内阁票拟后当即批红。
-  if (run && state.mode.code === "cabinet") await act(api(`/tasks/${result.id}/approve`, {}));
+  // 皇帝亲自「下诏并执行」：内阁当即票拟，随即批红。
+  if (run && state.mode.code === "cabinet") {
+    await act(api(`/tasks/${result.id}/draft`, {}));
+    await act(api(`/tasks/${result.id}/approve`, {}));
+  }
   if (run && !state.running) await act(api("/run", {}));
 });
 
@@ -646,6 +661,12 @@ document.addEventListener("click", (event) => {
     }
   } else if (el.id === "chronicle-close") {
     $("chronicle").hidden = true;
+  } else if (d.draft) {
+    el.disabled = true;
+    el.textContent = "票拟中…";
+    act(api(`/tasks/${d.draft}/draft`, {})).then((r) => r && toast(`诏令 #${d.draft} 票拟：拟派 ${r.name}`));
+  } else if (d.redraft) {
+    act(api(`/tasks/${d.redraft}/redraft`, { worker: Number($("redraft-" + d.redraft).value) }), "已御笔改票");
   } else if (d.approve) {
     act(api(`/tasks/${d.approve}/approve`, {}), `诏令 #${d.approve} 已批红`);
   } else if (d.purge) {

@@ -21,6 +21,17 @@ pub trait WorkerBackend: Send + Sync {
         None
     }
 
+    /// 不带工具的单轮问答（如内阁票拟），返回模型的回复与用量。`model` 为 `None` 用默认模型。
+    /// 不调用模型的后端返回错误，调用方应自行兜底。
+    fn complete(
+        &self,
+        _model: Option<&str>,
+        _system: &str,
+        _user: &str,
+    ) -> Result<(String, TokenUsage), BoxError> {
+        Err("演示后端不调用模型".into())
+    }
+
     /// `model` 的单价，用于估算花费；未知时为 `None`。
     fn price(&self, _model: &str) -> Option<Price> {
         None
@@ -87,7 +98,53 @@ impl AgentBackend {
     }
 }
 
+impl AgentBackend {
+    /// 需要切换到默认模型以外的 `name` 时构造该模型；用默认模型时为 `None`。
+    fn switch_to(
+        &self,
+        name: Option<&str>,
+    ) -> Result<Option<Box<dyn agent_loop::ModelProvider>>, BoxError> {
+        match name {
+            Some(name) if Some(name) != self.model.model_name() => match &self.catalog {
+                Some(catalog) => Ok(Some(catalog.provider(name))),
+                None => Err(format!("执行后端不支持切换到模型 {name}").into()),
+            },
+            _ => Ok(None),
+        }
+    }
+}
+
+/// 只累计用量的执行钩子。
+#[derive(Default)]
+struct UsageTotal(std::cell::Cell<TokenUsage>);
+impl ExecutionHooks for UsageTotal {
+    fn model_usage(&self, usage: TokenUsage) {
+        let mut total = self.0.get();
+        total += usage;
+        self.0.set(total);
+    }
+}
+
 impl WorkerBackend for AgentBackend {
+    fn complete(
+        &self,
+        model: Option<&str>,
+        system: &str,
+        user: &str,
+    ) -> Result<(String, TokenUsage), BoxError> {
+        let switched = self.switch_to(model)?;
+        let model = switched.as_deref().unwrap_or(self.model.as_ref());
+        let messages = [
+            agent_loop::Message::System(system.into()),
+            agent_loop::Message::User(user.into()),
+        ];
+        let hooks = UsageTotal::default();
+        match model.next_turn(&messages, &[], &hooks)? {
+            agent_loop::ModelTurn::Final(text) => Ok((text, hooks.0.get())),
+            agent_loop::ModelTurn::Calls { .. } => Err("未提供工具，模型却请求调用工具".into()),
+        }
+    }
+
     fn model_name(&self) -> Option<&str> {
         self.model.model_name()
     }
@@ -98,13 +155,7 @@ impl WorkerBackend for AgentBackend {
 
     fn execute(&self, job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
         let (actor, edict) = (&job.actor, &job.edict);
-        let switched = match job.model.as_deref() {
-            Some(name) if Some(name) != self.model.model_name() => match &self.catalog {
-                Some(catalog) => Some(catalog.provider(name)),
-                None => return Err(format!("执行后端不支持切换到模型 {name}").into()),
-            },
-            _ => None,
-        };
+        let switched = self.switch_to(job.model.as_deref())?;
         let model = switched.as_deref().unwrap_or(self.model.as_ref());
         let tools = tools::sealed_tools(&self.root, &edict.seal)?;
         let system = format!(

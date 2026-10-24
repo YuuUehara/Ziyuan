@@ -12,7 +12,7 @@ use ziyuan_core::{
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{Court, GovernanceError, ServiceRecord, Task, TaskStatus, founding_events};
-use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
+use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventStore, StorageError};
 
 #[derive(Debug)]
@@ -59,7 +59,7 @@ pub struct TaskReport {
     /// 派工路线；运行时路由失败则为空。
     pub path: Vec<String>,
     pub outcome: Outcome,
-    /// 该诏令至今累计的模型 token 用量（含以往运行）。
+    /// 该诏令承办至今累计的模型 token 用量（含以往运行，不含内阁票拟）。
     pub usage: TokenUsage,
     /// 最近一次承办所用的模型。
     pub model: Option<String>,
@@ -180,6 +180,100 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 内阁票拟：首辅（以其官职所配模型，否则默认模型）读诏令，从本部在任官员中拟定承办人，
+    /// 附票拟意见记入事件簿。模型不可用、回复未指明合格人选时，按旧例（任务量均衡）拟派并在
+    /// 意见中注明。阻塞直到模型返回。返回拟派的官员。
+    pub fn draft(
+        &mut self,
+        task: TaskId,
+        backend: &dyn WorkerBackend,
+    ) -> Result<AgentId, AppError> {
+        let court = &self.court;
+        let entry = court
+            .task(task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        // 旧例人选；同时校验制度、诏令状态与内阁、本部是否有人。
+        let fallback = court.route(&entry.edict)?.worker;
+        court.propose_draft(task, fallback, String::new(), None, TokenUsage::default())?;
+        let (secretary, office) = court.coordinator().expect("路由已确认内阁有人");
+        let candidates = court.draft_candidates(entry.edict.department);
+        let model = court
+            .model_of(secretary.id)
+            .or(backend.model_name())
+            .map(str::to_owned);
+        let system = format!(
+            "你是紫垣朝廷{}{}，为皇帝票拟：从候选官员中拟定一位承办下面这件诏令，并简述理由。\n\
+             只能从候选名单中选。回复第一行必须是「拟派：#官员ID」，其后用一两句话说明理由，不超过 100 字。",
+            office.label(),
+            secretary.name
+        );
+        let mut user = format!(
+            "诏令（{}）：{}\n玉玺：{}\n候选：\n",
+            entry.edict.department.label(),
+            entry.edict.text,
+            entry.edict.seal
+        );
+        for (agent, office) in &candidates {
+            user.push_str(&format!(
+                "#{} {} {}，{}\n",
+                agent.id.0,
+                agent.name,
+                office.label(),
+                describe_record(&court.service_record(agent.id))
+            ));
+        }
+        let (worker, note, model, usage) = match backend.complete(model.as_deref(), &system, &user)
+        {
+            Ok((reply, usage)) => {
+                let reply: String = reply.trim().chars().take(600).collect();
+                match parse_draft(&reply).filter(|id| candidates.iter().any(|(a, _)| a.id == *id)) {
+                    Some(id) => (id, reply, model, usage),
+                    None => (
+                        fallback,
+                        format!("票拟未指明合格人选，按旧例拟派。原票：{reply}"),
+                        model,
+                        usage,
+                    ),
+                }
+            }
+            Err(e) => (
+                fallback,
+                format!("内阁未能票拟（{e}），按旧例拟派。"),
+                None,
+                TokenUsage::default(),
+            ),
+        };
+        self.commit(|court| {
+            Ok(vec![court.propose_draft(
+                task,
+                worker,
+                note.clone(),
+                model.clone(),
+                usage,
+            )?])
+        })?;
+        Ok(worker)
+    }
+
+    /// 御笔改票：皇帝改定拟派的承办人（仍须批红）。
+    pub fn redraft(&mut self, task: TaskId, worker: AgentId, note: String) -> Result<(), AppError> {
+        let note = if note.trim().is_empty() {
+            "御笔改票".to_owned()
+        } else {
+            format!("御笔改票：{}", note.trim())
+        };
+        self.commit(|court| {
+            Ok(vec![court.propose_draft(
+                task,
+                worker,
+                note.clone(),
+                None,
+                TokenUsage::default(),
+            )?])
+        })?;
+        Ok(())
+    }
+
     /// 为官职指定承办模型；`None` 恢复默认。
     pub fn set_office_model(
         &mut self,
@@ -272,7 +366,8 @@ impl<S: EventStore> Session<S> {
                     return Ok(Vec::new());
                 }
                 // 玉玺受承办者官职的上限约束；毫无交集则不予承办。
-                let assigned = court.route(&entry.edict).and_then(|route| {
+                // 内阁制下按票拟派工（拟派者已不在任则按旧例）。
+                let assigned = court.route_task(entry).and_then(|route| {
                     let seal = court.effective_seal(route.worker, &entry.edict)?;
                     Ok((route, seal))
                 });
@@ -412,7 +507,7 @@ impl<S: EventStore> Session<S> {
                         edict,
                         path,
                         outcome,
-                        usage: entry.map(|t| t.usage).unwrap_or_default(),
+                        usage: entry.map(execution_usage).unwrap_or_default(),
                         model: entry.and_then(|t| t.model.clone()),
                     }));
                 }
@@ -480,6 +575,18 @@ fn random_seed() -> u64 {
 
 // ---- 呈现：CLI、Web 与 TUI 共用的中文描述 ----
 
+/// 承办所用的 token：诏令累计用量减去内阁票拟的部分。
+fn execution_usage(task: &Task) -> TokenUsage {
+    let drafting = task
+        .draft
+        .as_ref()
+        .map_or_else(TokenUsage::default, |d| d.usage);
+    TokenUsage {
+        input: task.usage.input.saturating_sub(drafting.input),
+        output: task.usage.output.saturating_sub(drafting.output),
+    }
+}
+
 /// 按各诏令实际所用的模型估算花费，如「约 0.0123 元」。`default_model` 用于未记下模型的早期诏令；
 /// 查不到单价的诏令不计入。全部查不到（或没有用量）时返回 `None`。
 pub fn estimate_cost<'a>(
@@ -489,16 +596,40 @@ pub fn estimate_cost<'a>(
 ) -> Option<String> {
     let mut total = None::<(f64, String)>;
     for task in tasks {
-        if task.usage.total() == 0 {
-            continue;
+        // 票拟与承办可能用不同模型，分别计价。
+        let (drafting, draft_model) = task
+            .draft
+            .as_ref()
+            .map_or((TokenUsage::default(), None), |d| {
+                (d.usage, d.model.as_deref())
+            });
+        let executing = execution_usage(task);
+        for (usage, model) in [(executing, task.model.as_deref()), (drafting, draft_model)] {
+            if usage.total() == 0 {
+                continue;
+            }
+            let Some(p) = model.or(default_model).and_then(&price) else {
+                continue;
+            };
+            let entry = total.get_or_insert((0.0, p.currency.clone()));
+            entry.0 += p.cost(usage);
         }
-        let Some(p) = task.model.as_deref().or(default_model).and_then(&price) else {
-            continue;
-        };
-        let entry = total.get_or_insert((0.0, p.currency.clone()));
-        entry.0 += p.cost(task.usage);
     }
     total.map(|(cost, currency)| format!("约 {cost:.4} {currency}"))
+}
+
+/// 从票拟回复中取拟派的官员 ID：「拟派」之后（没有则全文）的第一个 `#数字`。
+fn parse_draft(reply: &str) -> Option<AgentId> {
+    let after = reply.find("拟派").map_or(reply, |i| &reply[i..]);
+    let (start, mark) = after
+        .char_indices()
+        .find(|(_, c)| matches!(c, '#' | '＃'))?;
+    let digits: String = after[start + mark.len_utf8()..]
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok().map(AgentId)
 }
 
 /// 一键朱元璋时的史官记述。
@@ -553,6 +684,18 @@ pub fn describe_event(event: &CourtEvent) -> String {
         CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
         CourtEvent::OfficialPurged { agent } => format!("革职 #{}，削去仕籍", agent.0),
         CourtEvent::EdictApproved { task } => format!("诏令 #{} 批红", task.0),
+        CourtEvent::EdictDrafted {
+            task,
+            worker,
+            model,
+            ..
+        } => match model {
+            Some(model) => format!(
+                "诏令 #{} 内阁票拟：拟派 #{}（模型 {model}）",
+                task.0, worker.0
+            ),
+            None => format!("诏令 #{} 票拟：拟派 #{}", task.0, worker.0),
+        },
         CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
         CourtEvent::EdictIssued(e) => {
             format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
@@ -909,6 +1052,143 @@ mod tests {
             Some("flash")
         );
         assert_eq!(reopened.court().office_model(clerk), None);
+    }
+
+    /// 票拟时按 `reply` 作答；执行时记下承办者。
+    struct Cabinet(String, std::sync::Mutex<Vec<AgentId>>);
+    impl WorkerBackend for Cabinet {
+        fn execute(&self, job: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            self.1.lock().unwrap().push(job.actor.id);
+            Ok("办毕".into())
+        }
+        fn model_name(&self) -> Option<&str> {
+            Some("flash")
+        }
+        fn complete(
+            &self,
+            model: Option<&str>,
+            system: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            assert_eq!(model, Some("pro"), "首辅用其官职所配模型");
+            assert!(
+                system.contains("内阁首辅") && user.contains("#7 新工 工部郎中"),
+                "{user}"
+            );
+            Ok((
+                self.0.clone(),
+                TokenUsage {
+                    input: 50,
+                    output: 5,
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cabinet_drafts_pick_the_worker_and_fall_back_when_unusable() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        session.reform(GovernanceMode::Cabinet).unwrap();
+        session.dismiss(AgentId(6)).unwrap();
+        session
+            .appoint(AgentId(6), Office::FirstGrandSecretary)
+            .unwrap();
+        session
+            .set_office_model(Office::FirstGrandSecretary, Some("pro".into()))
+            .unwrap();
+        let new = session
+            .recruit(Some("新工".into()), Department::Works)
+            .unwrap();
+        session
+            .appoint(new, Office::Clerk(Department::Works))
+            .unwrap();
+        let issue = |s: &mut Session<_>, text: &str| {
+            s.issue(Department::Works, text.into(), Seal::default())
+                .unwrap()
+                .id
+        };
+        let picked = issue(&mut session, "甲");
+        let bogus = issue(&mut session, "乙");
+
+        // 旧例会派给 #4；首辅拟派 #7，执行时以票拟为准。
+        let cabinet = Cabinet("拟派：#7\n新工熟悉此事。".into(), Default::default());
+        assert_eq!(session.draft(picked, &cabinet).unwrap(), new);
+        // 拟派了非本部官员（#3 吏部尚书）：按旧例拟派，意见中注明。
+        let wrong = Cabinet("拟派：#3".into(), Default::default());
+        assert_eq!(session.draft(bogus, &wrong).unwrap(), AgentId(4));
+        let draft = session.court().task(bogus).unwrap().draft.clone().unwrap();
+        assert!(
+            draft.note.starts_with("票拟未指明合格人选"),
+            "{}",
+            draft.note
+        );
+        // 演示后端不调用模型：按旧例，不记模型与用量。
+        let demo = issue(&mut session, "丙");
+        session.draft(demo, &DemoBackend).unwrap();
+        assert_eq!(
+            session
+                .court()
+                .task(demo)
+                .unwrap()
+                .draft
+                .as_ref()
+                .unwrap()
+                .model,
+            None
+        );
+        // 御笔改票后仍须批红；不能改派给他部官员。
+        assert!(session.redraft(demo, AgentId(3), String::new()).is_err());
+        session
+            .redraft(demo, AgentId(2), "尚书亲办".into())
+            .unwrap();
+        for task in [picked, bogus, demo] {
+            session.approve(task).unwrap();
+        }
+        assert!(
+            session.redraft(demo, AgentId(4), String::new()).is_err(),
+            "批红后不能改票"
+        );
+
+        let scheduler = Scheduler::new(
+            Arc::new(Cabinet(String::new(), Default::default())),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let reports = run_all(&mut session, &scheduler).await;
+        let worker_of = |id| match &session.court().task(id).unwrap().status {
+            TaskStatus::Completed { worker, .. } => *worker,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            [worker_of(picked), worker_of(bogus), worker_of(demo)],
+            [new, AgentId(4), AgentId(2)]
+        );
+        assert!(reports[0].path.last().unwrap().ends_with("（票拟）"));
+        // 票拟用量计入诏令，花费按票拟模型（pro）与承办模型分别计价。
+        let price = |m: &str| {
+            Some(Price {
+                input_per_million: if m == "pro" { 1_000_000.0 } else { 0.0 },
+                output_per_million: 0.0,
+                currency: "元".into(),
+            })
+        };
+        let task = session.court().task(picked).unwrap();
+        assert_eq!(task.usage.total(), 55);
+        assert_eq!(
+            estimate_cost([task], None, price).as_deref(),
+            Some("约 50.0000 元")
+        );
+    }
+
+    #[test]
+    fn draft_reply_parsing() {
+        assert_eq!(parse_draft("拟派：#12\n理由"), Some(AgentId(12)));
+        assert_eq!(parse_draft("参考 #3 之例，拟派：＃ 5"), Some(AgentId(5)));
+        assert_eq!(parse_draft("建议 #8 承办"), Some(AgentId(8)));
+        assert_eq!(parse_draft("无人可派"), None);
     }
 
     /// 调用一次工具后失败。

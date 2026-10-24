@@ -469,6 +469,15 @@ pub enum CourtEvent {
     },
     /// 诏令入队；此后依次可有 `TaskAssigned`、若干 `ToolInvoked`，并以完成/失败/撤销之一结束。
     EdictIssued(Edict),
+    /// 内阁票拟：拟定承办者并附票拟意见。`model`/`usage` 为首辅票拟所用模型与用量；
+    /// 皇帝改票时 `model` 为 `None`、`usage` 为零。可多次票拟，以最后一次为准。
+    EdictDrafted {
+        task: TaskId,
+        worker: AgentId,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    },
     /// 内阁制下皇帝对内阁票拟的批红：批红后诏令方可指派执行。
     EdictApproved {
         task: TaskId,

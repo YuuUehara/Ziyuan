@@ -72,6 +72,8 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/cancel", post(cancel))
         .route("/tasks/{id}/review", post(review))
         .route("/tasks/{id}/approve", post(approve))
+        .route("/tasks/{id}/draft", post(draft))
+        .route("/tasks/{id}/redraft", post(redraft))
         .route("/reform", post(reform))
         .route("/offices/model", post(office_model))
         .route("/offices/ceiling", post(office_ceiling))
@@ -457,6 +459,37 @@ async fn abolish(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     .await
 }
 
+/// 内阁票拟（会等待模型返回）。
+async fn draft(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    app.mutate(move |s| {
+        let worker = s.draft(TaskId(id), backend.as_ref())?;
+        let name = &s.court().agent(worker).expect("拟派在册官员").name;
+        Ok(json!({ "worker": worker.0, "name": name }))
+    })
+    .await
+}
+
+/// 御笔改票：`{ worker, note? }`。
+async fn redraft(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let worker = body["worker"]
+        .as_u64()
+        .ok_or_else(|| ApiError::bad("缺少字段 `worker`"))?;
+    let note = body["note"].as_str().unwrap_or_default().to_owned();
+    app.mutate(move |s| {
+        s.redraft(TaskId(id), AgentId(worker), note)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
 async fn approve(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
@@ -650,11 +683,24 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                     "scope": t.edict.seal.scope,
                 },
                 "status": kind,
-                // 内阁制下待批红的诏令附上内阁票拟（预拟的派工路线）。
                 "needs_approval": court.needs_approval(t),
-                "draft": court.needs_approval(t).then(|| match court.route(&t.edict) {
+                "draft": t.draft.as_ref().map(|d| json!({
+                    "worker": d.worker.0,
+                    "name": name(d.worker),
+                    "note": d.note,
+                    "model": d.model,
+                })),
+                // 待批红的诏令附上将要执行的派工路线（按票拟，未票拟则按旧例）与可拟派的官员。
+                "preview": court.needs_approval(t).then(|| match court.route_task(t) {
                     Ok(route) => json!({ "route": route.path }),
                     Err(e) => json!({ "error": e.to_string() }),
+                }),
+                "candidates": court.needs_approval(t).then(|| {
+                    court
+                        .draft_candidates(t.edict.department)
+                        .iter()
+                        .map(|(a, o)| json!({ "id": a.id.0, "name": a.name, "office": o.label() }))
+                        .collect::<Vec<_>>()
                 }),
                 "worker": worker.and_then(name),
                 "detail": detail,
@@ -847,12 +893,36 @@ mod tests {
         let (_, state) = call(&base, "/state", t, None).await;
         let task = &state["tasks"][0];
         assert_eq!(task["needs_approval"], true);
+        assert!(task["draft"].is_null());
         assert!(
-            task["draft"]["route"][1]
+            task["preview"]["route"][1]
                 .as_str()
                 .unwrap()
                 .contains("内阁首辅")
         );
+        // 演示后端不调用模型：按旧例拟派；改票给他部官员被拒，改给本部尚书则路线随之改变。
+        let (status, drafted) = call(&base, "/tasks/1/draft", t, Some(json!({}))).await;
+        assert_eq!((status, drafted["worker"].as_u64()), (200, Some(4)));
+        let other = json!({ "worker": 3 });
+        assert_eq!(call(&base, "/tasks/1/redraft", t, Some(other)).await.0, 400);
+        let minister = json!({ "worker": 2, "note": "尚书亲办" });
+        assert_eq!(
+            call(&base, "/tasks/1/redraft", t, Some(minister)).await.0,
+            200
+        );
+        let (_, state) = call(&base, "/state", t, None).await;
+        let task = &state["tasks"][0];
+        assert_eq!(task["draft"]["note"], "御笔改票：尚书亲办");
+        let route = task["preview"]["route"].as_array().unwrap();
+        assert!(
+            route
+                .last()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .ends_with("（票拟）")
+        );
+        assert_eq!(task["candidates"].as_array().unwrap().len(), 2);
         assert!(state["officials"][0]["purged"].as_bool().unwrap());
         assert_eq!(
             call(&base, "/tasks/1/approve", t, Some(json!({}))).await.0,

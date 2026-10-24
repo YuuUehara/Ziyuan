@@ -84,6 +84,8 @@ pub enum Message {
     },
     /// 后台执行结束；出错时带上错误。
     RunDone(Option<String>),
+    /// 后台内阁票拟结束：拟派的官员，或错误。
+    Drafted(TaskId, Result<AgentId, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,6 +134,8 @@ enum InputKind {
 enum ChooseKind {
     Reform,
     Appoint(AgentId),
+    /// 御笔改票：从本部在任官员中改选承办人。
+    Redraft(TaskId),
 }
 
 /// 现行制度下 `agent` 可任的官职：本制度的协调官职，以及本部（专长所在部门）的官职。
@@ -254,6 +258,18 @@ impl App {
                     Outcome::NotStarted => {}
                 }
             }
+            Message::Drafted(task, result) => {
+                self.reload();
+                match result {
+                    Ok(worker) => {
+                        let name = self.court().agent(worker).map_or("?", |a| a.name.as_str());
+                        let message =
+                            format!("诏令 #{} 票拟：拟派 {name}（按 b 批红、e 改票）", task.0);
+                        self.info(message);
+                    }
+                    Err(e) => self.error(format!("票拟失败：{e}")),
+                }
+            }
             Message::RunDone(error) => {
                 self.run = None;
                 self.live.clear();
@@ -325,6 +341,13 @@ impl App {
         match code {
             KeyCode::Char('c') => {
                 self.mutate(|s| s.cancel(task), |_| format!("诏令 #{} 已撤销", task.0));
+            }
+            KeyCode::Char('t') => self.start_draft(task),
+            KeyCode::Char('e') => {
+                self.modal = Some(Modal::Choose {
+                    kind: ChooseKind::Redraft(task),
+                    selected: 0,
+                })
             }
             KeyCode::Char('b') => {
                 self.mutate(
@@ -519,7 +542,47 @@ impl App {
                     |_| format!("任命官员 #{} 为{}", agent.0, office.label()),
                 );
             }
+            ChooseKind::Redraft(task) => {
+                let Some(worker) = self
+                    .redraft_candidates(task)
+                    .get(selected)
+                    .map(|(id, _)| *id)
+                else {
+                    return;
+                };
+                self.mutate(
+                    |s| s.redraft(task, worker, String::new()),
+                    |_| format!("诏令 #{} 御笔改票（按 b 批红）", task.0),
+                );
+            }
         }
+    }
+
+    /// 改票可选的官员：本部在任的尚书、侍郎、郎中。
+    fn redraft_candidates(&self, task: TaskId) -> Vec<(AgentId, String)> {
+        let court = self.court();
+        let Some(entry) = court.task(task) else {
+            return Vec::new();
+        };
+        court
+            .draft_candidates(entry.edict.department)
+            .iter()
+            .map(|(a, o)| (a.id, format!("{}（{}）", a.name, o.label())))
+            .collect()
+    }
+
+    /// 在阻塞线程中请内阁票拟（会等待模型返回），结果经消息送回。
+    fn start_draft(&mut self, task: TaskId) {
+        self.info(format!("诏令 #{} 内阁票拟中…", task.0));
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| s.draft(task, backend.as_ref()))
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Drafted(task, result));
+        });
     }
 
     fn options(&self, kind: ChooseKind) -> Vec<String> {
@@ -532,6 +595,11 @@ impl App {
             ChooseKind::Appoint(agent) => appointable(self.court(), agent)
                 .iter()
                 .map(|o| format!("{}（{}）", o.label(), o.rank(mode)))
+                .collect(),
+            ChooseKind::Redraft(task) => self
+                .redraft_candidates(task)
+                .into_iter()
+                .map(|(_, label)| label)
                 .collect(),
         }
     }
@@ -836,15 +904,35 @@ impl App {
                     lines.extend(live.lines().map(|l| Line::from(l.to_owned())));
                     following = true;
                 } else if court.needs_approval(task) {
+                    let heading = Style::new().fg(VERMILION).bold();
+                    match &task.draft {
+                        Some(draft) => {
+                            let model = draft
+                                .model
+                                .as_ref()
+                                .map_or(String::new(), |m| format!("（{m}）"));
+                            lines.push(Line::from(vec![
+                                Span::styled("内阁票拟　", heading),
+                                Span::raw(format!("拟派 {}{model}", name(draft.worker))),
+                            ]));
+                            lines.extend(draft.note.lines().map(|l| Line::from(l.to_owned())));
+                        }
+                        None => lines.push(Line::from(vec![
+                            Span::styled("内阁票拟　", heading),
+                            Span::raw("尚未票拟；未票拟即批红为中旨，按旧例派工。"),
+                        ])),
+                    }
                     lines.push(Line::from(vec![
-                        Span::styled("内阁票拟　", Style::new().fg(VERMILION).bold()),
-                        Span::raw(match court.route(&task.edict) {
+                        label("路线"),
+                        Span::raw(match court.route_task(task) {
                             Ok(route) => route.path.join(" → "),
                             Err(e) => e.to_string(),
                         }),
                     ]));
                     lines.push(Line::default());
-                    lines.push(Line::from("待批红。按 b 朱笔批红，c 撤销。").dim());
+                    lines.push(
+                        Line::from("待批红。按 t 内阁票拟，e 御笔改票，b 朱笔批红，c 撤销。").dim(),
+                    );
                 } else if matches!(task.status, TaskStatus::Pending) {
                     lines.push(Line::from("排队中。按 r 执行，c 撤销。").dim());
                 }
@@ -987,6 +1075,7 @@ impl App {
                 ("s", "停止"),
                 ("c", "撤销"),
                 ("a/d", "采纳/驳回"),
+                ("t/e", "票拟/改票"),
                 ("b", "批红"),
                 ("g", "改制"),
                 ("Z", "朱元璋"),
@@ -1079,6 +1168,7 @@ impl App {
                         let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
                         format!("任命 #{} {name}", agent.0)
                     }
+                    ChooseKind::Redraft(task) => format!("御笔改票 · 诏令 #{}", task.0),
                 };
                 let popup = centered(area, 36, options.len() as u16 + 2);
                 frame.render_widget(Clear, popup);
@@ -1284,7 +1374,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reform_and_appointments_follow_court_rules() {
-        let (mut app, _messages, root) = temp_app("court");
+        let (mut app, mut messages, root) = temp_app("court");
         // 改为内阁制（第三项）：首辅空缺，派工路线显示空缺，下诏被拒且不留记录。
         press(&mut app, "g↓↓\n");
         assert!(screen(&app).contains("四叔来看你了"));
@@ -1324,6 +1414,31 @@ mod tests {
         );
         press(&mut app, "r");
         assert!(app.run.is_none() && screen(&app).contains("须先按 b"));
+        assert!(screen(&app).contains("尚未票拟"));
+
+        // t 后台票拟（演示后端无模型，按旧例拟派并注明），e 御笔改票。
+        press(&mut app, "t");
+        let message = tokio::time::timeout(Duration::from_secs(10), messages.recv())
+            .await
+            .expect("票拟应在 10 秒内结束")
+            .unwrap();
+        assert!(matches!(message, Message::Drafted(TaskId(1), Ok(_))));
+        app.handle(message);
+        let drafted = app.court().task(TaskId(1)).unwrap().draft.clone().unwrap();
+        assert!(screen(&app).contains("拟派"), "{}", screen(&app));
+        let others = app.redraft_candidates(TaskId(1));
+        let pick = others
+            .iter()
+            .position(|(id, _)| *id != drafted.worker)
+            .unwrap_or(0);
+        press(&mut app, "e");
+        for _ in 0..pick {
+            press(&mut app, "↓");
+        }
+        press(&mut app, "\n");
+        let redrafted = app.court().task(TaskId(1)).unwrap().draft.clone().unwrap();
+        assert_eq!(redrafted.worker, others[pick].0);
+        assert!(redrafted.note.contains("御笔改票"));
         press(&mut app, "b");
         assert!(app.court().runnable_tasks() == [TaskId(1)]);
 

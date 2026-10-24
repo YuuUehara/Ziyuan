@@ -35,7 +35,12 @@ A="$(queue '排队一')"; B="$(queue '排队二')"; C="$(queue '撤销我')"
 "$BIN" cancel "$C"
 if "$BIN" cancel "$C" > /dev/null 2>&1; then echo '不应重复撤销' >&2; exit 1; fi
 # 内阁制：未批红的诏令不执行
-"$BIN" tasks | grep -q "#$A .*待批红（票拟：皇帝 → 内阁首辅"
+"$BIN" tasks | grep -q "#$A .*待批红（未票拟，旧例预拟：皇帝 → 内阁首辅"
+# 内阁票拟（演示后端按旧例拟派），再御笔改票给新工（#7）；B 不票拟直接批红（中旨）
+"$BIN" draft "$A" | grep -q "诏令 #$A 票拟：拟派"
+if "$BIN" redraft "$A" 3 > /dev/null 2>&1; then echo '不应改派他部官员' >&2; exit 1; fi
+"$BIN" redraft "$A" 7 '新工熟悉' | grep -q '御笔改票：新工熟悉'
+"$BIN" tasks | grep -q "#$A .*待批红（票拟：.*工部郎中·新工（票拟）"
 grep -q '没有未结束的诏令' <<< "$("$BIN" run 2>/dev/null)"
 "$BIN" approve all | grep -q "诏令 #$B 已批红"
 RUN="$("$BIN" run --jobs 2 --timeout 30)"
@@ -46,7 +51,7 @@ TASKS="$("$BIN" tasks)"
 grep -q "#$C .*已撤销" <<< "$TASKS"
 if grep -q '待办\|未结束' <<< "$TASKS"; then echo '仍有未结束诏令' >&2; exit 1; fi
 grep -q '没有未结束的诏令' <<< "$("$BIN" run)"
-"$BIN" history | grep -q "诏令 #$A 派给"
+"$BIN" history | grep -q "诏令 #$A 派给 #7"
 # 多进程同时入队：每件诏令编号唯一，事件簿保持可回放
 for i in $(seq 1 10); do "$BIN" edict --queue --dept works "并发$i" > /dev/null & done
 wait

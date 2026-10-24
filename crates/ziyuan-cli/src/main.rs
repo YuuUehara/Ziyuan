@@ -45,7 +45,9 @@ const HELP: &str = concat!(
   ziyuan model <官职> <模型|default>     为官职指定承办模型（同一服务地址与 Key）
   ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
-  ziyuan approve <诏令ID|all>           内阁制下对内阁票拟批红（批红后方可执行）
+  ziyuan draft <诏令ID|all>             内阁票拟：首辅（模型）拟定承办人并附意见
+  ziyuan redraft <诏令ID> <官员ID> [理由] 御笔改票：改定拟派的承办人
+  ziyuan approve <诏令ID|all>           内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
@@ -123,6 +125,9 @@ enum Command {
     Abolish,
     /// `None` 表示全部待批红的诏令。
     Approve(Option<TaskId>),
+    /// `None` 表示全部待批红且未票拟的诏令。
+    Draft(Option<TaskId>),
+    Redraft(TaskId, AgentId, String),
     Appoint(AgentId, Office),
     Examine(AgentId),
     Review(TaskId, Verdict, String),
@@ -199,6 +204,20 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Err(_) => return Err("用法: ziyuan model <官职> <模型|default>".into()),
         },
         "ceiling" => parse_ceiling(args)?,
+        "draft" => match args.as_slice() {
+            [all] if all == "all" => Command::Draft(None),
+            [id] => Command::Draft(Some(TaskId(
+                id.parse().map_err(|_| "诏令 ID 必须是数字或 all")?,
+            ))),
+            _ => return Err("用法: ziyuan draft <诏令ID|all>".into()),
+        },
+        "redraft" => {
+            if args.len() < 2 {
+                return Err("用法: ziyuan redraft <诏令ID> <官员ID> [理由]".into());
+            }
+            let task = TaskId(args[0].parse().map_err(|_| "诏令 ID 必须是数字")?);
+            Command::Redraft(task, agent_id(&args[1])?, args[2..].join(" "))
+        }
         "approve" => match args.as_slice() {
             [all] if all == "all" => Command::Approve(None),
             [id] => Command::Approve(Some(TaskId(
@@ -290,10 +309,15 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             // 先取得执行者锁再下诏，避免被拒绝的诏令残留在队列中。
             let executor = if queue { None } else { Some(lock_executor()?) };
             let edict = session.issue(department, text, seal)?;
-            if !queue && session.court().mode() == GovernanceMode::Cabinet {
+            let backend = if queue { None } else { Some(worker_backend()?) };
+            if let Some(backend) = &backend
+                && session.court().mode() == GovernanceMode::Cabinet
+            {
                 // 皇帝亲自下诏并立即执行：内阁票拟后当即批红。
+                session.draft(edict.id, backend.as_ref())?;
+                print_draft(session, edict.id);
                 session.approve(edict.id)?;
-                println!("诏令 #{} 经内阁票拟，朱笔批红。", edict.id.0);
+                println!("朱笔批红。");
             }
             if queue {
                 println!(
@@ -307,7 +331,8 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     max_concurrent: 1,
                     ..DEFAULT_LIMITS
                 };
-                run_tasks(session, &[edict.id], limits)?;
+                let backend = backend.expect("立即执行时已构造后端");
+                run_tasks(session, &[edict.id], backend, limits)?;
             }
             drop(executor);
         }
@@ -324,7 +349,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             if tasks.is_empty() {
                 println!("没有未结束的诏令。");
             } else {
-                run_tasks(session, &tasks, limits)?;
+                run_tasks(session, &tasks, worker_backend()?, limits)?;
             }
         }
         Command::Serve(port) => {
@@ -364,8 +389,13 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 let name = |id: AgentId| court.agent(id).map_or("?", |a| a.name.as_str());
                 let status = match &task.status {
                     TaskStatus::Pending if court.needs_approval(task) => {
-                        match court.route(&task.edict) {
-                            Ok(route) => format!("待批红（票拟：{}）", route.path.join(" → ")),
+                        let label = if task.draft.is_some() {
+                            "票拟"
+                        } else {
+                            "未票拟，旧例预拟"
+                        };
+                        match court.route_task(task) {
+                            Ok(route) => format!("待批红（{label}：{}）", route.path.join(" → ")),
                             Err(e) => format!("待批红（票拟不成：{e}）"),
                         }
                     }
@@ -442,6 +472,33 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
             println!("诏令已颁：罢中书省，制度改为废相亲政。");
             println!("史官记：{ABOLITION_NOTE}");
+        }
+        Command::Draft(task) => {
+            let tasks = match task {
+                Some(task) => vec![task],
+                None => {
+                    let court = session.court();
+                    court
+                        .tasks()
+                        .filter(|t| court.needs_approval(t) && t.draft.is_none())
+                        .map(|t| t.edict.id)
+                        .collect()
+                }
+            };
+            if tasks.is_empty() {
+                println!("没有待票拟的诏令。");
+            } else {
+                let backend = worker_backend()?;
+                for task in tasks {
+                    session.draft(task, backend.as_ref())?;
+                    print_draft(session, task);
+                }
+                println!("请 `ziyuan approve <诏令ID|all>` 批红，或 `ziyuan redraft` 改票。");
+            }
+        }
+        Command::Redraft(task, worker, note) => {
+            session.redraft(task, worker, note)?;
+            print_draft(session, task);
         }
         Command::Approve(task) => {
             let tasks = match task {
@@ -549,9 +606,10 @@ fn lock_executor() -> Result<ExecutorLock, Box<dyn Error>> {
 fn run_tasks(
     session: &mut Session<EventLog>,
     tasks: &[TaskId],
+    backend: Arc<dyn WorkerBackend>,
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
-    let scheduler = Scheduler::new(worker_backend()?, limits);
+    let scheduler = Scheduler::new(backend, limits);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -638,6 +696,21 @@ impl<W: Write> StreamPrinter<W> {
         self.break_line(Some(task));
         self.interrupted.remove(&task);
         let _ = self.out.flush();
+    }
+}
+
+fn print_draft(session: &Session<EventLog>, task: TaskId) {
+    let court = session.court();
+    let Some(entry) = court.task(task) else {
+        return;
+    };
+    let Some(draft) = &entry.draft else {
+        return;
+    };
+    let name = court.agent(draft.worker).map_or("?", |a| a.name.as_str());
+    println!("诏令 #{} 票拟：拟派 #{} {name}", task.0, draft.worker.0);
+    for line in draft.note.lines().filter(|l| !l.trim().is_empty()) {
+        println!("  {line}");
     }
 }
 

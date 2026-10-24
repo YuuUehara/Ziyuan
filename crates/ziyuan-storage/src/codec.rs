@@ -40,6 +40,26 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         OfficialDismissed { agent } => format!("v1\tDISMISSED\t{}", agent.0),
         OfficialPurged { agent } => format!("v1\tPURGED\t{}", agent.0),
         EdictApproved { task } => format!("v1\tAPPROVED\t{}", task.0),
+        EdictDrafted {
+            task,
+            worker,
+            note,
+            model,
+            usage,
+        } => {
+            let line = format!(
+                "v1\tDRAFTED\t{}\t{}\t{}\t{}\t{}",
+                task.0,
+                worker.0,
+                to_hex(note),
+                usage.input,
+                usage.output
+            );
+            match model {
+                Some(model) => format!("{line}\t{}", to_hex(model)),
+                None => line,
+            }
+        }
         InstitutionReformed(mode) => format!("v1\tREFORMED\t{}", mode.code()),
         EdictIssued(e) => format!(
             "v1\tEDICT\t{}\t{}\t{}\t{}",
@@ -159,6 +179,19 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "APPROVED" => EdictApproved {
             task: TaskId(id(2)?),
         },
+        "DRAFTED" => EdictDrafted {
+            task: TaskId(id(2)?),
+            worker: AgentId(id(3)?),
+            note: from_hex(field(4)?)?,
+            usage: TokenUsage {
+                input: id(5)?,
+                output: id(6)?,
+            },
+            model: match parts.len() {
+                7 => None,
+                _ => Some(from_hex(field(7)?)?),
+            },
+        },
         "REFORMED" => InstitutionReformed(
             field(2)?
                 .parse::<GovernanceMode>()
@@ -247,6 +280,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         | OfficeModelSet { .. }
         | TaskFailed { .. } => 4,
         TaskAssigned { .. } => 5,
+        EdictDrafted { model: None, .. } => 7,
+        EdictDrafted { .. } => 8,
         OfficeCeilingSet { .. } => 5,
         EdictIssued(_) if parts.len() == 5 => 5,
         AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
@@ -325,6 +360,23 @@ mod tests {
             },
             CourtEvent::TaskCancelled { task },
             CourtEvent::EdictApproved { task },
+            CourtEvent::EdictDrafted {
+                task,
+                worker: AgentId(4),
+                note: "拟派：#4\t熟悉此事".into(),
+                model: Some("deepseek-v4-pro".into()),
+                usage: TokenUsage {
+                    input: 300,
+                    output: 20,
+                },
+            },
+            CourtEvent::EdictDrafted {
+                task,
+                worker: AgentId(7),
+                note: "御笔改票".into(),
+                model: None,
+                usage: TokenUsage::default(),
+            },
             CourtEvent::OfficialPurged { agent: AgentId(3) },
             CourtEvent::ModelUsage {
                 task,

@@ -49,6 +49,13 @@ pub enum GovernanceError {
     NoChancellery,
     /// 模型名为空或含空白。
     InvalidModel(String),
+    /// 只有内阁制下才票拟。
+    NoCabinet,
+    /// 票拟只能拟派本部在任的尚书、侍郎或郎中。
+    NotEligible {
+        worker: AgentId,
+        department: Department,
+    },
     /// 诏令的查阅范围全在承办者官职的玉玺上限之外。
     SealExceedsCeiling(Office),
 }
@@ -102,6 +109,13 @@ impl fmt::Display for GovernanceError {
             Self::AlreadyApproved(id) => write!(f, "诏令 #{} 已批红或已在执行", id.0),
             Self::NoChancellery => f.write_str("现行制度不设中书省，已无丞相可废"),
             Self::InvalidModel(m) => write!(f, "模型名不能为空或含空白: {m:?}"),
+            Self::NoCabinet => f.write_str("现行制度不设内阁，无从票拟"),
+            Self::NotEligible { worker, department } => write!(
+                f,
+                "官员 #{} 不是{}在任官员，不能拟派",
+                worker.0,
+                department.label()
+            ),
             Self::SealExceedsCeiling(office) => write!(
                 f,
                 "诏令的查阅范围全在{}的玉玺上限之外，不予承办",
@@ -144,6 +158,21 @@ pub struct Task {
     pub approved: bool,
     /// 最近一次指派时承办所用的模型（演示后端与早期日志为 `None`）。
     pub model: Option<String>,
+    /// 内阁票拟（只在内阁制下产生）。
+    pub draft: Option<Draft>,
+}
+
+/// 内阁票拟的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Draft {
+    /// 拟派的承办者。
+    pub worker: AgentId,
+    /// 票拟意见（首辅所写，或「御笔改票」）。
+    pub note: String,
+    /// 最近一次由模型票拟时所用的模型。
+    pub model: Option<String>,
+    /// 历次票拟的累计用量（已计入 `Task::usage`）。
+    pub usage: TokenUsage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,6 +261,28 @@ impl Court {
                 self.appointments.remove(agent);
                 self.purged.insert(*agent);
             }
+            CourtEvent::EdictDrafted {
+                task,
+                worker,
+                note,
+                model,
+                usage,
+            } => {
+                self.propose_draft(*task, *worker, note.clone(), model.clone(), *usage)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.usage += *usage;
+                let (mut total, mut model) = (*usage, model.clone());
+                if let Some(previous) = &entry.draft {
+                    total += previous.usage;
+                    model = model.or_else(|| previous.model.clone());
+                }
+                entry.draft = Some(Draft {
+                    worker: *worker,
+                    note: note.clone(),
+                    model,
+                    usage: total,
+                });
+            }
             CourtEvent::EdictApproved { task } => {
                 self.propose_approval(*task)?;
                 self.tasks.get_mut(task).expect("已确认存在").approved = true;
@@ -263,6 +314,7 @@ impl Court {
                         review: None,
                         approved: false,
                         model: None,
+                        draft: None,
                     },
                 );
             }
@@ -523,6 +575,69 @@ impl Court {
         Ok(CourtEvent::EdictApproved { task })
     }
 
+    /// 票拟：内阁制下、批红之前，拟派本部在任官员承办。
+    pub fn propose_draft(
+        &self,
+        task: TaskId,
+        worker: AgentId,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    ) -> Result<CourtEvent, GovernanceError> {
+        if self.mode != GovernanceMode::Cabinet {
+            return Err(GovernanceError::NoCabinet);
+        }
+        // 诏令须存在、未结束且尚未批红。
+        self.propose_approval(task)?;
+        let department = self.tasks[&task].edict.department;
+        if !self
+            .draft_candidates(department)
+            .iter()
+            .any(|(a, _)| a.id == worker)
+        {
+            return Err(GovernanceError::NotEligible { worker, department });
+        }
+        Ok(CourtEvent::EdictDrafted {
+            task,
+            worker,
+            note,
+            model,
+            usage,
+        })
+    }
+
+    /// 可拟派承办 `department` 诏令的官员：本部在任尚书、侍郎、郎中（依次排列）。
+    pub fn draft_candidates(&self, department: Department) -> Vec<(&Agent, Office)> {
+        let mut staff: Vec<_> = self
+            .appointments
+            .iter()
+            .filter(|(_, office)| department_of(**office) == Some(department))
+            .filter_map(|(id, office)| Some((self.agents.get(id)?, *office)))
+            .collect();
+        staff.sort_by_key(|(agent, office)| {
+            let rank = match office {
+                Office::Minister(_) => 0,
+                Office::ViceMinister(_) => 1,
+                _ => 2,
+            };
+            (rank, agent.id)
+        });
+        staff
+    }
+
+    /// 现行制度下的协调者（正职，空缺则副职）及其官职；废相亲政时为 `None`。
+    pub fn coordinator(&self) -> Option<(&Agent, Office)> {
+        match self.mode {
+            GovernanceMode::Chancellor => {
+                self.head_or_deputy(Office::Chancellor, Office::ViceChancellor)
+            }
+            GovernanceMode::Cabinet => {
+                self.head_or_deputy(Office::FirstGrandSecretary, Office::SecondGrandSecretary)
+            }
+            GovernanceMode::DirectRule => None,
+        }
+    }
+
     /// 一键朱元璋：革去中书省全部丞相，罢中书省，改为废相亲政。
     pub fn propose_abolition(&self) -> Result<Vec<CourtEvent>, GovernanceError> {
         if self.mode != GovernanceMode::Chancellor {
@@ -739,6 +854,20 @@ impl Court {
     ///
     /// 皇帝 →（中书省或内阁）→ 本部尚书 → 郎中。正职空缺时由副职署理，在路线中注明。
     pub fn route(&self, edict: &Edict) -> Result<Route, GovernanceError> {
+        self.route_to(edict, None)
+    }
+
+    /// 诏令的派工路线：内阁制下若已票拟且拟派者仍在任，派给拟派者，否则按旧例。
+    pub fn route_task(&self, task: &Task) -> Result<Route, GovernanceError> {
+        let drafted = task
+            .draft
+            .as_ref()
+            .filter(|_| self.mode == GovernanceMode::Cabinet)
+            .map(|d| d.worker);
+        self.route_to(&task.edict, drafted)
+    }
+
+    fn route_to(&self, edict: &Edict, drafted: Option<AgentId>) -> Result<Route, GovernanceError> {
         let mut path = vec!["皇帝".to_owned()];
         let step = |(agent, office): (&Agent, Office), head: Office| {
             let acting = if office == head { "" } else { "（署理）" };
@@ -764,17 +893,27 @@ impl Court {
             .ok_or(GovernanceError::Vacant(head))?;
         path.push(step(found, head));
         let minister = found.0;
-        // 目前只按任务量均衡派工；未来可接入可靠的考绩评分。
-        let clerk = Office::Clerk(department);
-        let worker = self
-            .appointments
-            .iter()
-            .filter(|(_, office)| **office == clerk)
-            .filter_map(|(id, _)| self.agents.get(id))
-            .min_by_key(|candidate| (self.workload(candidate.id), candidate.id))
-            .unwrap_or(minister);
+        let staff = self.draft_candidates(department);
+        let drafted = drafted.and_then(|id| staff.iter().find(|(a, _)| a.id == id));
+        // 未票拟时按任务量均衡派给郎中；本部无郎中则由尚书（或署理的侍郎）亲办。
+        let (worker, office) = drafted.copied().unwrap_or_else(|| {
+            staff
+                .iter()
+                .filter(|(_, office)| *office == Office::Clerk(department))
+                .min_by_key(|(candidate, _)| (self.workload(candidate.id), candidate.id))
+                .copied()
+                .unwrap_or(found)
+        });
+        let mark = if drafted.is_some() {
+            "（票拟）"
+        } else {
+            ""
+        };
         if worker.id != minister.id {
-            path.push(format!("{}·{}", clerk.label(), worker.name));
+            path.push(format!("{}·{}{mark}", office.label(), worker.name));
+        } else if drafted.is_some() {
+            let last = path.last_mut().expect("至少有尚书一步");
+            last.push_str(mark);
         }
         Ok(Route {
             path,
@@ -1096,6 +1235,43 @@ mod tests {
         apply(vec![CourtEvent::EdictIssued(edict)], &mut court);
         assert!(court.runnable_tasks().is_empty());
         assert_eq!(court.open_tasks(), [id]);
+        // 票拟只能拟派本部在任官员；拟派尚书后，派工改给尚书（路线注明票拟），不再按旧例给郎中。
+        let none = TokenUsage::default();
+        assert_eq!(
+            court.propose_draft(id, AgentId(3), String::new(), None, none),
+            Err(GovernanceError::NotEligible {
+                worker: AgentId(3),
+                department: Department::Works
+            })
+        );
+        assert_eq!(
+            court.route(&court.task(id).unwrap().edict).unwrap().worker,
+            AgentId(4)
+        );
+        let used = TokenUsage {
+            input: 100,
+            output: 10,
+        };
+        apply(
+            vec![
+                court
+                    .propose_draft(id, AgentId(2), "尚书亲办".into(), Some("pro".into()), used)
+                    .unwrap(),
+            ],
+            &mut court,
+        );
+        let route = court.route_task(court.task(id).unwrap()).unwrap();
+        assert_eq!(route.worker, AgentId(2));
+        assert!(
+            route.path.last().unwrap().ends_with("（票拟）"),
+            "{:?}",
+            route.path
+        );
+        let task = court.task(id).unwrap();
+        assert_eq!(
+            (task.usage, task.draft.as_ref().unwrap().usage),
+            (used, used)
+        );
         apply(vec![court.propose_approval(id).unwrap()], &mut court);
         assert_eq!(court.runnable_tasks(), [id]);
         assert_eq!(
