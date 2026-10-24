@@ -479,6 +479,7 @@ mod tests {
             model: Some("deepseek-v4-pro".into()),
             budget: None,
             treasury: None,
+            urgent: false,
         };
         assert_eq!(
             backend.execute(&job, &()).unwrap(),

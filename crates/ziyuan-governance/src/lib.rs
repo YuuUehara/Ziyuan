@@ -78,6 +78,8 @@ pub enum GovernanceError {
     InRetreat,
     /// 科举或殿试不合规矩（原因）。
     InvalidExam(String),
+    /// 驿传或加急不合规矩。
+    Military(String),
     /// 廷议须在诏令待办时进行。
     CannotDebate(TaskId),
     /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
@@ -175,6 +177,7 @@ impl fmt::Display for GovernanceError {
             Self::CannotDebate(id) => write!(f, "诏令 #{} 不能廷议：须尚未执行", id.0),
             Self::InvalidDebate(why) => write!(f, "廷议未成：{why}"),
             Self::InvalidExam(why) => write!(f, "礼部不准：{why}"),
+            Self::Military(why) => write!(f, "兵部不准：{why}"),
             Self::InvalidBudget => f.write_str("度支须为正数（tokens）"),
             Self::TreasuryExhausted(limit) => write!(
                 f,
@@ -283,6 +286,10 @@ pub struct Task {
     pub budget: Option<u64>,
     /// 刑部与锦衣卫的检出。
     pub suspicions: Vec<Suspicion>,
+    /// 经兵部驿站入队时的来处。
+    pub courier: Option<String>,
+    /// 八百里加急。
+    pub urgent: bool,
 }
 
 /// 一处检出（见 `CourtEvent::SuspicionRaised`）。
@@ -293,12 +300,24 @@ pub struct Suspicion {
     pub excerpt: String,
 }
 impl Suspicion {
-    /// 检出者：外来文书归锦衣卫，回奏归刑部。
+    /// 驿传入队时对诏令内容的检出所记的来源。
+    pub const COURIER: &'static str = "courier";
+
+    /// 检出者：外来文书（工具输出、驿传）归锦衣卫，回奏归刑部。
     pub fn bureau(&self) -> &'static str {
-        if self.source.starts_with("tool:") {
+        if self.source.starts_with("tool:") || self.source == Self::COURIER {
             "锦衣卫"
         } else {
             "刑部"
+        }
+    }
+
+    /// 检出之处：工具名、「驿传」或「回奏」。
+    pub fn origin(&self) -> &str {
+        match self.source.strip_prefix("tool:") {
+            Some(tool) => tool,
+            None if self.source == Self::COURIER => "驿传",
+            None => "回奏",
         }
     }
 }
@@ -516,6 +535,8 @@ impl Court {
                         debates: Vec::new(),
                         budget: None,
                         suspicions: Vec::new(),
+                        courier: None,
+                        urgent: false,
                     },
                 );
             }
@@ -649,6 +670,8 @@ impl Court {
                             changes: None,
                             censure: None,
                             parent: Some(*task),
+                            courier: None,
+                            urgent: parent.urgent,
                             assignee: Some(sub.worker),
                             split: None,
                             proxied: false,
@@ -695,6 +718,26 @@ impl Court {
                     answers: answers.clone(),
                     zhuangyuan: None,
                 });
+            }
+            CourtEvent::CourierDelivered { task, station } => {
+                self.propose_courier(*task, station.clone())?;
+                self.tasks.get_mut(task).expect("已确认存在").courier = Some(station.clone());
+            }
+            CourtEvent::EdictExpedited { task } => {
+                self.propose_expedite(*task)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.urgent = true;
+                // 已分办的，未结的子诏令一并加急。
+                let subtasks = entry
+                    .split
+                    .as_ref()
+                    .map(|s| s.subtasks.clone())
+                    .unwrap_or_default();
+                for id in subtasks {
+                    if let Some(sub) = self.tasks.get_mut(&id).filter(|t| t.status.is_open()) {
+                        sub.urgent = true;
+                    }
+                }
             }
             CourtEvent::ZhuangyuanNamed { agent } => {
                 self.propose_zhuangyuan(*agent)?;
@@ -763,7 +806,8 @@ impl Court {
                     .tasks
                     .get_mut(task)
                     .ok_or(GovernanceError::UnknownEdict(*task))?;
-                if entry.status == TaskStatus::Pending {
+                // 驿传的检出在入队时记录，其余须在执行中或之后。
+                if entry.status == TaskStatus::Pending && source != Suspicion::COURIER {
                     return Err(GovernanceError::TaskNotAssigned(*task));
                 }
                 entry.suspicions.push(Suspicion {
@@ -890,7 +934,8 @@ impl Court {
     /// 现在就可以执行的诏令：未结束，（内阁制下）已批红；子诏令须原诏令已批红，
     /// 已分办的原诏令须子诏令全部结束（届时由尚书汇总）。按 ID 升序。
     pub fn runnable_tasks(&self) -> Vec<TaskId> {
-        self.tasks
+        let mut tasks = self
+            .tasks
             .values()
             .filter(|t| t.status.is_open() && !self.needs_approval(t))
             .filter(|t| {
@@ -899,8 +944,10 @@ impl Court {
                     .is_none_or(|p| !self.needs_approval(p))
             })
             .filter(|t| self.open_subtasks(t) == 0)
-            .map(|t| t.edict.id)
-            .collect()
+            .collect::<Vec<_>>();
+        // 兵部：八百里加急插队先行，其余按诏令先后（排序稳定）。
+        tasks.sort_by_key(|t| !t.urgent);
+        tasks.into_iter().map(|t| t.edict.id).collect()
     }
 
     /// 分办：把待办诏令 `task` 拆给本部官员，`plan` 为 (承办者, 子诏令内容)。
@@ -1109,6 +1156,8 @@ impl Court {
             .values()
             .filter(|t| tasks.is_none_or(|ids| ids.contains(&t.edict.id)))
             .filter(|t| self.needs_approval(t))
+            // 有密报的（如驿传内容可疑），司礼监不敢代批红。
+            .filter(|t| t.suspicions.is_empty())
             .map(|t| CourtEvent::EdictApproved { task: t.edict.id })
             .collect()
     }
@@ -1270,6 +1319,43 @@ impl Court {
             }
         }
         Ok(())
+    }
+
+    /// 驿传入队：诏令须待办且尚未记来处；来处须非空、不含控制字符、至多 40 字。
+    pub fn propose_courier(
+        &self,
+        task: TaskId,
+        station: String,
+    ) -> Result<CourtEvent, GovernanceError> {
+        self.open_task(task)?;
+        let station = station.trim().to_owned();
+        if station.is_empty()
+            || station.chars().count() > 40
+            || station.chars().any(char::is_control)
+        {
+            return Err(GovernanceError::Military(
+                "驿站名须为 1–40 字的单行文字".into(),
+            ));
+        }
+        if self.tasks[&task].courier.is_some() {
+            return Err(GovernanceError::Military(format!(
+                "诏令 #{} 已记驿传来处",
+                task.0
+            )));
+        }
+        Ok(CourtEvent::CourierDelivered { task, station })
+    }
+
+    /// 八百里加急：诏令须未结束且尚未加急。
+    pub fn propose_expedite(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
+        self.open_task(task)?;
+        if self.tasks[&task].urgent {
+            return Err(GovernanceError::Military(format!(
+                "诏令 #{} 已是八百里加急",
+                task.0
+            )));
+        }
+        Ok(CourtEvent::EdictExpedited { task })
     }
 
     /// 钦点状元：须在最近一次殿试的答卷者中，且该次尚未点过。

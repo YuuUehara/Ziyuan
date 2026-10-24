@@ -848,6 +848,16 @@ pub enum CourtEvent {
     ZhuangyuanNamed {
         agent: AgentId,
     },
+    /// 兵部驿传：外部事件（CI 失败、新 issue 等）经驿站入队为诏令，`station` 为来处。
+    /// 与该诏令的 `EdictIssued` 一同记录；入队后仍受批红、玉玺与度支约束。
+    CourierDelivered {
+        task: TaskId,
+        station: String,
+    },
+    /// 八百里加急：待办诏令插队先行，执行时限放宽。
+    EdictExpedited {
+        task: TaskId,
+    },
     /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。
     ModelUsage {
         task: TaskId,

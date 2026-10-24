@@ -202,6 +202,8 @@
   .badge.accept { color: #fff; background: var(--jade); border-color: var(--jade); }
   .badge.reject { color: #fff; background: var(--vermilion); border-color: var(--vermilion); }
   .badge.seal { color: var(--lacquer); border-color: var(--gold); background: #fff4d6; }
+  .badge.urgent { color: #fff; border-color: #b8461f; background: linear-gradient(90deg, #b8461f, #e07a2e); }
+  .badge.courier { color: #2f5d62; border-color: #9cc3c0; background: #e8f3f1; }
   .meta { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
   .reply {
     margin: 8px 0 0; padding: 8px 10px; border-radius: 6px;
@@ -322,7 +324,7 @@
           <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> write_file</label>
           <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> run_tests</label>
         </div>
-        <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。</p>
+        <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。外部事件（CI 等）可凭令牌 POST <code>api/courier</code> 经兵部驿站入队。</p>
         <div class="actions">
           <button type="submit" class="primary" data-run="1">下诏并执行</button>
           <button type="submit" data-run="0">仅入队</button>
@@ -594,7 +596,8 @@ function taskHtml(t) {
       ? `<button class="small" data-split="${t.id}" title="尚书把此诏令拆给本部官员分办，事后汇总">尚书分办</button>` : "";
     const debate = t.status === "pending" && !debating[t.id]
       ? `<button class="small" data-debate="${t.id}" title="宰辅、本部长官与御史按各自性格文风轮流辩论两轮">廷议</button>` : "";
-    actions = `<div class="review-row"><span style="flex:1"></span>${debate}${split}${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
+    const urgent = t.urgent ? "" : `<button class="small" data-urgent="${t.id}" title="兵部：插队先行，时限加倍">八百里加急</button>`;
+    actions = `<div class="review-row"><span style="flex:1"></span>${urgent}${debate}${split}${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
   }
   if (t.changes) {
     const c = t.changes;
@@ -626,7 +629,7 @@ function taskHtml(t) {
         <button class="small" data-redraft="${t.id}">御笔改票</button></div>`;
   }
   return `<article class="task ${t.status}">
-    <div class="task-head"><span class="task-id">#${t.id}</span><span>${esc(t.department)}</span>
+    <div class="task-head"><span class="task-id">#${t.id}</span>${t.urgent ? '<span class="badge urgent">八百里加急</span>' : ""}${t.courier ? `<span class="badge courier" title="兵部驿站投递的外部事件">驿传 · ${esc(t.courier)}</span>` : ""}<span>${esc(t.department)}</span>
       ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
     <div class="task-text">${esc(t.text)}</div>
     <div class="meta">${meta}</div>${body}${actions}</article>`;
@@ -872,6 +875,8 @@ document.addEventListener("click", (event) => {
       toast(`礼部判卷：${r.results.map((x) => `「${x.exam}」${x.score} 分`).join("，")}`));
   } else if (d.crown) {
     act(api(`/officials/${d.crown}/crown`, {})).then((r) => r && chronicle(r.note));
+  } else if (d.urgent) {
+    act(api(`/tasks/${d.urgent}/urgent`, {}), `诏令 #${d.urgent} 八百里加急`);
   } else if (d.purge) {
     if (confirm(`革去官员 #${d.purge}？削去仕籍，永不叙用。`)) act(api(`/officials/${d.purge}/purge`, {}), "已革职");
   } else if (d.review) {

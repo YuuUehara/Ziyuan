@@ -215,6 +215,10 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             encode_speeches(answers)
         ),
         ZhuangyuanNamed { agent } => format!("v1\tZHUANGYUAN\t{}", agent.0),
+        CourierDelivered { task, station } => {
+            format!("v1\tCOURIER\t{}\t{}", task.0, to_hex(station))
+        }
+        EdictExpedited { task } => format!("v1\tURGENT\t{}", task.0),
         CensorReported {
             task,
             censor,
@@ -567,6 +571,13 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         "ZHUANGYUAN" => ZhuangyuanNamed {
             agent: AgentId(id(2)?),
         },
+        "COURIER" => CourierDelivered {
+            task: TaskId(id(2)?),
+            station: from_hex(field(3)?)?,
+        },
+        "URGENT" => EdictExpedited {
+            task: TaskId(id(2)?),
+        },
         "CENSURED" => CensorReported {
             task: TaskId(id(2)?),
             censor: AgentId(id(3)?),
@@ -627,7 +638,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         | ChangesDiscarded { .. }
         | TaskCancelled { .. } => 3,
         ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
-        ZhuangyuanNamed { .. } => 3,
+        ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
+        CourierDelivered { .. } => 4,
         ExamTaken { model: None, .. } => 8,
         ExamTaken { .. } => 9,
         CensorReported { model: None, .. } => 11,
@@ -747,6 +759,11 @@ mod tests {
                 }],
             },
             CourtEvent::ZhuangyuanNamed { agent: AgentId(2) },
+            CourtEvent::CourierDelivered {
+                task,
+                station: "CI\t驿站".into(),
+            },
+            CourtEvent::EdictExpedited { task },
             CourtEvent::BudgetSet {
                 scope: BudgetScope::Court,
                 tokens: Some(1_000_000),

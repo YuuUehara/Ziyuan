@@ -171,4 +171,14 @@ if "$BIN" exam --palace 何以治国 > /dev/null 2>&1; then echo '演示后端�
 if "$BIN" history | has '礼部科举'; then echo '科举失败不应留记录' >&2; exit 1; fi
 if "$BIN" history | has '殿试：'; then echo '殿试失败不应留记录' >&2; exit 1; fi
 if "$BIN" tasks | has '体例不合'; then echo '演示回奏应合体例' >&2; exit 1; fi
+# 兵部：驿传入队（标准输入）、加急插队、驿站名须非空；用完撤销
+CI="$("$BIN" post --station CI 'CI 失败：lint 报错' | sed -n 's/^驿传：诏令 #\([0-9]*\).*/\1/p')"
+[ -n "$CI" ]
+printf '线上告警\n' | "$BIN" post --urgent - | has '八百里加急'
+"$BIN" tasks | has '【八百里加急】【驿传·驿站】工部 线上告警  —'
+if "$BIN" post --station '' x > /dev/null 2>&1; then echo '驿站名须非空' >&2; exit 1; fi
+"$BIN" urgent "$CI" | has '插队先行'
+if "$BIN" urgent "$CI" > /dev/null 2>&1; then echo '不应重复加急' >&2; exit 1; fi
+"$BIN" history | has '兵部驿传'
+for id in $("$BIN" tasks | sed -n 's/^#\([0-9]*\) .*【驿传·.*/\1/p'); do "$BIN" cancel "$id" > /dev/null; done
 echo 'ZiYuan smoke test PASS'

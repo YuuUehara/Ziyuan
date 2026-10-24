@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, duzhi_report,
-    estimate_cost, kaocheng_report, render_diff, seal_note,
+    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, describe_event, describe_record,
+    duzhi_report, estimate_cost, kaocheng_report, render_diff, seal_note,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech,
@@ -416,6 +416,12 @@ impl App {
                 self.mutate(|s| s.cancel(task), |_| format!("诏令 #{} 已撤销", task.0));
             }
             KeyCode::Char('t') => self.start_draft(task),
+            KeyCode::Char('U') => {
+                self.mutate(
+                    |s| s.expedite(task),
+                    |_| format!("诏令 #{} 八百里加急：插队先行，时限加倍", task.0),
+                );
+            }
             KeyCode::Char('i') => self.start_censor(task),
             KeyCode::Char('f') => self.start_split(task),
             KeyCode::Char('v') => self.start_debate(task),
@@ -825,7 +831,7 @@ impl App {
         }
         let lock = match EventLog::new(&self.config.root).try_lock_executor() {
             Ok(Some(lock)) => lock,
-            Ok(None) => return self.error("另一个 ziyuan 进程正在执行诏令，请待其结束"),
+            Ok(None) => return self.error(EXECUTOR_BUSY),
             Err(e) => return self.error(e.to_string()),
         };
         if self.court().runnable_tasks().is_empty() {
@@ -980,6 +986,14 @@ impl App {
                         Style::new().dim(),
                     ),
                     Span::styled(format!("{:<6}", label), style),
+                    Span::styled(
+                        if task.urgent { " 急" } else { "" },
+                        Style::new().fg(Color::LightRed).bold(),
+                    ),
+                    Span::styled(
+                        if task.courier.is_some() { " 驿" } else { "" },
+                        Style::new().fg(Color::Cyan),
+                    ),
                     Span::raw(format!(
                         " {} {}",
                         task.edict.department.label(),
@@ -1057,6 +1071,19 @@ impl App {
             status_line.push(Span::raw(format!("  承办 {}", name(w))));
         }
         lines.push(Line::from(status_line));
+        if task.urgent || task.courier.is_some() {
+            let mut military = vec![label("兵部")];
+            if task.urgent {
+                military.push(Span::styled(
+                    "八百里加急（插队先行，时限加倍）",
+                    Style::new().fg(Color::LightRed).bold(),
+                ));
+            }
+            if let Some(station) = &task.courier {
+                military.push(Span::raw(format!("  驿传自「{station}」")));
+            }
+            lines.push(Line::from(military));
+        }
         if let Some(parent) = task.parent {
             lines.push(Line::from(vec![
                 label("分办"),
@@ -1149,7 +1176,7 @@ impl App {
                 Style::new().fg(Color::Red).bold(),
             ));
             for s in &task.suspicions {
-                let source = s.source.strip_prefix("tool:").unwrap_or("回奏");
+                let source = s.origin();
                 lines.push(Line::from(format!(
                     "  {}（{source}）{}：「{}」",
                     s.bureau(),
@@ -1411,6 +1438,7 @@ impl App {
                 ("f", "分办"),
                 ("v", "廷议"),
                 ("i", "复核"),
+                ("U", "加急"),
                 ("K", "考成"),
                 ("H", "度支"),
                 ("D", "修道/回朝"),
@@ -1696,6 +1724,16 @@ mod tests {
         let task = app.court().task(TaskId(1)).expect("应已下诏");
         assert_eq!(task.edict.department, Department::Personnel);
         assert!(screen(&app).contains("诏令 #1 已入队"));
+        // U 八百里加急：详情标出；再按报错。
+        press(&mut app, "U");
+        assert!(app.court().task(TaskId(1)).unwrap().urgent);
+        assert!(
+            screen(&app).contains("八百里加急（插队先行"),
+            "{}",
+            screen(&app)
+        );
+        press(&mut app, "U");
+        assert!(screen(&app).contains("已是八百里加急"));
 
         // v 廷议：发言陆续显示在详情里；演示后端不调用模型，廷议失败、不留纪要。
         press(&mut app, "v");

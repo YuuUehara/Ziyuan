@@ -60,6 +60,8 @@ pub struct Job {
     /// 国库余额（tokens），同一次执行的各件共用；用尽后执行中的停支，未开始的不再开始
     /// （结局为 `NotStarted`，诏令留在队列）。`None` 不限。
     pub treasury: Option<Arc<AtomicI64>>,
+    /// 八百里加急：时限为常规的两倍（入队次序由调用方排定，加急在前、先得空位）。
+    pub urgent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +172,7 @@ async fn run_job(
     progress: mpsc::UnboundedSender<Progress>,
 ) -> Outcome {
     let treasury = job.treasury.clone();
+    let timeout = if job.urgent { timeout * 2 } else { timeout };
     if treasury
         .as_ref()
         .is_some_and(|t| t.load(Ordering::SeqCst) <= 0)
@@ -319,6 +322,7 @@ mod tests {
             model: None,
             budget: None,
             treasury: None,
+            urgent: false,
         }
     }
 
@@ -411,14 +415,22 @@ mod tests {
         let scheduler = Scheduler::new(
             backend.clone(),
             Limits {
-                max_concurrent: 1,
+                max_concurrent: 2,
                 timeout: Duration::from_millis(50),
             },
         );
-        let progress = collect(scheduler.start(vec![job(1)], &CancelToken::new())).await;
+        // 八百里加急的时限加倍。
+        let urgent = Job {
+            urgent: true,
+            ..job(2)
+        };
+        let progress = collect(scheduler.start(vec![job(1), urgent], &CancelToken::new())).await;
         assert_eq!(
             outcomes(&progress),
-            [(1, Outcome::Failed("超时（0.05 秒）".into()))]
+            [
+                (1, Outcome::Failed("超时（0.05 秒）".into())),
+                (2, Outcome::Failed("超时（0.1 秒）".into()))
+            ]
         );
         // 通道在后端线程退出后才关闭，此时它必然已看到撤销信号。
         assert!(backend.saw_cancel.load(Ordering::SeqCst));

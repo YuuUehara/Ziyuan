@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
-    ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, duzhi_report,
-    estimate_cost, kaocheng_grade, kaocheng_report, render_diff, seal_note,
+    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, describe_event, describe_record,
+    duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff, seal_note,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -70,6 +70,10 @@ const HELP: &str = concat!(
   ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]
                                        户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支；
                                        不带参数则出具度支奏销（按用途、模型、官员汇总花费）
+  ziyuan post [--dept works] [--station 驿站] [--urgent] <内容|->
+                                         兵部驿传：外部事件（CI 失败、新 issue）入队为诏令，`-` 读标准输入；
+                                         默认玉玺（只读），仍须批红、受度支约束；只入队，不执行
+  ziyuan urgent <诏令ID>                 八百里加急：插队先行，时限加倍
   ziyuan exam <官员ID>                   礼部科举：官员应试 .ziyuan/exam/ 下的考题，按要点判分，记入履历
   ziyuan exam --palace <题目>            殿试：天子亲策，在任官员各答一卷
   ziyuan crown <官员ID>                  钦点状元（须为最近一次殿试的答卷者）
@@ -177,6 +181,15 @@ enum Command {
     Kaocheng,
     /// `None` 列出全部诏令的密报。
     Flags(Option<TaskId>),
+    /// 兵部驿传：外部事件入队为诏令（只入队，不执行）。
+    Post {
+        department: Department,
+        station: String,
+        urgent: bool,
+        text: String,
+    },
+    /// 八百里加急。
+    Urgent(TaskId),
     /// 礼部科举：官员应试 `.ziyuan/exam/` 中的考题。
     Exam(AgentId),
     /// 殿试：皇帝出题，在任官员作答。
@@ -306,6 +319,11 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
         "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
         "kaocheng" => no_args(args, Command::Kaocheng)?,
+        "post" => parse_post(args)?,
+        "urgent" => match <[String; 1]>::try_from(args) {
+            Ok([id]) => Command::Urgent(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
+            Err(_) => return Err("用法: ziyuan urgent <诏令ID>".into()),
+        },
         "exam" => match args.as_slice() {
             [flag, rest @ ..] if flag == "--palace" && !rest.is_empty() => {
                 Command::Palace(rest.join(" "))
@@ -628,8 +646,20 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     0 => String::new(),
                     n => format!("（廷议 {n} 场）"),
                 };
+                // 兵部：加急与驿传来处标在部门之前。
+                let military = format!(
+                    "{}{}",
+                    if task.urgent {
+                        "【八百里加急】"
+                    } else {
+                        ""
+                    },
+                    task.courier
+                        .as_ref()
+                        .map_or(String::new(), |c| format!("【驿传·{c}】"))
+                );
                 println!(
-                    "#{:<3} {parent}{} {}  —  {}{flagged}{debated}{usage}",
+                    "#{:<3} {parent}{military}{} {}  —  {}{flagged}{debated}{usage}",
                     task.edict.id.0,
                     task.edict.department.label(),
                     task.edict.text,
@@ -771,6 +801,35 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
+        Command::Post {
+            department,
+            station,
+            urgent,
+            text,
+        } => {
+            let edict = session.post(department, text, &station, urgent)?;
+            let task = session.court().task(edict.id).expect("刚入队");
+            let speed = if urgent { "，八百里加急" } else { "" };
+            println!(
+                "驿传：诏令 #{} 自「{station}」入队（{}{speed}）。",
+                edict.id.0,
+                department.label()
+            );
+            if !task.suspicions.is_empty() {
+                println!(
+                    "锦衣卫密报 {} 条，`ziyuan flags {}` 查看；修道期间司礼监不代批红。",
+                    task.suspicions.len(),
+                    edict.id.0
+                );
+            }
+            if session.court().needs_approval(task) {
+                println!("待批红：`ziyuan approve {}`。", edict.id.0);
+            }
+        }
+        Command::Urgent(task) => {
+            session.expedite(task)?;
+            println!("诏令 #{} 八百里加急：插队先行，时限加倍。", task.0);
+        }
         Command::Exam(agent) => {
             let backend = worker_backend()?;
             let name = session
@@ -822,7 +881,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             {
                 for s in &task.suspicions {
                     any = true;
-                    let source = s.source.strip_prefix("tool:").unwrap_or("回奏");
+                    let source = s.origin();
                     println!(
                         "诏令 #{} {}（{source}）：{}「{}」",
                         task.edict.id.0,
@@ -994,8 +1053,7 @@ fn lock_executor() -> Result<ExecutorLock, Box<dyn Error>> {
     EventLog::new(&env::current_dir()?)
         .try_lock_executor()?
         .ok_or_else(|| {
-            "另一个 ziyuan 进程正在执行诏令。可用 `edict --queue` 入队，待其结束后 `ziyuan run`。"
-                .into()
+            format!("{EXECUTOR_BUSY}。可用 `edict --queue` 入队，待其结束后 `ziyuan run`。").into()
         })
 }
 
@@ -1284,6 +1342,47 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         text: args.join(" "),
         queue,
         seal,
+    })
+}
+
+/// `post [--dept works] [--station 驿站] [--urgent] <内容|->`；`-` 从标准输入读取内容。
+fn parse_post(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    const USAGE: &str =
+        "用法: ziyuan post [--dept works] [--station 驿站] [--urgent] <内容|-（从标准输入读取）>";
+    let (mut department, mut station, mut urgent) = (Department::Works, "驿站".to_owned(), false);
+    while let Some(flag) = args.first().cloned() {
+        match flag.as_str() {
+            "--urgent" => {
+                args.remove(0);
+                urgent = true;
+            }
+            "--dept" | "--station" if args.len() >= 2 => {
+                args.remove(0);
+                let value = args.remove(0);
+                if flag == "--dept" {
+                    department = value.parse()?;
+                } else {
+                    station = value;
+                }
+            }
+            "--dept" | "--station" => return Err(USAGE.into()),
+            _ => break,
+        }
+    }
+    let text = match args.as_slice() {
+        [] => return Err(USAGE.into()),
+        [dash] if dash == "-" => {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::stdin(), &mut text)?;
+            text.trim().to_owned()
+        }
+        _ => args.join(" "),
+    };
+    Ok(Command::Post {
+        department,
+        station,
+        urgent,
+        text,
     })
 }
 
