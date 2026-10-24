@@ -128,11 +128,29 @@ impl<S: EventStore> Session<S> {
         &self.history
     }
 
-    /// 重新加载事件簿，看到其他进程（或会话）写入的变更。
+    /// 重新加载事件簿，看到其他进程（或会话）写入的变更：只读取并应用新增的事件。
+    /// 事件簿比已知的短（被替换过）时从头重放。
     pub fn reload(&mut self) -> Result<(), AppError> {
-        let history = self.store.load()?;
-        self.court = Court::replay(&history)?;
-        self.history = history;
+        let fresh = match self.store.load_since(self.history.len()) {
+            Ok(fresh) => fresh,
+            Err(StorageError::Conflict { .. }) => {
+                let history = self.store.load()?;
+                self.court = Court::replay(&history)?;
+                self.history = history;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if fresh.is_empty() {
+            return Ok(());
+        }
+        // 先在副本上应用，出错时会话保持原状。
+        let mut court = self.court.clone();
+        for event in &fresh {
+            court.apply(event)?;
+        }
+        self.court = court;
+        self.history.extend(fresh);
         Ok(())
     }
 
@@ -1042,10 +1060,7 @@ impl<S: EventStore> Session<S> {
                     self.history.extend(events.iter().cloned());
                     return Ok(events);
                 }
-                Err(StorageError::Conflict { .. }) => {
-                    self.history = self.store.load()?;
-                    self.court = Court::replay(&self.history)?;
-                }
+                Err(StorageError::Conflict { .. }) => self.reload()?,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -2859,6 +2874,17 @@ mod tests {
             Session::found(EventLog::new(&root)),
             Err(AppError::AlreadyFounded)
         ));
+        // 增量刷新得到与重新打开相同的状态。
+        b.reload().unwrap();
+        assert_eq!(b.history(), reopened.history());
+        assert!(b.court().agent(recruited).is_some());
+        // 事件簿被删掉重建：刷新时从头重放。
+        std::fs::remove_dir_all(root.join(".ziyuan")).unwrap();
+        let mut fresh = Session::found(EventLog::new(&root)).unwrap();
+        fresh.reform(GovernanceMode::Cabinet).unwrap();
+        b.reload().unwrap();
+        assert_eq!(b.history(), fresh.history());
+        assert_eq!(b.court().mode(), GovernanceMode::Cabinet);
         std::fs::remove_dir_all(root).unwrap();
     }
 

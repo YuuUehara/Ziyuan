@@ -37,7 +37,8 @@ const HELP: &str = concat!(
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan tasks                         查看诏令及其状态
-  ziyuan serve [--port 8080]           启动紫禁城 Web 界面（仅本机，需访问令牌）
+  ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]
+                                       启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）
   ziyuan tui                           启动紫禁城终端界面
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
@@ -132,7 +133,12 @@ enum Command {
     },
     Run(Limits),
     Tasks,
-    Serve(u16),
+    Serve {
+        port: u16,
+        bind: std::net::IpAddr,
+        /// 重新生成令牌（旧令牌作废）。
+        rotate: bool,
+    },
     Tui,
     Cancel(TaskId),
     Reform(GovernanceMode),
@@ -211,13 +217,29 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "run" => Command::Run(parse_limits(args)?),
         "tasks" => no_args(args, Command::Tasks)?,
         "tui" => no_args(args, Command::Tui)?,
-        "serve" => match args.as_slice() {
-            [] => Command::Serve(8080),
-            [flag, port] if flag == "--port" => {
-                Command::Serve(port.parse().map_err(|_| "端口必须是 0–65535 的数字")?)
+        "serve" => {
+            const USAGE: &str = "用法: ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]";
+            let (mut port, mut bind, mut rotate) =
+                (8080, std::net::Ipv4Addr::LOCALHOST.into(), false);
+            let mut rest = args.iter();
+            while let Some(flag) = rest.next() {
+                match flag.as_str() {
+                    "--port" => {
+                        let value = rest.next().ok_or(USAGE)?;
+                        port = value.parse().map_err(|_| "端口必须是 0–65535 的数字")?;
+                    }
+                    "--bind" => {
+                        let value = rest.next().ok_or(USAGE)?;
+                        bind = value
+                            .parse()
+                            .map_err(|_| "--bind 须为 IP 地址，如 0.0.0.0")?;
+                    }
+                    "--new-token" => rotate = true,
+                    _ => return Err(USAGE.into()),
+                }
             }
-            _ => return Err("用法: ziyuan serve [--port 8080]".into()),
-        },
+            Command::Serve { port, bind, rotate }
+        }
         "cancel" => match <[String; 1]>::try_from(args) {
             Ok([id]) => Command::Cancel(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
             Err(_) => return Err("用法: ziyuan cancel <诏令ID>".into()),
@@ -436,21 +458,33 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 run_tasks(session, None, worker_backend()?, limits)?;
             }
         }
-        Command::Serve(port) => {
+        Command::Serve { port, bind, rotate } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
+            let root = env::current_dir()?;
             let config = ziyuan_web::Config {
-                root: env::current_dir()?,
-                token: ziyuan_web::random_token()?,
+                token: ziyuan_web::load_or_create_token(&root, rotate)?,
+                root,
                 backend: worker_backend()?,
                 limits: DEFAULT_LIMITS,
             };
             runtime.block_on(async {
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+                let listener = tokio::net::TcpListener::bind((bind, port)).await?;
                 let addr = listener.local_addr()?;
-                println!("紫禁城已开启：http://{addr}/?token={}", config.token);
-                println!("（仅监听本机；令牌即皇帝身份，请勿外传。Ctrl-C 关闭。）");
+                // 监听全部地址时，地址栏要填本机在网络中的地址。
+                let host = match bind.is_unspecified() {
+                    true => format!("<本机地址>:{}", addr.port()),
+                    false => addr.to_string(),
+                };
+                println!("奉天门已开：http://{host}/?token={}", config.token);
+                println!("令牌存于 .ziyuan/web-token，重启不变；`--new-token` 重新生成。令牌即皇帝身份，请勿外传。");
+                if !bind.is_loopback() {
+                    println!(
+                        "注意：正在监听 {addr}，其他机器可以访问。HTTP 为明文，令牌可能被窃听；\
+                         请只在可信网络中使用，或置于 HTTPS 反向代理、SSH 隧道之后。"
+                    );
+                }
                 ziyuan_web::serve(listener, config).await
             })?;
         }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>紫禁城 · 紫垣</title>
+<title>奉天门 · 紫垣</title>
 <style>
   :root {
     --lacquer: #7a1712;
@@ -285,7 +285,7 @@
 </head>
 <body>
 <header>
-  <div class="brand"><h1>紫禁城</h1><span>紫垣 ZiYuan · 朝廷控制台</span></div>
+  <div class="brand"><h1>奉天门</h1><span>御门听政 · 紫垣 ZiYuan</span></div>
   <div class="header-stats">
     <span class="stat">制度 <b id="mode-label">—</b></span>
     <span class="stat">诏令 <b id="task-count">0</b> · 待办 <b id="open-count">0</b></span>
@@ -407,17 +407,16 @@
 <div id="toast"></div>
 <div id="locked"><div>
   <h2>需要访问令牌</h2>
-  <p>请使用 <code>ziyuan serve</code> 启动时打印的完整地址（含 <code>?token=</code>）打开本页。</p>
+  <p>请打开 <code>ziyuan serve</code> 启动时打印的完整地址，或在此输入令牌（见 <code>.ziyuan/web-token</code>）。</p>
+  <form id="login-form" class="row">
+    <input type="password" id="login-token" autocomplete="off" placeholder="访问令牌">
+    <button class="gold" type="submit">入朝</button>
+  </form>
 </div></div>
 
 <script>
 "use strict";
-const params = new URLSearchParams(location.search);
-let token = params.get("token") || sessionStorage.getItem("ziyuan-token") || "";
-if (params.get("token")) {
-  sessionStorage.setItem("ziyuan-token", token);
-  history.replaceState(null, "", location.pathname);
-}
+// 令牌由服务器种在 HttpOnly Cookie 中，页面脚本不经手。
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -430,7 +429,7 @@ const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
 async function api(path, body) {
   const response = await fetch("api" + path, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (response.status === 401) {
@@ -805,7 +804,7 @@ document.addEventListener("click", (event) => {
 
 // ---- 实时推送 ----
 function connect() {
-  const source = new EventSource("api/events?token=" + encodeURIComponent(token));
+  const source = new EventSource("api/events");
   let pending;
   const scheduleRefresh = () => { clearTimeout(pending); pending = setTimeout(refresh, 120); };
   source.addEventListener("changed", scheduleRefresh);
@@ -829,6 +828,17 @@ function connect() {
   });
   source.addEventListener("run_error", (event) => toast(JSON.parse(event.data).error, true));
 }
+
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await fetch("login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: $("login-token").value }),
+  });
+  if (response.ok) location.reload();
+  else toast("令牌不正确", true);
+});
 
 refresh().then(() => { if (state) connect(); });
 // CLI 等其他进程的变更不会推送，定期刷新。

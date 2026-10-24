@@ -1,10 +1,12 @@
 //! 紫禁城（Forbidden City）：紫垣的 Web 界面。
 //!
 //! 页面是内嵌的单个 HTML 文件；数据经 JSON API 读写，执行中的流式输出与结局经 SSE 推送。
-//! Web 界面同样代表皇帝，因此每个 API 请求都必须携带启动时生成的令牌。
+//! Web 界面同样代表皇帝，因此每个 API 请求都必须带令牌：浏览器经 `?token=` 或登录框换取
+//! HttpOnly、SameSite=Strict 的 Cookie，脚本可用 `Authorization: Bearer`。令牌存于
+//! `.ziyuan/web-token`，重启后不变，可重新生成。
 //!
-//! 每个请求各自打开一个 [`Session`]，与 CLI 共用同一套多进程规则：写入以乐观并发提交，
-//! 执行诏令前取得执行者锁。
+//! 请求共用一个缓存的 [`Session`]（每次只增量读取新事件），同时有多个请求时另开会话；
+//! 与 CLI 共用同一套多进程规则：写入以乐观并发提交，执行诏令前取得执行者锁。
 use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
@@ -38,7 +40,7 @@ const INDEX_HTML: &str = include_str!("index.html");
 pub struct Config {
     /// 朝廷所在目录（含 `.ziyuan/`），也是玉玺查阅范围的根。
     pub root: PathBuf,
-    /// API 令牌；页面 URL 以 `?token=` 携带。
+    /// 访问令牌（见 [`load_or_create_token`]）。
     pub token: String,
     pub backend: Arc<dyn WorkerBackend>,
     pub limits: Limits,
@@ -51,6 +53,34 @@ pub fn random_token() -> io::Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// 读取 `<root>/.ziyuan/web-token` 中的令牌；没有、内容不合格或 `rotate` 时生成新令牌写入
+/// （Unix 下仅本人可读写）。旧令牌随之失效。
+pub fn load_or_create_token(root: &std::path::Path, rotate: bool) -> io::Result<String> {
+    let path = root.join(".ziyuan").join("web-token");
+    if !rotate {
+        match std::fs::read_to_string(&path) {
+            Ok(text) if is_token(text.trim()) => return Ok(text.trim().to_owned()),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let token = random_token()?;
+    std::fs::create_dir_all(path.parent().expect("令牌路径含目录"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    io::Write::write_all(&mut options.open(&path)?, format!("{token}\n").as_bytes())?;
+    Ok(token)
+}
+
+fn is_token(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+const COOKIE: &str = "ziyuan_token";
+
 /// 在 `listener` 上提供 Web 界面，直到出错。
 pub async fn serve(listener: TcpListener, config: Config) -> io::Result<()> {
     axum::serve(listener, router(config)).await
@@ -62,6 +92,7 @@ pub fn router(config: Config) -> Router {
         config,
         events,
         run: Mutex::new(None),
+        cache: Mutex::new(None),
     }));
     let api = Router::new()
         .route("/state", get(state))
@@ -93,7 +124,8 @@ pub fn router(config: Config) -> Router {
         .route("/officials/{id}/purge", post(purge))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
     Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
+        .route("/", get(index))
+        .route("/login", post(login))
         .nest("/api", api)
         .with_state(app)
 }
@@ -107,6 +139,8 @@ struct Inner {
     events: broadcast::Sender<(&'static str, String)>,
     /// 本进程正在进行的执行；`Some` 时拒绝再次启动。
     run: Mutex<Option<CancelToken>>,
+    /// 空闲的会话，下一个请求取走后增量读取新事件，用完放回。
+    cache: Mutex<Option<Session<EventLog>>>,
 }
 
 impl AppState {
@@ -118,19 +152,32 @@ impl AppState {
         self.0.run.lock().expect("锁未中毒").is_some()
     }
 
-    /// 在阻塞线程中打开会话并执行 `f`（事件簿读写持文件锁，会阻塞）。
+    /// 在阻塞线程中取一个会话（缓存的增量刷新，没有则打开）执行 `f`，用完放回缓存
+    /// （事件簿读写持文件锁，会阻塞）。
     async fn with_session<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Session<EventLog>) -> Result<T, AppError> + Send + 'static,
     ) -> Result<T, ApiError> {
         let root = self.0.config.root.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut session = Session::open(EventLog::new(&root))?;
-            f(&mut session)
+        let cached = self.0.cache.lock().expect("锁未中毒").take();
+        let (session, result) = tokio::task::spawn_blocking(move || {
+            let refreshed = cached.map(|mut s| s.reload().map(|()| s));
+            let mut session = match refreshed {
+                Some(Ok(session)) => session,
+                // 刷新失败（如事件簿被替换）则重新打开。
+                _ => Session::open(EventLog::new(&root))?,
+            };
+            let result = f(&mut session);
+            Ok::<_, AppError>((session, result))
         })
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .map_err(ApiError::from)
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+        self.0
+            .cache
+            .lock()
+            .expect("锁未中毒")
+            .get_or_insert(session);
+        result.map_err(ApiError::from)
     }
 
     /// 执行变更，成功后通知页面刷新。
@@ -177,26 +224,64 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// `Authorization: Bearer <令牌>`，或 `?token=<令牌>`（EventSource 无法设置请求头）。
-async fn require_token(State(app): State<AppState>, request: Request, next: Next) -> Response {
+/// 请求所带的令牌是否正确：`Authorization: Bearer <令牌>`，或登录后的 Cookie。
+fn authorized(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
     let expected = app.0.config.token.as_bytes();
-    let header_token = request
-        .headers()
+    let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let query_token = request
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
-    let ok = [header_token, query_token]
+    let cookies = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().strip_prefix(COOKIE)?.strip_prefix('='));
+    bearer
         .into_iter()
-        .flatten()
-        .any(|t| constant_time_eq(t.as_bytes(), expected));
-    if ok {
+        .chain(cookies)
+        .any(|t| constant_time_eq(t.as_bytes(), expected))
+}
+
+async fn require_token(State(app): State<AppState>, request: Request, next: Next) -> Response {
+    if authorized(&app, request.headers()) {
         next.run(request).await
     } else {
         ApiError(StatusCode::UNAUTHORIZED, "缺少或错误的访问令牌".into()).into_response()
+    }
+}
+
+/// 登录 Cookie：只随同站请求发送，脚本读不到；浏览器关闭前有效。
+fn login_cookie(token: &str) -> String {
+    format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/")
+}
+
+/// 首页。带正确的 `?token=` 时种下 Cookie 并重定向到不含令牌的地址，以免令牌留在地址栏与历史记录。
+async fn index(
+    State(app): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    match query.get("token") {
+        Some(token) if constant_time_eq(token.as_bytes(), app.0.config.token.as_bytes()) => (
+            StatusCode::SEE_OTHER,
+            [
+                (header::SET_COOKIE, login_cookie(token)),
+                (header::LOCATION, "/".to_owned()),
+            ],
+        )
+            .into_response(),
+        _ => Html(INDEX_HTML).into_response(),
+    }
+}
+
+/// 登录框：令牌正确则种下 Cookie。
+async fn login(State(app): State<AppState>, Json(body): Json<Value>) -> Response {
+    let token = body["token"].as_str().unwrap_or("").trim();
+    if constant_time_eq(token.as_bytes(), app.0.config.token.as_bytes()) {
+        let cookie = login_cookie(token);
+        ([(header::SET_COOKIE, cookie)], Json(json!({}))).into_response()
+    } else {
+        ApiError(StatusCode::UNAUTHORIZED, "令牌不正确".into()).into_response()
     }
 }
 
@@ -962,6 +1047,46 @@ mod tests {
         .unwrap()
     }
 
+    /// 不跟随重定向地发送请求，返回 (状态码, Set-Cookie, Location)。
+    async fn raw(
+        url: String,
+        cookie: Option<String>,
+        body: Option<Value>,
+    ) -> (u16, Option<String>, Option<String>) {
+        tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .build()
+                .into();
+            let response = match body {
+                Some(body) => agent
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .send(body.to_string()),
+                None => {
+                    let mut request = agent.get(&url);
+                    if let Some(cookie) = &cookie {
+                        request = request.header("Cookie", cookie);
+                    }
+                    request.call()
+                }
+            }
+            .unwrap();
+            let header = |name| {
+                let value = response.headers().get(name)?;
+                Some(value.to_str().unwrap().to_owned())
+            };
+            (
+                response.status().as_u16(),
+                header("set-cookie"),
+                header("location"),
+            )
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn api_requires_the_token() {
         let (base, root) = start("auth").await;
@@ -969,18 +1094,57 @@ mod tests {
         assert_eq!(call(&base, "/state", Some("wrong"), None).await.0, 401);
         let edict = json!({ "department": "works", "text": "越权" });
         assert_eq!(call(&base, "/edicts", None, Some(edict)).await.0, 401);
-        // EventSource 只能用查询参数携带令牌。
-        assert_eq!(
-            call(&base, &format!("/history?token={TOKEN}"), None, None)
-                .await
-                .0,
-            200
-        );
+        // 令牌不再经 API 的查询参数传递（会留在日志与历史记录里）。
+        let query = format!("/history?token={TOKEN}");
+        assert_eq!(call(&base, &query, None, None).await.0, 401);
         let (status, state) = call(&base, "/state", Some(TOKEN), None).await;
         assert_eq!(
             (status, state["mode"]["code"].as_str()),
             (200, Some("chancellor"))
         );
+
+        // 带令牌打开首页：种下 HttpOnly、SameSite=Strict 的 Cookie，重定向到不含令牌的地址。
+        let (status, cookie, location) = raw(format!("{base}/?token={TOKEN}"), None, None).await;
+        assert_eq!((status, location.as_deref()), (303, Some("/")));
+        let cookie = cookie.unwrap();
+        assert!(
+            cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"),
+            "{cookie}"
+        );
+        let pair = cookie.split(';').next().unwrap().to_owned();
+        let api = format!("{base}/api/state");
+        assert_eq!(raw(api.clone(), Some(pair), None).await.0, 200);
+        let wrong = Some("ziyuan_token=wrong; other=1".to_owned());
+        assert_eq!(raw(api.clone(), wrong, None).await.0, 401);
+        // 令牌错误：只给页面（登录框），不种 Cookie。
+        let (status, cookie, _) = raw(format!("{base}/?token=wrong"), None, None).await;
+        assert_eq!((status, cookie), (200, None));
+        // 登录框。
+        let login = format!("{base}/login");
+        let (status, cookie, _) = raw(login.clone(), None, Some(json!({ "token": TOKEN }))).await;
+        assert_eq!(status, 200);
+        assert!(
+            cookie
+                .unwrap()
+                .starts_with(&format!("ziyuan_token={TOKEN};"))
+        );
+        let (status, cookie, _) = raw(login, None, Some(json!({ "token": "nope" }))).await;
+        assert_eq!((status, cookie), (401, None));
+
+        // 令牌文件：首次生成、之后沿用；重新生成后旧令牌作废；内容不合格则重新生成。
+        let first = load_or_create_token(&root, false).unwrap();
+        assert_eq!(load_or_create_token(&root, false).unwrap(), first);
+        let rotated = load_or_create_token(&root, true).unwrap();
+        assert!(rotated != first && is_token(&rotated));
+        let path = root.join(".ziyuan/web-token");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::write(&path, "short\n").unwrap();
+        assert!(is_token(&load_or_create_token(&root, false).unwrap()));
         std::fs::remove_dir_all(root).unwrap();
     }
 

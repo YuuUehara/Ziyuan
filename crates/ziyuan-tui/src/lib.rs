@@ -885,7 +885,7 @@ impl App {
         let usage = court.total_usage();
         let mut spans = vec![
             Span::styled(
-                " 紫垣 · 紫禁城 ",
+                " 紫垣 · 奉天门 ",
                 Style::new().fg(Color::White).bg(VERMILION).bold(),
             ),
             Span::raw("  制度 "),

@@ -13,14 +13,37 @@ fn to_hex(value: &str) -> String {
     }
     out
 }
+/// 十六进制字符的值；非法字符为 0xFF。
+const NIBBLES: [u8; 256] = {
+    let mut table = [0xFF; 256];
+    let mut i = 0;
+    while i < 10 {
+        table[b'0' as usize + i] = i as u8;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 6 {
+        table[b'a' as usize + i] = 10 + i as u8;
+        table[b'A' as usize + i] = 10 + i as u8;
+        i += 1;
+    }
+    table
+};
+
 fn from_hex(s: &str) -> Result<String, String> {
     if !s.len().is_multiple_of(2) {
         return Err("hex 长度不合法".into());
     }
-    let mut out = Vec::new();
-    for pair in s.as_bytes().chunks(2) {
-        let text = std::str::from_utf8(pair).map_err(|e| e.to_string())?;
-        out.push(u8::from_str_radix(text, 16).map_err(|e| e.to_string())?);
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut invalid = 0;
+    for [a, b] in s.as_bytes().as_chunks::<2>().0 {
+        let (hi, lo) = (NIBBLES[*a as usize], NIBBLES[*b as usize]);
+        invalid |= hi | lo;
+        out.push(hi << 4 | lo);
+    }
+    // 合法值都小于 16，任一非法字符都会让高位置 1。
+    if invalid > 0x0F {
+        return Err("hex 含非法字符".into());
     }
     String::from_utf8(out).map_err(|e| e.to_string())
 }
@@ -233,11 +256,39 @@ fn split_list(field: &str) -> impl Iterator<Item = &str> {
     field.split(',').filter(|item| !item.is_empty())
 }
 
-pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
+/// 解码失败的原因。
+#[derive(Debug)]
+pub(crate) enum DecodeError {
+    /// 更新版本的紫垣写入的内容（更高的格式版本或未知的事件类型）：须升级才能读取。
+    Newer(String),
+    Malformed(String),
+}
+impl From<String> for DecodeError {
+    fn from(reason: String) -> Self {
+        Self::Malformed(reason)
+    }
+}
+impl From<&str> for DecodeError {
+    fn from(reason: &str) -> Self {
+        Self::Malformed(reason.into())
+    }
+}
+
+/// 事件簿的兼容规则：新增事件类型，或在行尾追加可选字段，格式版本仍为 v1；
+/// 旧版读到不认识的事件类型或更高的版本时拒绝读取并提示升级，而不是当作损坏。
+/// 只有改变既有字段含义时才升级格式版本，届时由读取方把旧行转换为新事件。
+pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
     use CourtEvent::*;
     let parts: Vec<&str> = line.split('\t').collect();
-    if parts.first() != Some(&"v1") {
-        return Err("不支持的事件格式版本".into());
+    if parts[0] != "v1" {
+        let newer = parts[0]
+            .strip_prefix('v')
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| n > 1);
+        return Err(match newer {
+            true => DecodeError::Newer(format!("事件格式 {}", parts[0])),
+            false => "不支持的事件格式版本".into(),
+        });
     }
     let field = |i: usize| parts.get(i).copied().ok_or_else(|| format!("缺少字段 {i}"));
     let id =
@@ -282,7 +333,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "RETREAT" => EmperorRetreat(match field(2)? {
             "1" => true,
             "0" => false,
-            other => return Err(format!("修道标记无效: {other}")),
+            other => return Err(format!("修道标记无效: {other}").into()),
         }),
         "REFORMED" => InstitutionReformed(
             field(2)?
@@ -335,7 +386,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
             ok: match field(5)? {
                 "1" => true,
                 "0" => false,
-                other => return Err(format!("成败标记无效: {other}")),
+                other => return Err(format!("成败标记无效: {other}").into()),
             },
         },
         "FAILED" => TaskFailed {
@@ -428,7 +479,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
                     "-" => None,
                     "1" => Some(true),
                     "0" => Some(false),
-                    other => return Err(format!("测试标记无效: {other}")),
+                    other => return Err(format!("测试标记无效: {other}").into()),
                 },
             },
             usage: TokenUsage {
@@ -455,7 +506,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
             verdict: field(3)?.parse::<Verdict>().map_err(|e| e.to_string())?,
             note: from_hex(field(4)?)?,
         },
-        other => return Err(format!("未知事件类型: {other}")),
+        other => return Err(DecodeError::Newer(format!("事件类型 {other}"))),
     };
     let expected_fields = match &event {
         Founded(_)
@@ -699,6 +750,25 @@ mod tests {
     }
     #[test]
     fn malformed_event_is_rejected() {
-        assert!(decode_event("v1\tEDICT\t42\tworks\tbroken").is_err());
+        let malformed = |line| matches!(decode_event(line), Err(DecodeError::Malformed(_)));
+        let newer = |line| matches!(decode_event(line), Err(DecodeError::Newer(_)));
+        assert!(malformed("v1\tEDICT\t42\tworks\tbroken"));
+        assert!(malformed("v1\tEDICT\t42\tworks\te69g"), "非法 hex 字符");
+        assert!(malformed("v1\tEDICT\t42\tworks\te69"), "hex 长度为奇数");
+        assert!(malformed("v0\tFOUNDED\tcabinet") && malformed("x\tFOUNDED"));
+        // 更新版本写入的：更高的格式版本、不认识的事件类型，提示升级而非损坏。
+        assert!(newer("v2\tFOUNDED\tcabinet"));
+        assert!(newer("v1\tCOURT_BANQUET\t1"));
+        assert_eq!(
+            decode_event("v1\tRETREAT\t1").unwrap(),
+            CourtEvent::EmperorRetreat(true)
+        );
+        assert!(
+            matches!(
+                decode_event("v1\tCOMPLETED\t1\t4\t4142").unwrap(),
+                CourtEvent::TaskCompleted { summary, .. } if summary == "AB"
+            ),
+            "大写 hex 也可读"
+        );
     }
 }
