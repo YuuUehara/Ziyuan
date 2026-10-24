@@ -1,7 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
-    Agent, AgentId, Capability, CourtEvent, Department, Edict, GovernanceMode, Office, Seal,
-    TaskId, TokenUsage, Verdict,
+    Agent, AgentId, Capability, CourtEvent, Department, Edict, FileChange, GovernanceMode, Office,
+    Seal, TaskId, TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -110,6 +110,19 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         ),
         TaskFailed { task, reason } => format!("v1\tFAILED\t{}\t{}", task.0, to_hex(reason)),
         TaskCancelled { task } => format!("v1\tCANCELLED\t{}", task.0),
+        // 每处改动为 `路径:原文:新文`（均 hex，新建文件的原文为 `-`），以逗号分隔。
+        ChangesProposed { task, changes } => {
+            let entries: Vec<_> = changes
+                .iter()
+                .map(|c| {
+                    let before = c.before.as_deref().map_or("-".into(), to_hex);
+                    format!("{}:{before}:{}", to_hex(&c.path), to_hex(&c.after))
+                })
+                .collect();
+            format!("v1\tCHANGES\t{}\t{}", task.0, entries.join(","))
+        }
+        ChangesApplied { task } => format!("v1\tAPPLIED\t{}", task.0),
+        ChangesDiscarded { task } => format!("v1\tDISCARDED\t{}", task.0),
         ModelUsage { task, usage } => {
             format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output)
         }
@@ -253,6 +266,27 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "CANCELLED" => TaskCancelled {
             task: TaskId(id(2)?),
         },
+        "CHANGES" => ChangesProposed {
+            task: TaskId(id(2)?),
+            changes: split_list(field(3)?)
+                .map(|entry| -> Result<FileChange, String> {
+                    let [path, before, after] = entry.split(':').collect::<Vec<_>>()[..] else {
+                        return Err("改动字段不合法".into());
+                    };
+                    Ok(FileChange {
+                        path: from_hex(path)?,
+                        before: (before != "-").then(|| from_hex(before)).transpose()?,
+                        after: from_hex(after)?,
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+        },
+        "APPLIED" => ChangesApplied {
+            task: TaskId(id(2)?),
+        },
+        "DISCARDED" => ChangesDiscarded {
+            task: TaskId(id(2)?),
+        },
         "USAGE" => ModelUsage {
             task: TaskId(id(2)?),
             usage: TokenUsage {
@@ -273,7 +307,10 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         | OfficialDismissed { .. }
         | OfficialPurged { .. }
         | EdictApproved { .. }
+        | ChangesApplied { .. }
+        | ChangesDiscarded { .. }
         | TaskCancelled { .. } => 3,
+        ChangesProposed { .. } => 4,
         OfficeModelSet { model: None, .. } | OfficeCeilingSet { ceiling: None, .. } => 3,
         OfficialAppointed { .. }
         | TaskAssigned { model: None, .. }
@@ -359,6 +396,23 @@ mod tests {
                 reason: "超时\n（300s）".into(),
             },
             CourtEvent::TaskCancelled { task },
+            CourtEvent::ChangesProposed {
+                task,
+                changes: vec![
+                    FileChange {
+                        path: "src/新:a.rs".into(),
+                        before: None,
+                        after: "fn a() {}\n".into(),
+                    },
+                    FileChange {
+                        path: "README.md".into(),
+                        before: Some(String::new()),
+                        after: "\t,一\n".into(),
+                    },
+                ],
+            },
+            CourtEvent::ChangesApplied { task },
+            CourtEvent::ChangesDiscarded { task },
             CourtEvent::EdictApproved { task },
             CourtEvent::EdictDrafted {
                 task,
@@ -403,7 +457,7 @@ mod tests {
         };
         assert_eq!((edict.text.as_str(), edict.seal), ("查", Seal::default()));
         assert!(decode_event("v1\tEDICT\t1\tworks\te69fa5\tread_file").is_err());
-        assert!(decode_event("v1\tEDICT\t1\tworks\te69fa5\twrite_file\t2e").is_err());
+        assert!(decode_event("v1\tEDICT\t1\tworks\te69fa5\trun_shell\t2e").is_err());
     }
     #[test]
     fn malformed_event_is_rejected() {

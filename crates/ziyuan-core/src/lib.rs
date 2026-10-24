@@ -345,16 +345,34 @@ impl FromStr for Verdict {
 pub enum Capability {
     ReadFile,
     SearchCode,
+    /// 写文件：改动只暂存，呈报皇帝落盘后才写入项目。
+    WriteFile,
+    /// 在项目副本中（含暂存改动）运行皇帝设定的测试命令。
+    RunTests,
 }
 impl Capability {
-    pub const ALL: [Self; 2] = [Self::ReadFile, Self::SearchCode];
+    pub const ALL: [Self; 4] = [
+        Self::ReadFile,
+        Self::SearchCode,
+        Self::WriteFile,
+        Self::RunTests,
+    ];
+    /// 默认玉玺授予的只读工具。
+    pub const READ_ONLY: [Self; 2] = [Self::ReadFile, Self::SearchCode];
 
     /// 与工具名一致。
     pub fn code(self) -> &'static str {
         match self {
             Self::ReadFile => "read_file",
             Self::SearchCode => "search_code",
+            Self::WriteFile => "write_file",
+            Self::RunTests => "run_tests",
         }
+    }
+
+    /// 动土木之权（写文件、跑测试）：唯工部诏令可授。
+    pub fn is_works_only(self) -> bool {
+        matches!(self, Self::WriteFile | Self::RunTests)
     }
 }
 impl FromStr for Capability {
@@ -381,7 +399,7 @@ impl Default for Seal {
     /// 全部只读工具，整个项目。
     fn default() -> Self {
         Self {
-            capabilities: Capability::ALL.into(),
+            capabilities: Capability::READ_ONLY.into(),
             scope: vec![".".into()],
         }
     }
@@ -430,6 +448,16 @@ impl fmt::Display for Seal {
         };
         write!(f, "工具：{tools}；范围：{}", self.scope.join("、"))
     }
+}
+
+/// 承办官员暂存的一处文件改动（只支持新建与改写）。`before` 为改动时项目中的原文，
+/// 新建文件为 `None`；落盘前据此确认文件在此期间未被他人改动。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChange {
+    /// 相对项目根目录的路径（`/` 分隔）。
+    pub path: String,
+    pub before: Option<String>,
+    pub after: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,6 +534,19 @@ pub enum CourtEvent {
         reason: String,
     },
     TaskCancelled {
+        task: TaskId,
+    },
+    /// 承办官员呈报的文件改动（奏本），在 `TaskCompleted` 之前记录；须皇帝落盘才写入项目。
+    ChangesProposed {
+        task: TaskId,
+        changes: Vec<FileChange>,
+    },
+    /// 皇帝准奏：改动已写入项目。
+    ChangesApplied {
+        task: TaskId,
+    },
+    /// 皇帝驳回改动：不写入项目。
+    ChangesDiscarded {
         task: TaskId,
     },
     /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。

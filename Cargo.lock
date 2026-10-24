@@ -2253,6 +2253,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 name = "ziyuan-app"
 version = "0.2.0"
 dependencies = [
+ "serde_json",
  "tokio",
  "ziyuan-core",
  "ziyuan-governance",

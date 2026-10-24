@@ -21,10 +21,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, estimate_cost,
-    seal_note,
+    render_diff, seal_note,
 };
 use ziyuan_core::{AgentId, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
-use ziyuan_governance::{Court, Task, TaskStatus};
+use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::EventLog;
 
@@ -343,6 +343,19 @@ impl App {
                 self.mutate(|s| s.cancel(task), |_| format!("诏令 #{} 已撤销", task.0));
             }
             KeyCode::Char('t') => self.start_draft(task),
+            KeyCode::Char('w') => {
+                let root = self.config.root.clone();
+                self.mutate(
+                    |s| s.apply_changes(task, &root),
+                    |_| format!("诏令 #{} 准奏，改动已写入项目", task.0),
+                );
+            }
+            KeyCode::Char('u') => {
+                self.mutate(
+                    |s| s.discard_changes(task),
+                    |_| format!("诏令 #{} 的改动已驳回", task.0),
+                );
+            }
             KeyCode::Char('e') => {
                 self.modal = Some(Modal::Choose {
                     kind: ChooseKind::Redraft(task),
@@ -896,6 +909,29 @@ impl App {
                 Span::raw(format!("{}{note}", verdict.label())),
             ]));
         }
+        if let Some(changes) = &task.changes {
+            let state = match changes.state {
+                ChangeState::Proposed => "待准奏（w 准奏落盘，u 驳回）",
+                ChangeState::Applied => "已落盘",
+                ChangeState::Discarded => "已驳回",
+            };
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled("工部奏本　", Style::new().fg(GOLD).bold()),
+                Span::raw(format!("改动 {} 个文件，{state}", changes.files.len())),
+            ]));
+            for file in &changes.files {
+                for line in render_diff(file).lines() {
+                    let style = match line.chars().next() {
+                        Some('+') if !line.starts_with("+++") => Style::new().fg(Color::Green),
+                        Some('-') if !line.starts_with("---") => Style::new().fg(Color::Red),
+                        Some('@') => Style::new().dim(),
+                        _ => Style::new(),
+                    };
+                    lines.push(Line::styled(line.to_owned(), style));
+                }
+            }
+        }
         lines.push(Line::default());
         let mut following = false;
         match &task.status {
@@ -1089,6 +1125,7 @@ impl App {
                 ("a/d", "采纳/驳回"),
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
+                ("w/u", "准奏/驳回改动"),
                 ("g", "改制"),
                 ("Tab", "切换"),
                 ("q", "退出"),

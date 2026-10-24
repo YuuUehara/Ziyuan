@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
-    Agent, AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId,
-    TokenUsage, Verdict,
+    Agent, AgentId, Capability, CourtEvent, Department, Edict, FileChange, GovernanceMode, Office,
+    Seal, TaskId, TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -58,6 +58,10 @@ pub enum GovernanceError {
     },
     /// 诏令的查阅范围全在承办者官职的玉玺上限之外。
     SealExceedsCeiling(Office),
+    /// 写文件、跑测试只能授予工部诏令。
+    WorksOnly(Capability),
+    /// 诏令没有待决的改动（未呈报，或已落盘/驳回）。
+    NoPendingChanges(TaskId),
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -121,6 +125,10 @@ impl fmt::Display for GovernanceError {
                 "诏令的查阅范围全在{}的玉玺上限之外，不予承办",
                 office.label()
             ),
+            Self::WorksOnly(capability) => {
+                write!(f, "{} 只能授予工部诏令", capability.code())
+            }
+            Self::NoPendingChanges(id) => write!(f, "诏令 #{} 没有待决的改动", id.0),
         }
     }
 }
@@ -160,6 +168,25 @@ pub struct Task {
     pub model: Option<String>,
     /// 内阁票拟（只在内阁制下产生）。
     pub draft: Option<Draft>,
+    /// 承办官员呈报的文件改动（只有授予 `write_file` 的工部诏令才会有）。
+    pub changes: Option<Changes>,
+}
+
+/// 呈报的文件改动及皇帝的处置。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changes {
+    pub files: Vec<FileChange>,
+    pub state: ChangeState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeState {
+    /// 待皇帝落盘或驳回。
+    Proposed,
+    /// 已写入项目。
+    Applied,
+    /// 驳回，未写入。
+    Discarded,
 }
 
 /// 内阁票拟的结果。
@@ -298,7 +325,7 @@ impl Court {
                 if edict.text.trim().is_empty() {
                     return Err(GovernanceError::EmptyEdict);
                 }
-                validate_seal(&edict.seal)?;
+                validate_edict_seal(edict.department, &edict.seal)?;
                 if self.tasks.contains_key(&edict.id) {
                     return Err(GovernanceError::DuplicateEdict(edict.id));
                 }
@@ -315,6 +342,7 @@ impl Court {
                         approved: false,
                         model: None,
                         draft: None,
+                        changes: None,
                     },
                 );
             }
@@ -328,7 +356,10 @@ impl Court {
                     return Err(GovernanceError::UnknownAgent(*worker));
                 }
                 self.set_status(*task, TaskStatus::Assigned(*worker));
-                self.tasks.get_mut(task).expect("已确认存在").model = model.clone();
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.model = model.clone();
+                // 重新指派（如上次运行中断）：上次暂存的改动作废。
+                entry.changes = None;
             }
             CourtEvent::OfficeModelSet { office, model } => {
                 self.propose_office_model(*office, model.clone())?;
@@ -377,6 +408,25 @@ impl Court {
                         summary: summary.clone(),
                     },
                 );
+            }
+            CourtEvent::ChangesProposed { task, changes } => {
+                if !matches!(self.open_task(*task)?, TaskStatus::Assigned(_)) {
+                    return Err(GovernanceError::TaskNotAssigned(*task));
+                }
+                self.tasks.get_mut(task).expect("已确认存在").changes = Some(Changes {
+                    files: changes.clone(),
+                    state: ChangeState::Proposed,
+                });
+            }
+            CourtEvent::ChangesApplied { task } | CourtEvent::ChangesDiscarded { task } => {
+                self.propose_changes_decision(*task, true)?;
+                let applied = matches!(event, CourtEvent::ChangesApplied { .. });
+                let changes = self.tasks.get_mut(task).and_then(|t| t.changes.as_mut());
+                changes.expect("已确认有待决改动").state = if applied {
+                    ChangeState::Applied
+                } else {
+                    ChangeState::Discarded
+                };
             }
             CourtEvent::TaskFailed { task, reason } => {
                 let worker = match self.open_task(*task)? {
@@ -694,6 +744,30 @@ impl Court {
         })
     }
 
+    /// 皇帝处置已完成诏令呈报的改动：`apply` 为真是落盘（准奏），否则驳回。
+    /// 实际写入文件由调用方在提交事件前完成。
+    pub fn propose_changes_decision(
+        &self,
+        task: TaskId,
+        apply: bool,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if !matches!(entry.status, TaskStatus::Completed { .. }) {
+            return Err(GovernanceError::NotCompleted(task));
+        }
+        match &entry.changes {
+            Some(c) if c.state == ChangeState::Proposed => Ok(if apply {
+                CourtEvent::ChangesApplied { task }
+            } else {
+                CourtEvent::ChangesDiscarded { task }
+            }),
+            _ => Err(GovernanceError::NoPendingChanges(task)),
+        }
+    }
+
     pub fn propose_cancellation(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
         self.open_task(task)?;
         Ok(CourtEvent::TaskCancelled { task })
@@ -771,7 +845,7 @@ impl Court {
         if text.trim().is_empty() {
             return Err(GovernanceError::EmptyEdict);
         }
-        validate_seal(&seal)?;
+        validate_edict_seal(department, &seal)?;
         Ok(Edict {
             id: TaskId(self.next_task_id),
             department,
@@ -943,6 +1017,17 @@ impl Court {
 }
 
 /// 查阅范围只能是项目内的相对路径。路径是否存在、是否经符号链接逃逸，由运行时在构造工具时检查。
+/// 诏令的玉玺：在 [`validate_seal`] 之外，写文件与跑测试只能授予工部。
+/// （官职上限不受此限：上限只会收窄诏令的玉玺。）
+fn validate_edict_seal(department: Department, seal: &Seal) -> Result<(), GovernanceError> {
+    if department != Department::Works
+        && let Some(&c) = seal.capabilities.iter().find(|c| c.is_works_only())
+    {
+        return Err(GovernanceError::WorksOnly(c));
+    }
+    validate_seal(seal)
+}
+
 fn validate_seal(seal: &Seal) -> Result<(), GovernanceError> {
     if seal.scope.is_empty() {
         return Err(GovernanceError::InvalidScope(String::new()));

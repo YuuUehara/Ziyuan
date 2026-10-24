@@ -23,11 +23,12 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event, estimate_cost,
+    render_diff,
 };
 use ziyuan_core::{
     AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
 };
-use ziyuan_governance::{Court, ServiceRecord, Task, TaskStatus};
+use ziyuan_governance::{ChangeState, Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventLog, StorageError};
 
@@ -74,6 +75,8 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/approve", post(approve))
         .route("/tasks/{id}/draft", post(draft))
         .route("/tasks/{id}/redraft", post(redraft))
+        .route("/tasks/{id}/changes/apply", post(apply_changes))
+        .route("/tasks/{id}/changes/discard", post(discard_changes))
         .route("/reform", post(reform))
         .route("/offices/model", post(office_model))
         .route("/offices/ceiling", post(office_ceiling))
@@ -152,7 +155,9 @@ impl From<AppError> for ApiError {
     fn from(error: AppError) -> Self {
         let status = match &error {
             AppError::Governance(_) => StatusCode::BAD_REQUEST,
-            AppError::NotFounded | AppError::AlreadyFounded => StatusCode::CONFLICT,
+            AppError::NotFounded | AppError::AlreadyFounded | AppError::Apply(_) => {
+                StatusCode::CONFLICT
+            }
             AppError::Storage(StorageError::Conflict { .. }) => StatusCode::CONFLICT,
             AppError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -357,6 +362,30 @@ async fn cancel(
 ) -> Result<Json<Value>, ApiError> {
     app.mutate(move |s| {
         s.cancel(TaskId(id))?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+/// 准奏：把呈报的改动写入项目。
+async fn apply_changes(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    app.mutate(move |s| {
+        s.apply_changes(TaskId(id), &root)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+async fn discard_changes(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    app.mutate(move |s| {
+        s.discard_changes(TaskId(id))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -696,6 +725,18 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                         .map(|(a, o)| json!({ "id": a.id.0, "name": a.name, "office": o.label() }))
                         .collect::<Vec<_>>()
                 }),
+                "changes": t.changes.as_ref().map(|c| json!({
+                    "state": match c.state {
+                        ChangeState::Proposed => "proposed",
+                        ChangeState::Applied => "applied",
+                        ChangeState::Discarded => "discarded",
+                    },
+                    "files": c.files.iter().map(|f| json!({
+                        "path": f.path,
+                        "created": f.before.is_none(),
+                        "diff": render_diff(f),
+                    })).collect::<Vec<_>>(),
+                })),
                 "worker": worker.and_then(name),
                 "detail": detail,
                 "review": t.review.as_ref().map(|(v, note)| json!({

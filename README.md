@@ -2,7 +2,7 @@
 
 > **实验性 Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
 
-**当前版本 v0.2.0。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员只能用只读工具 `read_file`、`search_code` 查阅当前目录；仍不能修改文件或运行命令。
+**当前版本 v0.2.0。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
 
 ## 组件命名
 
@@ -21,7 +21,7 @@
 crates/
   ziyuan-core/        官员、官职、部门、诏令、事件等领域类型
   ziyuan-governance/  朝廷状态重放、改制、任免与任务路由（规则唯一来源）
-  ziyuan-runtime/     Scheduler、WorkerBackend（Demo / Agent）、Tool Calling Loop、只读工具
+  ziyuan-runtime/     Scheduler、WorkerBackend（Demo / Agent）、Tool Calling Loop、工作区工具（只读与工部受控写）
   ziyuan-llm/         OpenAI 兼容 Chat Completions Adapter（ureq + serde_json）
   ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
   ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
@@ -125,10 +125,27 @@ ziyuan edict --scope crates/ziyuan-storage --tools search_code "检查 storage �
 ziyuan edict --tools none "只凭诏令文本回答"
 ```
 
-- 默认：全部只读工具，整个项目。`--scope` 可重复；`--tools` 为逗号列表或 `none`。
+- 默认：只读工具（`read_file`、`search_code`），整个项目。`--scope` 可重复；`--tools` 为逗号列表或 `none`。
 - 绝对路径、`..` 与不存在的路径在下诏时拒绝；运行时按 canonical 路径检查，符号链接也无法越界。
 - 无论玉玺如何，`.ziyuan`（事件簿）、`.git`、`.jj` 与 `.env*` 一律不可读。
 - 运行时按玉玺构造工具：模型看不到未授予的工具，越界的读取记为失败的 `ToolInvoked`。
+
+### 工部动手：受控写权限
+
+工部诏令可以另授 `write_file`（改写或新建文件）与 `run_tests`（跑测试）。其他五部的诏令授这两项会被拒绝。
+
+```bash
+export ZIYUAN_TEST_COMMAND="cargo test"      # 由皇帝设定，模型不能更改
+ziyuan edict --tools read_file,write_file,run_tests --scope src "修复 parse 的越界并补测试"
+ziyuan diff 3       # 查看呈报的统一 diff
+ziyuan apply 3      # 准奏：写入项目
+ziyuan discard 3    # 或驳回
+```
+
+- **只暂存，不落盘**：`write_file` 的改动留在内存里，同一诏令内 `read_file` 读到的是新内容；诏令完成时作为奏本（`ChangesProposed`）记入事件簿，项目文件不变。
+- **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
+- **测试在副本里跑**：`run_tests` 把项目复制到临时目录（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与 `target`），叠加暂存改动，运行 `ZIYUAN_TEST_COMMAND`。子进程只继承 `PATH`、`HOME` 等少数环境变量，API Key 不会传进去；时限 10 分钟，返回退出码与输出末尾。
+- 写入同样受玉玺范围与禁区约束，符号链接无法越界；官职的玉玺上限也能收回这两项权力。
 
 ### 吏部：评定、考绩与荐举
 
@@ -240,7 +257,7 @@ v0.2.0 还加入了：元/明官制（品级、署理）、随机官名、各角
 1. ~~**真实模型实测与成本**~~ 已完成：DeepSeek 实测（含思考模式思维链回传）、花费估算；OpenAI、Ollama 待实测。
 2. ~~**按官职配模型与权限上限**~~ 已完成：尚书、首辅用强模型，郎中用便宜模型；每个官职有玉玺上限，诏令的玉玺不能超出承办者官职的上限。
 3. ~~**内阁真正票拟**~~ 已完成：首辅（模型）读诏令后拟票，给出派工人选和理由；皇帝可以改票再批红。丞相制下丞相则自行决断，不经皇帝。拆分方案并入第 6 项。
-4. **工部动手：受控写权限**：新增写文件与运行测试的工具，限定在沙箱或工作树中；改动以 diff 形式呈报，皇帝批红后才落盘。
+4. ~~**工部动手：受控写权限**~~ 已完成：`write_file` 只暂存、`run_tests` 在项目副本中跑皇帝设定的命令；改动以 diff 呈报，皇帝准奏后才落盘。
 5. **都察院与自动考绩**：言官（独立 Agent）复核回奏、出具弹劾或背书；可验证的证据（测试通过、引用的代码确实存在）计入吏部考绩，升迁仍由皇帝批准。
 6. **多官协作**：尚书把一件诏令拆给多位郎中并行办理，再汇总回奏；子任务各自记入事件簿、可审计。
 7. **人格层与廷议**：官员有性格与文风，可就一件事廷议辩论；人格只影响措辞与论证，不改变权限与路由。

@@ -210,6 +210,13 @@
   .reply.stream { border-style: solid; border-color: #ecc195; background: #fff8ec; }
   .reply.stream::after { content: "▍"; color: #e08a2b; animation: pulse .6s infinite alternate; }
   .reply.error { border-color: #e9b4ae; background: #fdf1ef; color: #8c2620; }
+  .changes { margin-top: 8px; border: 1px solid var(--gold); border-radius: 6px; background: #fffaf0; padding: 6px 10px; font-size: 13px; }
+  .changes summary { cursor: pointer; font-family: ui-monospace, monospace; }
+  pre.diff { margin: 4px 0; padding: 6px 8px; background: #fff; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; max-height: 280px; overflow: auto; white-space: pre; }
+  pre.diff .add { color: #1d6b3a; background: #e8f6ec; display: block; }
+  pre.diff .del { color: #8c2620; background: #fdf1ef; display: block; }
+  pre.diff .hunk { color: var(--muted); display: block; }
+  pre.diff .ctx { display: block; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
   .review-row input { flex: 1; }
   .empty { color: var(--muted); text-align: center; padding: 26px 0; }
@@ -291,6 +298,8 @@
         <div class="checks">
           <label><input type="checkbox" id="tool-read_file" data-keep checked> read_file</label>
           <label><input type="checkbox" id="tool-search_code" data-keep checked> search_code</label>
+          <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> write_file</label>
+          <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> run_tests</label>
         </div>
         <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。</p>
         <div class="actions">
@@ -365,6 +374,8 @@
           <div class="row">
             <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> read_file</label>
             <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> search_code</label>
+            <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> write_file</label>
+            <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> run_tests</label>
             <button class="small shrink" id="ceiling-set">设上限</button>
             <button class="small shrink" id="ceiling-clear">取消</button>
           </div>
@@ -506,6 +517,20 @@ function taskHtml(t) {
     const approve = t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
     actions = `<div class="review-row"><span style="flex:1"></span>${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
   }
+  if (t.changes) {
+    const c = t.changes;
+    const stateLabel = { proposed: "待准奏", applied: "已落盘", discarded: "已驳回" }[c.state];
+    const files = c.files.map((f) => `<details ${c.state === "proposed" ? "open" : ""}>
+      <summary>${esc(f.path)}${f.created ? "（新建）" : ""}</summary>
+      <pre class="diff">${f.diff.split("\n").filter((l, i) => i > 1 && l).map((l) =>
+        `<span class="${{ "+": "add", "-": "del", "@": "hunk" }[l[0]] || "ctx"}">${esc(l)}</span>`).join("")}</pre></details>`).join("");
+    body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件，${stateLabel}${files}</div>`;
+    if (c.state === "proposed" && t.status === "completed") {
+      body += `<div class="review-row"><span style="flex:1"></span>
+        <button class="small gold" data-apply="${t.id}">准奏落盘</button>
+        <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
+    }
+  }
   if (t.needs_approval) {
     const d = t.draft;
     const route = t.preview.route ? t.preview.route.map(esc).join(" ▸ ") : esc(t.preview.error);
@@ -596,11 +621,13 @@ async function loadHistory() {
   $("history-list").innerHTML = lines.map((l) => `<li>${esc(l)}</li>`).join("");
 }
 
+const TOOLS = ["read_file", "search_code", "write_file", "run_tests"];
+
 // ---- 交互 ----
 $("edict-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const run = event.submitter && event.submitter.dataset.run === "1";
-  const tools = ["read_file", "search_code"].filter((t) => $("tool-" + t).checked);
+  const tools = TOOLS.filter((t) => $("tool-" + t).checked);
   const body = {
     department: $("edict-dept").value,
     text: $("edict-text").value.trim(),
@@ -644,7 +671,7 @@ $("model-clear").addEventListener("click", () =>
 $("ceiling-set").addEventListener("click", () => act(api("/offices/ceiling", {
   office: configOffice(),
   scope: $("ceiling-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
-  tools: ["read_file", "search_code"].filter((t) => $("ceiling-" + t).checked),
+  tools: TOOLS.filter((t) => $("ceiling-" + t).checked),
 }), "已设玉玺上限"));
 $("ceiling-clear").addEventListener("click", () =>
   act(api("/offices/ceiling", { office: configOffice(), clear: true }), "已取消玉玺上限"));
@@ -682,6 +709,10 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.draft}/draft`, {})).then((r) => r && toast(`诏令 #${d.draft} 票拟：拟派 ${r.name}`));
   } else if (d.redraft) {
     act(api(`/tasks/${d.redraft}/redraft`, { worker: Number($("redraft-" + d.redraft).value) }), "已御笔改票");
+  } else if (d.apply) {
+    if (confirm(`把诏令 #${d.apply} 的改动写入项目？`)) act(api(`/tasks/${d.apply}/changes/apply`, {}), "已准奏，改动已落盘");
+  } else if (d.discard) {
+    act(api(`/tasks/${d.discard}/changes/discard`, {}), "已驳回改动");
   } else if (d.approve) {
     act(api(`/tasks/${d.approve}/approve`, {}), `诏令 #${d.approve} 已批红`);
   } else if (d.purge) {

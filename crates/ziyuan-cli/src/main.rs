@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
     ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, estimate_cost,
-    seal_note,
+    render_diff, seal_note,
 };
 use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
-use ziyuan_governance::{Task, TaskStatus};
+use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
 use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
@@ -49,6 +49,9 @@ const HELP: &str = concat!(
   ziyuan redraft <诏令ID> <官员ID> [理由] 御笔改票：改定拟派的承办人
   ziyuan approve <诏令ID|all>           内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
+  ziyuan diff <诏令ID>                  查看工部呈报的改动（统一 diff）
+  ziyuan apply <诏令ID>                 准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）
+  ziyuan discard <诏令ID>               驳回呈报的改动，不写入
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
   ziyuan examine <官员ID>               吏部考绩：经评定的履历
@@ -66,13 +69,17 @@ const HELP: &str = concat!(
 
 玉玺（承办官员的权限，随诏令记入事件簿）：
   --scope <路径>   可查阅的项目路径（目录或文件，可重复）；默认整个项目
-  --tools <工具>   read_file、search_code 的逗号列表，或 none；默认全部
-  无论玉玺如何，.ziyuan、.git、.jj 与 .env* 均不可读。
+  --tools <工具>   read_file、search_code、write_file、run_tests 的逗号列表，或 none；
+                   默认 read_file,search_code（只读）
+  write_file、run_tests 只能授予工部：改动只暂存，诏令完成后呈报，须 `ziyuan apply` 准奏才落盘；
+  run_tests 在项目的临时副本（含暂存改动）中运行 ZIYUAN_TEST_COMMAND，不传 API Key 等环境变量。
+  无论玉玺如何，.ziyuan、.git、.jj 与 .env* 均不可读写。
 
 真实模型（OpenAI 兼容 Chat Completions API）：
   ZIYUAN_LLM_MODEL     模型名；设置后 edict 由模型以只读工具查阅当前目录
   ZIYUAN_LLM_BASE_URL  默认 https://api.openai.com/v1（如 https://api.deepseek.com/v1、http://localhost:11434/v1）
   ZIYUAN_LLM_API_KEY   API Key（本地 Ollama 可不设）
+  ZIYUAN_TEST_COMMAND  run_tests 运行的测试命令（如 cargo test；由皇帝设定，模型不能更改）
   ZIYUAN_LLM_PRICE     估算花费用的单价「输入,输出[,币种]」（每百万 token）；
                        deepseek-flash / deepseek-v4-pro 内置官方高峰价（估算上限）
 
@@ -131,6 +138,9 @@ enum Command {
     Appoint(AgentId, Office),
     Examine(AgentId),
     Review(TaskId, Verdict, String),
+    Diff(TaskId),
+    /// 准奏（`true`）或驳回改动。
+    Decide(TaskId, bool),
     Recommend(Office),
     History,
 }
@@ -230,6 +240,9 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Err(_) => return Err("用法: ziyuan appoint <官员ID> <官职>".into()),
         },
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
+        "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
+        "apply" => Command::Decide(task_id(&args, "ziyuan apply <诏令ID>")?, true),
+        "discard" => Command::Decide(task_id(&args, "ziyuan discard <诏令ID>")?, false),
         "review" => {
             if args.len() < 2 {
                 return Err("用法: ziyuan review <诏令ID> <accept|reject> [备注]".into());
@@ -401,12 +414,17 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     }
                     TaskStatus::Pending => "待办".to_owned(),
                     TaskStatus::Assigned(w) => format!("已指派 {}（未结束）", name(*w)),
-                    TaskStatus::Completed { worker, .. } => match &task.review {
-                        Some((verdict, _)) => {
-                            format!("已完成（{}），{}", name(*worker), verdict.label())
-                        }
-                        None => format!("已完成（{}），待评定", name(*worker)),
-                    },
+                    TaskStatus::Completed { worker, .. } => {
+                        let review = match &task.review {
+                            Some((verdict, _)) => verdict.label(),
+                            None => "待评定",
+                        };
+                        format!(
+                            "已完成（{}），{review}{}",
+                            name(*worker),
+                            changes_note(task)
+                        )
+                    }
                     TaskStatus::Failed { reason, .. } => format!("失败：{reason}"),
                     TaskStatus::Cancelled => "已撤销".to_owned(),
                 };
@@ -422,6 +440,29 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     task.edict.text,
                     status
                 );
+            }
+        }
+        Command::Diff(task) => {
+            let entry = session
+                .court()
+                .task(task)
+                .ok_or(format!("未记录下达的诏令 #{}", task.0))?;
+            let Some(changes) = &entry.changes else {
+                println!("诏令 #{} 没有呈报改动。", task.0);
+                return Ok(());
+            };
+            println!("诏令 #{} 呈报改动{}：", task.0, changes_note(entry));
+            for file in &changes.files {
+                print!("{}", render_diff(file));
+            }
+        }
+        Command::Decide(task, apply) => {
+            if apply {
+                session.apply_changes(task, &env::current_dir()?)?;
+                println!("诏令已颁：准奏，诏令 #{} 的改动已写入项目。", task.0);
+            } else {
+                session.discard_changes(task)?;
+                println!("诏令已颁：驳回诏令 #{} 的改动，未写入。", task.0);
             }
         }
         Command::Cancel(task) => {
@@ -627,6 +668,16 @@ fn run_tasks(
             })
             .await
     });
+    for &task in tasks {
+        let entry = session.court().task(task);
+        if let Some(entry) = entry.filter(|t| t.changes.is_some()) {
+            println!(
+                "诏令 #{} 呈报改动{}：`ziyuan diff {0}` 查看，`ziyuan apply {0}` 准奏落盘，`ziyuan discard {0}` 驳回。",
+                task.0,
+                changes_note(entry)
+            );
+        }
+    }
     // 超时或撤销后，阻塞中的模型请求可能仍未返回；不等待它们。
     runtime.shutdown_background();
     result?;
@@ -734,19 +785,33 @@ fn model_label() -> String {
     OpenAiCompatible::from_env().map_or("演示（未接模型）".into(), |m| m.model().to_owned())
 }
 
+/// 呈报改动的状态，如「；改动 2 个文件待准奏」；没有改动时为空。
+fn changes_note(task: &Task) -> String {
+    let Some(changes) = &task.changes else {
+        return String::new();
+    };
+    let state = match changes.state {
+        ChangeState::Proposed => "待准奏",
+        ChangeState::Applied => "已落盘",
+        ChangeState::Discarded => "已驳回",
+    };
+    format!("；改动 {} 个文件{state}", changes.files.len())
+}
+
 /// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。
 fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
     let Some(model) = OpenAiCompatible::from_env() else {
         return Ok(Arc::new(DemoBackend));
     };
     eprintln!(
-        "执行后端：{}（只读工具与查阅范围由各诏令的玉玺决定）",
+        "执行后端：{}（工具与查阅范围由各诏令的玉玺决定）",
         model.model()
     );
     let catalog = Box::new(model.catalog());
     Ok(Arc::new(
         AgentBackend::new(Box::new(model), env::current_dir()?, MAX_AGENT_STEPS)
-            .with_catalog(catalog),
+            .with_catalog(catalog)
+            .with_test_command(env::var("ZIYUAN_TEST_COMMAND").ok()),
     ))
 }
 
@@ -769,6 +834,13 @@ fn parse_id(args: &[String], usage: &str) -> Result<AgentId, Box<dyn Error>> {
     }
 }
 
+fn task_id(args: &[String], usage: &str) -> Result<TaskId, Box<dyn Error>> {
+    match args {
+        [id] => Ok(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
+        _ => Err(format!("用法: {usage}").into()),
+    }
+}
+
 fn parse_limits(args: Vec<String>) -> Result<Limits, Box<dyn Error>> {
     const USAGE: &str = "用法: ziyuan run [--jobs <并发数>] [--timeout <秒>]（均须为正整数）";
     let mut limits = DEFAULT_LIMITS;
@@ -787,7 +859,7 @@ fn parse_limits(args: Vec<String>) -> Result<Limits, Box<dyn Error>> {
 }
 
 fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan edict [--dept works] [--scope <路径>]... [--tools read_file,search_code|none] [--queue] <诏令内容>";
+    const USAGE: &str = "用法: ziyuan edict [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--queue] <诏令内容>";
     let mut department = None;
     let mut queue = false;
     let mut seal = Seal::default();
@@ -845,7 +917,8 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
 
 /// `ceiling <官职> default`，或 `--scope`/`--tools`（与诏令玉玺同义；未给出的一项不设限）。
 fn parse_ceiling(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan ceiling <官职> [--scope <路径>]... [--tools read_file,search_code|none] | default";
+    const USAGE: &str =
+        "用法: ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具,…>|none] | default";
     if args.is_empty() {
         return Err(USAGE.into());
     }

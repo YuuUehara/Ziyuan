@@ -6,7 +6,7 @@ use crate::{ExecutionHooks, WorkerBackend};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use ziyuan_core::{Agent, Edict, TaskId, TokenUsage};
+use ziyuan_core::{Agent, Edict, FileChange, TaskId, TokenUsage};
 
 /// 可克隆的撤销信号；同步代码用 `is_cancelled` 轮询，异步代码 `await cancelled()`。
 #[derive(Clone, Debug)]
@@ -67,6 +67,11 @@ pub enum Progress {
     TextDelta { task: TaskId, text: String },
     /// 一次模型调用的 token 用量。
     Usage { task: TaskId, usage: TokenUsage },
+    /// 承办官员呈报的暂存改动；总在该任务的 `Finished` 之前（除非已超时或被撤销）。
+    Changes {
+        task: TaskId,
+        changes: Vec<FileChange>,
+    },
     /// 每个 Job 恰好一条。
     Finished { task: TaskId, outcome: Outcome },
 }
@@ -200,6 +205,13 @@ impl ExecutionHooks for TaskHooks {
         let _ = self.progress.send(Progress::TextDelta {
             task: self.task,
             text: text.into(),
+        });
+    }
+
+    fn changes_proposed(&self, changes: Vec<FileChange>) {
+        let _ = self.progress.send(Progress::Changes {
+            task: self.task,
+            changes,
         });
     }
 

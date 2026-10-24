@@ -7,9 +7,10 @@
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 use ziyuan_core::{
-    AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Price, Seal, TaskId,
-    TokenUsage, Verdict,
+    AgentId, CourtEvent, Department, Edict, FileChange, GovernanceMode, Office, Price, Seal,
+    TaskId, TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{Court, GovernanceError, ServiceRecord, Task, TaskStatus, founding_events};
@@ -22,6 +23,8 @@ pub enum AppError {
     AlreadyFounded,
     Governance(GovernanceError),
     Storage(StorageError),
+    /// 落盘失败（如文件自呈报以来已被改动）；事件簿不变。
+    Apply(String),
 }
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -30,13 +33,14 @@ impl fmt::Display for AppError {
             Self::AlreadyFounded => f.write_str("朝廷已存在，拒绝覆盖日志"),
             Self::Governance(e) => e.fmt(f),
             Self::Storage(e) => e.fmt(f),
+            Self::Apply(e) => write!(f, "落盘失败：{e}"),
         }
     }
 }
 impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotFounded | Self::AlreadyFounded => None,
+            Self::NotFounded | Self::AlreadyFounded | Self::Apply(_) => None,
             Self::Governance(e) => Some(e),
             Self::Storage(e) => Some(e),
         }
@@ -356,6 +360,25 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 准奏：把诏令呈报的改动写入 `root` 下的项目，再记入事件簿。写入前逐一核对文件
+    /// 自呈报以来未被改动，否则一处也不写、不留记录。
+    pub fn apply_changes(&mut self, task: TaskId, root: &Path) -> Result<(), AppError> {
+        self.reload()?;
+        self.court.propose_changes_decision(task, true)?;
+        let files = &self.court.task(task).expect("已确认存在");
+        let files = &files.changes.as_ref().expect("已确认有待决改动").files;
+        ziyuan_runtime::tools::apply_changes(root, files)
+            .map_err(|e| AppError::Apply(e.to_string()))?;
+        self.commit(|court| Ok(vec![court.propose_changes_decision(task, true)?]))?;
+        Ok(())
+    }
+
+    /// 驳回诏令呈报的改动：不写入项目。
+    pub fn discard_changes(&mut self, task: TaskId) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_changes_decision(task, false)?]))?;
+        Ok(())
+    }
+
     /// 撤销尚未结束的诏令。
     ///
     /// 若该诏令正由另一进程执行，执行不会被打断，但其结果会被作废、不再记录。
@@ -468,6 +491,18 @@ impl<S: EventStore> Session<S> {
                         Ok(match court.task(task).map(|t| &t.status) {
                             Some(TaskStatus::Pending) | None => Vec::new(),
                             Some(_) => vec![CourtEvent::ModelUsage { task, usage }],
+                        })
+                    })?;
+                }
+                Progress::Changes { task, changes } => {
+                    // 超时/撤销后才呈报的改动作废。
+                    self.commit(|court| {
+                        Ok(match court.task(task).map(|t| &t.status) {
+                            Some(TaskStatus::Assigned(_)) => vec![CourtEvent::ChangesProposed {
+                                task,
+                                changes: changes.clone(),
+                            }],
+                            _ => Vec::new(),
                         })
                     })?;
                 }
@@ -657,6 +692,67 @@ fn parse_draft(reply: &str) -> Option<AgentId> {
     digits.parse().ok().map(AgentId)
 }
 
+/// 一处改动的统一 diff（每段前后各留 3 行上下文）。
+pub fn render_diff(change: &FileChange) -> String {
+    const CONTEXT: usize = 3;
+    let old: Vec<&str> = change
+        .before
+        .as_deref()
+        .map_or(Vec::new(), |b| b.lines().collect());
+    let new: Vec<&str> = change.after.lines().collect();
+    // (标记, 原文行号, 内容)：' ' 不变，'-' 删除，'+' 新增。
+    let mut ops: Vec<(char, usize, &str)> = Vec::new();
+    if old.len().saturating_mul(new.len()) > 4_000_000 {
+        // 太大时不求最小差异：整段删去、整段新增。
+        ops.extend(old.iter().enumerate().map(|(i, l)| ('-', i, *l)));
+        ops.extend(new.iter().map(|l| ('+', old.len(), *l)));
+    } else {
+        // 最长公共子序列：lcs[i][j] 为 old[i..] 与 new[j..] 的公共行数。
+        let (n, m) = (old.len(), new.len());
+        let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if old[i] == new[j] {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < m {
+            if i < n && j < m && old[i] == new[j] {
+                ops.push((' ', i, old[i]));
+                (i, j) = (i + 1, j + 1);
+            } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
+                ops.push(('-', i, old[i]));
+                i += 1;
+            } else {
+                ops.push(('+', i, new[j]));
+                j += 1;
+            }
+        }
+    }
+    let changed: Vec<usize> = (0..ops.len()).filter(|&k| ops[k].0 != ' ').collect();
+    let shown = |k: usize| changed.iter().any(|&c| c.abs_diff(k) <= CONTEXT);
+    let mut out = match &change.before {
+        Some(_) => format!("--- a/{0}\n+++ b/{0}\n", change.path),
+        None => format!("--- /dev/null\n+++ b/{}\n", change.path),
+    };
+    let mut previous = None;
+    for (k, (mark, line, text)) in ops.iter().enumerate() {
+        if !shown(k) {
+            continue;
+        }
+        if previous != k.checked_sub(1) || previous.is_none() {
+            out.push_str(&format!("@@ 原第 {} 行 @@\n", line + 1));
+        }
+        out.push_str(&format!("{mark}{text}\n"));
+        previous = Some(k);
+    }
+    out
+}
+
 /// 一键朱元璋时的史官记述。
 pub const ABOLITION_NOTE: &str = "洪武十三年正月，丞相胡惟庸以谋反伏诛，株连者三万余人。即日罢中书省，升六部，天子亲裁庶务。——一键朱元璋：丞相，从此不再是问题。";
 
@@ -756,6 +852,12 @@ pub fn describe_event(event: &CourtEvent) -> String {
         }
         CourtEvent::TaskFailed { task, reason } => format!("诏令 #{} 失败：{reason}", task.0),
         CourtEvent::TaskCancelled { task } => format!("诏令 #{} 撤销", task.0),
+        CourtEvent::ChangesProposed { task, changes } => {
+            let paths: Vec<_> = changes.iter().map(|c| c.path.as_str()).collect();
+            format!("诏令 #{} 呈报改动：{}", task.0, paths.join("、"))
+        }
+        CourtEvent::ChangesApplied { task } => format!("诏令 #{} 改动准奏落盘", task.0),
+        CourtEvent::ChangesDiscarded { task } => format!("诏令 #{} 改动驳回", task.0),
         CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
         CourtEvent::TaskReviewed {
             task,
@@ -777,6 +879,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
+    use ziyuan_core::Capability;
     use ziyuan_runtime::{BoxError, DemoBackend, ExecutionHooks, Limits, WorkerBackend};
     use ziyuan_storage::{EventLog, MemoryEventLog};
 
@@ -1018,7 +1121,6 @@ mod tests {
 
     #[tokio::test]
     async fn office_model_and_ceiling_shape_each_job() {
-        use ziyuan_core::Capability;
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
         let clerk = Office::Clerk(Department::Works);
@@ -1222,6 +1324,114 @@ mod tests {
         assert_eq!(parse_draft("参考 #3 之例，拟派：＃ 5"), Some(AgentId(5)));
         assert_eq!(parse_draft("建议 #8 承办"), Some(AgentId(8)));
         assert_eq!(parse_draft("无人可派"), None);
+    }
+
+    /// 把诏令文本当作路径，写入 "new\nkeep\n" 后回奏。
+    struct Writer;
+    impl ziyuan_runtime::agent_loop::ModelProvider for Writer {
+        fn next_turn(
+            &self,
+            messages: &[ziyuan_runtime::agent_loop::Message],
+            _tools: &[ziyuan_runtime::agent_loop::ToolSpec],
+            _hooks: &dyn ExecutionHooks,
+        ) -> Result<ziyuan_runtime::agent_loop::ModelTurn, BoxError> {
+            use ziyuan_runtime::agent_loop::{Message, ModelTurn, ToolRequest};
+            if messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolOutput { .. }))
+            {
+                return Ok(ModelTurn::Final("已改".into()));
+            }
+            let path = messages.iter().find_map(|m| match m {
+                Message::User(text) => Some(text.clone()),
+                _ => None,
+            });
+            Ok(ModelTurn::Calls {
+                calls: vec![ToolRequest {
+                    id: "1".into(),
+                    name: "write_file".into(),
+                    args_json: serde_json::json!({ "path": path, "content": "new\nkeep\n" })
+                        .to_string(),
+                }],
+                text: String::new(),
+                reasoning: String::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn works_changes_are_proposed_then_applied_or_discarded_by_the_emperor() {
+        let root = std::env::temp_dir().join(format!("ziyuan-app-changes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "old\nkeep\n").unwrap();
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let write = Seal {
+            capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+            scope: vec![".".into()],
+        };
+        // 动土木之权唯工部可授。
+        assert!(matches!(
+            session.issue(Department::Revenue, "README.md".into(), write.clone()),
+            Err(AppError::Governance(GovernanceError::WorksOnly(
+                Capability::WriteFile
+            )))
+        ));
+        let edit = session
+            .issue(Department::Works, "README.md".into(), write.clone())
+            .unwrap()
+            .id;
+        let create = session
+            .issue(Department::Works, "docs/新.md".into(), write)
+            .unwrap()
+            .id;
+        let backend = ziyuan_runtime::AgentBackend::new(Box::new(Writer), root.clone(), 4);
+        run_all(&mut session, &scheduler(backend)).await;
+
+        // 执行后项目不变；改动在回奏之前呈报。
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "old\nkeep\n"
+        );
+        let history = session.history();
+        let position = |f: &dyn Fn(&CourtEvent) -> bool| history.iter().position(f).unwrap();
+        assert!(
+            position(&|e| matches!(e, CourtEvent::ChangesProposed { task, .. } if *task == edit))
+                < position(
+                    &|e| matches!(e, CourtEvent::TaskCompleted { task, .. } if *task == edit)
+                )
+        );
+        let changes = session.court().task(edit).unwrap().changes.clone().unwrap();
+        assert_eq!(changes.state, ziyuan_governance::ChangeState::Proposed);
+        let diff = render_diff(&changes.files[0]);
+        assert!(
+            diff.contains("-old\n+new\n") && diff.contains("--- a/README.md"),
+            "{diff}"
+        );
+        assert!(diff.ends_with("+new\n keep\n"), "{diff}");
+
+        session.apply_changes(edit, &root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "new\nkeep\n"
+        );
+        assert!(matches!(
+            session.apply_changes(edit, &root),
+            Err(AppError::Governance(GovernanceError::NoPendingChanges(_)))
+        ));
+        session.discard_changes(create).unwrap();
+        assert!(!root.join("docs").exists());
+        let state = session
+            .court()
+            .task(create)
+            .unwrap()
+            .changes
+            .as_ref()
+            .unwrap()
+            .state;
+        assert_eq!(state, ziyuan_governance::ChangeState::Discarded);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 调用一次工具后失败。

@@ -59,7 +59,7 @@ wait
 "$BIN" run --jobs 4 > /dev/null
 # 玉玺：越界或无效的权限在下诏时拒绝；非默认玉玺记入事件簿
 mkdir -p src
-for bad in "--scope /etc" "--scope ../x" "--scope missing" "--tools write_file"; do
+for bad in "--scope /etc" "--scope ../x" "--scope missing" "--tools run_shell"; do
   if "$BIN" edict --queue $bad '越权' > /dev/null 2>&1; then echo "应拒绝: $bad" >&2; exit 1; fi
 done
 SEALED="$("$BIN" edict --queue --scope src --tools search_code '只查 src')"
@@ -107,4 +107,11 @@ grep -q '玉玺上限之外' <<< "$OUT"
 "$BIN" edict '受限承办' | grep -q '玉玺受工部.*上限所限：工具：search_code；范围：src'
 "$BIN" ceiling clerk:works default | grep -q '取消玉玺上限'
 "$BIN" history | grep -q '工部郎中玉玺上限'
+# 工部受控写权限：非工部不得授 write_file；演示后端不改文件，无改动可准奏
+if "$BIN" edict --dept revenue --tools write_file '越权' > /dev/null 2>&1; then echo '非工部不应授写权' >&2; exit 1; fi
+"$BIN" edict --tools read_file,write_file --queue '工部改动' | grep -q '已入队'
+"$BIN" run > /dev/null
+WID="$("$BIN" tasks | tail -1 | grep -o '^#[0-9]*' | tr -d '#')"
+"$BIN" diff "$WID" | grep -q '没有呈报改动'
+if "$BIN" apply "$WID" > /dev/null 2>&1; then echo '无改动不应准奏' >&2; exit 1; fi
 echo 'ZiYuan smoke test PASS'

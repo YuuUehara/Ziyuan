@@ -3,7 +3,7 @@
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::path::PathBuf;
-use ziyuan_core::{Price, TokenUsage};
+use ziyuan_core::{Capability, FileChange, Price, TokenUsage};
 
 mod scheduler;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
@@ -49,6 +49,8 @@ pub trait ExecutionHooks {
     fn text_delta(&self, _text: &str) {}
     /// 一次模型调用的 token 用量（服务端报告时）。
     fn model_usage(&self, _usage: TokenUsage) {}
+    /// 承办成功、即将回奏时呈报暂存的文件改动（有改动时才调用）。
+    fn changes_proposed(&self, _changes: Vec<FileChange>) {}
 }
 impl ExecutionHooks for () {}
 
@@ -73,6 +75,8 @@ pub struct AgentBackend {
     catalog: Option<Box<dyn ModelCatalog>>,
     root: PathBuf,
     max_steps: usize,
+    /// 皇帝设定的测试命令（`run_tests` 用）。
+    test_command: Option<String>,
 }
 
 /// 同一服务商的模型目录：按名称构造模型并给出单价。
@@ -89,7 +93,13 @@ impl AgentBackend {
             catalog: None,
             root,
             max_steps,
+            test_command: None,
         }
+    }
+
+    pub fn with_test_command(mut self, command: Option<String>) -> Self {
+        self.test_command = command;
+        self
     }
 
     pub fn with_catalog(mut self, catalog: Box<dyn ModelCatalog>) -> Self {
@@ -157,10 +167,16 @@ impl WorkerBackend for AgentBackend {
         let (actor, edict) = (&job.actor, &job.edict);
         let switched = self.switch_to(job.model.as_deref())?;
         let model = switched.as_deref().unwrap_or(self.model.as_ref());
-        let tools = tools::sealed_tools(&self.root, &edict.seal)?;
+        let sealed = tools::sealed_tools(&self.root, &edict.seal, self.test_command.as_deref())?;
+        let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
+            "你可以用 write_file 改写授权范围内的文件，但改动只暂存，回奏后由皇帝审阅 diff 决定是否落盘；\
+             不能执行测试命令以外的任何命令。回奏时列出改了哪些文件、为什么改。"
+        } else {
+            "你只能使用所提供的工具查阅授权范围内的内容，不能修改文件或执行命令。"
+        };
         let system = format!(
             "你是紫垣朝廷{}的官员{}，奉诏办理下列事务。\n\
-             玉玺授权（{}）。你只能使用所提供的只读工具查阅授权范围内的内容，不能修改文件或执行命令。\n\
+             玉玺授权（{}）。{powers}\n\
              请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。",
             edict.department.label(),
             actor.name,
@@ -170,13 +186,12 @@ impl WorkerBackend for AgentBackend {
             agent_loop::Message::System(system),
             agent_loop::Message::User(edict.text.clone()),
         ];
-        Ok(agent_loop::run(
-            model,
-            &tools,
-            messages,
-            self.max_steps,
-            hooks,
-        )?)
+        let summary = agent_loop::run(model, &sealed.tools, messages, self.max_steps, hooks)?;
+        let changes = sealed.changes();
+        if !changes.is_empty() {
+            hooks.changes_proposed(changes);
+        }
+        Ok(summary)
     }
 }
 
