@@ -218,6 +218,8 @@
   pre.diff .hunk { color: var(--muted); display: block; }
   pre.diff .ctx { display: block; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
+  .split { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid var(--gold); background: #fffaf0; }
+  .split ul { margin: 4px 0 0; padding-left: 18px; }
   .censure { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #b9c7d8; background: #f2f6fb; white-space: pre-wrap; }
   .censure.impeach { border-color: #e9b4ae; background: #fdf1ef; }
   .censure .ev { color: var(--muted); font-size: 12px; }
@@ -511,6 +513,13 @@ function taskHtml(t) {
   } else if (t.status === "failed") {
     body = `<div class="reply error">${esc(t.detail)}</div>`;
   }
+  if (t.split) {
+    const s = t.split;
+    const rows = s.subtasks.map((sub) =>
+      `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}</li>`).join("");
+    const state = t.status === "pending" ? (s.open ? `${s.open} 件未结` : "待尚书汇总") : "已汇总";
+    body += `<div class="split"><b>多官分办</b>　${esc(s.note)}（${state}）<ul>${rows}</ul></div>`;
+  }
   if (t.censure) {
     const c = t.censure;
     body += `<div class="censure ${c.verdict}"><b>都察院${esc(c.label)}</b>　左都御史${esc(c.censor || "?")}${c.model ? `（${esc(c.model)}）` : ""}：${esc(c.note)}
@@ -526,7 +535,9 @@ function taskHtml(t) {
       <button class="small reject" data-review="${t.id}" data-verdict="reject">驳回</button>${censorBtn}</div>`;
   } else if (open) {
     const approve = t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
-    actions = `<div class="review-row"><span style="flex:1"></span>${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
+    const split = t.status === "pending" && !t.split && !t.parent
+      ? `<button class="small" data-split="${t.id}" title="尚书把此诏令拆给本部官员分办，事后汇总">尚书分办</button>` : "";
+    actions = `<div class="review-row"><span style="flex:1"></span>${split}${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
   }
   if (t.changes) {
     const c = t.changes;
@@ -559,7 +570,7 @@ function taskHtml(t) {
   }
   return `<article class="task ${t.status}">
     <div class="task-head"><span class="task-id">#${t.id}</span><span>${esc(t.department)}</span>
-      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${seal}</div>
+      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
     <div class="task-text">${esc(t.text)}</div>
     <div class="meta">${meta}</div>${body}${actions}</article>`;
 }
@@ -726,6 +737,10 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.draft}/draft`, {})).then((r) => r && toast(`诏令 #${d.draft} 票拟：拟派 ${r.name}`));
   } else if (d.redraft) {
     act(api(`/tasks/${d.redraft}/redraft`, { worker: Number($("redraft-" + d.redraft).value) }), "已御笔改票");
+  } else if (d.split) {
+    el.disabled = true;
+    el.textContent = "尚书拆分中…";
+    act(api(`/tasks/${d.split}/split`, {})).then((r) => r && toast(`诏令 #${d.split} 已分办为 ${r.subtasks.length} 件`));
   } else if (d.censor) {
     el.disabled = true;
     el.textContent = "御史复核中…";

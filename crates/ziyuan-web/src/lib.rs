@@ -77,6 +77,7 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/draft", post(draft))
         .route("/tasks/{id}/redraft", post(redraft))
         .route("/tasks/{id}/censor", post(censor))
+        .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
         .route("/tasks/{id}/changes/discard", post(discard_changes))
         .route("/reform", post(reform))
@@ -504,6 +505,19 @@ async fn draft(
     .await
 }
 
+/// 尚书分办（会等待模型返回）。
+async fn split(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    app.mutate(move |s| {
+        let subtasks = s.plan_split(TaskId(id), backend.as_ref())?;
+        Ok(json!({ "subtasks": subtasks.iter().map(|t| t.0).collect::<Vec<_>>() }))
+    })
+    .await
+}
+
 /// 都察院复核（会等待御史的模型返回）。
 async fn censor(
     State(app): State<AppState>,
@@ -767,6 +781,23 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "detail": detail,
                 "review": t.review.as_ref().map(|(v, note)| json!({
                     "verdict": v.code(), "label": v.label(), "note": note,
+                })),
+                "parent": t.parent.map(|p| p.0),
+                "split": t.split.as_ref().map(|s| json!({
+                    "note": s.note,
+                    "open": court.open_subtasks(t),
+                    "subtasks": s.subtasks.iter().filter_map(|id| court.task(*id)).map(|sub| json!({
+                        "id": sub.edict.id.0,
+                        "text": sub.edict.text,
+                        "worker": sub.handler().or(sub.assignee).and_then(name),
+                        "status": match sub.status {
+                            TaskStatus::Pending => "pending",
+                            TaskStatus::Assigned(_) => "assigned",
+                            TaskStatus::Completed { .. } => "completed",
+                            TaskStatus::Failed { .. } => "failed",
+                            TaskStatus::Cancelled => "cancelled",
+                        },
+                    })).collect::<Vec<_>>(),
                 })),
                 "censure": t.censure.as_ref().map(|c| json!({
                     "verdict": c.verdict.code(),

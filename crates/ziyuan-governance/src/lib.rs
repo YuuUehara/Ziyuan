@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
     Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
+    GovernanceMode, Office, Seal, Subtask, TaskId, TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -67,6 +67,10 @@ pub enum GovernanceError {
     /// 御史不得复核自己经手的诏令。
     SelfReview(AgentId),
     AlreadyCensured(TaskId),
+    /// 分办须在诏令待办时进行，子诏令不再分办，一件诏令只分办一次。
+    CannotSplit(TaskId),
+    /// 分办须为 2–8 件，每件有内容。
+    InvalidSplit(String),
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,6 +144,12 @@ impl fmt::Display for GovernanceError {
             Self::NotCensor(id) => write!(f, "官员 #{} 不是现任左都御史", id.0),
             Self::SelfReview(id) => write!(f, "官员 #{} 经手此诏令，须回避，不得自行复核", id.0),
             Self::AlreadyCensured(id) => write!(f, "诏令 #{} 已经都察院复核", id.0),
+            Self::CannotSplit(id) => write!(
+                f,
+                "诏令 #{} 不能分办：须尚未执行、未曾分办，且本身不是分办出的子诏令",
+                id.0
+            ),
+            Self::InvalidSplit(why) => write!(f, "分办方案不合法：{why}"),
         }
     }
 }
@@ -183,6 +193,23 @@ pub struct Task {
     pub changes: Option<Changes>,
     /// 都察院的复核（只有已完成的诏令才有）。
     pub censure: Option<Censure>,
+    /// 分办出此诏令的原诏令。
+    pub parent: Option<TaskId>,
+    /// 分办时指定的承办者（子诏令才有）。
+    pub assignee: Option<AgentId>,
+    /// 此诏令已分办（原诏令才有）。
+    pub split: Option<Split>,
+}
+
+/// 分办方案。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Split {
+    pub subtasks: Vec<TaskId>,
+    /// 尚书的拆分说明，或「御定分办」。
+    pub note: String,
+    pub model: Option<String>,
+    /// 拆分所用的 token（已计入 `Task::usage`）。
+    pub usage: TokenUsage,
 }
 
 /// 都察院复核的结果。
@@ -369,6 +396,9 @@ impl Court {
                         draft: None,
                         changes: None,
                         censure: None,
+                        parent: None,
+                        assignee: None,
+                        split: None,
                     },
                 );
             }
@@ -442,6 +472,61 @@ impl Court {
                 self.tasks.get_mut(task).expect("已确认存在").changes = Some(Changes {
                     files: changes.clone(),
                     state: ChangeState::Proposed,
+                });
+            }
+            CourtEvent::EdictSplit {
+                task,
+                subtasks,
+                note,
+                model,
+                usage,
+            } => {
+                let plan: Vec<_> = subtasks
+                    .iter()
+                    .map(|s| (s.worker, s.text.clone()))
+                    .collect();
+                self.check_split(*task, &plan)?;
+                for (i, sub) in subtasks.iter().enumerate() {
+                    if self.tasks.contains_key(&sub.id)
+                        || subtasks[..i].iter().any(|s| s.id == sub.id)
+                    {
+                        return Err(GovernanceError::DuplicateEdict(sub.id));
+                    }
+                }
+                let parent = self.tasks.get(task).expect("已确认存在").clone();
+                for sub in subtasks {
+                    self.next_task_id = self.next_task_id.max(sub.id.0 + 1);
+                    self.tasks.insert(
+                        sub.id,
+                        Task {
+                            edict: Edict {
+                                id: sub.id,
+                                text: sub.text.clone(),
+                                ..parent.edict.clone()
+                            },
+                            status: TaskStatus::Pending,
+                            tool_calls: 0,
+                            tool_failures: 0,
+                            usage: TokenUsage::default(),
+                            review: None,
+                            approved: false,
+                            model: None,
+                            draft: None,
+                            changes: None,
+                            censure: None,
+                            parent: Some(*task),
+                            assignee: Some(sub.worker),
+                            split: None,
+                        },
+                    );
+                }
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.usage += *usage;
+                entry.split = Some(Split {
+                    subtasks: subtasks.iter().map(|s| s.id).collect(),
+                    note: note.clone(),
+                    model: model.clone(),
+                    usage: *usage,
                 });
             }
             CourtEvent::CensorReported {
@@ -570,18 +655,98 @@ impl Court {
             .collect()
     }
 
-    /// 内阁制下尚未批红的待办诏令：须先批红才能执行。
+    /// 内阁制下尚未批红的待办诏令：须先批红才能执行。子诏令随原诏令批红，自身不批红。
     pub fn needs_approval(&self, task: &Task) -> bool {
-        self.mode == GovernanceMode::Cabinet && !task.approved && task.status == TaskStatus::Pending
+        self.mode == GovernanceMode::Cabinet
+            && !task.approved
+            && task.status == TaskStatus::Pending
+            && task.parent.is_none()
     }
 
-    /// 现在就可以执行的诏令：未结束，且（内阁制下）已批红。按 ID 升序。
+    /// 已分办的原诏令中尚未结束的子诏令数。
+    pub fn open_subtasks(&self, task: &Task) -> usize {
+        task.split.as_ref().map_or(0, |split| {
+            split
+                .subtasks
+                .iter()
+                .filter(|id| self.tasks.get(id).is_some_and(|t| t.status.is_open()))
+                .count()
+        })
+    }
+
+    /// 现在就可以执行的诏令：未结束，（内阁制下）已批红；子诏令须原诏令已批红，
+    /// 已分办的原诏令须子诏令全部结束（届时由尚书汇总）。按 ID 升序。
     pub fn runnable_tasks(&self) -> Vec<TaskId> {
         self.tasks
             .values()
             .filter(|t| t.status.is_open() && !self.needs_approval(t))
+            .filter(|t| {
+                t.parent
+                    .and_then(|p| self.tasks.get(&p))
+                    .is_none_or(|p| !self.needs_approval(p))
+            })
+            .filter(|t| self.open_subtasks(t) == 0)
             .map(|t| t.edict.id)
             .collect()
+    }
+
+    /// 分办：把待办诏令 `task` 拆给本部官员，`plan` 为 (承办者, 子诏令内容)。
+    pub fn propose_split(
+        &self,
+        task: TaskId,
+        plan: Vec<(AgentId, String)>,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    ) -> Result<CourtEvent, GovernanceError> {
+        self.check_split(task, &plan)?;
+        let subtasks = plan
+            .into_iter()
+            .zip(self.next_task_id..)
+            .map(|((worker, text), id)| Subtask {
+                id: TaskId(id),
+                worker,
+                text,
+            })
+            .collect();
+        Ok(CourtEvent::EdictSplit {
+            task,
+            subtasks,
+            note,
+            model,
+            usage,
+        })
+    }
+
+    fn check_split(&self, task: TaskId, plan: &[(AgentId, String)]) -> Result<(), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if entry.status != TaskStatus::Pending || entry.split.is_some() || entry.parent.is_some() {
+            return Err(GovernanceError::CannotSplit(task));
+        }
+        if !(2..=8).contains(&plan.len()) {
+            return Err(GovernanceError::InvalidSplit(format!(
+                "须分为 2–8 件，实为 {} 件",
+                plan.len()
+            )));
+        }
+        if plan.iter().any(|(_, text)| text.trim().is_empty()) {
+            return Err(GovernanceError::InvalidSplit("子诏令内容不能为空".into()));
+        }
+        let department = entry.edict.department;
+        let staff = self.draft_candidates(department);
+        if let Some((worker, _)) = plan
+            .iter()
+            .find(|(w, _)| !staff.iter().any(|(a, _)| a.id == *w))
+        {
+            return Err(GovernanceError::NotEligible {
+                worker: *worker,
+                department,
+            });
+        }
+        Ok(())
     }
 
     /// 为官职指定承办模型；`None` 恢复默认。
@@ -720,6 +885,14 @@ impl Court {
             (rank, agent.id)
         });
         staff
+    }
+
+    /// 本部长官：尚书，空缺则由侍郎署理。
+    pub fn department_head(&self, department: Department) -> Option<(&Agent, Office)> {
+        self.head_or_deputy(
+            Office::Minister(department),
+            Office::ViceMinister(department),
+        )
     }
 
     /// 现行制度下的协调者（正职，空缺则副职）及其官职；废相亲政时为 `None`。
@@ -1012,20 +1185,29 @@ impl Court {
     ///
     /// 皇帝 →（中书省或内阁）→ 本部尚书 → 郎中。正职空缺时由副职署理，在路线中注明。
     pub fn route(&self, edict: &Edict) -> Result<Route, GovernanceError> {
-        self.route_to(edict, None)
+        self.route_to(edict, Pick::Default)
     }
 
-    /// 诏令的派工路线：内阁制下若已票拟且拟派者仍在任，派给拟派者，否则按旧例。
+    /// 诏令的派工路线：子诏令派给分办时指定的官员；已分办的原诏令由尚书汇总；内阁制下若已
+    /// 票拟，派给拟派者。指定者已不在本部任职时按旧例。
     pub fn route_task(&self, task: &Task) -> Result<Route, GovernanceError> {
-        let drafted = task
+        let pick = if let Some(worker) = task.assignee {
+            Pick::Named(worker, "（分办）")
+        } else if task.split.is_some() {
+            Pick::Head
+        } else if let Some(draft) = task
             .draft
             .as_ref()
             .filter(|_| self.mode == GovernanceMode::Cabinet)
-            .map(|d| d.worker);
-        self.route_to(&task.edict, drafted)
+        {
+            Pick::Named(draft.worker, "（票拟）")
+        } else {
+            Pick::Default
+        };
+        self.route_to(&task.edict, pick)
     }
 
-    fn route_to(&self, edict: &Edict, drafted: Option<AgentId>) -> Result<Route, GovernanceError> {
+    fn route_to(&self, edict: &Edict, pick: Pick) -> Result<Route, GovernanceError> {
         let mut path = vec!["皇帝".to_owned()];
         let step = |(agent, office): (&Agent, Office), head: Office| {
             let acting = if office == head { "" } else { "（署理）" };
@@ -1052,7 +1234,19 @@ impl Court {
         path.push(step(found, head));
         let minister = found.0;
         let staff = self.draft_candidates(department);
-        let drafted = drafted.and_then(|id| staff.iter().find(|(a, _)| a.id == id));
+        if matches!(pick, Pick::Head) {
+            path.last_mut()
+                .expect("至少有尚书一步")
+                .push_str("（汇总）");
+            return Ok(Route {
+                path,
+                worker: minister.id,
+            });
+        }
+        let (drafted, mark) = match pick {
+            Pick::Named(id, mark) => (staff.iter().find(|(a, _)| a.id == id), mark),
+            _ => (None, ""),
+        };
         // 未票拟时按任务量均衡派给郎中；本部无郎中则由尚书（或署理的侍郎）亲办。
         let (worker, office) = drafted.copied().unwrap_or_else(|| {
             staff
@@ -1062,11 +1256,7 @@ impl Court {
                 .copied()
                 .unwrap_or(found)
         });
-        let mark = if drafted.is_some() {
-            "（票拟）"
-        } else {
-            ""
-        };
+        let mark = if drafted.is_some() { mark } else { "" };
         if worker.id != minister.id {
             path.push(format!("{}·{}{mark}", office.label(), worker.name));
         } else if drafted.is_some() {
@@ -1166,6 +1356,17 @@ pub struct Candidate<'a> {
     /// 现任官职；荐举不会自动罢免或调任。
     pub current: Option<Office>,
     pub record: ServiceRecord,
+}
+
+/// 派工时如何选承办者。
+#[derive(Clone, Copy)]
+enum Pick {
+    /// 旧例：任务量均衡派给郎中。
+    Default,
+    /// 指定官员（票拟或分办），路线上附注标记。
+    Named(AgentId, &'static str),
+    /// 尚书（或署理的侍郎）亲办：汇总分办的回奏。
+    Head,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1613,6 +1814,122 @@ mod tests {
             tests: Some(false),
         };
         assert!(!flawed.verified() && !failing.verified() && !Evidence::default().verified());
+    }
+
+    #[test]
+    fn split_edicts_run_subtasks_first_then_the_minister_summarizes() {
+        let mut court = Court::replay(&founding_events(1)).unwrap();
+        let apply = |court: &mut Court, e: CourtEvent| court.apply(&e).unwrap();
+        apply(
+            &mut court,
+            CourtEvent::AgentRegistered(Agent {
+                id: AgentId(7),
+                name: "新工".into(),
+                speciality: Department::Works,
+            }),
+        );
+        apply(
+            &mut court,
+            CourtEvent::OfficialAppointed {
+                agent: AgentId(7),
+                office: Office::Clerk(Department::Works),
+            },
+        );
+        let edict = court
+            .new_edict(Department::Works, "查全库".into(), Seal::default())
+            .unwrap();
+        apply(&mut court, CourtEvent::EdictIssued(edict));
+        let none = TokenUsage::default();
+        let split = |court: &Court, task: u64, plan: &[(u64, &str)]| {
+            let plan = plan
+                .iter()
+                .map(|(w, t)| (AgentId(*w), t.to_string()))
+                .collect();
+            court.propose_split(TaskId(task), plan, "分办".into(), None, none)
+        };
+        // 只分一件、分给他部官员（#3 吏部尚书）都不行。
+        assert!(matches!(
+            split(&court, 1, &[(4, "甲")]),
+            Err(GovernanceError::InvalidSplit(_))
+        ));
+        assert!(matches!(
+            split(&court, 1, &[(4, "甲"), (3, "乙")]),
+            Err(GovernanceError::NotEligible { .. })
+        ));
+        let event = split(&court, 1, &[(4, "查 storage"), (7, "查 runtime")]).unwrap();
+        apply(&mut court, event);
+        // 子诏令 #2、#3 先执行，原诏令等子诏令结束；子诏令不再分办，原诏令不能再分。
+        assert_eq!(court.runnable_tasks(), [TaskId(2), TaskId(3)]);
+        assert_eq!(court.task(TaskId(3)).unwrap().edict.seal, Seal::default());
+        for task in [1, 2] {
+            assert_eq!(
+                split(&court, task, &[(4, "甲"), (7, "乙")]),
+                Err(GovernanceError::CannotSplit(TaskId(task)))
+            );
+        }
+        let route = court.route_task(court.task(TaskId(3)).unwrap()).unwrap();
+        assert_eq!(route.worker, AgentId(7));
+        assert!(
+            route.path.last().unwrap().ends_with("（分办）"),
+            "{:?}",
+            route.path
+        );
+
+        apply(
+            &mut court,
+            CourtEvent::TaskAssigned {
+                task: TaskId(2),
+                worker: AgentId(4),
+                model: None,
+            },
+        );
+        apply(
+            &mut court,
+            CourtEvent::TaskCompleted {
+                task: TaskId(2),
+                worker: AgentId(4),
+                summary: "无 unsafe".into(),
+            },
+        );
+        assert_eq!(court.runnable_tasks(), [TaskId(3)]);
+        apply(&mut court, CourtEvent::TaskCancelled { task: TaskId(3) });
+        // 子诏令全部结束（撤销也算），原诏令派给工部尚书 #2 汇总。
+        assert_eq!(court.runnable_tasks(), [TaskId(1)]);
+        let route = court.route_task(court.task(TaskId(1)).unwrap()).unwrap();
+        assert_eq!(route.worker, AgentId(2));
+        assert!(
+            route.path.last().unwrap().ends_with("（汇总）"),
+            "{:?}",
+            route.path
+        );
+
+        // 内阁制下子诏令随原诏令批红。
+        apply(
+            &mut court,
+            CourtEvent::InstitutionReformed(GovernanceMode::Cabinet),
+        );
+        apply(
+            &mut court,
+            CourtEvent::OfficialDismissed { agent: AgentId(6) },
+        );
+        apply(
+            &mut court,
+            CourtEvent::OfficialAppointed {
+                agent: AgentId(6),
+                office: Office::FirstGrandSecretary,
+            },
+        );
+        let edict = court
+            .new_edict(Department::Works, "再查".into(), Seal::default())
+            .unwrap();
+        let id = edict.id;
+        apply(&mut court, CourtEvent::EdictIssued(edict));
+        let event = split(&court, id.0, &[(4, "甲"), (7, "乙")]).unwrap();
+        apply(&mut court, event);
+        // （改制后 #1 本身也须批红。）
+        assert!(court.runnable_tasks().is_empty());
+        apply(&mut court, CourtEvent::EdictApproved { task: id });
+        assert_eq!(court.runnable_tasks(), [TaskId(id.0 + 1), TaskId(id.0 + 2)]);
     }
 
     #[test]

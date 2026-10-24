@@ -535,6 +535,14 @@ pub struct FileChange {
     pub after: String,
 }
 
+/// 分办出去的一件子诏令：沿用原诏令的部门与玉玺，由指定官员承办。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subtask {
+    pub id: TaskId,
+    pub worker: AgentId,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edict {
     pub id: TaskId,
@@ -577,6 +585,15 @@ pub enum CourtEvent {
     EdictDrafted {
         task: TaskId,
         worker: AgentId,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    },
+    /// 多官协作：尚书（或皇帝御定）把一件待办诏令拆给本部数位官员分办。子诏令随即入队、
+    /// 并发执行；全部结束后，原诏令由尚书汇总回奏。`model`/`usage` 为尚书拆分所用（御定为 `None` 与零）。
+    EdictSplit {
+        task: TaskId,
+        subtasks: Vec<Subtask>,
         note: String,
         model: Option<String>,
         usage: TokenUsage,

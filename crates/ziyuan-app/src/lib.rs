@@ -491,8 +491,146 @@ impl<S: EventStore> Session<S> {
     ///
     /// 若该诏令正由另一进程执行，执行不会被打断，但其结果会被作废、不再记录。
     pub fn cancel(&mut self, task: TaskId) -> Result<(), AppError> {
-        self.commit(|court| Ok(vec![court.propose_cancellation(task)?]))?;
+        self.commit(|court| {
+            let cancel = court.propose_cancellation(task)?;
+            // 撤销已分办的原诏令时，未结束的子诏令一并撤销。
+            let mut events: Vec<_> = court
+                .task(task)
+                .and_then(|t| t.split.as_ref())
+                .map_or(&[][..], |s| &s.subtasks)
+                .iter()
+                .filter(|id| court.task(**id).is_some_and(|t| t.status.is_open()))
+                .map(|&id| CourtEvent::TaskCancelled { task: id })
+                .collect();
+            events.push(cancel);
+            Ok(events)
+        })?;
         Ok(())
+    }
+
+    /// 御定分办：皇帝亲自把待办诏令拆给本部官员，`plan` 为 (承办者, 子诏令内容)。
+    /// 返回子诏令 ID。
+    pub fn split(
+        &mut self,
+        task: TaskId,
+        plan: Vec<(AgentId, String)>,
+    ) -> Result<Vec<TaskId>, AppError> {
+        self.commit(|court| {
+            let note = "御定分办".to_owned();
+            Ok(vec![court.propose_split(
+                task,
+                plan.clone(),
+                note,
+                None,
+                TokenUsage::default(),
+            )?])
+        })?;
+        Ok(self.subtasks_of(task))
+    }
+
+    /// 尚书分办：本部尚书（其官职所配模型，否则默认模型）读诏令与本部官员，拆成 2–8 件子诏令。
+    /// 模型不可用（含演示后端）或拆分方案不合法时报错，不留记录。阻塞直到模型返回。
+    pub fn plan_split(
+        &mut self,
+        task: TaskId,
+        backend: &dyn WorkerBackend,
+    ) -> Result<Vec<TaskId>, AppError> {
+        self.reload()?;
+        let court = &self.court;
+        let entry = court
+            .task(task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        let department = entry.edict.department;
+        let (minister, office) = court
+            .department_head(department)
+            .ok_or(GovernanceError::Vacant(Office::Minister(department)))?;
+        // 先用占位方案校验诏令能否分办，免得白白调用模型。汇总是尚书之责，尚书不领子诏令。
+        let staff: Vec<_> = court
+            .draft_candidates(department)
+            .into_iter()
+            .filter(|(a, _)| a.id != minister.id)
+            .collect();
+        if staff.is_empty() {
+            return Err(GovernanceError::InvalidSplit("本部除尚书外别无官员可分办".into()).into());
+        }
+        let placeholder: Vec<_> = staff.iter().map(|(a, _)| (a.id, "-".to_owned())).collect();
+        let placeholder = [placeholder.clone(), placeholder].concat();
+        if let Err(e @ GovernanceError::CannotSplit(_)) = court.propose_split(
+            task,
+            placeholder,
+            String::new(),
+            None,
+            TokenUsage::default(),
+        ) {
+            return Err(e.into());
+        }
+        let model = court
+            .model_of(minister.id)
+            .or(backend.model_name())
+            .map(str::to_owned);
+        let system = format!(
+            "你是紫垣朝廷{}{}，奉诏把下面这件诏令拆给本部官员分头办理，事后由你汇总回奏。\n\
+             拆成 2–8 件可独立完成的子诏令，同一官员可领多件。每行一件，格式为「#官员ID：子诏令内容」；\n\
+             子诏令内容要具体，写明查办的范围与要回奏的事项，不必重复官员姓名。汇总由你亲自来做，\n\
+             不要列为子诏令。最后可另起一行「说明：……」，不超过 80 字。",
+            office.label(),
+            minister.name
+        );
+        let mut user = format!(
+            "诏令（{}）：{}\n玉玺：{}\n本部官员：\n",
+            department.label(),
+            entry.edict.text,
+            entry.edict.seal
+        );
+        for (agent, office) in &staff {
+            user.push_str(&format!(
+                "#{} {} {}，{}\n",
+                agent.id.0,
+                agent.name,
+                office.label(),
+                describe_record(&court.service_record(agent.id))
+            ));
+        }
+        let (reply, usage) = backend
+            .complete(model.as_deref(), &system, &user)
+            .map_err(|e| GovernanceError::InvalidSplit(format!("尚书未能拆分（{e}）")))?;
+        let (plan, note) = parse_split(&reply);
+        // 派给尚书本人的（多半是「汇总」）略去；内容开头重复的官员姓名去掉。
+        let plan: Vec<_> = plan
+            .into_iter()
+            .filter(|(worker, _)| *worker != minister.id)
+            .map(|(worker, text)| {
+                let name = court.agent(worker).map_or("", |a| a.name.as_str());
+                let text = match text.strip_prefix(name) {
+                    Some(rest) if !name.is_empty() && rest.starts_with(['：', ':']) => rest
+                        [rest.chars().next().expect("有冒号").len_utf8()..]
+                        .trim()
+                        .to_owned(),
+                    _ => text,
+                };
+                (worker, text)
+            })
+            .collect();
+        let note = if note.is_empty() {
+            format!("{}{}分办", office.label(), minister.name)
+        } else {
+            note
+        };
+        self.commit(|court| {
+            Ok(vec![court.propose_split(
+                task,
+                plan.clone(),
+                note.clone(),
+                model.clone(),
+                usage,
+            )?])
+        })?;
+        Ok(self.subtasks_of(task))
+    }
+
+    fn subtasks_of(&self, task: TaskId) -> Vec<TaskId> {
+        let split = self.court.task(task).and_then(|t| t.split.as_ref());
+        split.map_or_else(Vec::new, |s| s.subtasks.clone())
     }
 
     /// 按当前制度逐件指派 `tasks`，交给调度器并发执行，并经 `on_update` 报告流式文本与每件的结局。
@@ -563,10 +701,20 @@ impl<S: EventStore> Session<S> {
                         .agent(worker)
                         .expect("路由只指向在册官员")
                         .clone();
+                    let mut seal = sealed.take().expect("指派时已算出玉玺");
+                    let entry = self.court.task(task).expect("刚提交的诏令");
+                    let text = if entry.split.is_some() {
+                        // 汇总只核对、不动土木：收回写文件与跑测试之权。
+                        seal.capabilities.retain(|c| !c.is_works_only());
+                        summary_prompt(&self.court, entry)
+                    } else {
+                        edict.text.clone()
+                    };
                     jobs.push(Job {
                         actor,
                         edict: Edict {
-                            seal: sealed.take().expect("指派时已算出玉玺"),
+                            seal,
+                            text,
                             ..edict.clone()
                         },
                         model,
@@ -743,26 +891,22 @@ fn random_seed() -> u64 {
 
 // ---- 呈现：CLI、Web 与 TUI 共用的中文描述 ----
 
-/// 承办所用的 token：诏令累计用量减去内阁票拟的部分。
+/// 承办所用的 token：诏令累计用量减去票拟、拆分与复核的部分。
 fn execution_usage(task: &Task) -> TokenUsage {
-    let drafting = task
-        .draft
-        .as_ref()
-        .map_or_else(TokenUsage::default, |d| d.usage);
-    let censoring = task
-        .censure
-        .as_ref()
-        .map_or_else(TokenUsage::default, |c| c.usage);
-    TokenUsage {
-        input: task
-            .usage
-            .input
-            .saturating_sub(drafting.input + censoring.input),
-        output: task
-            .usage
-            .output
-            .saturating_sub(drafting.output + censoring.output),
+    let mut usage = task.usage;
+    for (extra, _) in overheads(task) {
+        usage.input = usage.input.saturating_sub(extra.input);
+        usage.output = usage.output.saturating_sub(extra.output);
     }
+    usage
+}
+
+/// 承办之外的模型开销及所用模型：内阁票拟、尚书拆分、都察院复核。
+fn overheads(task: &Task) -> [(TokenUsage, Option<&str>); 3] {
+    let draft = task.draft.as_ref().map(|d| (d.usage, d.model.as_deref()));
+    let split = task.split.as_ref().map(|s| (s.usage, s.model.as_deref()));
+    let censure = task.censure.as_ref().map(|c| (c.usage, c.model.as_deref()));
+    [draft, split, censure].map(|o| o.unwrap_or_default())
 }
 
 /// 按各诏令实际所用的模型估算花费，如「约 0.0123 元」。`default_model` 用于未记下模型的早期诏令；
@@ -774,25 +918,9 @@ pub fn estimate_cost<'a>(
 ) -> Option<String> {
     let mut total = None::<(f64, String)>;
     for task in tasks {
-        // 票拟、承办与复核可能用不同模型，分别计价。
-        let (drafting, draft_model) = task
-            .draft
-            .as_ref()
-            .map_or((TokenUsage::default(), None), |d| {
-                (d.usage, d.model.as_deref())
-            });
-        let (censoring, censor_model) = task
-            .censure
-            .as_ref()
-            .map_or((TokenUsage::default(), None), |c| {
-                (c.usage, c.model.as_deref())
-            });
-        let executing = execution_usage(task);
-        for (usage, model) in [
-            (executing, task.model.as_deref()),
-            (drafting, draft_model),
-            (censoring, censor_model),
-        ] {
+        // 承办、票拟、拆分与复核可能用不同模型，分别计价。
+        let executing = (execution_usage(task), task.model.as_deref());
+        for (usage, model) in std::iter::once(executing).chain(overheads(task)) {
             if usage.total() == 0 {
                 continue;
             }
@@ -1140,6 +1268,69 @@ fn citations(text: &str) -> Vec<(String, Option<(usize, usize)>)> {
     out
 }
 
+/// 尚书汇总时收到的诏令内容：原诏令与各件子诏令的结局。
+fn summary_prompt(court: &Court, task: &Task) -> String {
+    let mut out = format!(
+        "原诏令：{}\n\n此诏令已分给本部官员分头办理，各件结局如下。请核对各份回奏（可用工具抽查），\
+         汇总成一份回奏呈皇帝：逐项说明结论，指出未办成或互相矛盾之处，不得把未办成的说成已办成。\n",
+        task.edict.text
+    );
+    for id in task.split.iter().flat_map(|s| &s.subtasks) {
+        let Some(sub) = court.task(*id) else {
+            continue;
+        };
+        let name = sub
+            .handler()
+            .or(sub.assignee)
+            .and_then(|a| court.agent(a))
+            .map_or("?", |a| a.name.as_str());
+        let outcome = match &sub.status {
+            TaskStatus::Completed { summary, .. } => format!("回奏：\n{}", truncate(summary, 3000)),
+            TaskStatus::Failed { reason, .. } => format!("失败：{reason}"),
+            TaskStatus::Cancelled => "已撤销".to_owned(),
+            TaskStatus::Pending | TaskStatus::Assigned(_) => "未结束".to_owned(),
+        };
+        out.push_str(&format!(
+            "\n## 子诏令 #{}（{name}）：{}\n{outcome}\n",
+            id.0, sub.edict.text
+        ));
+    }
+    out
+}
+
+/// 解析尚书的拆分方案：每行「#官员ID：内容」，以及「说明：……」。
+fn parse_split(reply: &str) -> (Vec<(AgentId, String)>, String) {
+    let mut plan = Vec::new();
+    let mut note = String::new();
+    for line in reply.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', '•', ' ']);
+        if let Some(rest) = line
+            .strip_prefix("说明")
+            .map(|r| r.trim_start_matches(['：', ':', ' ']))
+        {
+            note = truncate(rest.trim(), 200);
+            continue;
+        }
+        // `#` 前只允许列表编号与项目符号（如「1. 」「(2)」「- 」）。
+        let Some(start) = line.find(['#', '＃']) else {
+            continue;
+        };
+        let marker = |c: char| c.is_ascii_digit() || " .、)）(（-*•".contains(c);
+        if !line[..start].chars().all(marker) {
+            continue;
+        }
+        let rest = &line[start + line[start..].chars().next().expect("有 #").len_utf8()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let text = rest[digits.len()..]
+            .trim_start_matches(['：', ':', ' ', '、', '.'])
+            .trim();
+        if let (Ok(id), false) = (digits.parse(), text.is_empty()) {
+            plan.push((AgentId(id), truncate(text, 2000)));
+        }
+    }
+    (plan, note)
+}
+
 /// 御史回复中最先出现的「背书」或「弹劾」。
 fn parse_censure(reply: &str) -> Option<CensorVerdict> {
     let endorse = reply.find("背书");
@@ -1214,6 +1405,13 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("诏令 #{} 呈报改动：{}", task.0, paths.join("、"))
         }
         CourtEvent::ChangesApplied { task } => format!("诏令 #{} 改动准奏落盘", task.0),
+        CourtEvent::EdictSplit { task, subtasks, .. } => {
+            let parts: Vec<_> = subtasks
+                .iter()
+                .map(|s| format!("#{}→#{}", s.id.0, s.worker.0))
+                .collect();
+            format!("诏令 #{} 分办：{}", task.0, parts.join("、"))
+        }
         CourtEvent::CensorReported {
             task,
             censor,
@@ -1947,6 +2145,131 @@ mod tests {
             Some(CensorVerdict::Impeached)
         );
         assert_eq!(parse_censure("待查"), None);
+    }
+
+    /// 记下每件作业的诏令内容与工具；拆分时给出固定方案。
+    #[derive(Clone, Default)]
+    struct Planner(Arc<std::sync::Mutex<Vec<Recorded>>>);
+    /// 一件作业的诏令内容与所授工具。
+    type Recorded = (String, Vec<Capability>);
+    impl WorkerBackend for Planner {
+        fn execute(&self, job: &Job, _hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let tools = job.edict.seal.capabilities.iter().copied().collect();
+            self.0.lock().unwrap().push((job.edict.text.clone(), tools));
+            Ok(format!(
+                "{}办妥：{}",
+                job.actor.name,
+                job.edict.text.lines().next().unwrap()
+            ))
+        }
+        fn complete(
+            &self,
+            _model: Option<&str>,
+            _system: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            // 尚书不在候选之列；即便模型把汇总派给尚书 #2，也会被略去。
+            assert!(user.contains("#7 ") && !user.contains("工部尚书"), "{user}");
+            let plan =
+                "拟分两件：\n1. #4：查 storage\n- ＃7：查 runtime\n#2：汇总\n#9\n说明：按 crate 分";
+            Ok((
+                plan.into(),
+                TokenUsage {
+                    input: 5,
+                    output: 2,
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn minister_splits_an_edict_and_summarizes_the_subtasks() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let clerk = session.recruit(None, Department::Works).unwrap();
+        session
+            .appoint(clerk, Office::Clerk(Department::Works))
+            .unwrap();
+        assert_eq!(clerk, AgentId(7));
+        let seal = Seal {
+            capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+            scope: vec![".".into()],
+        };
+        let parent = session
+            .issue(Department::Works, "查全库".into(), seal)
+            .unwrap()
+            .id;
+
+        // 演示后端不调用模型：拆不了，也不留记录。
+        let before = session.history().len();
+        assert!(matches!(
+            session.plan_split(parent, &DemoBackend),
+            Err(AppError::Governance(GovernanceError::InvalidSplit(_)))
+        ));
+        assert_eq!(session.history().len(), before);
+        let planner = Planner::default();
+        assert_eq!(
+            session.plan_split(parent, &planner).unwrap(),
+            [TaskId(2), TaskId(3)]
+        );
+        let split = session.court().task(parent).unwrap().split.clone().unwrap();
+        assert_eq!(
+            (split.note.as_str(), split.usage.total()),
+            ("按 crate 分", 7)
+        );
+
+        session
+            .run_open(&scheduler(planner.clone()), &CancelToken::new(), |_| {})
+            .await
+            .unwrap();
+        let court = session.court();
+        let handler = |id: u64| court.task(TaskId(id)).unwrap().handler();
+        assert_eq!(
+            [handler(1), handler(2), handler(3)],
+            [Some(AgentId(2)), Some(AgentId(4)), Some(AgentId(7))]
+        );
+        // 子诏令照常持写权；汇总在子诏令之后，内容附各份回奏，且只留只读工具。
+        let jobs = planner.0.lock().unwrap().clone();
+        assert_eq!(jobs.len(), 3);
+        assert!(
+            jobs[..2]
+                .iter()
+                .all(|(_, tools)| tools.contains(&Capability::WriteFile))
+        );
+        let (summary, tools) = &jobs[2];
+        assert!(summary.starts_with("原诏令：查全库"), "{summary}");
+        assert!(
+            summary.contains("子诏令 #3（") && summary.contains("办妥：查 runtime"),
+            "{summary}"
+        );
+        assert_eq!(tools, &[Capability::ReadFile]);
+        assert_eq!(execution_usage(court.task(parent).unwrap()).total(), 0);
+
+        // 御定分办，撤销原诏令时子诏令一并撤销。
+        let next = session
+            .issue(Department::Works, "再查".into(), Seal::default())
+            .unwrap()
+            .id;
+        let plan = vec![(AgentId(4), "甲".into()), (AgentId(4), "乙".into())];
+        let subs = session.split(next, plan).unwrap();
+        assert_eq!(
+            session
+                .court()
+                .task(next)
+                .unwrap()
+                .split
+                .as_ref()
+                .unwrap()
+                .note,
+            "御定分办"
+        );
+        session.cancel(next).unwrap();
+        for id in [next].iter().chain(&subs) {
+            assert_eq!(
+                session.court().task(*id).unwrap().status,
+                TaskStatus::Cancelled
+            );
+        }
     }
 
     /// 调用一次工具后失败。

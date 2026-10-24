@@ -45,6 +45,9 @@ const HELP: &str = concat!(
   ziyuan model <官职> <模型|default>     为官职指定承办模型（同一服务地址与 Key）
   ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
+  ziyuan split <诏令ID> [官员ID:子诏令]...
+                                       多官协作：尚书（模型）把待办诏令拆给本部官员分办，或皇帝御定；
+                                       子诏令并发执行，全部结束后尚书汇总回奏
   ziyuan draft <诏令ID|all>             内阁票拟：首辅（模型）拟定承办人并附意见
   ziyuan redraft <诏令ID> <官员ID> [理由] 御笔改票：改定拟派的承办人
   ziyuan approve <诏令ID|all>           内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
@@ -142,6 +145,8 @@ enum Command {
     Examine(AgentId),
     Review(TaskId, Verdict, String),
     Diff(TaskId),
+    /// 空列表表示由尚书拆分。
+    Split(TaskId, Vec<(AgentId, String)>),
     /// `None` 表示全部已完成、未复核的诏令。
     Censor(Option<TaskId>),
     Kaocheng,
@@ -248,6 +253,19 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
         "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
         "kaocheng" => no_args(args, Command::Kaocheng)?,
+        "split" => {
+            const USAGE: &str = "用法: ziyuan split <诏令ID> [官员ID:子诏令]...";
+            let (id, parts) = args.split_first().ok_or(USAGE)?;
+            let task = TaskId(id.parse().map_err(|_| USAGE)?);
+            let plan = parts
+                .iter()
+                .map(|part| {
+                    let (agent, text) = part.split_once([':', '：']).ok_or(USAGE)?;
+                    Ok((agent_id(agent)?, text.to_owned()))
+                })
+                .collect::<Result<_, Box<dyn Error>>>()?;
+            Command::Split(task, plan)
+        }
         "censor" => match args.as_slice() {
             [all] if all == "all" => Command::Censor(None),
             [id] => Command::Censor(Some(TaskId(
@@ -359,7 +377,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     ..DEFAULT_LIMITS
                 };
                 let backend = backend.expect("立即执行时已构造后端");
-                run_tasks(session, &[edict.id], backend, limits)?;
+                run_tasks(session, Some(&[edict.id]), backend, limits)?;
             }
             drop(executor);
         }
@@ -367,7 +385,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             let _executor = lock_executor()?;
             let court = session.court();
             let tasks = court.runnable_tasks();
-            let waiting = court.open_tasks().len() - tasks.len();
+            let waiting = court.tasks().filter(|t| court.needs_approval(t)).count();
             if waiting > 0 {
                 eprintln!(
                     "另有 {waiting} 件诏令待批红（`ziyuan approve <诏令ID|all>`），本次不执行。"
@@ -376,7 +394,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             if tasks.is_empty() {
                 println!("没有未结束的诏令。");
             } else {
-                run_tasks(session, &tasks, worker_backend()?, limits)?;
+                run_tasks(session, None, worker_backend()?, limits)?;
             }
         }
         Command::Serve(port) => {
@@ -415,6 +433,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             for task in court.tasks() {
                 let name = |id: AgentId| court.agent(id).map_or("?", |a| a.name.as_str());
                 let status = match &task.status {
+                    TaskStatus::Pending if task.split.is_some() => {
+                        match court.open_subtasks(task) {
+                            0 => "待尚书汇总".to_owned(),
+                            n => format!("分办中（{n} 件未结）"),
+                        }
+                    }
                     TaskStatus::Pending if court.needs_approval(task) => {
                         let label = if task.draft.is_some() {
                             "票拟"
@@ -451,8 +475,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 } else {
                     String::new()
                 };
+                let parent = task
+                    .parent
+                    .map_or(String::new(), |p| format!("↳ 分办自 #{} ", p.0));
                 println!(
-                    "#{:<3} {} {}  —  {}{usage}",
+                    "#{:<3} {parent}{} {}  —  {}{usage}",
                     task.edict.id.0,
                     task.edict.department.label(),
                     task.edict.text,
@@ -585,6 +612,26 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
+        Command::Split(task, plan) => {
+            let subtasks = if plan.is_empty() {
+                session.plan_split(task, worker_backend()?.as_ref())?
+            } else {
+                session.split(task, plan)?
+            };
+            let court = session.court();
+            let note = court
+                .task(task)
+                .and_then(|t| t.split.as_ref())
+                .map_or("", |s| s.note.as_str());
+            println!("诏令 #{} 分办（{note}）：", task.0);
+            for id in subtasks {
+                let sub = court.task(id).expect("刚分办");
+                let worker = sub.assignee.and_then(|a| court.agent(a));
+                let name = worker.map_or("?", |a| a.name.as_str());
+                println!("  #{} → {name}：{}", id.0, sub.edict.text);
+            }
+            println!("`ziyuan run` 执行；子诏令全部结束后由尚书汇总回奏。");
+        }
         Command::Redraft(task, worker, note) => {
             session.redraft(task, worker, note)?;
             print_draft(session, task);
@@ -692,9 +739,10 @@ fn lock_executor() -> Result<ExecutorLock, Box<dyn Error>> {
 }
 
 /// 在 Tokio 上执行 `tasks` 并逐件打印结局；有未完成的诏令时返回错误。
+/// 执行 `tasks`；`None` 则反复执行全部可执行的诏令直到队列清空（分办的汇总随后接上）。
 fn run_tasks(
     session: &mut Session<EventLog>,
-    tasks: &[TaskId],
+    tasks: Option<&[TaskId]>,
     backend: Arc<dyn WorkerBackend>,
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
@@ -703,6 +751,7 @@ fn run_tasks(
         .enable_all()
         .build()?;
     let mut unfinished = 0;
+    let mut finished = Vec::new();
     let result = runtime.block_on(async {
         let cancel = CancelToken::new();
         let on_interrupt = cancel.clone();
@@ -713,21 +762,24 @@ fn run_tasks(
             }
         });
         let mut stream = StreamPrinter::new(io::stderr());
-        session
-            .run(tasks, &scheduler, &cancel, |update| match update {
-                RunUpdate::Assigned(_) => {}
-                RunUpdate::Text { task, text } => stream.text(task, text),
-                RunUpdate::Finished(report) => {
-                    stream.finish(report.edict.id);
-                    if !matches!(report.outcome, Outcome::Completed(_)) {
-                        unfinished += 1;
-                    }
-                    print_report(report);
+        let on_update = |update: RunUpdate<'_>| match update {
+            RunUpdate::Assigned(_) => {}
+            RunUpdate::Text { task, text } => stream.text(task, text),
+            RunUpdate::Finished(report) => {
+                stream.finish(report.edict.id);
+                if !matches!(report.outcome, Outcome::Completed(_)) {
+                    unfinished += 1;
                 }
-            })
-            .await
+                finished.push(report.edict.id);
+                print_report(report);
+            }
+        };
+        match tasks {
+            Some(tasks) => session.run(tasks, &scheduler, &cancel, on_update).await,
+            None => session.run_open(&scheduler, &cancel, on_update).await,
+        }
     });
-    for &task in tasks {
+    for &task in &finished {
         let entry = session.court().task(task);
         if let Some(entry) = entry.filter(|t| t.changes.is_some()) {
             println!(

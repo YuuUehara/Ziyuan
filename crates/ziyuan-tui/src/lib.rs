@@ -88,6 +88,8 @@ pub enum Message {
     RunDone(Option<String>),
     /// 后台内阁票拟结束：拟派的官员，或错误。
     Drafted(TaskId, Result<AgentId, String>),
+    /// 后台尚书分办结束：子诏令数，或错误。
+    Split(TaskId, Result<usize, String>),
     /// 后台都察院复核结束：结论（背书/弹劾），或错误。
     Censured(TaskId, Result<&'static str, String>),
 }
@@ -263,6 +265,13 @@ impl App {
                     Outcome::NotStarted => {}
                 }
             }
+            Message::Split(task, result) => {
+                self.reload();
+                match result {
+                    Ok(n) => self.info(format!("诏令 #{} 已分办为 {n} 件（按 r 执行）", task.0)),
+                    Err(e) => self.error(format!("分办失败：{e}")),
+                }
+            }
             Message::Drafted(task, result) => {
                 self.reload();
                 match result {
@@ -358,6 +367,7 @@ impl App {
             }
             KeyCode::Char('t') => self.start_draft(task),
             KeyCode::Char('i') => self.start_censor(task),
+            KeyCode::Char('f') => self.start_split(task),
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
@@ -607,6 +617,21 @@ impl App {
             .collect()
     }
 
+    /// 在阻塞线程中请尚书分办（会等待模型返回），结果经消息送回。
+    fn start_split(&mut self, task: TaskId) {
+        self.info(format!("诏令 #{} 尚书分办中…", task.0));
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| s.plan_split(task, backend.as_ref()))
+                .map(|subtasks| subtasks.len())
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Split(task, result));
+        });
+    }
+
     /// 在阻塞线程中请都察院复核（会等待御史的模型返回），结果经消息送回。
     fn start_censor(&mut self, task: TaskId) {
         self.info(format!("诏令 #{} 都察院复核中…", task.0));
@@ -836,8 +861,12 @@ impl App {
             .iter()
             .map(|task| {
                 let (label, style) = status_badge(self.court(), task);
+                let indent = if task.parent.is_some() { "↳" } else { "" };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("#{:<3}", task.edict.id.0), Style::new().dim()),
+                    Span::styled(
+                        format!("#{:<3}{indent}", task.edict.id.0),
+                        Style::new().dim(),
+                    ),
                     Span::styled(format!("{:<6}", label), style),
                     Span::raw(format!(
                         " {} {}",
@@ -916,6 +945,30 @@ impl App {
             status_line.push(Span::raw(format!("  承办 {}", name(w))));
         }
         lines.push(Line::from(status_line));
+        if let Some(parent) = task.parent {
+            lines.push(Line::from(vec![
+                label("分办"),
+                Span::raw(format!("自诏令 #{}", parent.0)),
+            ]));
+        }
+        if let Some(split) = &task.split {
+            lines.push(Line::from(vec![
+                label("分办"),
+                Span::raw(split.note.clone()),
+            ]));
+            for id in &split.subtasks {
+                let Some(sub) = court.task(*id) else {
+                    continue;
+                };
+                let (badge, style) = status_badge(court, sub);
+                let who = sub.handler().or(sub.assignee).map_or("?".to_owned(), name);
+                lines.push(Line::from(vec![
+                    Span::raw(format!("  #{} ", id.0)),
+                    Span::styled(badge, style),
+                    Span::raw(format!(" {who}：{}", sub.edict.text)),
+                ]));
+            }
+        }
         if task.usage.total() > 0 || task.tool_calls > 0 {
             lines.push(Line::from(vec![
                 label("用量"),
@@ -1178,6 +1231,7 @@ impl App {
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
                 ("w/u", "准奏/驳回改动"),
+                ("f", "分办"),
                 ("i", "复核"),
                 ("K", "考成"),
                 ("g", "改制"),
@@ -1355,6 +1409,10 @@ fn status_badge(court: &Court, task: &Task) -> (String, Style) {
         );
     }
     match &task.status {
+        TaskStatus::Pending if task.split.is_some() => match court.open_subtasks(task) {
+            0 => ("待汇总".into(), Style::new().fg(Color::Yellow)),
+            _ => ("分办中".into(), Style::new().fg(Color::Yellow)),
+        },
         TaskStatus::Pending => ("待办".into(), Style::new().fg(Color::Gray)),
         TaskStatus::Assigned(_) => ("执行中".into(), Style::new().fg(Color::Yellow).bold()),
         TaskStatus::Completed { .. } => match &task.review {

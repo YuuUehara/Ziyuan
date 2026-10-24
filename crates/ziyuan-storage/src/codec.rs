@@ -1,7 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
+    GovernanceMode, Office, Seal, Subtask, TaskId, TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -122,6 +122,31 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tCHANGES\t{}\t{}", task.0, entries.join(","))
         }
         ChangesApplied { task } => format!("v1\tAPPLIED\t{}", task.0),
+        // 子诏令为 `ID:承办者:内容hex`，以逗号分隔。
+        EdictSplit {
+            task,
+            subtasks,
+            note,
+            model,
+            usage,
+        } => {
+            let parts: Vec<_> = subtasks
+                .iter()
+                .map(|s| format!("{}:{}:{}", s.id.0, s.worker.0, to_hex(&s.text)))
+                .collect();
+            let line = format!(
+                "v1\tSPLIT\t{}\t{}\t{}\t{}\t{}",
+                task.0,
+                parts.join(","),
+                to_hex(note),
+                usage.input,
+                usage.output
+            );
+            match model {
+                Some(model) => format!("{line}\t{}", to_hex(model)),
+                None => line,
+            }
+        }
         CensorReported {
             task,
             censor,
@@ -314,6 +339,31 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "APPLIED" => ChangesApplied {
             task: TaskId(id(2)?),
         },
+        "SPLIT" => EdictSplit {
+            task: TaskId(id(2)?),
+            subtasks: split_list(field(3)?)
+                .map(|entry| -> Result<Subtask, String> {
+                    let [sub, worker, text] = entry.split(':').collect::<Vec<_>>()[..] else {
+                        return Err("子诏令字段不合法".into());
+                    };
+                    let number = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
+                    Ok(Subtask {
+                        id: TaskId(number(sub)?),
+                        worker: AgentId(number(worker)?),
+                        text: from_hex(text)?,
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+            note: from_hex(field(4)?)?,
+            usage: TokenUsage {
+                input: id(5)?,
+                output: id(6)?,
+            },
+            model: match parts.len() {
+                7 => None,
+                _ => Some(from_hex(field(7)?)?),
+            },
+        },
         "CENSURED" => CensorReported {
             task: TaskId(id(2)?),
             censor: AgentId(id(3)?),
@@ -368,6 +418,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         | TaskCancelled { .. } => 3,
         ChangesProposed { .. } => 4,
         CensorReported { model: None, .. } => 11,
+        EdictSplit { model: None, .. } => 7,
+        EdictSplit { .. } => 8,
         CensorReported { .. } => 12,
         OfficeModelSet { model: None, .. } | OfficeCeilingSet { ceiling: None, .. } => 3,
         OfficialAppointed { .. }
@@ -470,6 +522,34 @@ mod tests {
                 ],
             },
             CourtEvent::ChangesApplied { task },
+            CourtEvent::EdictSplit {
+                task,
+                subtasks: vec![
+                    Subtask {
+                        id: TaskId(8),
+                        worker: AgentId(4),
+                        text: "查 storage：\t,一".into(),
+                    },
+                    Subtask {
+                        id: TaskId(9),
+                        worker: AgentId(7),
+                        text: "查 runtime".into(),
+                    },
+                ],
+                note: "分而治之".into(),
+                model: Some("pro".into()),
+                usage: TokenUsage {
+                    input: 5,
+                    output: 1,
+                },
+            },
+            CourtEvent::EdictSplit {
+                task,
+                subtasks: vec![],
+                note: String::new(),
+                model: None,
+                usage: TokenUsage::default(),
+            },
             CourtEvent::CensorReported {
                 task,
                 censor: AgentId(7),

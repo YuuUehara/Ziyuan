@@ -122,4 +122,14 @@ CID="$("$BIN" recruit justice | grep -o '#[0-9]*' | head -1 | tr -d '#')"
 "$BIN" tasks | grep -q '御史弹劾'
 "$BIN" kaocheng | grep -q '天子亲自考成'
 "$BIN" examine "$CID" | grep -q '考成：无事可考'
+# 多官协作：演示后端无从拆分；御定分办后子诏令先办，尚书汇总
+SID="$("$BIN" edict --queue '会办全库' | grep -o '#[0-9]*' | head -1 | tr -d '#')"
+if "$BIN" split "$SID" > /dev/null 2>&1; then echo '演示后端不应能拆分' >&2; exit 1; fi
+CLERK="$("$BIN" officials | grep '工部郎中' | head -1 | grep -o '^#[0-9]*' | tr -d '#')"
+"$BIN" split "$SID" "$CLERK:查甲" "$CLERK:查乙" | grep -q '御定分办'
+"$BIN" tasks | grep -q "分办自 #$SID"
+"$BIN" tasks | grep "^#$SID " | grep -q '分办中（2 件未结）'
+"$BIN" run > /dev/null
+"$BIN" tasks | grep "^#$SID " | grep -q '已完成（.*），'
+"$BIN" history | grep -q "诏令 #$SID 分办"
 echo 'ZiYuan smoke test PASS'
