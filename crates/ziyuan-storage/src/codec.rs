@@ -1,7 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Seal, Subtask, TaskId, TokenUsage, Verdict,
+    GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -147,6 +147,24 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
                 Some(model) => format!("{line}\t{}", to_hex(model)),
                 None => line,
             }
+        }
+        // 发言为 `官员ID;官职;内容hex;输入;输出;模型hex（无模型为空）`，以逗号分隔。
+        CourtDebated { task, speeches } => {
+            let parts: Vec<_> = speeches
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{};{};{};{};{};{}",
+                        s.speaker.0,
+                        s.office.code(),
+                        to_hex(&s.text),
+                        s.usage.input,
+                        s.usage.output,
+                        s.model.as_deref().map(to_hex).unwrap_or_default()
+                    )
+                })
+                .collect();
+            format!("v1\tDEBATED\t{}\t{}", task.0, parts.join(","))
         }
         CensorReported {
             task,
@@ -370,6 +388,32 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
                 _ => Some(from_hex(field(7)?)?),
             },
         },
+        "DEBATED" => CourtDebated {
+            task: TaskId(id(2)?),
+            speeches: split_list(field(3)?)
+                .map(|entry| -> Result<Speech, String> {
+                    let [speaker, office, text, input, output, model] =
+                        entry.split(';').collect::<Vec<_>>()[..]
+                    else {
+                        return Err("廷议发言字段不合法".into());
+                    };
+                    let number = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
+                    Ok(Speech {
+                        speaker: AgentId(number(speaker)?),
+                        office: office.parse::<Office>().map_err(|e| e.to_string())?,
+                        text: from_hex(text)?,
+                        usage: TokenUsage {
+                            input: number(input)?,
+                            output: number(output)?,
+                        },
+                        model: match model {
+                            "" => None,
+                            model => Some(from_hex(model)?),
+                        },
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+        },
         "CENSURED" => CensorReported {
             task: TaskId(id(2)?),
             censor: AgentId(id(3)?),
@@ -423,7 +467,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         | ChangesApplied { .. }
         | ChangesDiscarded { .. }
         | TaskCancelled { .. } => 3,
-        ChangesProposed { .. } => 4,
+        ChangesProposed { .. } | CourtDebated { .. } => 4,
         CensorReported { model: None, .. } => 11,
         EdictSplit { model: None, .. } => 7,
         EdictSplit { .. } => 8,
@@ -558,6 +602,28 @@ mod tests {
                 note: String::new(),
                 model: None,
                 usage: TokenUsage::default(),
+            },
+            CourtEvent::CourtDebated {
+                task,
+                speeches: vec![
+                    Speech {
+                        speaker: AgentId(2),
+                        office: Office::Minister(Department::Works),
+                        text: "臣以为；不可：\t,急".into(),
+                        model: Some("pro".into()),
+                        usage: TokenUsage {
+                            input: 9,
+                            output: 3,
+                        },
+                    },
+                    Speech {
+                        speaker: AgentId(5),
+                        office: Office::Censor,
+                        text: String::new(),
+                        model: None,
+                        usage: TokenUsage::default(),
+                    },
+                ],
             },
             CourtEvent::CensorReported {
                 task,

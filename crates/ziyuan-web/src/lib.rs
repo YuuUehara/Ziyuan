@@ -26,7 +26,8 @@ use ziyuan_app::{
     kaocheng_grade, kaocheng_report, render_diff,
 };
 use ziyuan_core::{
-    AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
+    AgentId, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId, TokenUsage,
+    Verdict,
 };
 use ziyuan_governance::{ChangeState, Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -78,6 +79,7 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/redraft", post(redraft))
         .route("/tasks/{id}/censor", post(censor))
         .route("/tasks/{id}/split", post(split))
+        .route("/tasks/{id}/debate", post(debate))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
         .route("/tasks/{id}/changes/discard", post(discard_changes))
         .route("/reform", post(reform))
@@ -531,6 +533,44 @@ async fn split(
     .await
 }
 
+/// 廷议（会等待全部发言）：每段发言以 SSE `speech` 事件实时推送，结束后整场记入事件簿。
+/// 请求体可给 `rounds`（1–3，默认 2）与 `members`（官员 ID，默认宰辅、本部长官与御史）。
+async fn debate(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    let rounds = body["rounds"].as_u64().unwrap_or(2) as usize;
+    let members: Vec<AgentId> = body["members"]
+        .as_array()
+        .map(|ids| ids.iter().filter_map(Value::as_u64).map(AgentId).collect())
+        .unwrap_or_default();
+    let live = app.clone();
+    app.mutate(move |s| {
+        let stopped = s.debate(
+            TaskId(id),
+            &members,
+            rounds,
+            backend.as_ref(),
+            |agent, speech| {
+                live.emit(
+                    "speech",
+                    json!({
+                        "task": id,
+                        "name": agent.name,
+                        "office": speech.office.label(),
+                        "persona": Persona::of(agent.id).label(),
+                        "text": speech.text,
+                    }),
+                )
+            },
+        )?;
+        Ok(json!({ "stopped": stopped }))
+    })
+    .await
+}
+
 /// 都察院复核（会等待御史的模型返回）。
 async fn censor(
     State(app): State<AppState>,
@@ -727,6 +767,7 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
             json!({
                 "id": a.id.0,
                 "name": a.name,
+                "persona": Persona::of(a.id).label(),
                 "speciality": { "code": a.speciality.code(), "label": a.speciality.label() },
                 "office": court.office_of(a.id).map(|o| office_json(o, court.mode())),
                 "purged": court.is_purged(a.id),
@@ -813,6 +854,13 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                         },
                     })).collect::<Vec<_>>(),
                 })),
+                "debates": t.debates.iter().map(|speeches| speeches.iter().map(|sp| json!({
+                    "name": name(sp.speaker),
+                    "office": sp.office.label(),
+                    "persona": Persona::of(sp.speaker).label(),
+                    "text": sp.text,
+                    "model": sp.model,
+                })).collect::<Vec<_>>()).collect::<Vec<_>>(),
                 "censure": t.censure.as_ref().map(|c| json!({
                     "verdict": c.verdict.code(),
                     "label": c.verdict.label(),
@@ -1082,6 +1130,21 @@ mod tests {
         let body = json!({ "department": "works", "text": "查 src", "scope": ["src"], "tools": ["search_code"] });
         let (status, issued) = call(&base, "/edicts", t, Some(body)).await;
         assert_eq!((status, issued["id"].as_u64()), (200, Some(1)));
+        // 演示后端不能廷议：报错，不留纪要。官员带人格标签。
+        let (status, error) = call(&base, "/tasks/1/debate", t, Some(json!({}))).await;
+        assert_eq!(status, 400, "{error}");
+        assert!(
+            error["error"].as_str().unwrap().contains("廷议未成"),
+            "{error}"
+        );
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(state["tasks"][0]["debates"], json!([]));
+        assert!(
+            state["officials"][0]["persona"]
+                .as_str()
+                .unwrap()
+                .contains('·')
+        );
 
         // 另一个进程（此处为测试本身）持有执行者锁时拒绝执行。
         let held = EventLog::new(&root).try_lock_executor().unwrap().unwrap();

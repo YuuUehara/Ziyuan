@@ -221,6 +221,12 @@
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
   .split { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid var(--gold); background: #fffaf0; }
   .split ul { margin: 4px 0 0; padding-left: 18px; }
+  .debate { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #c9b8d8; background: #f8f4fb; }
+  .debate summary { cursor: pointer; }
+  .debate p { margin: 6px 0 0; white-space: pre-wrap; }
+  .debate .who { font-weight: 600; color: #4b2a63; }
+  .debate.live { border-style: dashed; }
+  .persona { color: var(--muted); font-size: 12px; }
   .censure { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #b9c7d8; background: #f2f6fb; white-space: pre-wrap; }
   .censure.impeach { border-color: #e9b4ae; background: #fdf1ef; }
   .censure .ev { color: var(--muted); font-size: 12px; }
@@ -419,6 +425,7 @@ const fmt = (n) => Number(n).toLocaleString("zh-CN");
 
 let state = null;
 const streams = {};   // 诏令 ID → 执行中流式文本
+const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
 
 async function api(path, body) {
   const response = await fetch("api" + path, {
@@ -522,6 +529,15 @@ function taskHtml(t) {
     const state = t.status === "pending" ? (s.open ? `${s.open} 件未结` : "待尚书汇总") : "已汇总";
     body += `<div class="split"><b>多官分办</b>　${esc(s.note)}（${state}）<ul>${rows}</ul></div>`;
   }
+  const speechHtml = (sp) =>
+    `<p><span class="who">${esc(sp.office)}${esc(sp.name || "?")}</span> <span class="persona">${esc(sp.persona)}</span>：${esc(sp.text)}</p>`;
+  if (debating[t.id]) {
+    body += `<div class="debate live"><b>廷议进行中…</b>${debating[t.id].map(speechHtml).join("")}</div>`;
+  } else if (t.debates.length) {
+    const last = t.debates[t.debates.length - 1];
+    const earlier = t.debates.length > 1 ? `，前 ${t.debates.length - 1} 场从略` : "";
+    body += `<details class="debate" open><summary><b>廷议纪要</b>　第 ${t.debates.length} 场，${last.length} 段发言${earlier}；供票拟与承办参考，不改派工与玉玺</summary>${last.map(speechHtml).join("")}</details>`;
+  }
   if (t.censure) {
     const c = t.censure;
     body += `<div class="censure ${c.verdict}"><b>都察院${esc(c.label)}</b>　左都御史${esc(c.censor || "?")}${c.model ? `（${esc(c.model)}）` : ""}：${esc(c.note)}
@@ -543,7 +559,9 @@ function taskHtml(t) {
       : t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
     const split = t.status === "pending" && !t.split && !t.parent
       ? `<button class="small" data-split="${t.id}" title="尚书把此诏令拆给本部官员分办，事后汇总">尚书分办</button>` : "";
-    actions = `<div class="review-row"><span style="flex:1"></span>${split}${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
+    const debate = t.status === "pending" && !debating[t.id]
+      ? `<button class="small" data-debate="${t.id}" title="宰辅、本部长官与御史按各自性格文风轮流辩论两轮">廷议</button>` : "";
+    actions = `<div class="review-row"><span style="flex:1"></span>${debate}${split}${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
   }
   if (t.changes) {
     const c = t.changes;
@@ -627,7 +645,7 @@ function render() {
       : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.filter((of) => !of.department || of.department === o.speciality.code).map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
          <button class="small shrink" data-appoint="${o.id}">任命</button>${purge}</div>`;
     const usage = o.record.usage.input + o.record.usage.output;
-    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}</td><td>${esc(o.speciality.label)}</td>
+    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}<br><span class="persona">${esc(o.persona)}</span></td><td>${esc(o.speciality.label)}</td>
       <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
       <td class="record">${o.model ? esc(o.model) : '<span class="hint">演示</span>'}${o.ceiling ? `<br><span class="hint">上限 ${esc(o.ceiling)}</span>` : ""}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.cost) : "—"}</td><td>${action}</td></tr>`;
@@ -753,6 +771,14 @@ document.addEventListener("click", (event) => {
     el.disabled = true;
     el.textContent = "尚书拆分中…";
     act(api(`/tasks/${d.split}/split`, {})).then((r) => r && toast(`诏令 #${d.split} 已分办为 ${r.subtasks.length} 件`));
+  } else if (d.debate) {
+    const id = d.debate;
+    debating[id] = [];
+    preserve(render);
+    api(`/tasks/${id}/debate`, { rounds: 2 })
+      .then((r) => toast(r.stopped ? `廷议中止：${r.stopped}` : `诏令 #${id} 廷议毕，纪要已记入事件簿`, !!r.stopped))
+      .catch((e) => toast(e.message, true))
+      .finally(() => { delete debating[id]; refresh(); });
   } else if (d.censor) {
     el.disabled = true;
     el.textContent = "御史复核中…";
@@ -794,6 +820,12 @@ function connect() {
     const { task } = JSON.parse(event.data);
     delete streams[task];
     scheduleRefresh();
+  });
+  source.addEventListener("speech", (event) => {
+    const sp = JSON.parse(event.data);
+    if (!debating[sp.task]) return;
+    debating[sp.task].push(sp);
+    preserve(render);
   });
   source.addEventListener("run_error", (event) => toast(JSON.parse(event.data).error, true));
 }

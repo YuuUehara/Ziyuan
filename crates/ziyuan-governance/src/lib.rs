@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
     Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Seal, Subtask, TaskId, TokenUsage, Verdict,
+    GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -75,6 +75,10 @@ pub enum GovernanceError {
     RetreatUnchanged(bool),
     /// 皇帝修道期间，批红与评定由司礼监代批，须先回朝。
     InRetreat,
+    /// 廷议须在诏令待办时进行。
+    CannotDebate(TaskId),
+    /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
+    InvalidDebate(String),
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -156,6 +160,8 @@ impl fmt::Display for GovernanceError {
             Self::InvalidSplit(why) => write!(f, "分办方案不合法：{why}"),
             Self::RetreatUnchanged(true) => f.write_str("陛下已在西苑修道"),
             Self::RetreatUnchanged(false) => f.write_str("陛下本在朝中"),
+            Self::CannotDebate(id) => write!(f, "诏令 #{} 不能廷议：须尚未执行", id.0),
+            Self::InvalidDebate(why) => write!(f, "廷议未成：{why}"),
             Self::InRetreat => f.write_str(
                 "陛下正在西苑修道，批红与评定由司礼监代批。要亲自处置请先 `ziyuan return` 回朝",
             ),
@@ -212,6 +218,8 @@ pub struct Task {
     pub split: Option<Split>,
     /// 批红或评定是皇帝修道期间由司礼监代批的。
     pub proxied: bool,
+    /// 历次廷议的发言（用量已计入 `usage`）；承办时附上最近一次的纪要。
+    pub debates: Vec<Vec<Speech>>,
 }
 
 /// 分办方案。
@@ -420,6 +428,7 @@ impl Court {
                         assignee: None,
                         split: None,
                         proxied: false,
+                        debates: Vec::new(),
                     },
                 );
             }
@@ -539,6 +548,7 @@ impl Court {
                             assignee: Some(sub.worker),
                             split: None,
                             proxied: false,
+                            debates: Vec::new(),
                         },
                     );
                 }
@@ -550,6 +560,14 @@ impl Court {
                     model: model.clone(),
                     usage: *usage,
                 });
+            }
+            CourtEvent::CourtDebated { task, speeches } => {
+                self.propose_debate(*task, speeches)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                for speech in speeches {
+                    entry.usage += speech.usage;
+                }
+                entry.debates.push(speeches.clone());
             }
             CourtEvent::CensorReported {
                 task,
@@ -954,6 +972,40 @@ impl Court {
             }
             GovernanceMode::DirectRule => None,
         }
+    }
+
+    /// 廷议可否：诏令待办，发言者在发言时担任所记官职。
+    pub fn propose_debate(&self, task: TaskId, speeches: &[Speech]) -> Result<(), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if entry.status != TaskStatus::Pending {
+            return Err(GovernanceError::CannotDebate(task));
+        }
+        if speeches.is_empty() {
+            return Err(GovernanceError::InvalidDebate("没有发言".into()));
+        }
+        for speech in speeches {
+            if self.appointments.get(&speech.speaker) != Some(&speech.office) {
+                return Err(GovernanceError::NotAppointed(speech.speaker));
+            }
+        }
+        Ok(())
+    }
+
+    /// 默认的廷议人选（至多四位）：协调者（丞相或首辅）、本部长官、左都御史，不足再由本部官员补上。
+    pub fn debate_candidates(&self, department: Department) -> Vec<(&Agent, Office)> {
+        let mut chosen: Vec<(&Agent, Office)> = Vec::new();
+        let censor = self.censor().map(|a| (a, Office::Censor));
+        let staff = self.draft_candidates(department);
+        let picks = [self.coordinator(), self.department_head(department), censor];
+        for pick in picks.into_iter().flatten().chain(staff) {
+            if chosen.len() < 4 && chosen.iter().all(|(a, _)| a.id != pick.0.id) {
+                chosen.push(pick);
+            }
+        }
+        chosen
     }
 
     /// 一键朱元璋：罢中书省，株连百官——丞相与全部在任官员革职削籍，改为废相亲政。

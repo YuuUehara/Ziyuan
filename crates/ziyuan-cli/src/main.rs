@@ -12,7 +12,9 @@ use ziyuan_app::{
     ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, estimate_cost,
     kaocheng_grade, kaocheng_report, render_diff, seal_note,
 };
-use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_core::{
+    AgentId, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId, Verdict,
+};
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
 use ziyuan_runtime::{
@@ -50,6 +52,9 @@ const HELP: &str = concat!(
   ziyuan split <诏令ID> [官员ID:子诏令]...
                                        多官协作：尚书（模型）把待办诏令拆给本部官员分办，或皇帝御定；
                                        子诏令并发执行，全部结束后尚书汇总回奏
+  ziyuan debate <诏令ID> [--rounds 2] [官员ID]...
+                                       廷议：数位在任官员（默认宰辅、本部长官、御史）按各自性格文风
+                                       就待办诏令轮流辩论；纪要供票拟与承办参考，不改变派工与玉玺
   ziyuan draft <诏令ID|all>             内阁票拟：首辅（模型）拟定承办人并附意见
   ziyuan redraft <诏令ID> <官员ID> [理由] 御笔改票：改定拟派的承办人
   ziyuan approve <诏令ID|all>           内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
@@ -151,6 +156,8 @@ enum Command {
     Diff(TaskId),
     /// 空列表表示由尚书拆分。
     Split(TaskId, Vec<(AgentId, String)>),
+    /// 诏令、与议官员（空为默认人选）、轮数。
+    Debate(TaskId, Vec<AgentId>, usize),
     /// `None` 表示全部已完成、未复核的诏令。
     Censor(Option<TaskId>),
     Kaocheng,
@@ -272,6 +279,23 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 .collect::<Result<_, Box<dyn Error>>>()?;
             Command::Split(task, plan)
         }
+        "debate" => {
+            const USAGE: &str = "用法: ziyuan debate <诏令ID> [--rounds 1-3] [官员ID]...";
+            let (id, rest) = args.split_first().ok_or(USAGE)?;
+            let task = TaskId(id.parse().map_err(|_| USAGE)?);
+            let mut rounds = 2;
+            let mut members = Vec::new();
+            let mut rest = rest.iter();
+            while let Some(arg) = rest.next() {
+                if arg == "--rounds" {
+                    let n = rest.next().and_then(|n| n.parse().ok());
+                    rounds = n.filter(|n| (1..=3).contains(n)).ok_or(USAGE)?;
+                } else {
+                    members.push(agent_id(arg)?);
+                }
+            }
+            Command::Debate(task, members, rounds)
+        }
         "censor" => match args.as_slice() {
             [all] if all == "all" => Command::Censor(None),
             [id] => Command::Censor(Some(TaskId(
@@ -339,11 +363,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     None => "未任官职".into(),
                 };
                 println!(
-                    "#{:<3} {:<6} {:<18} {} 模型 {} (完成 {} 件)",
+                    "#{:<3} {:<6} {:<18} {} {} 模型 {} (完成 {} 件)",
                     agent.id.0,
                     agent.name,
                     office,
                     agent.speciality.label(),
+                    Persona::of(agent.id).label(),
                     model,
                     court.recorded_completions(agent.id)
                 );
@@ -495,8 +520,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 let parent = task
                     .parent
                     .map_or(String::new(), |p| format!("↳ 分办自 #{} ", p.0));
+                let debated = match task.debates.len() {
+                    0 => String::new(),
+                    n => format!("（廷议 {n} 场）"),
+                };
                 println!(
-                    "#{:<3} {parent}{} {}  —  {}{usage}",
+                    "#{:<3} {parent}{} {}  —  {}{debated}{usage}",
                     task.edict.id.0,
                     task.edict.department.label(),
                     task.edict.text,
@@ -638,6 +667,25 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
+        Command::Debate(task, members, rounds) => {
+            let backend = worker_backend()?;
+            println!("诏令 #{} 廷议：", task.0);
+            let stopped =
+                session.debate(task, &members, rounds, backend.as_ref(), |agent, speech| {
+                    println!(
+                        "【{}{}·{}】{}",
+                        speech.office.label(),
+                        agent.name,
+                        Persona::of(agent.id).label(),
+                        speech.text
+                    );
+                    let _ = io::stdout().flush();
+                })?;
+            if let Some(reason) = stopped {
+                println!("廷议中止：{reason}；已有发言照记。");
+            }
+            println!("纪要已记入事件簿，票拟与承办时附上，供参考；派工与玉玺不变。");
+        }
         Command::Split(task, plan) => {
             let subtasks = if plan.is_empty() {
                 session.plan_split(task, worker_backend()?.as_ref())?

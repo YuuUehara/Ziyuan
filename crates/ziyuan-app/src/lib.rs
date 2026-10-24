@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use ziyuan_core::{
-    AgentId, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange, GovernanceMode,
-    Office, Price, Seal, TaskId, TokenUsage, Verdict,
+    Agent, AgentId, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
+    GovernanceMode, Office, Persona, Price, Seal, Speech, TaskId, TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{
@@ -224,9 +224,10 @@ impl<S: EventStore> Session<S> {
             .map(str::to_owned);
         let system = format!(
             "你是紫垣朝廷{}{}，为皇帝票拟：从候选官员中拟定一位承办下面这件诏令，并简述理由。\n\
-             只能从候选名单中选。回复第一行必须是「拟派：#官员ID」，其后用一两句话说明理由，不超过 100 字。",
+             只能从候选名单中选。回复第一行必须是「拟派：#官员ID」，其后用一两句话说明理由，不超过 100 字。\n{}",
             office.label(),
-            secretary.name
+            secretary.name,
+            Persona::of(secretary.id).prompt()
         );
         let mut user = format!(
             "诏令（{}）：{}\n玉玺：{}\n候选：\n",
@@ -242,6 +243,9 @@ impl<S: EventStore> Session<S> {
                 office.label(),
                 describe_record(&court.service_record(agent.id))
             ));
+        }
+        if let Some(minutes) = debate_minutes(court, entry) {
+            user.push_str(&format!("\n{minutes}"));
         }
         let (worker, note, model, usage) = match backend.complete(model.as_deref(), &system, &user)
         {
@@ -312,8 +316,9 @@ impl<S: EventStore> Session<S> {
              依据诏令、回奏、工具调用记录与证据核验，判断回奏是否属实、是否办成了诏令所命之事。\n\
              回复第一行必须是「背书」或「弹劾」二字之一，其后用不超过 150 字说明理由。\n\
              证据核验由程序完成、确凿可信：查无实据的引用要分辨是捏造，还是官员如实说明其不存在；\
-             测试未通过而回奏称已办成者，应予弹劾。",
-            censor.name
+             测试未通过而回奏称已办成者，应予弹劾。\n{}",
+            censor.name,
+            Persona::of(censor.id).prompt()
         );
         let mut user = format!(
             "诏令 #{}（{}）：{}\n玉玺：{}\n承办：{handler}\n\n回奏：\n{}\n\n工具调用：\n",
@@ -527,6 +532,133 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 廷议：`participants`（为空则取 [`Court::debate_candidates`]）就一件待办诏令轮流发言
+    /// `rounds` 轮（1–3），每人以其官职所配模型（否则默认模型）和人格发言，后发言者看得到此前的发言。
+    /// 每段发言经 `on_speech` 报告，结束后整场记入事件簿；纪要随后附在票拟与承办的提示中，
+    /// 但不改变派工与玉玺。阻塞直到全部发言完毕。
+    ///
+    /// 有人未能发言（模型出错）时廷议中止：已有的发言照记，返回 `Some(原因)`；
+    /// 一段发言也没有（含演示后端）则报错，不留记录。
+    pub fn debate(
+        &mut self,
+        task: TaskId,
+        participants: &[AgentId],
+        rounds: usize,
+        backend: &dyn WorkerBackend,
+        mut on_speech: impl FnMut(&Agent, &Speech),
+    ) -> Result<Option<String>, AppError> {
+        self.reload()?;
+        let court = &self.court;
+        let entry = court
+            .task(task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if entry.status != TaskStatus::Pending {
+            return Err(GovernanceError::CannotDebate(task).into());
+        }
+        let members: Vec<(Agent, Office)> = if participants.is_empty() {
+            let chosen = court.debate_candidates(entry.edict.department);
+            chosen.into_iter().map(|(a, o)| (a.clone(), o)).collect()
+        } else {
+            let mut members = Vec::new();
+            for &id in participants {
+                let agent = court.agent(id).ok_or(GovernanceError::UnknownAgent(id))?;
+                let office = court
+                    .office_of(id)
+                    .ok_or(GovernanceError::NotAppointed(id))?;
+                if members.iter().any(|(a, _): &(Agent, Office)| a.id == id) {
+                    let why = format!("官员 #{} 重复列名", id.0);
+                    return Err(GovernanceError::InvalidDebate(why).into());
+                }
+                members.push((agent.clone(), office));
+            }
+            members
+        };
+        if !(2..=6).contains(&members.len()) {
+            let why = format!("须有 2–6 位在任官员与议，现有 {} 位", members.len());
+            return Err(GovernanceError::InvalidDebate(why).into());
+        }
+        let mut header = format!(
+            "诏令 #{}（{}）：{}\n玉玺：{}\n与议：\n",
+            task.0,
+            entry.edict.department.label(),
+            entry.edict.text,
+            entry.edict.seal
+        );
+        for (agent, office) in &members {
+            header.push_str(&format!(
+                "#{} {} {}\n",
+                agent.id.0,
+                agent.name,
+                office.label()
+            ));
+        }
+        let mut speeches: Vec<Speech> = Vec::new();
+        let mut transcript = String::new();
+        let mut stopped = None;
+        'rounds: for round in 1..=rounds.clamp(1, 3) {
+            for (agent, office) in &members {
+                let model = court
+                    .model_of(agent.id)
+                    .or(backend.model_name())
+                    .map(str::to_owned);
+                let system = format!(
+                    "你是紫垣朝廷{}{}，正与同僚就下面这件诏令廷议。{}\n\
+                     可以赞成、反对或补充同僚的意见，须针对具体论点、言之有物；不要复述诏令，不要客套，\
+                     不超过 150 字。廷议只供皇帝参考：不决定由谁承办，也不授予任何权限。",
+                    office.label(),
+                    agent.name,
+                    Persona::of(agent.id).prompt()
+                );
+                let turn = if transcript.is_empty() {
+                    "你第一个发言。".to_owned()
+                } else {
+                    format!("已有发言：\n{transcript}\n")
+                };
+                let user = format!(
+                    "{header}\n{turn}现在是第 {round} 轮，轮到你（#{} {}）发言。",
+                    agent.id.0, agent.name
+                );
+                match backend.complete(model.as_deref(), &system, &user) {
+                    Ok((reply, usage)) => {
+                        let text = strip_own_label(reply.trim(), &agent.name);
+                        let text: String = text.chars().take(600).collect();
+                        transcript.push_str(&format!(
+                            "【第 {round} 轮】#{} {}（{}）：{text}\n",
+                            agent.id.0,
+                            agent.name,
+                            office.label()
+                        ));
+                        let speech = Speech {
+                            speaker: agent.id,
+                            office: *office,
+                            text,
+                            model: model.clone(),
+                            usage,
+                        };
+                        on_speech(agent, &speech);
+                        speeches.push(speech);
+                    }
+                    Err(e) => {
+                        stopped = Some(format!("{}{}未能发言（{e}）", office.label(), agent.name));
+                        break 'rounds;
+                    }
+                }
+            }
+        }
+        if speeches.is_empty() {
+            let why = stopped.unwrap_or_default();
+            return Err(GovernanceError::InvalidDebate(why).into());
+        }
+        self.commit(|court| {
+            court.propose_debate(task, &speeches)?;
+            Ok(vec![CourtEvent::CourtDebated {
+                task,
+                speeches: speeches.clone(),
+            }])
+        })?;
+        Ok(stopped)
+    }
+
     /// 御定分办：皇帝亲自把待办诏令拆给本部官员，`plan` 为 (承办者, 子诏令内容)。
     /// 返回子诏令 ID。
     pub fn split(
@@ -591,9 +723,10 @@ impl<S: EventStore> Session<S> {
             "你是紫垣朝廷{}{}，奉诏把下面这件诏令拆给本部官员分头办理，事后由你汇总回奏。\n\
              拆成 2–8 件可独立完成的子诏令，同一官员可领多件。每行一件，格式为「#官员ID：子诏令内容」；\n\
              子诏令内容要具体，写明查办的范围与要回奏的事项，不必重复官员姓名。汇总由你亲自来做，\n\
-             不要列为子诏令。最后可另起一行「说明：……」，不超过 80 字。",
+             不要列为子诏令。最后可另起一行「说明：……」，不超过 80 字。\n{}",
             office.label(),
-            minister.name
+            minister.name,
+            Persona::of(minister.id).prompt()
         );
         let mut user = format!(
             "诏令（{}）：{}\n玉玺：{}\n本部官员：\n",
@@ -729,7 +862,10 @@ impl<S: EventStore> Session<S> {
                         seal.capabilities.retain(|c| !c.is_works_only());
                         summary_prompt(&self.court, entry)
                     } else {
-                        edict.text.clone()
+                        match debate_minutes(&self.court, entry) {
+                            Some(minutes) => format!("{}\n\n{minutes}", edict.text),
+                            None => edict.text.clone(),
+                        }
                     };
                     jobs.push(Job {
                         actor,
@@ -924,7 +1060,7 @@ fn random_seed() -> u64 {
 
 // ---- 呈现：CLI、Web 与 TUI 共用的中文描述 ----
 
-/// 承办所用的 token：诏令累计用量减去票拟、拆分与复核的部分。
+/// 承办所用的 token：诏令累计用量减去票拟、拆分、复核与廷议的部分。
 fn execution_usage(task: &Task) -> TokenUsage {
     let mut usage = task.usage;
     for (extra, _) in overheads(task) {
@@ -934,12 +1070,17 @@ fn execution_usage(task: &Task) -> TokenUsage {
     usage
 }
 
-/// 承办之外的模型开销及所用模型：内阁票拟、尚书拆分、都察院复核。
-fn overheads(task: &Task) -> [(TokenUsage, Option<&str>); 3] {
+/// 承办之外的模型开销及所用模型：内阁票拟、尚书拆分、都察院复核与历次廷议发言。
+fn overheads(task: &Task) -> Vec<(TokenUsage, Option<&str>)> {
     let draft = task.draft.as_ref().map(|d| (d.usage, d.model.as_deref()));
     let split = task.split.as_ref().map(|s| (s.usage, s.model.as_deref()));
     let censure = task.censure.as_ref().map(|c| (c.usage, c.model.as_deref()));
-    [draft, split, censure].map(|o| o.unwrap_or_default())
+    let speeches = task.debates.iter().flatten();
+    [draft, split, censure]
+        .into_iter()
+        .flatten()
+        .chain(speeches.map(|s| (s.usage, s.model.as_deref())))
+        .collect()
 }
 
 /// 按各诏令实际所用的模型估算花费，如「约 0.0123 元」。`default_model` 用于未记下模型的早期诏令；
@@ -951,7 +1092,7 @@ pub fn estimate_cost<'a>(
 ) -> Option<String> {
     let mut total = None::<(f64, String)>;
     for task in tasks {
-        // 承办、票拟、拆分与复核可能用不同模型，分别计价。
+        // 承办、票拟、拆分、复核与廷议可能用不同模型，分别计价。
         let executing = (execution_usage(task), task.model.as_deref());
         for (usage, model) in std::iter::once(executing).chain(overheads(task)) {
             if usage.total() == 0 {
@@ -1351,6 +1492,29 @@ fn citations(text: &str) -> Vec<(String, Option<(usize, usize)>)> {
 }
 
 /// 尚书汇总时收到的诏令内容：原诏令与各件子诏令的结局。
+/// 模型有时照抄纪要格式，以「【第 1 轮】#4 张三（工部郎中）：」开头：去掉这段自报家门。
+fn strip_own_label<'a>(reply: &'a str, name: &str) -> &'a str {
+    let head: String = reply.chars().take(40).collect();
+    match head.find(['：', ':']) {
+        Some(end) if head[..end].contains(name) => {
+            let colon = head[end..].chars().next().expect("有冒号").len_utf8();
+            reply[end + colon..].trim_start()
+        }
+        _ => reply,
+    }
+}
+
+/// 最近一次廷议的纪要，附在票拟与承办的提示中；没有廷议则为 `None`。
+pub fn debate_minutes(court: &Court, task: &Task) -> Option<String> {
+    let speeches = task.debates.last()?;
+    let mut minutes = "廷议纪要（仅供参考，以诏令为准）：\n".to_owned();
+    for s in speeches {
+        let name = court.agent(s.speaker).map_or("?", |a| a.name.as_str());
+        minutes.push_str(&format!("{}{name}：{}\n", s.office.label(), s.text));
+    }
+    Some(minutes)
+}
+
 fn summary_prompt(court: &Court, task: &Task) -> String {
     let mut out = format!(
         "原诏令：{}\n\n此诏令已分给本部官员分头办理，各件结局如下。请核对各份回奏（可用工具抽查），\
@@ -1489,6 +1653,21 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("诏令 #{} 呈报改动：{}", task.0, paths.join("、"))
         }
         CourtEvent::ChangesApplied { task } => format!("诏令 #{} 改动准奏落盘", task.0),
+        CourtEvent::CourtDebated { task, speeches } => {
+            let mut speakers: Vec<String> = Vec::new();
+            for s in speeches {
+                let id = format!("#{}", s.speaker.0);
+                if !speakers.contains(&id) {
+                    speakers.push(id);
+                }
+            }
+            format!(
+                "诏令 #{} 廷议：{} 段发言（{}）",
+                task.0,
+                speeches.len(),
+                speakers.join("、")
+            )
+        }
         CourtEvent::EdictSplit { task, subtasks, .. } => {
             let parts: Vec<_> = subtasks
                 .iter()
@@ -1899,6 +2078,170 @@ mod tests {
             Some("flash")
         );
         assert_eq!(reopened.court().office_model(clerk), None);
+    }
+
+    /// 廷议时第 `fail_at` 次发言起出错；记下每次发言的系统、用户提示，执行时记下承办者与诏令内容。
+    #[derive(Default)]
+    struct Debaters {
+        fail_at: usize,
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+        jobs: std::sync::Mutex<Vec<(AgentId, String)>>,
+    }
+    impl WorkerBackend for Debaters {
+        fn execute(&self, job: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let entry = (job.actor.id, job.edict.text.clone());
+            self.jobs.lock().unwrap().push(entry);
+            Ok("办毕".into())
+        }
+        fn model_name(&self) -> Option<&str> {
+            Some("flash")
+        }
+        fn complete(
+            &self,
+            _model: Option<&str>,
+            system: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((system.into(), user.into()));
+            if calls.len() >= self.fail_at {
+                return Err("断线".into());
+            }
+            let usage = TokenUsage {
+                input: 10,
+                output: 1,
+            };
+            // 第二段照抄纪要格式自报家门。
+            let me = user
+                .rsplit("轮到你（")
+                .next()
+                .unwrap()
+                .split('）')
+                .next()
+                .unwrap();
+            let label = if calls.len() == 2 {
+                format!("【第 1 轮】{me}（工部尚书）：")
+            } else {
+                String::new()
+            };
+            Ok((format!(" {label}第{}议 ", calls.len()), usage))
+        }
+    }
+
+    #[tokio::test]
+    async fn court_debate_records_speeches_and_informs_but_does_not_route() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        session
+            .set_office_model(Office::Minister(Department::Works), Some("pro".into()))
+            .unwrap();
+        let task = session
+            .issue(Department::Works, "查事件簿".into(), Seal::default())
+            .unwrap()
+            .id;
+        // 演示后端不调用模型：报错，不留记录。
+        let before = session.history().len();
+        assert!(
+            session
+                .debate(task, &[], 2, &DemoBackend, |_, _| {})
+                .is_err()
+        );
+        assert_eq!(session.history().len(), before);
+        // 人选：未任官者、重复列名、仅一人，都不成。
+        let none = Debaters::default();
+        for bad in [
+            &[AgentId(1), AgentId(99)][..],
+            &[AgentId(1), AgentId(1)],
+            &[AgentId(2)],
+        ] {
+            assert!(
+                session.debate(task, bad, 1, &none, |_, _| {}).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(
+            none.calls.lock().unwrap().is_empty(),
+            "人选不合法时不调用模型"
+        );
+
+        // 默认人选：丞相 #1、工部尚书 #2、工部郎中 #4（无御史）；两轮共六段。
+        let full = Debaters {
+            fail_at: usize::MAX,
+            ..Default::default()
+        };
+        let mut heard = Vec::new();
+        let stopped = session
+            .debate(task, &[], 2, &full, |agent, speech| {
+                heard.push((agent.id, speech.text.clone()))
+            })
+            .unwrap();
+        assert_eq!(stopped, None);
+        let ids: Vec<_> = heard.iter().map(|(id, _)| id.0).collect();
+        assert_eq!(ids, [1, 2, 4, 1, 2, 4]);
+        assert_eq!(heard[0].1, "第1议", "发言去掉首尾空白");
+        assert_eq!(heard[1].1, "第2议", "去掉照抄的自报家门");
+        {
+            let calls = full.calls.lock().unwrap();
+            // 人格写进系统提示；后发言者看得到前面的发言，首位发言者看不到。
+            assert!(calls[0].0.contains(&Persona::of(AgentId(1)).prompt()));
+            assert!(calls[4].0.contains(&Persona::of(AgentId(2)).prompt()));
+            assert!(!calls[0].1.contains("第1议"));
+            assert!(calls[4].1.contains("第4议") && calls[4].1.contains("第 2 轮"));
+        }
+        let speeches = &session.court().task(task).unwrap().debates[0];
+        assert_eq!(speeches[1].office, Office::Minister(Department::Works));
+        assert_eq!(speeches[1].model.as_deref(), Some("pro"), "按官职所配模型");
+        assert_eq!(speeches[0].model.as_deref(), Some("flash"));
+
+        // 第二场在第三段发言时断线：前两段照记，返回原因。
+        let flaky = Debaters {
+            fail_at: 3,
+            ..Default::default()
+        };
+        let stopped = session.debate(task, &[AgentId(4), AgentId(1)], 3, &flaky, |_, _| {});
+        assert!(stopped.unwrap().unwrap().contains("工部郎中"));
+        let entry = session.court().task(task).unwrap();
+        assert_eq!(entry.debates.len(), 2);
+        assert_eq!(entry.debates[1].len(), 2);
+        assert_eq!(entry.usage.total(), 8 * 11);
+        let price = |model: &str| {
+            let input = if model == "pro" { 1000.0 } else { 0.0 };
+            Some(Price {
+                input_per_million: input,
+                output_per_million: 0.0,
+                currency: "元".into(),
+            })
+        };
+        // 只有尚书的两段（各 10 个输入 token）用 pro 计价。
+        assert_eq!(
+            estimate_cost([entry], None, price).as_deref(),
+            Some("约 0.0200 元")
+        );
+
+        // 回放得到同样的廷议；承办仍按旧例派给 #4，诏令附最近一次的纪要。
+        let replayed = Court::replay(session.history()).unwrap();
+        assert_eq!(replayed.task(task).unwrap().debates, entry.debates);
+        let backend = Arc::new(Debaters::default());
+        let scheduler = Scheduler::new(
+            backend.clone(),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        run_all(&mut session, &scheduler).await;
+        let jobs = backend.jobs.lock().unwrap().clone();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, AgentId(4));
+        assert!(
+            jobs[0].1.starts_with("查事件簿\n\n廷议纪要"),
+            "{}",
+            jobs[0].1
+        );
+        assert!(jobs[0].1.contains("第2议") && !jobs[0].1.contains("第6议"));
+        // 已执行的诏令不再廷议。
+        let err = session.debate(task, &[], 1, &full, |_, _| {}).unwrap_err();
+        assert!(err.to_string().contains("不能廷议"), "{err}");
     }
 
     /// 票拟时按 `reply` 作答；执行时记下承办者。

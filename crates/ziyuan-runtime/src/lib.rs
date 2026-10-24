@@ -3,7 +3,7 @@
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::path::PathBuf;
-use ziyuan_core::{Capability, FileChange, Price, TokenUsage};
+use ziyuan_core::{Capability, FileChange, Persona, Price, TokenUsage};
 
 mod scheduler;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
@@ -177,10 +177,11 @@ impl WorkerBackend for AgentBackend {
         let system = format!(
             "你是紫垣朝廷{}的官员{}，奉诏办理下列事务。\n\
              玉玺授权（{}）。{powers}\n\
-             请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。",
+             请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。\n{}",
             edict.department.label(),
             actor.name,
             edict.seal,
+            Persona::of(actor.id).prompt(),
         );
         let messages = vec![
             agent_loop::Message::System(system),

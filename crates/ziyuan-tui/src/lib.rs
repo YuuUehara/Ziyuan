@@ -24,7 +24,8 @@ use ziyuan_app::{
     kaocheng_report, render_diff, seal_note,
 };
 use ziyuan_core::{
-    AgentId, CensorVerdict, Department, GovernanceMode, Office, Seal, TaskId, Verdict,
+    AgentId, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech, TaskId,
+    Verdict,
 };
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -92,6 +93,10 @@ pub enum Message {
     Split(TaskId, Result<usize, String>),
     /// 后台都察院复核结束：结论（背书/弹劾），或错误。
     Censured(TaskId, Result<&'static str, String>),
+    /// 廷议中一段发言（已排好「官职姓名（人格）：内容」）。
+    Speech(TaskId, String),
+    /// 后台廷议结束：中止原因（`None` 为议毕），或错误。
+    Debated(TaskId, Result<Option<String>, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -181,6 +186,8 @@ pub struct App {
     run: Option<CancelToken>,
     /// 执行中诏令的流式输出（不入事件簿）。
     live: HashMap<TaskId, String>,
+    /// 廷议进行中已收到的发言（议毕后以事件簿为准）。
+    debating: HashMap<TaskId, Vec<String>>,
     quit: bool,
 }
 
@@ -203,6 +210,7 @@ impl App {
             status: None,
             run: None,
             live: HashMap::new(),
+            debating: HashMap::new(),
             quit: false,
         };
         Ok((app, receiver))
@@ -282,6 +290,20 @@ impl App {
                         self.info(message);
                     }
                     Err(e) => self.error(format!("票拟失败：{e}")),
+                }
+            }
+            Message::Speech(task, line) => {
+                if let Some(speeches) = self.debating.get_mut(&task) {
+                    speeches.push(line);
+                }
+            }
+            Message::Debated(task, result) => {
+                self.debating.remove(&task);
+                self.reload();
+                match result {
+                    Ok(None) => self.info(format!("诏令 #{} 廷议毕，纪要已记入事件簿", task.0)),
+                    Ok(Some(reason)) => self.error(format!("廷议中止：{reason}；已有发言照记")),
+                    Err(e) => self.error(format!("廷议失败：{e}")),
                 }
             }
             Message::Censured(task, result) => {
@@ -379,6 +401,7 @@ impl App {
             KeyCode::Char('t') => self.start_draft(task),
             KeyCode::Char('i') => self.start_censor(task),
             KeyCode::Char('f') => self.start_split(task),
+            KeyCode::Char('v') => self.start_debate(task),
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
@@ -640,6 +663,29 @@ impl App {
                 .map(|subtasks| subtasks.len())
                 .map_err(|e| e.to_string());
             let _ = sender.send(Message::Split(task, result));
+        });
+    }
+
+    /// 在阻塞线程中廷议（默认人选，两轮；会等待全部发言），发言与结果经消息送回。
+    fn start_debate(&mut self, task: TaskId) {
+        if self.debating.contains_key(&task) {
+            return;
+        }
+        self.info(format!("诏令 #{} 廷议中…", task.0));
+        self.debating.insert(task, Vec::new());
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| {
+                    s.debate(task, &[], 2, backend.as_ref(), |agent, speech| {
+                        let line = speech_line(&agent.name, agent.id, speech);
+                        let _ = sender.send(Message::Speech(task, line));
+                    })
+                })
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Debated(task, result));
         });
     }
 
@@ -1015,6 +1061,27 @@ impl App {
                 )),
             ]));
         }
+        let speeches: Vec<String> = match self.debating.get(&task.edict.id) {
+            Some(live) => live.clone(),
+            None => task.debates.last().map_or_else(Vec::new, |last| {
+                last.iter()
+                    .map(|sp| speech_line(&name(sp.speaker), sp.speaker, sp))
+                    .collect()
+            }),
+        };
+        if self.debating.contains_key(&task.edict.id) || !speeches.is_empty() {
+            let title = if self.debating.contains_key(&task.edict.id) {
+                "廷议进行中…".to_owned()
+            } else {
+                format!(
+                    "廷议纪要（第 {} 场，供参考，不改派工与玉玺）",
+                    task.debates.len()
+                )
+            };
+            lines.push(Line::default());
+            lines.push(Line::styled(title, Style::new().fg(Color::Magenta).bold()));
+            lines.extend(speeches.into_iter().map(Line::from));
+        }
         if let Some(c) = &task.censure {
             let censor = self
                 .court()
@@ -1141,6 +1208,7 @@ impl App {
                         None => Cell::from("未任官职").dim(),
                     },
                     Cell::from(a.speciality.label()),
+                    Cell::from(Persona::of(a.id).label()).fg(Color::Magenta),
                     Cell::from(
                         court
                             .model_of(a.id)
@@ -1161,15 +1229,25 @@ impl App {
                 Constraint::Length(8),
                 Constraint::Length(20),
                 Constraint::Length(6),
+                Constraint::Length(10),
                 Constraint::Length(16),
                 Constraint::Min(30),
                 Constraint::Length(8),
             ],
         )
         .header(
-            Row::new(["ID", "姓名", "官职·品级", "专长", "模型", "考绩", "tokens"])
-                .fg(GOLD)
-                .bold(),
+            Row::new([
+                "ID",
+                "姓名",
+                "官职·品级",
+                "专长",
+                "人格",
+                "模型",
+                "考绩",
+                "tokens",
+            ])
+            .fg(GOLD)
+            .bold(),
         )
         .row_highlight_style(Style::new().bg(Color::DarkGray).bold())
         .highlight_symbol("▌")
@@ -1255,6 +1333,7 @@ impl App {
                 ("b", "批红"),
                 ("w/u", "准奏/驳回改动"),
                 ("f", "分办"),
+                ("v", "廷议"),
                 ("i", "复核"),
                 ("K", "考成"),
                 ("D", "修道/回朝"),
@@ -1401,6 +1480,16 @@ impl App {
 const VERMILION: Color = Color::Rgb(178, 34, 34);
 const GOLD: Color = Color::Rgb(218, 165, 32);
 
+/// 廷议发言的一行：「官职姓名（人格）：内容」。
+fn speech_line(name: &str, speaker: AgentId, speech: &Speech) -> String {
+    let persona = Persona::of(speaker).label();
+    format!(
+        "{}{name}（{persona}）：{}",
+        speech.office.label(),
+        speech.text
+    )
+}
+
 fn panel(title: String) -> Block<'static> {
     Block::bordered()
         .border_style(Style::new().fg(VERMILION))
@@ -1529,6 +1618,28 @@ mod tests {
         let task = app.court().task(TaskId(1)).expect("应已下诏");
         assert_eq!(task.edict.department, Department::Personnel);
         assert!(screen(&app).contains("诏令 #1 已入队"));
+
+        // v 廷议：发言陆续显示在详情里；演示后端不调用模型，廷议失败、不留纪要。
+        press(&mut app, "v");
+        let line = "工部尚书某（刚直·简劲）：臣以为可".to_owned();
+        app.handle(Message::Speech(TaskId(1), line));
+        let shown = screen(&app);
+        assert!(
+            shown.contains("廷议进行中") && shown.contains("臣以为可"),
+            "{shown}"
+        );
+        let message = tokio::time::timeout(Duration::from_secs(10), messages.recv())
+            .await
+            .expect("廷议应在 10 秒内结束")
+            .unwrap();
+        assert!(matches!(message, Message::Debated(TaskId(1), Err(_))));
+        app.handle(message);
+        let shown = screen(&app);
+        assert!(
+            shown.contains("廷议失败") && !shown.contains("臣以为可"),
+            "{shown}"
+        );
+        assert!(app.court().task(TaskId(1)).unwrap().debates.is_empty());
 
         // 另一个进程持有执行者锁时拒绝执行，诏令仍在队列。
         let held = EventLog::new(&root).try_lock_executor().unwrap().unwrap();
