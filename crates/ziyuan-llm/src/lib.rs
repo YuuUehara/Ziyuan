@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::time::Duration;
 use ziyuan_core::{Price, TokenUsage};
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
-use ziyuan_runtime::{BoxError, ExecutionHooks};
+use ziyuan_runtime::{BoxError, ExecutionHooks, ModelCatalog};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -54,19 +54,47 @@ impl OpenAiCompatible {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// 同一服务地址与 Key 下的模型目录，供按官职切换模型。
+    pub fn catalog(&self) -> Catalog {
+        Catalog {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+        }
+    }
 }
 
-/// 估算花费所用的单价：`ZIYUAN_LLM_PRICE`（「输入,输出[,币种]」，每百万 token）优先，
-/// 否则查内置价目。内置价目取 DeepSeek 官方 2026-10 的高峰时段、未命中缓存价，是估算上限：
-/// 空闲时段与缓存命中都更便宜。未知模型返回 `None`。
-pub fn price_for(model: &str) -> Option<Price> {
-    if let Ok(spec) = env::var("ZIYUAN_LLM_PRICE") {
-        return parse_price(&spec);
+pub struct Catalog {
+    base_url: String,
+    api_key: Option<String>,
+}
+
+impl ModelCatalog for Catalog {
+    fn provider(&self, model: &str) -> Box<dyn ModelProvider> {
+        Box::new(OpenAiCompatible::new(
+            self.base_url.clone(),
+            self.api_key.clone(),
+            model,
+        ))
     }
+
+    fn price(&self, model: &str) -> Option<Price> {
+        price_for(model)
+    }
+}
+
+/// 估算花费所用的单价。内置价目取 DeepSeek 官方 2026-10 的高峰时段、未命中缓存价，是估算上限：
+/// 空闲时段与缓存命中都更便宜。不在价目中的模型用 `ZIYUAN_LLM_PRICE`（「输入,输出[,币种]」，
+/// 每百万 token），未设置则返回 `None`。
+pub fn price_for(model: &str) -> Option<Price> {
     let (input, output) = match model {
         "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => (2.0, 8.0),
         "deepseek-v4-pro" => (9.0, 27.0),
-        _ => return None,
+        _ => {
+            return env::var("ZIYUAN_LLM_PRICE")
+                .ok()
+                .and_then(|s| parse_price(&s));
+        }
     };
     Some(Price {
         input_per_million: input,
@@ -90,10 +118,6 @@ fn parse_price(spec: &str) -> Option<Price> {
 impl ModelProvider for OpenAiCompatible {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
-    }
-
-    fn price(&self) -> Option<Price> {
-        price_for(&self.model)
     }
 
     fn next_turn(
@@ -354,7 +378,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use ziyuan_core::{Agent, AgentId, Capability, Department, Edict, Seal, TaskId};
-    use ziyuan_runtime::{AgentBackend, WorkerBackend};
+    use ziyuan_runtime::{AgentBackend, Job, WorkerBackend};
 
     /// 每个请求的 JSON 请求体与 Authorization 头。
     type Requests = Arc<Mutex<Vec<(Value, String)>>>;
@@ -430,11 +454,9 @@ mod tests {
             ),
             (200, final_reply("lib.rs 第 1 行有 unsafe")),
         ]);
-        let backend = AgentBackend::new(
-            Box::new(OpenAiCompatible::new(url, Some("sk-test".into()), "m")),
-            root.clone(),
-            4,
-        );
+        let default = OpenAiCompatible::new(url, Some("sk-test".into()), "m");
+        let catalog = Box::new(default.catalog());
+        let backend = AgentBackend::new(Box::new(default), root.clone(), 4).with_catalog(catalog);
         let actor = Agent {
             id: AgentId(4),
             name: "陈工".into(),
@@ -450,15 +472,25 @@ mod tests {
                 scope: vec![".".into()],
             },
         };
+        // 官职指定了另一个模型：请求应发给该模型，沿用同一服务地址与 Key。
+        let job = Job {
+            actor,
+            edict,
+            model: Some("deepseek-v4-pro".into()),
+        };
         assert_eq!(
-            backend.execute(&actor, &edict, &()).unwrap(),
+            backend.execute(&job, &()).unwrap(),
             "lib.rs 第 1 行有 unsafe"
+        );
+        assert_eq!(
+            backend.price("deepseek-v4-pro").unwrap().output_per_million,
+            27.0
         );
 
         let seen = seen.lock().unwrap();
         let (first, auth) = &seen[0];
         assert_eq!(auth, "Bearer sk-test");
-        assert_eq!(first["model"], "m");
+        assert_eq!(first["model"], "deepseek-v4-pro");
         assert_eq!(first["messages"][0]["role"], "system");
         assert_eq!(first["messages"][1]["content"], "查 unsafe");
         let names: Vec<_> = first["tools"]

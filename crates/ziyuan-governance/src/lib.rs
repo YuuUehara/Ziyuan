@@ -47,6 +47,10 @@ pub enum GovernanceError {
     AlreadyApproved(TaskId),
     /// 一键朱元璋只能在丞相制下使用。
     NoChancellery,
+    /// 模型名为空或含空白。
+    InvalidModel(String),
+    /// 诏令的查阅范围全在承办者官职的玉玺上限之外。
+    SealExceedsCeiling(Office),
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -97,6 +101,12 @@ impl fmt::Display for GovernanceError {
             }
             Self::AlreadyApproved(id) => write!(f, "诏令 #{} 已批红或已在执行", id.0),
             Self::NoChancellery => f.write_str("现行制度不设中书省，已无丞相可废"),
+            Self::InvalidModel(m) => write!(f, "模型名不能为空或含空白: {m:?}"),
+            Self::SealExceedsCeiling(office) => write!(
+                f,
+                "诏令的查阅范围全在{}的玉玺上限之外，不予承办",
+                office.label()
+            ),
         }
     }
 }
@@ -111,6 +121,9 @@ pub struct Court {
     appointments: BTreeMap<AgentId, Office>,
     /// 革职削籍的官员。
     purged: BTreeSet<AgentId>,
+    /// 按官职（`Office::code`）指定的承办模型与玉玺上限。
+    office_models: BTreeMap<String, String>,
+    office_ceilings: BTreeMap<String, Seal>,
     next_task_id: u64,
     next_agent_id: u64,
     tasks: BTreeMap<TaskId, Task>,
@@ -129,6 +142,8 @@ pub struct Task {
     pub review: Option<(Verdict, String)>,
     /// 皇帝是否已对内阁票拟批红（只在内阁制下要求）。
     pub approved: bool,
+    /// 最近一次指派时承办所用的模型（演示后端与早期日志为 `None`）。
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +164,18 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+impl Task {
+    /// 经手此诏令的官员（执行中、完成或失败时）；撤销不算经手。
+    pub fn handler(&self) -> Option<AgentId> {
+        match &self.status {
+            TaskStatus::Assigned(worker) | TaskStatus::Completed { worker, .. } => Some(*worker),
+            TaskStatus::Failed { worker, .. } => *worker,
+            // 撤销不计入：可能是皇帝改了主意，不代表官员表现。
+            TaskStatus::Pending | TaskStatus::Cancelled => None,
+        }
+    }
+}
+
 impl TaskStatus {
     /// 未结束的任务可被（重新）执行或撤销。
     pub fn is_open(&self) -> bool {
@@ -167,6 +194,8 @@ impl Court {
             agents: BTreeMap::new(),
             appointments: BTreeMap::new(),
             purged: BTreeSet::new(),
+            office_models: BTreeMap::new(),
+            office_ceilings: BTreeMap::new(),
             next_task_id: 1,
             next_agent_id: 1,
             tasks: BTreeMap::new(),
@@ -233,15 +262,35 @@ impl Court {
                         usage: TokenUsage::default(),
                         review: None,
                         approved: false,
+                        model: None,
                     },
                 );
             }
-            CourtEvent::TaskAssigned { task, worker } => {
+            CourtEvent::TaskAssigned {
+                task,
+                worker,
+                model,
+            } => {
                 self.open_task(*task)?;
                 if !self.agents.contains_key(worker) {
                     return Err(GovernanceError::UnknownAgent(*worker));
                 }
                 self.set_status(*task, TaskStatus::Assigned(*worker));
+                self.tasks.get_mut(task).expect("已确认存在").model = model.clone();
+            }
+            CourtEvent::OfficeModelSet { office, model } => {
+                self.propose_office_model(*office, model.clone())?;
+                match model {
+                    Some(m) => self.office_models.insert(office.code(), m.clone()),
+                    None => self.office_models.remove(&office.code()),
+                };
+            }
+            CourtEvent::OfficeCeilingSet { office, ceiling } => {
+                self.propose_office_ceiling(*office, ceiling.clone())?;
+                match ceiling {
+                    Some(c) => self.office_ceilings.insert(office.code(), c.clone()),
+                    None => self.office_ceilings.remove(&office.code()),
+                };
             }
             CourtEvent::ToolInvoked { task, ok, .. } => {
                 if !matches!(self.open_task(*task)?, TaskStatus::Assigned(_)) {
@@ -384,6 +433,61 @@ impl Court {
             .filter(|t| t.status.is_open() && !self.needs_approval(t))
             .map(|t| t.edict.id)
             .collect()
+    }
+
+    /// 为官职指定承办模型；`None` 恢复默认。
+    pub fn propose_office_model(
+        &self,
+        office: Office,
+        model: Option<String>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        if let Some(m) = &model
+            && (m.is_empty() || m.chars().any(char::is_whitespace))
+        {
+            return Err(GovernanceError::InvalidModel(m.clone()));
+        }
+        Ok(CourtEvent::OfficeModelSet { office, model })
+    }
+
+    /// 为官职设定玉玺上限；`None` 取消上限。
+    pub fn propose_office_ceiling(
+        &self,
+        office: Office,
+        ceiling: Option<Seal>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        if let Some(seal) = &ceiling {
+            validate_seal(seal)?;
+        }
+        Ok(CourtEvent::OfficeCeilingSet { office, ceiling })
+    }
+
+    /// 官职指定的承办模型；未指定时用默认模型。
+    pub fn office_model(&self, office: Office) -> Option<&str> {
+        self.office_models.get(&office.code()).map(String::as_str)
+    }
+
+    pub fn office_ceiling(&self, office: Office) -> Option<&Seal> {
+        self.office_ceilings.get(&office.code())
+    }
+
+    /// `agent` 承办诏令时所用的模型（按其现任官职）；`None` 表示默认模型。
+    pub fn model_of(&self, agent: AgentId) -> Option<&str> {
+        self.office_of(agent).and_then(|o| self.office_model(o))
+    }
+
+    /// `agent` 承办 `edict` 时实际可用的玉玺：受其现任官职上限约束。
+    /// 诏令的查阅范围与上限毫无交集时返回 `Err(SealExceedsCeiling)`。
+    pub fn effective_seal(&self, agent: AgentId, edict: &Edict) -> Result<Seal, GovernanceError> {
+        let Some(office) = self.office_of(agent) else {
+            return Ok(edict.seal.clone());
+        };
+        match self.office_ceiling(office) {
+            None => Ok(edict.seal.clone()),
+            Some(ceiling) => edict
+                .seal
+                .within(ceiling)
+                .ok_or(GovernanceError::SealExceedsCeiling(office)),
+        }
     }
 
     pub fn is_purged(&self, agent: AgentId) -> bool {
@@ -565,15 +669,7 @@ impl Court {
     pub fn service_record(&self, agent: AgentId) -> ServiceRecord {
         let mut record = ServiceRecord::default();
         for task in self.tasks.values() {
-            let handled_by = match &task.status {
-                TaskStatus::Assigned(worker) | TaskStatus::Completed { worker, .. } => {
-                    Some(*worker)
-                }
-                TaskStatus::Failed { worker, .. } => *worker,
-                // 撤销不计入：可能是皇帝改了主意，不代表官员表现。
-                TaskStatus::Pending | TaskStatus::Cancelled => None,
-            };
-            if handled_by != Some(agent) {
+            if task.handler() != Some(agent) {
                 continue;
             }
             record.tool_calls += task.tool_calls;
@@ -1072,6 +1168,7 @@ mod tests {
             events.push(CourtEvent::TaskAssigned {
                 task,
                 worker: AgentId(worker),
+                model: None,
             });
             events.push(CourtEvent::ModelUsage {
                 task,
@@ -1204,6 +1301,7 @@ mod tests {
         let assigned = CourtEvent::TaskAssigned {
             task,
             worker: AgentId(4),
+            model: None,
         };
         let tool = CourtEvent::ToolInvoked {
             task,

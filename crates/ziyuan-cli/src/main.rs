@@ -9,12 +9,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
-    ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, seal_note,
+    ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, estimate_cost,
+    seal_note,
 };
-use ziyuan_core::{
-    AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
-};
-use ziyuan_governance::TaskStatus;
+use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_governance::{Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
 use ziyuan_runtime::{
     AgentBackend, CancelToken, DemoBackend, Limits, Outcome, Scheduler, WorkerBackend,
@@ -43,6 +42,9 @@ const HELP: &str = concat!(
   ziyuan dismiss <官员ID>               罢免现任官职
   ziyuan purge <官员ID>                 革职：削去仕籍，永不叙用
   ziyuan abolish                       一键朱元璋：革去全部丞相，罢中书省（改为废相亲政）
+  ziyuan model <官职> <模型|default>     为官职指定承办模型（同一服务地址与 Key）
+  ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] | default
+                                       设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
   ziyuan approve <诏令ID|all>           内阁制下对内阁票拟批红（批红后方可执行）
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
   ziyuan review <诏令ID> <accept|reject> [备注]
@@ -114,6 +116,10 @@ enum Command {
     Reform(GovernanceMode),
     Dismiss(AgentId),
     Purge(AgentId),
+    /// `None` 恢复默认模型。
+    Model(Office, Option<String>),
+    /// `None` 取消上限。
+    Ceiling(Office, Option<Seal>),
     Abolish,
     /// `None` 表示全部待批红的诏令。
     Approve(Option<TaskId>),
@@ -186,6 +192,13 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "dismiss" => Command::Dismiss(parse_id(&args, "ziyuan dismiss <官员ID>")?),
         "purge" => Command::Purge(parse_id(&args, "ziyuan purge <官员ID>")?),
         "abolish" => no_args(args, Command::Abolish)?,
+        "model" => match <[String; 2]>::try_from(args) {
+            Ok([office, model]) => {
+                Command::Model(office.parse()?, (model != "default").then_some(model))
+            }
+            Err(_) => return Err("用法: ziyuan model <官职> <模型|default>".into()),
+        },
+        "ceiling" => parse_ceiling(args)?,
         "approve" => match args.as_slice() {
             [all] if all == "all" => Command::Approve(None),
             [id] => Command::Approve(Some(TaskId(
@@ -227,11 +240,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 court.appointed_count(),
                 court.completed_count()
             );
-            println!("承办模型：{}", model_label());
+            println!("默认承办模型：{}", model_label());
             println!(
                 "模型用量：{}{}",
                 court.total_usage(),
-                cost_note(court.total_usage())
+                cost_note(court.tasks())
             );
             println!(
                 "调度中枢：{}",
@@ -244,8 +257,9 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
         Command::Officials => {
             let court = session.court();
-            let model = model_label();
+            let default = model_label();
             for agent in court.agents() {
+                let model = court.model_of(agent.id).unwrap_or(&default);
                 let office = match court.office_of(agent.id) {
                     Some(o) => format!("{}（{}）", o.label(), o.rank(court.mode())),
                     None if court.is_purged(agent.id) => "已革职".into(),
@@ -367,7 +381,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     TaskStatus::Cancelled => "已撤销".to_owned(),
                 };
                 let usage = if task.usage.total() > 0 {
-                    format!("（{} tokens{}）", task.usage.total(), cost_note(task.usage))
+                    format!("（{} tokens{}）", task.usage.total(), cost_note([task]))
                 } else {
                     String::new()
                 };
@@ -393,6 +407,20 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             println!("史官记：{note}");
             if mode != GovernanceMode::DirectRule {
                 println!("提示：新制度如无协调者，请先任命。 ");
+            }
+        }
+        Command::Model(office, model) => {
+            session.set_office_model(office, model.clone())?;
+            match model {
+                Some(m) => println!("诏令已颁：{}改用模型 {m}。", office.label()),
+                None => println!("诏令已颁：{}恢复默认模型。", office.label()),
+            }
+        }
+        Command::Ceiling(office, ceiling) => {
+            session.set_office_ceiling(office, ceiling.clone())?;
+            match ceiling {
+                Some(seal) => println!("诏令已颁：{}玉玺上限为 {seal}。", office.label()),
+                None => println!("诏令已颁：{}取消玉玺上限。", office.label()),
             }
         }
         Command::Purge(id) => {
@@ -453,7 +481,17 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 "  工具调用 {} 次，其中失败 {} 次（含越出玉玺的尝试）",
                 r.tool_calls, r.tool_failures
             );
-            println!("  模型用量：{}{}", r.usage, cost_note(r.usage));
+            let handled = court.tasks().filter(|t| t.handler() == Some(id));
+            println!("  模型用量：{}{}", r.usage, cost_note(handled));
+            if let Some(office) = court.office_of(id) {
+                println!(
+                    "  承办模型：{}",
+                    court.office_model(office).unwrap_or(&model_label())
+                );
+                if let Some(ceiling) = court.office_ceiling(office) {
+                    println!("  {}玉玺上限：{ceiling}", office.label());
+                }
+            }
             if r.unreviewed > 0 {
                 println!(
                     "  另有 {} 件回奏未经评定，不计入考绩。可用 `ziyuan review <诏令ID> accept|reject` 评定。",
@@ -616,16 +654,18 @@ fn print_report(report: &TaskReport) {
     }
     // 演示后端不调用模型；服务端未报告用量时也不显示。
     if report.usage.total() > 0 {
-        println!("用量：{}{}", report.usage, cost_note(report.usage));
+        let model = report.model.as_deref().unwrap_or("?");
+        let cost =
+            price_for(model).map_or(String::new(), |p| format!("，{}", p.describe(report.usage)));
+        println!("用量：{}（{model}）{cost}", report.usage);
     }
 }
 
 /// 显示用的承办模型（与 [`worker_backend`] 的选择一致）：演示后端不调用模型。
-/// 按当前模型单价估算的花费（见 `ziyuan_llm::price_for`）；单价未知时为空。
-fn cost_note(usage: TokenUsage) -> String {
-    OpenAiCompatible::from_env()
-        .and_then(|m| price_for(m.model()))
-        .map_or(String::new(), |p| format!("，{}", p.describe(usage)))
+/// 按各诏令实际所用模型估算的花费（单价见 `ziyuan_llm::price_for`）；查不到单价时为空。
+fn cost_note<'a>(tasks: impl IntoIterator<Item = &'a Task>) -> String {
+    let default = OpenAiCompatible::from_env().map(|m| m.model().to_owned());
+    estimate_cost(tasks, default.as_deref(), price_for).map_or(String::new(), |c| format!("，{c}"))
 }
 
 fn model_label() -> String {
@@ -641,11 +681,11 @@ fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
         "执行后端：{}（只读工具与查阅范围由各诏令的玉玺决定）",
         model.model()
     );
-    Ok(Arc::new(AgentBackend::new(
-        Box::new(model),
-        env::current_dir()?,
-        MAX_AGENT_STEPS,
-    )))
+    let catalog = Box::new(model.catalog());
+    Ok(Arc::new(
+        AgentBackend::new(Box::new(model), env::current_dir()?, MAX_AGENT_STEPS)
+            .with_catalog(catalog),
+    ))
 }
 
 fn no_args(args: Vec<String>, command: Command) -> Result<Command, Box<dyn Error>> {
@@ -739,6 +779,34 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         queue,
         seal,
     })
+}
+
+/// `ceiling <官职> default`，或 `--scope`/`--tools`（与诏令玉玺同义；未给出的一项不设限）。
+fn parse_ceiling(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    const USAGE: &str = "用法: ziyuan ceiling <官职> [--scope <路径>]... [--tools read_file,search_code|none] | default";
+    if args.is_empty() {
+        return Err(USAGE.into());
+    }
+    let office: Office = args.remove(0).parse()?;
+    if args == ["default"] {
+        return Ok(Command::Ceiling(office, None));
+    }
+    let mut seal = Seal::default();
+    let mut scope = Vec::new();
+    for pair in args.chunks(2) {
+        match pair {
+            [flag, value] if flag == "--scope" => scope.push(value.clone()),
+            [flag, value] if flag == "--tools" => seal.capabilities = parse_capabilities(value)?,
+            _ => return Err(USAGE.into()),
+        }
+    }
+    if args.is_empty() {
+        return Err(USAGE.into());
+    }
+    if !scope.is_empty() {
+        seal.scope = scope;
+    }
+    Ok(Command::Ceiling(office, Some(seal)))
 }
 
 /// `none` 表示不授予任何工具；否则为逗号分隔的工具名。

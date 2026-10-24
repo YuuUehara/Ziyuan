@@ -342,6 +342,25 @@
           </div>
           <div id="recommend-result"><p class="hint">按「采纳 − 驳回」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
         </div>
+        <div class="side">
+          <h3>官职配置 <small class="hint">模型与玉玺上限</small></h3>
+          <select id="config-office" data-keep></select>
+          <p class="hint" id="config-current"></p>
+          <div class="row">
+            <input type="text" id="config-model" data-keep placeholder="模型，如 deepseek-v4-pro">
+            <button class="small shrink" id="model-set">指定</button>
+            <button class="small shrink" id="model-clear">默认</button>
+          </div>
+          <div class="row">
+            <input type="text" id="ceiling-scope" data-keep placeholder="上限范围，逗号分隔（空为整个项目）">
+          </div>
+          <div class="row">
+            <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> read_file</label>
+            <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> search_code</label>
+            <button class="small shrink" id="ceiling-set">设上限</button>
+            <button class="small shrink" id="ceiling-clear">取消</button>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -389,12 +408,16 @@ async function api(path, body) {
   return data;
 }
 
-// 按当前模型单价估算花费（高峰、未命中缓存价，为估算上限）；单价未知时不显示。
-function cost(usage) {
-  const p = state && state.price;
-  if (!p || !(usage.input + usage.output)) return "";
-  const value = (usage.input * p.input + usage.output * p.output) / 1e6;
-  return `（约 ${value.toFixed(4)} ${p.currency}）`;
+// 服务端按各诏令实际所用模型估算的花费（高峰、未命中缓存价，为估算上限）；查不到单价时为 null。
+function cost(text) {
+  return text ? `（${esc(text)}）` : "";
+}
+
+function renderOfficeConfig(s) {
+  const office = s.offices.find((o) => o.code === $("config-office").value) || s.offices[0];
+  if (!office) return;
+  $("config-current").textContent =
+    `模型：${office.model || (s.model ? `默认（${s.model}）` : "演示后端")}；玉玺上限：${office.ceiling || "无"}`;
 }
 
 function chronicle(note) {
@@ -455,7 +478,7 @@ function taskHtml(t) {
   const meta = [
     t.worker ? `承办：${esc(t.worker)}` : "",
     t.tool_calls ? `工具 ${t.tool_calls} 次${t.tool_failures ? `（失败 ${t.tool_failures}）` : ""}` : "",
-    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${cost(t.usage)}` : "",
+    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${t.model ? ` · ${esc(t.model)}` : ""}${cost(t.cost)}` : "",
   ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
   let body = "";
   if (streams[t.id] !== undefined && open) {
@@ -492,7 +515,7 @@ function render() {
   $("task-count").textContent = s.tasks.length;
   $("open-count").textContent = open;
   $("usage-total").textContent = fmt(s.usage.input + s.usage.output);
-  $("cost-total").textContent = cost(s.usage);
+  $("cost-total").textContent = s.cost ? `（${s.cost}）` : "";
   $("run-state").textContent = s.running ? "执行中" : "待命";
   $("run-state").classList.toggle("live", s.running);
   $("run-btn").disabled = s.running || open === 0;
@@ -503,6 +526,8 @@ function render() {
   $("edict-dept").innerHTML = s.departments.map((d) => `<option value="${d.code}" ${d.code === "works" ? "selected" : ""}>${esc(d.label)}</option>`).join("");
   $("recruit-dept").innerHTML = deptOptions;
   $("recommend-office").innerHTML = s.offices.map((o) => `<option value="${o.code}">${esc(o.label)}（${esc(o.rank)}）</option>`).join("");
+  $("config-office").innerHTML = s.offices.map((o) =>
+    `<option value="${o.code}">${esc(o.label)}${o.model || o.ceiling ? " ✦" : ""}</option>`).join("");
 
   $("abolish-btn").hidden = s.mode.code !== "chancellor";
   $("modes").innerHTML = s.modes.map((m) =>
@@ -530,8 +555,8 @@ function render() {
     const usage = o.record.usage.input + o.record.usage.output;
     return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}</td><td>${esc(o.speciality.label)}</td>
       <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
-      <td class="record">${s.model ? esc(s.model) : '<span class="hint">演示</span>'}</td>
-      <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.record.usage) : "—"}</td><td>${action}</td></tr>`;
+      <td class="record">${o.model ? esc(o.model) : '<span class="hint">演示</span>'}${o.ceiling ? `<br><span class="hint">上限 ${esc(o.ceiling)}</span>` : ""}</td>
+      <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.cost) : "—"}</td><td>${action}</td></tr>`;
   }).join("");
 }
 
@@ -539,6 +564,7 @@ async function refresh() {
   try {
     state = await api("/state");
     preserve(render);
+    renderOfficeConfig(state);
     if ($("history").open) loadHistory();
   } catch (e) {
     if (!$("locked").classList.contains("show")) toast(e.message, true);
@@ -586,6 +612,19 @@ $("recommend-btn").addEventListener("click", async () => {
       : `<p class="hint">无人可任此职。</p>`;
   } catch (e) { toast(e.message, true); }
 });
+$("config-office").addEventListener("change", () => renderOfficeConfig(state));
+const configOffice = () => $("config-office").value;
+$("model-set").addEventListener("click", () =>
+  act(api("/offices/model", { office: configOffice(), model: $("config-model").value.trim() }), "已指定模型"));
+$("model-clear").addEventListener("click", () =>
+  act(api("/offices/model", { office: configOffice(), model: null }), "已恢复默认模型"));
+$("ceiling-set").addEventListener("click", () => act(api("/offices/ceiling", {
+  office: configOffice(),
+  scope: $("ceiling-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
+  tools: ["read_file", "search_code"].filter((t) => $("ceiling-" + t).checked),
+}), "已设玉玺上限"));
+$("ceiling-clear").addEventListener("click", () =>
+  act(api("/offices/ceiling", { office: configOffice(), clear: true }), "已取消玉玺上限"));
 $("history").addEventListener("toggle", () => { if ($("history").open) loadHistory(); });
 
 document.addEventListener("click", (event) => {

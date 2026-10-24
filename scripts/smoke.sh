@@ -82,4 +82,16 @@ grep -q '胡惟庸' <<< "$("$BIN" abolish)"
 "$BIN" officials | grep -q '^#6 .*已革职'
 if "$BIN" appoint 6 minister:personnel > /dev/null 2>&1; then echo '革职者不应再任官' >&2; exit 1; fi
 "$BIN" court | grep -q '废相亲政'
+# 官职配置：指定模型、玉玺上限（诏令范围全在上限外则不予承办）
+"$BIN" model clerk:works deepseek-v4-pro | grep -q '工部郎中改用模型 deepseek-v4-pro'
+"$BIN" officials | grep -q '工部郎中.*模型 deepseek-v4-pro'
+if "$BIN" model clerk:works 'a b' > /dev/null 2>&1; then echo '应拒绝含空白的模型名' >&2; exit 1; fi
+"$BIN" ceiling clerk:works --scope src --tools search_code | grep -q '玉玺上限为 工具：search_code；范围：src'
+"$BIN" ceiling minister:works --scope src > /dev/null
+mkdir -p docs
+OUT="$("$BIN" edict --scope docs '越出上限' 2>/dev/null || true)"
+grep -q '玉玺上限之外' <<< "$OUT"
+"$BIN" edict '受限承办' | grep -q '玉玺受工部.*上限所限：工具：search_code；范围：src'
+"$BIN" ceiling clerk:works default | grep -q '取消玉玺上限'
+"$BIN" history | grep -q '工部郎中玉玺上限'
 echo 'ZiYuan smoke test PASS'

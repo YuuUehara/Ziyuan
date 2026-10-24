@@ -42,23 +42,20 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         EdictApproved { task } => format!("v1\tAPPROVED\t{}", task.0),
         InstitutionReformed(mode) => format!("v1\tREFORMED\t{}", mode.code()),
         EdictIssued(e) => format!(
-            "v1\tEDICT\t{}\t{}\t{}\t{}\t{}",
+            "v1\tEDICT\t{}\t{}\t{}\t{}",
             e.id.0,
             e.department.code(),
             to_hex(&e.text),
-            e.seal
-                .capabilities
-                .iter()
-                .map(|c| c.code())
-                .collect::<Vec<_>>()
-                .join(","),
-            e.seal
-                .scope
-                .iter()
-                .map(|p| to_hex(p))
-                .collect::<Vec<_>>()
-                .join(",")
+            encode_seal(&e.seal)
         ),
+        OfficeModelSet { office, model } => match model {
+            Some(model) => format!("v1\tMODEL\t{}\t{}", office.code(), to_hex(model)),
+            None => format!("v1\tMODEL\t{}", office.code()),
+        },
+        OfficeCeilingSet { office, ceiling } => match ceiling {
+            Some(seal) => format!("v1\tCEILING\t{}\t{}", office.code(), encode_seal(seal)),
+            None => format!("v1\tCEILING\t{}", office.code()),
+        },
         TaskCompleted {
             task,
             worker,
@@ -69,7 +66,16 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             worker.0,
             to_hex(summary)
         ),
-        TaskAssigned { task, worker } => format!("v1\tASSIGNED\t{}\t{}", task.0, worker.0),
+        TaskAssigned {
+            task,
+            worker,
+            model: None,
+        } => format!("v1\tASSIGNED\t{}\t{}", task.0, worker.0),
+        TaskAssigned {
+            task,
+            worker,
+            model: Some(model),
+        } => format!("v1\tASSIGNED\t{}\t{}\t{}", task.0, worker.0, to_hex(model)),
         ToolInvoked {
             task,
             tool,
@@ -99,6 +105,22 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         ),
     }
 }
+/// 玉玺占两个字段：工具代码列表、hex 编码的路径列表。
+fn encode_seal(seal: &Seal) -> String {
+    let tools: Vec<_> = seal.capabilities.iter().map(|c| c.code()).collect();
+    let scope: Vec<_> = seal.scope.iter().map(|p| to_hex(p)).collect();
+    format!("{}\t{}", tools.join(","), scope.join(","))
+}
+
+fn decode_seal(tools: &str, scope: &str) -> Result<Seal, String> {
+    Ok(Seal {
+        capabilities: split_list(tools)
+            .map(|c| c.parse::<Capability>().map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?,
+        scope: split_list(scope).map(from_hex).collect::<Result<_, _>>()?,
+    })
+}
+
 /// 逗号分隔的列表；空字段为空列表。
 fn split_list(field: &str) -> impl Iterator<Item = &str> {
     field.split(',').filter(|item| !item.is_empty())
@@ -150,24 +172,36 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
             seal: if parts.len() == 5 {
                 Seal::default()
             } else {
-                Seal {
-                    capabilities: split_list(field(5)?)
-                        .map(|c| c.parse::<Capability>().map_err(|e| e.to_string()))
-                        .collect::<Result<_, _>>()?,
-                    scope: split_list(field(6)?)
-                        .map(from_hex)
-                        .collect::<Result<_, _>>()?,
-                }
+                decode_seal(field(5)?, field(6)?)?
             },
         }),
+        "MODEL" => OfficeModelSet {
+            office: field(2)?.parse::<Office>().map_err(|e| e.to_string())?,
+            model: match parts.len() {
+                3 => None,
+                _ => Some(from_hex(field(3)?)?),
+            },
+        },
+        "CEILING" => OfficeCeilingSet {
+            office: field(2)?.parse::<Office>().map_err(|e| e.to_string())?,
+            ceiling: match parts.len() {
+                3 => None,
+                _ => Some(decode_seal(field(3)?, field(4)?)?),
+            },
+        },
         "COMPLETED" => TaskCompleted {
             task: TaskId(id(2)?),
             worker: AgentId(id(3)?),
             summary: from_hex(field(4)?)?,
         },
+        // v0.2 及更早的日志没有模型字段。
         "ASSIGNED" => TaskAssigned {
             task: TaskId(id(2)?),
             worker: AgentId(id(3)?),
+            model: match parts.len() {
+                4 => None,
+                _ => Some(from_hex(field(4)?)?),
+            },
         },
         "TOOL" => ToolInvoked {
             task: TaskId(id(2)?),
@@ -207,7 +241,13 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         | OfficialPurged { .. }
         | EdictApproved { .. }
         | TaskCancelled { .. } => 3,
-        OfficialAppointed { .. } | TaskAssigned { .. } | TaskFailed { .. } => 4,
+        OfficeModelSet { model: None, .. } | OfficeCeilingSet { ceiling: None, .. } => 3,
+        OfficialAppointed { .. }
+        | TaskAssigned { model: None, .. }
+        | OfficeModelSet { .. }
+        | TaskFailed { .. } => 4,
+        TaskAssigned { .. } => 5,
+        OfficeCeilingSet { .. } => 5,
         EdictIssued(_) if parts.len() == 5 => 5,
         AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
         EdictIssued(_) => 7,
@@ -247,6 +287,31 @@ mod tests {
             CourtEvent::TaskAssigned {
                 task,
                 worker: AgentId(7),
+                model: None,
+            },
+            CourtEvent::TaskAssigned {
+                task,
+                worker: AgentId(7),
+                model: Some("deepseek-flash".into()),
+            },
+            CourtEvent::OfficeModelSet {
+                office: Office::Clerk(Department::Works),
+                model: Some("deepseek-v4-pro".into()),
+            },
+            CourtEvent::OfficeModelSet {
+                office: Office::Chancellor,
+                model: None,
+            },
+            CourtEvent::OfficeCeilingSet {
+                office: Office::Clerk(Department::Works),
+                ceiling: Some(Seal {
+                    capabilities: [Capability::ReadFile].into(),
+                    scope: vec!["crates/紫垣".into()],
+                }),
+            },
+            CourtEvent::OfficeCeilingSet {
+                office: Office::Minister(Department::Works),
+                ceiling: None,
             },
             CourtEvent::ToolInvoked {
                 task,

@@ -21,11 +21,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use ziyuan_app::{ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event};
+use ziyuan_app::{
+    ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event, estimate_cost,
+};
 use ziyuan_core::{
     AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
 };
-use ziyuan_governance::{Court, ServiceRecord, TaskStatus};
+use ziyuan_governance::{Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventLog, StorageError};
 
@@ -71,6 +73,8 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/review", post(review))
         .route("/tasks/{id}/approve", post(approve))
         .route("/reform", post(reform))
+        .route("/offices/model", post(office_model))
+        .route("/offices/ceiling", post(office_ceiling))
         .route("/abolish", post(abolish))
         .route("/officials", post(recruit))
         .route("/officials/{id}/appoint", post(appoint))
@@ -191,15 +195,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     let running = app.running();
-    let mut value = app.with_session(|s| Ok(court_json(s.court()))).await?;
+    let backend = app.0.config.backend.clone();
+    let mut value = app
+        .with_session(move |s| Ok(court_json(s.court(), backend.as_ref())))
+        .await?;
     value["running"] = json!(running);
-    value["model"] = json!(app.0.config.backend.model_name());
-    // 单价供页面估算花费；未知时为 null。
-    value["price"] = json!(app.0.config.backend.price().map(|p| json!({
-        "input": p.input_per_million,
-        "output": p.output_per_million,
-        "currency": p.currency,
-    })));
     Ok(Json(value))
 }
 
@@ -268,15 +268,7 @@ async fn issue(
             .map(|t| parse::<Capability>(t.as_str().unwrap_or_default()))
             .collect::<Result<BTreeSet<_>, _>>()?;
     }
-    let scope: Vec<String> = body
-        .get("scope")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p.as_str().map(str::trim))
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let scope = string_list(&body["scope"]);
     if !scope.is_empty() {
         // 越出项目的路径由治理层拒绝；这里尽早指出不存在的路径。
         if let Some(missing) = scope.iter().find(|p| !app.0.config.root.join(p).exists()) {
@@ -389,6 +381,65 @@ async fn reform(
     let mode = parse::<GovernanceMode>(str_field(&body, "mode")?)?;
     app.mutate(move |s| Ok(json!({ "note": s.reform(mode)? })))
         .await
+}
+
+/// `{ office, model }`；`model` 为 null 或空串时恢复默认模型。
+async fn office_model(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let office = parse::<Office>(str_field(&body, "office")?)?;
+    let model = body["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned);
+    app.mutate(move |s| {
+        s.set_office_model(office, model)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+/// `{ office, tools?, scope? }` 设定上限（未给出的一项不设限）；`{ office, clear: true }` 取消。
+async fn office_ceiling(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let office = parse::<Office>(str_field(&body, "office")?)?;
+    let ceiling = if body["clear"].as_bool() == Some(true) {
+        None
+    } else {
+        let mut seal = Seal::default();
+        if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+            seal.capabilities = tools
+                .iter()
+                .map(|t| parse::<Capability>(t.as_str().unwrap_or_default()))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+        }
+        let scope = string_list(&body["scope"]);
+        if !scope.is_empty() {
+            seal.scope = scope;
+        }
+        Some(seal)
+    };
+    app.mutate(move |s| {
+        s.set_office_ceiling(office, ceiling)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+/// 去掉空白项的字符串数组。
+fn string_list(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::trim))
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// 一键朱元璋。
@@ -526,8 +577,11 @@ fn report_json(report: &TaskReport) -> Value {
     })
 }
 
-fn court_json(court: &Court) -> Value {
+fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
     let name = |id: AgentId| court.agent(id).map(|a| a.name.clone());
+    // 按各诏令实际所用模型估算花费；演示后端为 null。
+    let default_model = backend.model_name();
+    let cost = |tasks: Vec<&Task>| estimate_cost(tasks, default_model, |m| backend.price(m));
     let departments: Vec<_> = Department::ALL
         .iter()
         .map(|&d| {
@@ -549,6 +603,8 @@ fn court_json(court: &Court) -> Value {
         .filter(|o| o.exists_in(court.mode()))
         .map(|o| {
             let mut value = office_json(o, court.mode());
+            value["model"] = json!(court.office_model(o));
+            value["ceiling"] = json!(court.office_ceiling(o).map(|c| c.to_string()));
             value["department"] = json!(match o {
                 Office::Minister(d) | Office::ViceMinister(d) | Office::Clerk(d) => Some(d.code()),
                 _ => None,
@@ -565,7 +621,10 @@ fn court_json(court: &Court) -> Value {
                 "speciality": { "code": a.speciality.code(), "label": a.speciality.label() },
                 "office": court.office_of(a.id).map(|o| office_json(o, court.mode())),
                 "purged": court.is_purged(a.id),
+                "model": court.model_of(a.id).or(default_model),
+                "ceiling": court.office_of(a.id).and_then(|o| court.office_ceiling(o)).map(|c| c.to_string()),
                 "record": record_json(&court.service_record(a.id)),
+                "cost": cost(court.tasks().filter(|t| t.handler() == Some(a.id)).collect()),
             })
         })
         .collect();
@@ -603,6 +662,8 @@ fn court_json(court: &Court) -> Value {
                     "verdict": v.code(), "label": v.label(), "note": note,
                 })),
                 "usage": usage_json(t.usage),
+                "model": t.model,
+                "cost": cost(vec![t]),
                 "tool_calls": t.tool_calls,
                 "tool_failures": t.tool_failures,
             })
@@ -616,6 +677,8 @@ fn court_json(court: &Court) -> Value {
         "officials": officials,
         "tasks": tasks,
         "usage": usage_json(court.total_usage()),
+        "model": default_model,
+        "cost": cost(court.tasks().collect()),
     })
 }
 
@@ -708,6 +771,52 @@ mod tests {
             (status, state["mode"]["code"].as_str()),
             (200, Some("chancellor"))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offices_can_be_given_models_and_seal_ceilings() {
+        let (base, root) = start("offices").await;
+        let t = Some(TOKEN);
+        let model = json!({ "office": "clerk:works", "model": "deepseek-v4-pro" });
+        assert_eq!(call(&base, "/offices/model", t, Some(model)).await.0, 200);
+        let bad = json!({ "office": "clerk:works", "model": "two words" });
+        assert_eq!(call(&base, "/offices/model", t, Some(bad)).await.0, 400);
+        let ceiling =
+            json!({ "office": "clerk:works", "scope": ["src"], "tools": ["search_code"] });
+        assert_eq!(
+            call(&base, "/offices/ceiling", t, Some(ceiling)).await.0,
+            200
+        );
+        let escape = json!({ "office": "clerk:works", "scope": ["../x"] });
+        assert_eq!(
+            call(&base, "/offices/ceiling", t, Some(escape)).await.0,
+            400
+        );
+
+        let (_, state) = call(&base, "/state", t, None).await;
+        let clerk = state["offices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["code"] == "clerk:works")
+            .unwrap();
+        assert_eq!(clerk["model"], "deepseek-v4-pro");
+        assert_eq!(clerk["ceiling"], "工具：search_code；范围：src");
+        let official = state["officials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["office"]["code"] == "clerk:works")
+            .unwrap();
+        assert_eq!(official["model"], "deepseek-v4-pro");
+        // 演示后端无单价：不显示花费。
+        assert!(state["cost"].is_null());
+
+        let clear = json!({ "office": "clerk:works", "clear": true });
+        call(&base, "/offices/ceiling", t, Some(clear)).await;
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert!(state["officials"][3]["ceiling"].is_null());
         std::fs::remove_dir_all(root).unwrap();
     }
 

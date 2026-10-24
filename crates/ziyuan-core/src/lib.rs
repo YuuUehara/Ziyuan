@@ -386,6 +386,40 @@ impl Default for Seal {
         }
     }
 }
+impl Seal {
+    /// 受 `ceiling`（官职上限）约束后的玉玺：工具取交集；查阅范围只保留落在上限内的部分
+    /// （诏令路径在上限路径之下则保留，上限路径在诏令路径之下则收窄为上限路径）。
+    /// 两者没有共同范围时返回 `None`。
+    pub fn within(&self, ceiling: &Seal) -> Option<Seal> {
+        fn parts(path: &str) -> Vec<&str> {
+            path.split('/')
+                .filter(|p| !p.is_empty() && *p != ".")
+                .collect()
+        }
+        let under = |inner: &str, outer: &str| parts(inner).starts_with(&parts(outer));
+        let mut scope: Vec<String> = Vec::new();
+        for path in &self.scope {
+            let narrowed: Vec<&String> = if ceiling.scope.iter().any(|c| under(path, c)) {
+                vec![path]
+            } else {
+                ceiling.scope.iter().filter(|c| under(c, path)).collect()
+            };
+            for p in narrowed {
+                if !scope.contains(p) {
+                    scope.push(p.clone());
+                }
+            }
+        }
+        (!scope.is_empty()).then(|| Seal {
+            capabilities: self
+                .capabilities
+                .intersection(&ceiling.capabilities)
+                .copied()
+                .collect(),
+            scope,
+        })
+    }
+}
 impl fmt::Display for Seal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let tools: Vec<_> = self.capabilities.iter().map(|c| c.code()).collect();
@@ -423,6 +457,16 @@ pub enum CourtEvent {
         agent: AgentId,
     },
     InstitutionReformed(GovernanceMode),
+    /// 皇帝为某一官职指定承办模型；`None` 恢复默认模型。
+    OfficeModelSet {
+        office: Office,
+        model: Option<String>,
+    },
+    /// 皇帝为某一官职设定玉玺上限：该职承办的诏令，玉玺不得超出此上限；`None` 取消上限。
+    OfficeCeilingSet {
+        office: Office,
+        ceiling: Option<Seal>,
+    },
     /// 诏令入队；此后依次可有 `TaskAssigned`、若干 `ToolInvoked`，并以完成/失败/撤销之一结束。
     EdictIssued(Edict),
     /// 内阁制下皇帝对内阁票拟的批红：批红后诏令方可指派执行。
@@ -433,6 +477,8 @@ pub enum CourtEvent {
     TaskAssigned {
         task: TaskId,
         worker: AgentId,
+        /// 承办所用的模型（演示后端与早期日志为 `None`），用于按模型估算花费。
+        model: Option<String>,
     },
     /// 审计：执行中的一次工具调用（只记参数与成败，不记输出）。
     ToolInvoked {
@@ -464,4 +510,44 @@ pub enum CourtEvent {
         verdict: Verdict,
         note: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seal(tools: &[Capability], scope: &[&str]) -> Seal {
+        Seal {
+            capabilities: tools.iter().copied().collect(),
+            scope: scope.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn seal_within_ceiling_narrows_tools_and_scope() {
+        use Capability::*;
+        let ceiling = seal(&[SearchCode], &["crates/core", "docs"]);
+        // 默认玉玺（整个项目、全部工具）收窄为上限本身。
+        assert_eq!(
+            Seal::default().within(&ceiling),
+            Some(seal(&[SearchCode], &["crates/core", "docs"]))
+        );
+        // 上限内的路径保留；上限外的去掉；`./` 前缀与尾部斜杠不影响比较。
+        assert_eq!(
+            seal(
+                &[ReadFile, SearchCode],
+                &["./crates/core/src", "README.md", "docs/"]
+            )
+            .within(&ceiling),
+            Some(seal(&[SearchCode], &["./crates/core/src", "docs/"]))
+        );
+        // 同名前缀不算在内：crates/core2 不在 crates/core 之下。
+        assert_eq!(seal(&[ReadFile], &["crates/core2"]).within(&ceiling), None);
+        // 上限为整个项目时不收窄范围。
+        let open = seal(&[ReadFile], &["."]);
+        assert_eq!(
+            seal(&[ReadFile, SearchCode], &["src"]).within(&open),
+            Some(seal(&[ReadFile], &["src"]))
+        );
+    }
 }

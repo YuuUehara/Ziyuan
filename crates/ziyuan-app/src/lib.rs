@@ -7,11 +7,11 @@
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 use std::fmt;
 use ziyuan_core::{
-    AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Seal, TaskId, TokenUsage,
-    Verdict,
+    AgentId, CourtEvent, Department, Edict, GovernanceMode, Office, Price, Seal, TaskId,
+    TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
-use ziyuan_governance::{Court, GovernanceError, ServiceRecord, TaskStatus, founding_events};
+use ziyuan_governance::{Court, GovernanceError, ServiceRecord, Task, TaskStatus, founding_events};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler};
 use ziyuan_storage::{EventStore, StorageError};
 
@@ -61,6 +61,8 @@ pub struct TaskReport {
     pub outcome: Outcome,
     /// 该诏令至今累计的模型 token 用量（含以往运行）。
     pub usage: TokenUsage,
+    /// 最近一次承办所用的模型。
+    pub model: Option<String>,
 }
 
 /// [`Session::run`] 执行期间的实时进度。
@@ -178,6 +180,26 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 为官职指定承办模型；`None` 恢复默认。
+    pub fn set_office_model(
+        &mut self,
+        office: Office,
+        model: Option<String>,
+    ) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_office_model(office, model.clone())?]))?;
+        Ok(())
+    }
+
+    /// 为官职设定玉玺上限；`None` 取消上限。
+    pub fn set_office_ceiling(
+        &mut self,
+        office: Office,
+        ceiling: Option<Seal>,
+    ) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_office_ceiling(office, ceiling.clone())?]))?;
+        Ok(())
+    }
+
     /// 一键朱元璋：革去全部丞相并罢中书省（改为废相亲政）。返回被革职的官员。
     pub fn abolish_chancellery(&mut self) -> Result<Vec<AgentId>, AppError> {
         let committed = self.commit(|court| court.propose_abolition())?;
@@ -237,8 +259,10 @@ impl<S: EventStore> Session<S> {
     ) -> Result<(), AppError> {
         let mut jobs = Vec::new();
         let mut running = Vec::new();
+        let default_model = scheduler.backend().model_name().map(str::to_owned);
         for &task in tasks {
             let mut path = Vec::new();
+            let mut sealed = None;
             let committed = self.commit(|court| {
                 let entry = court
                     .task(task)
@@ -247,12 +271,28 @@ impl<S: EventStore> Session<S> {
                 if !entry.status.is_open() || court.needs_approval(entry) {
                     return Ok(Vec::new());
                 }
-                Ok(vec![match court.route(&entry.edict) {
-                    Ok(route) => {
+                // 玉玺受承办者官职的上限约束；毫无交集则不予承办。
+                let assigned = court.route(&entry.edict).and_then(|route| {
+                    let seal = court.effective_seal(route.worker, &entry.edict)?;
+                    Ok((route, seal))
+                });
+                Ok(vec![match assigned {
+                    Ok((mut route, seal)) => {
+                        if seal != entry.edict.seal {
+                            let office = court.office_of(route.worker).expect("有上限即有官职");
+                            route
+                                .path
+                                .push(format!("玉玺受{}上限所限：{seal}", office.label()));
+                        }
                         path = route.path;
+                        sealed = Some(seal);
                         CourtEvent::TaskAssigned {
                             task,
                             worker: route.worker,
+                            // 演示后端不调用模型：不记官职指定的模型，以免误导花费估算。
+                            model: default_model.as_ref().map(|default| {
+                                court.model_of(route.worker).unwrap_or(default).to_owned()
+                            }),
                         }
                     }
                     Err(error) => CourtEvent::TaskFailed {
@@ -266,7 +306,7 @@ impl<S: EventStore> Session<S> {
             };
             let edict = self.court.task(task).expect("刚提交的诏令").edict.clone();
             match event {
-                CourtEvent::TaskAssigned { worker, .. } => {
+                CourtEvent::TaskAssigned { worker, model, .. } => {
                     let actor = self
                         .court
                         .agent(worker)
@@ -274,7 +314,11 @@ impl<S: EventStore> Session<S> {
                         .clone();
                     jobs.push(Job {
                         actor,
-                        edict: edict.clone(),
+                        edict: Edict {
+                            seal: sealed.take().expect("指派时已算出玉玺"),
+                            ..edict.clone()
+                        },
+                        model,
                     });
                     running.push((edict, path));
                     on_update(RunUpdate::Assigned(task));
@@ -285,6 +329,7 @@ impl<S: EventStore> Session<S> {
                         path: Vec::new(),
                         outcome: Outcome::Failed(reason),
                         usage: TokenUsage::default(),
+                        model: None,
                     }))
                 }
                 _ => unreachable!("指派只产生 TaskAssigned 或 TaskFailed"),
@@ -362,12 +407,13 @@ impl<S: EventStore> Session<S> {
                     } else {
                         outcome
                     };
-                    let usage = self.court.task(task).map(|t| t.usage).unwrap_or_default();
+                    let entry = self.court.task(task);
                     on_update(RunUpdate::Finished(&TaskReport {
                         edict,
                         path,
                         outcome,
-                        usage,
+                        usage: entry.map(|t| t.usage).unwrap_or_default(),
+                        model: entry.and_then(|t| t.model.clone()),
                     }));
                 }
             }
@@ -434,6 +480,27 @@ fn random_seed() -> u64 {
 
 // ---- 呈现：CLI、Web 与 TUI 共用的中文描述 ----
 
+/// 按各诏令实际所用的模型估算花费，如「约 0.0123 元」。`default_model` 用于未记下模型的早期诏令；
+/// 查不到单价的诏令不计入。全部查不到（或没有用量）时返回 `None`。
+pub fn estimate_cost<'a>(
+    tasks: impl IntoIterator<Item = &'a Task>,
+    default_model: Option<&str>,
+    price: impl Fn(&str) -> Option<Price>,
+) -> Option<String> {
+    let mut total = None::<(f64, String)>;
+    for task in tasks {
+        if task.usage.total() == 0 {
+            continue;
+        }
+        let Some(p) = task.model.as_deref().or(default_model).and_then(&price) else {
+            continue;
+        };
+        let entry = total.get_or_insert((0.0, p.currency.clone()));
+        entry.0 += p.cost(task.usage);
+    }
+    total.map(|(cost, currency)| format!("约 {cost:.4} {currency}"))
+}
+
 /// 一键朱元璋时的史官记述。
 pub const ABOLITION_NOTE: &str = "洪武十三年正月，丞相胡惟庸以谋反伏诛，株连者三万余人。即日罢中书省，升六部，天子亲裁庶务。——一键朱元璋：丞相，从此不再是问题。";
 
@@ -490,9 +557,22 @@ pub fn describe_event(event: &CourtEvent) -> String {
         CourtEvent::EdictIssued(e) => {
             format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
         }
-        CourtEvent::TaskAssigned { task, worker } => {
-            format!("诏令 #{} 派给 #{}", task.0, worker.0)
-        }
+        CourtEvent::TaskAssigned {
+            task,
+            worker,
+            model,
+        } => match model {
+            Some(model) => format!("诏令 #{} 派给 #{}（模型 {model}）", task.0, worker.0),
+            None => format!("诏令 #{} 派给 #{}", task.0, worker.0),
+        },
+        CourtEvent::OfficeModelSet { office, model } => match model {
+            Some(model) => format!("{}改用模型 {model}", office.label()),
+            None => format!("{}恢复默认模型", office.label()),
+        },
+        CourtEvent::OfficeCeilingSet { office, ceiling } => match ceiling {
+            Some(seal) => format!("{}玉玺上限：{seal}", office.label()),
+            None => format!("{}取消玉玺上限", office.label()),
+        },
         CourtEvent::ToolInvoked {
             task,
             tool,
@@ -529,7 +609,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
-    use ziyuan_core::Agent;
     use ziyuan_runtime::{BoxError, DemoBackend, ExecutionHooks, Limits, WorkerBackend};
     use ziyuan_storage::{EventLog, MemoryEventLog};
 
@@ -692,12 +771,7 @@ mod tests {
     /// 分两段流式输出后完成。
     struct Streaming;
     impl WorkerBackend for Streaming {
-        fn execute(
-            &self,
-            _: &Agent,
-            _: &Edict,
-            hooks: &dyn ExecutionHooks,
-        ) -> Result<String, BoxError> {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
             hooks.text_delta("先");
             hooks.model_usage(TokenUsage {
                 input: 10,
@@ -752,15 +826,95 @@ mod tests {
         );
     }
 
+    /// 记录收到的模型与玉玺；默认模型为 flash。
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<(Option<String>, Seal)>>);
+    impl WorkerBackend for Recording {
+        fn execute(&self, job: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let mut seen = self.0.lock().unwrap();
+            seen.push((job.model.clone(), job.edict.seal.clone()));
+            Ok("办毕".into())
+        }
+        fn model_name(&self) -> Option<&str> {
+            Some("flash")
+        }
+    }
+
+    #[tokio::test]
+    async fn office_model_and_ceiling_shape_each_job() {
+        use ziyuan_core::Capability;
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let clerk = Office::Clerk(Department::Works);
+        let ceiling = Seal {
+            capabilities: [Capability::SearchCode].into(),
+            scope: vec!["src".into()],
+        };
+        session.set_office_model(clerk, Some("pro".into())).unwrap();
+        session
+            .set_office_ceiling(clerk, Some(ceiling.clone()))
+            .unwrap();
+        assert!(session.set_office_model(clerk, Some("a b".into())).is_err());
+
+        let backend = Arc::new(Recording::default());
+        let scheduler = Scheduler::new(
+            backend.clone(),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let wide = session
+            .issue(Department::Works, "全查".into(), Seal::default())
+            .unwrap();
+        let outside = Seal {
+            scope: vec!["docs".into()],
+            ..Seal::default()
+        };
+        let denied = session
+            .issue(Department::Works, "越界".into(), outside)
+            .unwrap();
+        let reports = run_all(&mut session, &scheduler).await;
+        // 默认玉玺收窄为郎中的上限，模型用郎中指定的 pro；范围全在上限外的诏令不执行。
+        assert_eq!(
+            *backend.0.lock().unwrap(),
+            [(Some("pro".to_owned()), ceiling)]
+        );
+        assert!(reports[0].path.last().unwrap().contains("工部郎中上限"));
+        assert!(matches!(&reports[1].outcome, Outcome::Failed(r) if r.contains("上限之外")));
+        assert_eq!(
+            session.court().task(wide.id).unwrap().model.as_deref(),
+            Some("pro")
+        );
+        assert!(matches!(
+            session.court().task(denied.id).unwrap().status,
+            TaskStatus::Failed { worker: None, .. }
+        ));
+
+        // 恢复默认后记下的是后端默认模型；取消上限后玉玺不再收窄。
+        session.set_office_model(clerk, None).unwrap();
+        session.set_office_ceiling(clerk, None).unwrap();
+        let open = session
+            .issue(Department::Works, "再查".into(), Seal::default())
+            .unwrap();
+        run_all(&mut session, &scheduler).await;
+        assert_eq!(
+            backend.0.lock().unwrap()[1],
+            (Some("flash".to_owned()), Seal::default())
+        );
+        drop(session);
+        let reopened = Session::open(&mut store).unwrap();
+        assert_eq!(
+            reopened.court().task(open.id).unwrap().model.as_deref(),
+            Some("flash")
+        );
+        assert_eq!(reopened.court().office_model(clerk), None);
+    }
+
     /// 调用一次工具后失败。
     struct Broken;
     impl WorkerBackend for Broken {
-        fn execute(
-            &self,
-            _: &Agent,
-            _: &Edict,
-            hooks: &dyn ExecutionHooks,
-        ) -> Result<String, BoxError> {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
             hooks.tool_invoked("read_file", r#"{"path":"x"}"#, false);
             Err("模型不可用".into())
         }
@@ -810,7 +964,8 @@ mod tests {
             [
                 CourtEvent::TaskAssigned {
                     task: failing.id,
-                    worker: AgentId(4)
+                    worker: AgentId(4),
+                    model: None,
                 },
                 CourtEvent::ToolInvoked {
                     task: failing.id,
@@ -861,12 +1016,8 @@ mod tests {
     /// 执行期间，另一个进程（此处为另一个 Session）撤销了这件诏令。
     struct CancelledElsewhere(std::path::PathBuf);
     impl WorkerBackend for CancelledElsewhere {
-        fn execute(
-            &self,
-            _: &Agent,
-            edict: &Edict,
-            _: &dyn ExecutionHooks,
-        ) -> Result<String, BoxError> {
+        fn execute(&self, job: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let (_, edict) = (&job.actor, &job.edict);
             let mut other = Session::open(EventLog::new(&self.0))?;
             other.cancel(edict.id)?;
             Ok("本不该被记录".into())

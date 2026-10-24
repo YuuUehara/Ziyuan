@@ -1,7 +1,6 @@
 //! 独立于治理层的最小 Tool Calling Loop；模型 Adapter 见 `ziyuan-llm`。
 use crate::{BoxError, ExecutionHooks};
 use std::fmt;
-use ziyuan_core::Price;
 
 #[derive(Debug)]
 pub enum LoopError {
@@ -82,11 +81,6 @@ pub trait ModelProvider: Send + Sync {
 
     /// 模型名，供界面显示。
     fn model_name(&self) -> Option<&str> {
-        None
-    }
-
-    /// 模型单价，用于估算花费。
-    fn price(&self) -> Option<Price> {
         None
     }
 }

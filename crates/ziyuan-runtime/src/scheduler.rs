@@ -49,7 +49,10 @@ pub struct Limits {
 #[derive(Clone, Debug)]
 pub struct Job {
     pub actor: Agent,
+    /// 玉玺已受承办者官职的上限约束。
     pub edict: Edict,
+    /// 承办者官职指定的模型；`None` 用后端默认模型。
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +89,10 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(backend: Arc<dyn WorkerBackend>, limits: Limits) -> Self {
         Self { backend, limits }
+    }
+
+    pub fn backend(&self) -> &dyn WorkerBackend {
+        self.backend.as_ref()
     }
 
     /// 启动全部任务并立即返回进度通道。必须在 Tokio 运行时内调用。
@@ -152,7 +159,7 @@ async fn run_job(
     let handle = tokio::task::spawn_blocking(move || {
         // 许可随执行线程释放：超时后线程仍在收尾时，不会让并发数超过上限。
         let _permit = permit;
-        backend.execute(&job.actor, &job.edict, &hooks)
+        backend.execute(&job, &hooks)
     });
     tokio::select! {
         result = handle => match result {
@@ -228,6 +235,7 @@ mod tests {
                 text: format!("任务{id}"),
                 seal: Seal::default(),
             },
+            model: None,
         }
     }
 
@@ -258,12 +266,8 @@ mod tests {
         peak: AtomicUsize,
     }
     impl WorkerBackend for Busy {
-        fn execute(
-            &self,
-            actor: &Agent,
-            _: &Edict,
-            hooks: &dyn ExecutionHooks,
-        ) -> Result<String, BoxError> {
+        fn execute(&self, job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let (actor, _) = (&job.actor, &job.edict);
             let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(40));
@@ -279,12 +283,7 @@ mod tests {
         saw_cancel: AtomicBool,
     }
     impl WorkerBackend for UntilCancelled {
-        fn execute(
-            &self,
-            _: &Agent,
-            _: &Edict,
-            hooks: &dyn ExecutionHooks,
-        ) -> Result<String, BoxError> {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
             while !hooks.is_cancelled() {
                 thread::sleep(Duration::from_millis(5));
             }
