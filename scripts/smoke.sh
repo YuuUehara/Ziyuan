@@ -159,4 +159,7 @@ if "$BIN" budget court 0 > /dev/null 2>&1; then echo '度支须为正数' >&2; e
 "$BIN" budget | has '度支奏销'
 "$BIN" history | has '户部度支'
 "$BIN" budget court none > /dev/null
+# 刑部与锦衣卫：演示回奏无可疑内容
+"$BIN" flags | has '无所奏报'
+if "$BIN" flags x > /dev/null 2>&1; then echo '诏令 ID 须为数字' >&2; exit 1; fi
 echo 'ZiYuan smoke test PASS'

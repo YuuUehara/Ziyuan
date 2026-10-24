@@ -70,6 +70,7 @@ const HELP: &str = concat!(
   ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]
                                        户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支；
                                        不带参数则出具度支奏销（按用途、模型、官员汇总花费）
+  ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
   ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
@@ -171,6 +172,8 @@ enum Command {
     /// `None` 表示全部已完成、未复核的诏令。
     Censor(Option<TaskId>),
     Kaocheng,
+    /// `None` 列出全部诏令的密报。
+    Flags(Option<TaskId>),
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
     /// 准奏（`true`）或驳回改动。
@@ -294,6 +297,11 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
         "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
         "kaocheng" => no_args(args, Command::Kaocheng)?,
+        "flags" => match args.as_slice() {
+            [] => Command::Flags(None),
+            [id] => Command::Flags(Some(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?))),
+            _ => return Err("用法: ziyuan flags [诏令ID]".into()),
+        },
         "budget" => {
             const USAGE: &str = "用法: ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]";
             match args.as_slice() {
@@ -586,12 +594,16 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 let parent = task
                     .parent
                     .map_or(String::new(), |p| format!("↳ 分办自 #{} ", p.0));
+                let flagged = match task.suspicions.len() {
+                    0 => String::new(),
+                    n => format!("（密报 {n} 条，`ziyuan flags {}`）", task.edict.id.0),
+                };
                 let debated = match task.debates.len() {
                     0 => String::new(),
                     n => format!("（廷议 {n} 场）"),
                 };
                 println!(
-                    "#{:<3} {parent}{} {}  —  {}{debated}{usage}",
+                    "#{:<3} {parent}{} {}  —  {}{flagged}{debated}{usage}",
                     task.edict.id.0,
                     task.edict.department.label(),
                     task.edict.text,
@@ -733,6 +745,33 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
+        Command::Flags(only) => {
+            let court = session.court();
+            let mut any = false;
+            for task in court
+                .tasks()
+                .filter(|t| only.is_none_or(|id| t.edict.id == id))
+            {
+                for s in &task.suspicions {
+                    any = true;
+                    let source = s.source.strip_prefix("tool:").unwrap_or("回奏");
+                    println!(
+                        "诏令 #{} {}（{source}）：{}「{}」",
+                        task.edict.id.0,
+                        s.bureau(),
+                        s.threat.label(),
+                        s.excerpt
+                    );
+                }
+            }
+            if !any {
+                println!("刑部与锦衣卫无所奏报。");
+            } else {
+                println!(
+                    "（关键词机械检出，可能误报；玉玺不因此改变。请对照回奏与 `ziyuan diff` 自行判断。）"
+                );
+            }
+        }
         Command::Budget(None) => {
             let default = OpenAiCompatible::from_env().map(|m| m.model().to_owned());
             println!(

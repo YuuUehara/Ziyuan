@@ -933,6 +933,12 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "needs_approval": court.needs_approval(t),
                 "proxied": t.proxied,
                 "budget": t.budget,
+                "suspicions": t.suspicions.iter().map(|s| json!({
+                    "bureau": s.bureau(),
+                    "source": s.source.strip_prefix("tool:").unwrap_or("回奏"),
+                    "threat": s.threat.label(),
+                    "excerpt": s.excerpt,
+                })).collect::<Vec<_>>(),
                 "draft": t.draft.as_ref().map(|d| json!({
                     "worker": d.worker.0,
                     "name": name(d.worker),

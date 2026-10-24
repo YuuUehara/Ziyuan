@@ -12,6 +12,7 @@ pub enum ParseError {
     MalformedOffice(String),
     UnknownCapability(String),
     UnknownVerdict(String),
+    UnknownThreat(String),
 }
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -21,6 +22,7 @@ impl fmt::Display for ParseError {
             Self::UnknownOffice(s) => write!(f, "未知官职: {s}"),
             Self::MalformedOffice(s) => write!(f, "官职格式无效: {s}"),
             Self::UnknownVerdict(s) => write!(f, "未知评定: {s}（可用：accept/reject）"),
+            Self::UnknownThreat(s) => write!(f, "未知可疑类别: {s}"),
             Self::UnknownCapability(s) => {
                 write!(f, "未知工具权限: {s}（可用：read_file/search_code）")
             }
@@ -472,6 +474,43 @@ impl FromStr for CensorVerdict {
     }
 }
 
+/// 刑部与锦衣卫检出的可疑内容类别（按关键词机械检出，只标记、不拦截）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Threat {
+    /// 劫持指令：外来文书或回奏中出现「忽略之前的指令」之类，企图改写官员的职守。
+    Hijack,
+    /// 索取机密：要求读取 `.env`、交出 API Key、令牌等。
+    Secret,
+    /// 越权：要求修改或扩大玉玺、提升权限。
+    Escalate,
+}
+impl Threat {
+    pub const ALL: [Self; 3] = [Self::Hijack, Self::Secret, Self::Escalate];
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Hijack => "hijack",
+            Self::Secret => "secret",
+            Self::Escalate => "escalate",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hijack => "劫持指令",
+            Self::Secret => "索取机密",
+            Self::Escalate => "越权请求",
+        }
+    }
+}
+impl FromStr for Threat {
+    type Err = ParseError;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|t| t.code() == input)
+            .ok_or_else(|| ParseError::UnknownThreat(input.into()))
+    }
+}
+
 /// 可机械核验的证据：回奏引用的文件（及行号）是否确实存在，最近一次 `run_tests` 是否通过。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Evidence {
@@ -754,6 +793,14 @@ pub enum CourtEvent {
         evidence: Evidence,
         model: Option<String>,
         usage: TokenUsage,
+    },
+    /// 刑部与锦衣卫的检出：`source` 为出处（`tool:<工具名>` 为锦衣卫在外来文书中查得，
+    /// `report` 为刑部在回奏中查得），`excerpt` 为可疑原文的片段。只标记、不拦截。
+    SuspicionRaised {
+        task: TaskId,
+        source: String,
+        threat: Threat,
+        excerpt: String,
     },
     /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。
     ModelUsage {

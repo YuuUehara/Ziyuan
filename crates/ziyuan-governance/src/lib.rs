@@ -6,8 +6,8 @@ use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage,
-    Verdict,
+    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, Threat,
+    TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -248,6 +248,26 @@ pub struct Task {
     pub debates: Vec<Vec<Speech>>,
     /// 本件的度支（tokens），计入票拟、分办、廷议与复核；子诏令各自计。
     pub budget: Option<u64>,
+    /// 刑部与锦衣卫的检出。
+    pub suspicions: Vec<Suspicion>,
+}
+
+/// 一处检出（见 `CourtEvent::SuspicionRaised`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suspicion {
+    pub source: String,
+    pub threat: Threat,
+    pub excerpt: String,
+}
+impl Suspicion {
+    /// 检出者：外来文书归锦衣卫，回奏归刑部。
+    pub fn bureau(&self) -> &'static str {
+        if self.source.starts_with("tool:") {
+            "锦衣卫"
+        } else {
+            "刑部"
+        }
+    }
 }
 
 /// 分办方案。
@@ -460,6 +480,7 @@ impl Court {
                         proxied: false,
                         debates: Vec::new(),
                         budget: None,
+                        suspicions: Vec::new(),
                     },
                 );
             }
@@ -598,6 +619,7 @@ impl Court {
                             proxied: false,
                             debates: Vec::new(),
                             budget: None,
+                            suspicions: Vec::new(),
                         },
                     );
                 }
@@ -661,6 +683,25 @@ impl Court {
                         reason: reason.clone(),
                     },
                 );
+            }
+            CourtEvent::SuspicionRaised {
+                task,
+                source,
+                threat,
+                excerpt,
+            } => {
+                let entry = self
+                    .tasks
+                    .get_mut(task)
+                    .ok_or(GovernanceError::UnknownEdict(*task))?;
+                if entry.status == TaskStatus::Pending {
+                    return Err(GovernanceError::TaskNotAssigned(*task));
+                }
+                entry.suspicions.push(Suspicion {
+                    source: source.clone(),
+                    threat: *threat,
+                    excerpt: excerpt.clone(),
+                });
             }
             CourtEvent::ModelUsage { task, usage } => {
                 let entry = self

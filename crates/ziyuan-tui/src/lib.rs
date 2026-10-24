@@ -1097,6 +1097,22 @@ impl App {
             lines.push(Line::styled(title, Style::new().fg(Color::Magenta).bold()));
             lines.extend(speeches.into_iter().map(Line::from));
         }
+        if !task.suspicions.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "刑部与锦衣卫密报（关键词检出，可能误报）",
+                Style::new().fg(Color::Red).bold(),
+            ));
+            for s in &task.suspicions {
+                let source = s.source.strip_prefix("tool:").unwrap_or("回奏");
+                lines.push(Line::from(format!(
+                    "  {}（{source}）{}：「{}」",
+                    s.bureau(),
+                    s.threat.label(),
+                    s.excerpt
+                )));
+            }
+        }
         if let Some(c) = &task.censure {
             let censor = self
                 .court()

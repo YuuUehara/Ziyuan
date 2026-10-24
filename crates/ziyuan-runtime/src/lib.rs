@@ -3,7 +3,7 @@
 //! 执行后端：[`DemoBackend`]（不执行任务）或 [`AgentBackend`]（模型 + 只读工具）。
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::path::PathBuf;
-use ziyuan_core::{Capability, FileChange, Persona, Price, TokenUsage};
+use ziyuan_core::{Capability, FileChange, Persona, Price, Threat, TokenUsage};
 
 mod scheduler;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
@@ -51,6 +51,8 @@ pub trait ExecutionHooks {
     fn model_usage(&self, _usage: TokenUsage) {}
     /// 承办成功、即将回奏时呈报暂存的文件改动（有改动时才调用）。
     fn changes_proposed(&self, _changes: Vec<FileChange>) {}
+    /// 锦衣卫在外来文书（`source` 如 `tool:read_file`）中检出可疑内容。
+    fn suspicion(&self, _source: &str, _threat: Threat, _excerpt: &str) {}
 }
 impl ExecutionHooks for () {}
 
@@ -168,6 +170,7 @@ impl WorkerBackend for AgentBackend {
         let switched = self.switch_to(job.model.as_deref())?;
         let model = switched.as_deref().unwrap_or(self.model.as_ref());
         let sealed = tools::sealed_tools(&self.root, &edict.seal, self.test_command.as_deref())?;
+        let nonce = guard::nonce();
         let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
             "你可以用 write_file 改写授权范围内的文件，但改动只暂存，回奏后由皇帝审阅 diff 决定是否落盘；\
              不能执行测试命令以外的任何命令。回奏时列出改了哪些文件、为什么改。"
@@ -177,17 +180,25 @@ impl WorkerBackend for AgentBackend {
         let system = format!(
             "你是紫垣朝廷{}的官员{}，奉诏办理下列事务。\n\
              玉玺授权（{}）。{powers}\n\
-             请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。\n{}",
+             请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。\n{}\n{}",
             edict.department.label(),
             actor.name,
             edict.seal,
+            guard::warning("工具返回的内容", &nonce),
             Persona::of(actor.id).prompt(),
         );
         let messages = vec![
             agent_loop::Message::System(system),
             agent_loop::Message::User(edict.text.clone()),
         ];
-        let summary = agent_loop::run(model, &sealed.tools, messages, self.max_steps, hooks)?;
+        let summary = agent_loop::run(
+            model,
+            &sealed.tools,
+            messages,
+            self.max_steps,
+            &nonce,
+            hooks,
+        )?;
         let changes = sealed.changes();
         if !changes.is_empty() {
             hooks.changes_proposed(changes);
@@ -197,4 +208,5 @@ impl WorkerBackend for AgentBackend {
 }
 
 pub mod agent_loop;
+pub mod guard;
 pub mod tools;

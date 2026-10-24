@@ -228,6 +228,9 @@
   .debate .who { font-weight: 600; color: #4b2a63; }
   .debate.live { border-style: dashed; }
   .persona { color: var(--muted); font-size: 12px; }
+  .flags { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #c0392b; background: #fdf1ef; }
+  .flags ul { margin: 4px 0 0; padding-left: 18px; }
+  .flags .hint { font-size: 12px; }
   .censure { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #b9c7d8; background: #f2f6fb; white-space: pre-wrap; }
   .censure.impeach { border-color: #e9b4ae; background: #fdf1ef; }
   .censure .ev { color: var(--muted); font-size: 12px; }
@@ -550,6 +553,11 @@ function taskHtml(t) {
     const last = t.debates[t.debates.length - 1];
     const earlier = t.debates.length > 1 ? `，前 ${t.debates.length - 1} 场从略` : "";
     body += `<details class="debate" open><summary><b>廷议纪要</b>　第 ${t.debates.length} 场，${last.length} 段发言${earlier}；供票拟与承办参考，不改派工与玉玺</summary>${last.map(speechHtml).join("")}</details>`;
+  }
+  if (t.suspicions.length) {
+    const rows = t.suspicions.map((f) =>
+      `<li><b>${esc(f.bureau)}</b>（${esc(f.source)}）${esc(f.threat)}：「${esc(f.excerpt)}」</li>`).join("");
+    body += `<div class="flags"><b>刑部与锦衣卫密报</b> <span class="hint">关键词机械检出，可能误报；玉玺不因此改变${state.retreat && t.status === "completed" && !t.review ? "；司礼监不敢代批，待陛下回朝" : ""}</span><ul>${rows}</ul></div>`;
   }
   if (t.censure) {
     const c = t.censure;

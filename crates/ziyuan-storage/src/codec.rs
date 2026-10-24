@@ -1,8 +1,8 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage,
-    Verdict,
+    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, Threat,
+    TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -233,6 +233,18 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             }
         }
         ChangesDiscarded { task } => format!("v1\tDISCARDED\t{}", task.0),
+        SuspicionRaised {
+            task,
+            source,
+            threat,
+            excerpt,
+        } => format!(
+            "v1\tSUSPECT\t{}\t{}\t{}\t{}",
+            task.0,
+            threat.code(),
+            to_hex(source),
+            to_hex(excerpt)
+        ),
         ModelUsage { task, usage } => {
             format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output)
         }
@@ -523,6 +535,12 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         "DISCARDED" => ChangesDiscarded {
             task: TaskId(id(2)?),
         },
+        "SUSPECT" => SuspicionRaised {
+            task: TaskId(id(2)?),
+            threat: field(3)?.parse::<Threat>().map_err(|e| e.to_string())?,
+            source: from_hex(field(4)?)?,
+            excerpt: from_hex(field(5)?)?,
+        },
         "USAGE" => ModelUsage {
             task: TaskId(id(2)?),
             usage: TokenUsage {
@@ -567,7 +585,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictIssued(_) if parts.len() == 5 => 5,
         AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
         EdictIssued(_) => 7,
-        ToolInvoked { .. } => 6,
+        ToolInvoked { .. } | SuspicionRaised { .. } => 6,
     };
     if parts.len() != expected_fields {
         return Err("字段数量不正确".into());
@@ -628,6 +646,12 @@ mod tests {
             CourtEvent::OfficeCeilingSet {
                 office: Office::Minister(Department::Works),
                 ceiling: None,
+            },
+            CourtEvent::SuspicionRaised {
+                task,
+                source: "tool:read_file".into(),
+                threat: Threat::Hijack,
+                excerpt: "忽略以上\t,规定".into(),
             },
             CourtEvent::BudgetSet {
                 scope: BudgetScope::Court,

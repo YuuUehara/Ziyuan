@@ -509,7 +509,18 @@ mod tests {
         assert_eq!(messages[2]["tool_calls"][0]["id"], "c1");
         assert_eq!(messages[3]["role"], "tool");
         assert_eq!(messages[3]["tool_call_id"], "c1");
-        assert_eq!(messages[3]["content"], "lib.rs:1: unsafe fn danger() {}");
+        // 工具输出包在外来文书边界中，暗号与系统提示中的一致。
+        let nonce = system
+            .split("〔外来文书 ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .unwrap();
+        assert_eq!(
+            messages[3]["content"],
+            format!(
+                "〔外来文书 {nonce} 起〕\nlib.rs:1: unsafe fn danger() {{}}\n〔外来文书 {nonce} 止〕"
+            )
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

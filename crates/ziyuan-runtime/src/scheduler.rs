@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use ziyuan_core::{Agent, Edict, FileChange, TaskId, TokenUsage};
+use ziyuan_core::{Agent, Edict, FileChange, TaskId, Threat, TokenUsage};
 
 /// 可克隆的撤销信号；同步代码用 `is_cancelled` 轮询，异步代码 `await cancelled()`。
 #[derive(Clone, Debug)]
@@ -78,6 +78,13 @@ pub enum Progress {
     Changes {
         task: TaskId,
         changes: Vec<FileChange>,
+    },
+    /// 锦衣卫在外来文书中的检出。
+    Suspicion {
+        task: TaskId,
+        source: String,
+        threat: Threat,
+        excerpt: String,
     },
     /// 每个 Job 恰好一条。
     Finished { task: TaskId, outcome: Outcome },
@@ -265,6 +272,15 @@ impl ExecutionHooks for TaskHooks {
         let _ = self.progress.send(Progress::Changes {
             task: self.task,
             changes,
+        });
+    }
+
+    fn suspicion(&self, source: &str, threat: Threat, excerpt: &str) {
+        let _ = self.progress.send(Progress::Suspicion {
+            task: self.task,
+            source: source.into(),
+            threat,
+            excerpt: excerpt.into(),
         });
     }
 
