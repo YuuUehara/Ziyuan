@@ -120,7 +120,6 @@ enum Modal {
 #[derive(Clone, Copy)]
 enum ConfirmKind {
     Purge(AgentId),
-    Abolish,
 }
 
 #[derive(Clone, Copy)]
@@ -136,6 +135,8 @@ enum ChooseKind {
     Appoint(AgentId),
     /// 御笔改票：从本部在任官员中改选承办人。
     Redraft(TaskId),
+    /// 丞相制下废相：罢免丞相，或一键朱元璋（革职削籍）。
+    Abolish,
 }
 
 /// 现行制度下 `agent` 可任的官职：本制度的协调官职，以及本部（专长所在部门）的官职。
@@ -303,7 +304,6 @@ impl App {
             KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(5),
             KeyCode::Char('r') => self.start_run(),
             KeyCode::Char('s') => self.stop_run(),
-            KeyCode::Char('Z') => self.modal = Some(Modal::Confirm(ConfirmKind::Abolish)),
             KeyCode::Char('g') => {
                 let selected = GovernanceMode::ALL
                     .iter()
@@ -500,7 +500,49 @@ impl App {
                     |_| format!("官员 #{} 革职，削去仕籍，永不叙用", agent.0),
                 );
             }
-            ConfirmKind::Abolish => {
+        }
+    }
+
+    fn submit_choice(&mut self) {
+        let Some(Modal::Choose { kind, selected }) = self.modal.take() else {
+            return;
+        };
+        match kind {
+            ChooseKind::Reform => {
+                let mode = GovernanceMode::ALL[selected];
+                if mode == GovernanceMode::DirectRule
+                    && self.court().mode() == GovernanceMode::Chancellor
+                {
+                    self.modal = Some(Modal::Choose {
+                        kind: ChooseKind::Abolish,
+                        selected: 0,
+                    });
+                    return;
+                }
+                if let Some(note) =
+                    self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()))
+                {
+                    self.modal = Some(Modal::Notice(note.to_owned()));
+                }
+            }
+            ChooseKind::Appoint(agent) => {
+                let Some(&office) = appointable(self.court(), agent).get(selected) else {
+                    return;
+                };
+                self.mutate(
+                    |s| s.appoint(agent, office),
+                    |_| format!("任命官员 #{} 为{}", agent.0, office.label()),
+                );
+            }
+            ChooseKind::Abolish if selected == 0 => {
+                let mode = GovernanceMode::DirectRule;
+                if let Some(note) =
+                    self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()))
+                {
+                    self.modal = Some(Modal::Notice(note.to_owned()));
+                }
+            }
+            ChooseKind::Abolish => {
                 if let Some(purged) =
                     self.mutate(|s| s.abolish_chancellery(), |_| "罢中书省，废相亲政".into())
                 {
@@ -516,31 +558,6 @@ impl App {
                     };
                     self.modal = Some(Modal::Notice(format!("{purged}{ABOLITION_NOTE}")));
                 }
-            }
-        }
-    }
-
-    fn submit_choice(&mut self) {
-        let Some(Modal::Choose { kind, selected }) = self.modal.take() else {
-            return;
-        };
-        match kind {
-            ChooseKind::Reform => {
-                let mode = GovernanceMode::ALL[selected];
-                if let Some(note) =
-                    self.mutate(|s| s.reform(mode), |_| format!("制度改为{}", mode.label()))
-                {
-                    self.modal = Some(Modal::Notice(note.to_owned()));
-                }
-            }
-            ChooseKind::Appoint(agent) => {
-                let Some(&office) = appointable(self.court(), agent).get(selected) else {
-                    return;
-                };
-                self.mutate(
-                    |s| s.appoint(agent, office),
-                    |_| format!("任命官员 #{} 为{}", agent.0, office.label()),
-                );
             }
             ChooseKind::Redraft(task) => {
                 let Some(worker) = self
@@ -596,6 +613,10 @@ impl App {
                 .iter()
                 .map(|o| format!("{}（{}）", o.label(), o.rank(mode)))
                 .collect(),
+            ChooseKind::Abolish => vec![
+                "罢免丞相（留仕籍，可再起用）".to_owned(),
+                "一键朱元璋（革职削籍，永不叙用）".to_owned(),
+            ],
             ChooseKind::Redraft(task) => self
                 .redraft_candidates(task)
                 .into_iter()
@@ -1078,7 +1099,6 @@ impl App {
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
                 ("g", "改制"),
-                ("Z", "朱元璋"),
                 ("Tab", "切换"),
                 ("q", "退出"),
             ],
@@ -1088,7 +1108,6 @@ impl App {
                 ("d", "罢免"),
                 ("x", "革职"),
                 ("g", "改制"),
-                ("Z", "朱元璋"),
                 ("Tab", "切换"),
                 ("q", "退出"),
             ],
@@ -1169,6 +1188,7 @@ impl App {
                         format!("任命 #{} {name}", agent.0)
                     }
                     ChooseKind::Redraft(task) => format!("御笔改票 · 诏令 #{}", task.0),
+                    ChooseKind::Abolish => "罢中书省，丞相如何处置？".to_owned(),
                 };
                 let popup = centered(area, 36, options.len() as u16 + 2);
                 frame.render_widget(Clear, popup);
@@ -1187,9 +1207,6 @@ impl App {
                     ConfirmKind::Purge(agent) => {
                         let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
                         format!("革去官员 #{} {name}？削去仕籍，永不叙用。", agent.0)
-                    }
-                    ConfirmKind::Abolish => {
-                        "一键朱元璋：革去全部丞相、罢中书省，改为废相亲政？".to_owned()
                     }
                 };
                 let paragraph = Paragraph::new(vec![
@@ -1298,6 +1315,7 @@ mod tests {
                 '\n' => KeyCode::Enter,
                 '\t' => KeyCode::Tab,
                 '↓' => KeyCode::Down,
+                '⎋' => KeyCode::Esc,
                 c => KeyCode::Char(c),
             };
             app.handle(Message::Input(Event::Key(KeyEvent::from(code))));
@@ -1448,10 +1466,12 @@ mod tests {
         assert!(screen(&app).contains("大元，杀回来了"));
         press(&mut app, " ");
         assert!(app.modal.is_none());
-        // 一键朱元璋：取消不生效，确认后丞相革职、改为亲政。
-        press(&mut app, "Zn");
+        // 丞相制下改为亲政时选丞相的处置：Esc 取消不生效；选一键朱元璋则丞相革职、改为亲政。
+        press(&mut app, "g↓\n");
+        assert!(screen(&app).contains("一键朱元璋（革职削籍"));
+        press(&mut app, "⎋");
         assert_eq!(app.court().mode(), GovernanceMode::Chancellor);
-        press(&mut app, "Zy");
+        press(&mut app, "g↓\n↓\n");
         assert_eq!(app.court().mode(), GovernanceMode::DirectRule);
         assert!(screen(&app).contains("胡惟庸"));
         press(&mut app, " ");

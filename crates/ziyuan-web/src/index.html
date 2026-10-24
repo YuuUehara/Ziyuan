@@ -185,8 +185,9 @@
   .badge.awaiting { color: #fff; border-color: var(--vermilion); background: var(--vermilion); }
   .draft { margin-top: 8px; font-size: 13px; color: var(--muted); }
   .draft b { color: var(--vermilion); font-family: var(--serif); }
+  #abolish-choice .actions { flex-direction: column; margin-top: 8px; }
   button.zhu {
-    width: 100%; margin-bottom: 14px; padding: 9px; font-family: var(--serif); font-size: 15px;
+    padding: 9px; font-family: var(--serif); font-size: 15px;
     background: #2b1b17; color: var(--gold-soft); border-color: #000;
   }
   button.zhu:hover { background: #000; }
@@ -303,7 +304,14 @@
       <h2>朝堂 <small>制度与派工路线</small></h2>
       <div class="body">
         <div class="modes" id="modes"></div>
-        <button class="zhu" id="abolish-btn" hidden>一键朱元璋：革丞相，罢中书省</button>
+        <div class="chronicle" id="abolish-choice" hidden>
+          <h3>罢中书省，丞相如何处置？</h3>
+          <div class="actions">
+            <button id="reform-direct">罢免丞相（留仕籍，可再起用）</button>
+            <button class="zhu" id="abolish-btn">一键朱元璋：革职削籍，永不叙用</button>
+            <button class="small" id="abolish-cancel">取消</button>
+          </div>
+        </div>
         <div class="chronicle" id="chronicle" hidden>
           <h3>史官记</h3>
           <p id="chronicle-text"></p>
@@ -541,7 +549,7 @@ function render() {
   $("config-office").innerHTML = s.offices.map((o) =>
     `<option value="${o.code}">${esc(o.label)}${o.model || o.ceiling ? " ✦" : ""}</option>`).join("");
 
-  $("abolish-btn").hidden = s.mode.code !== "chancellor";
+  if (s.mode.code !== "chancellor") $("abolish-choice").hidden = true;
   $("modes").innerHTML = s.modes.map((m) =>
     `<button data-mode="${m.code}" class="${m.code === s.mode.code ? "current" : ""}">${esc(m.label)}</button>`).join("");
   $("routes").innerHTML = s.departments.map((d) => {
@@ -646,19 +654,28 @@ document.addEventListener("click", (event) => {
   const el = event.target.closest("button");
   if (!el) return;
   const d = el.dataset;
-  if (d.mode && d.mode !== state.mode.code) {
+  const reform = (mode, label) =>
+    act(api("/reform", { mode }), `已改制为${label}`).then((r) => r && chronicle(r.note));
+  if (d.mode === "direct" && state.mode.code === "chancellor") {
+    // 丞相制下废相：罢免还是一键朱元璋，在同一个入口里选。
+    $("abolish-choice").hidden = false;
+  } else if (d.mode && d.mode !== state.mode.code) {
     const label = el.textContent;
     if (confirm(`改制为「${label}」？旧制度的中书省/内阁官职将自动撤销。`)) {
-      act(api("/reform", { mode: d.mode }), `已改制为${label}`).then((r) => r && chronicle(r.note));
+      reform(d.mode, label);
     }
+  } else if (el.id === "reform-direct") {
+    $("abolish-choice").hidden = true;
+    reform("direct", "废相亲政");
   } else if (el.id === "abolish-btn") {
-    if (confirm("一键朱元璋：革去全部丞相、罢中书省？被革者永不叙用。")) {
-      act(api("/abolish", {})).then((r) => {
-        if (!r) return;
-        const names = r.purged.map((p) => p.name).join("、");
-        chronicle((names ? `丞相${names}革职削籍。` : "") + r.note);
-      });
-    }
+    $("abolish-choice").hidden = true;
+    act(api("/abolish", {})).then((r) => {
+      if (!r) return;
+      const names = r.purged.map((p) => p.name).join("、");
+      chronicle((names ? `丞相${names}革职削籍。` : "") + r.note);
+    });
+  } else if (el.id === "abolish-cancel") {
+    $("abolish-choice").hidden = true;
   } else if (el.id === "chronicle-close") {
     $("chronicle").hidden = true;
   } else if (d.draft) {
