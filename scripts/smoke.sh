@@ -151,4 +151,12 @@ DID="$("$BIN" edict --queue '廷议此事' | grep -o '#[0-9]*' | head -1 | tr -d
 if "$BIN" debate "$DID" > /dev/null 2>&1; then echo '演示后端不应能廷议' >&2; exit 1; fi
 if "$BIN" debate "$DID" --rounds 9 > /dev/null 2>&1; then echo '轮数越界应拒绝' >&2; exit 1; fi
 if "$BIN" history | has '廷议：'; then echo '廷议失败不应留记录' >&2; exit 1; fi
+# 户部度支：非正数被拒；设限后 court 显示余额，奏销可读，历史有记录
+if "$BIN" budget court 0 > /dev/null 2>&1; then echo '度支须为正数' >&2; exit 1; fi
+"$BIN" budget clerk:works 800 | has '工部郎中每件：限 800'
+"$BIN" budget court 999999 > /dev/null
+"$BIN" court | has '朝廷度支：999999 tokens'
+"$BIN" budget | has '度支奏销'
+"$BIN" history | has '户部度支'
+"$BIN" budget court none > /dev/null
 echo 'ZiYuan smoke test PASS'

@@ -1,7 +1,8 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
-    Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage, Verdict,
+    Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
+    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage,
+    Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -96,6 +97,18 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             Some(model) => format!("v1\tMODEL\t{}\t{}", office.code(), to_hex(model)),
             None => format!("v1\tMODEL\t{}", office.code()),
         },
+        // 范围为 `court`、`office:<官职>` 或 `task:<ID>`；取消度支时没有额度字段。
+        BudgetSet { scope, tokens } => {
+            let scope = match scope {
+                BudgetScope::Court => "court".to_owned(),
+                BudgetScope::Office(office) => format!("office:{}", office.code()),
+                BudgetScope::Task(task) => format!("task:{}", task.0),
+            };
+            match tokens {
+                Some(t) => format!("v1\tBUDGET\t{scope}\t{t}"),
+                None => format!("v1\tBUDGET\t{scope}"),
+            }
+        }
         OfficeCeilingSet { office, ceiling } => match ceiling {
             Some(seal) => format!("v1\tCEILING\t{}\t{}", office.code(), encode_seal(seal)),
             None => format!("v1\tCEILING\t{}", office.code()),
@@ -358,6 +371,22 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
                 _ => Some(from_hex(field(3)?)?),
             },
         },
+        "BUDGET" => BudgetSet {
+            scope: match field(2)?.split_once(':') {
+                None if field(2)? == "court" => BudgetScope::Court,
+                Some(("office", office)) => {
+                    BudgetScope::Office(office.parse::<Office>().map_err(|e| e.to_string())?)
+                }
+                Some(("task", task)) => {
+                    BudgetScope::Task(TaskId(task.parse::<u64>().map_err(|e| e.to_string())?))
+                }
+                _ => return Err(format!("度支范围无效: {}", field(2)?).into()),
+            },
+            tokens: match parts.len() {
+                3 => None,
+                _ => Some(id(3)?),
+            },
+        },
         "CEILING" => OfficeCeilingSet {
             office: field(2)?.parse::<Office>().map_err(|e| e.to_string())?,
             ceiling: match parts.len() {
@@ -523,7 +552,10 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictSplit { model: None, .. } => 7,
         EdictSplit { .. } => 8,
         CensorReported { .. } => 12,
-        OfficeModelSet { model: None, .. } | OfficeCeilingSet { ceiling: None, .. } => 3,
+        OfficeModelSet { model: None, .. }
+        | OfficeCeilingSet { ceiling: None, .. }
+        | BudgetSet { tokens: None, .. } => 3,
+        BudgetSet { .. } => 4,
         OfficialAppointed { .. }
         | TaskAssigned { model: None, .. }
         | OfficeModelSet { .. }
@@ -596,6 +628,18 @@ mod tests {
             CourtEvent::OfficeCeilingSet {
                 office: Office::Minister(Department::Works),
                 ceiling: None,
+            },
+            CourtEvent::BudgetSet {
+                scope: BudgetScope::Court,
+                tokens: Some(1_000_000),
+            },
+            CourtEvent::BudgetSet {
+                scope: BudgetScope::Office(Office::Minister(Department::Works)),
+                tokens: Some(20_000),
+            },
+            CourtEvent::BudgetSet {
+                scope: BudgetScope::Task(task),
+                tokens: None,
             },
             CourtEvent::ToolInvoked {
                 task,

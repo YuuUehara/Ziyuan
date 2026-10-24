@@ -24,12 +24,12 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event, estimate_cost,
-    kaocheng_grade, kaocheng_report, render_diff,
+    ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event, duzhi_report,
+    estimate_cost, kaocheng_grade, kaocheng_report, render_diff,
 };
 use ziyuan_core::{
-    AgentId, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId, TokenUsage,
-    Verdict,
+    AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
+    TokenUsage, Verdict,
 };
 use ziyuan_governance::{ChangeState, Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -99,6 +99,8 @@ pub fn router(config: Config) -> Router {
         .route("/history", get(history))
         .route("/recommend", get(recommend))
         .route("/kaocheng", get(kaocheng))
+        .route("/duzhi", get(duzhi))
+        .route("/budget", post(budget))
         .route("/events", get(events_stream))
         .route("/edicts", post(issue))
         .route("/run", post(run))
@@ -337,6 +339,48 @@ async fn recommend(
 async fn kaocheng(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     let report = app.with_session(|s| Ok(kaocheng_report(s.court()))).await?;
     Ok(Json(json!({ "report": report })))
+}
+
+/// 度支奏销（纯文本）。
+async fn duzhi(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    let report = app
+        .with_session(move |s| {
+            let default = backend.model_name();
+            Ok(duzhi_report(s.court(), default, |m| backend.price(m)))
+        })
+        .await?;
+    Ok(Json(json!({ "report": report })))
+}
+
+/// 户部度支：`{ "scope": "court" | "office" | "task", "office"?, "task"?, "tokens": 数或 null }`。
+async fn budget(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let scope = match str_field(&body, "scope")? {
+        "court" => BudgetScope::Court,
+        "office" => BudgetScope::Office(parse::<Office>(str_field(&body, "office")?)?),
+        "task" => BudgetScope::Task(TaskId(
+            body["task"]
+                .as_u64()
+                .ok_or_else(|| ApiError::bad("缺少诏令 ID"))?,
+        )),
+        other => return Err(ApiError::bad(format!("度支范围无效：{other}"))),
+    };
+    let tokens = match &body["tokens"] {
+        Value::Null => None,
+        value => Some(
+            value
+                .as_u64()
+                .ok_or_else(|| ApiError::bad("额度须为正整数（tokens）"))?,
+        ),
+    };
+    app.mutate(move |s| {
+        s.set_budget(scope, tokens)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
 }
 
 async fn events_stream(
@@ -839,6 +883,7 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
             let mut value = office_json(o, court.mode());
             value["model"] = json!(court.office_model(o));
             value["ceiling"] = json!(court.office_ceiling(o).map(|c| c.to_string()));
+            value["budget"] = json!(court.budget(BudgetScope::Office(o)));
             value["department"] = json!(match o {
                 Office::Minister(d) | Office::ViceMinister(d) | Office::Clerk(d) => Some(d.code()),
                 _ => None,
@@ -887,6 +932,7 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "status": kind,
                 "needs_approval": court.needs_approval(t),
                 "proxied": t.proxied,
+                "budget": t.budget,
                 "draft": t.draft.as_ref().map(|d| json!({
                     "worker": d.worker.0,
                     "name": name(d.worker),
@@ -966,6 +1012,10 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
     json!({
         "mode": { "code": court.mode().code(), "label": court.mode().label() },
         "retreat": court.in_retreat(),
+        "treasury": court.budget(BudgetScope::Court).map(|limit| json!({
+            "limit": limit,
+            "remaining": court.treasury_remaining(),
+        })),
         "modes": GovernanceMode::ALL.iter().map(|m| json!({ "code": m.code(), "label": m.label() })).collect::<Vec<_>>(),
         "departments": departments,
         "offices": offices,
@@ -1191,6 +1241,40 @@ mod tests {
         call(&base, "/offices/ceiling", t, Some(clear)).await;
         let (_, state) = call(&base, "/state", t, None).await;
         assert!(state["officials"][3]["ceiling"].is_null());
+
+        // 户部度支：官职每件、朝廷总额；非正数与未知范围被拒。
+        assert!(state["treasury"].is_null());
+        let office = json!({ "scope": "office", "office": "clerk:works", "tokens": 800 });
+        assert_eq!(call(&base, "/budget", t, Some(office)).await.0, 200);
+        let court = json!({ "scope": "court", "tokens": 5000 });
+        assert_eq!(call(&base, "/budget", t, Some(court)).await.0, 200);
+        for bad in [
+            json!({ "scope": "court", "tokens": 0 }),
+            json!({ "scope": "court", "tokens": -3 }),
+            json!({ "scope": "realm", "tokens": 9 }),
+            json!({ "scope": "task", "task": 42, "tokens": 9 }),
+        ] {
+            assert_eq!(
+                call(&base, "/budget", t, Some(bad.clone())).await.0,
+                400,
+                "{bad}"
+            );
+        }
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(
+            state["treasury"],
+            json!({ "limit": 5000, "remaining": 5000 })
+        );
+        let clerk = state["offices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["code"] == "clerk:works")
+            .unwrap();
+        assert_eq!(clerk["budget"], 800);
+        let (_, duzhi) = call(&base, "/duzhi", t, None).await;
+        let report = duzhi["report"].as_str().unwrap();
+        assert!(report.contains("工部郎中每件限 800 tokens"), "{report}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

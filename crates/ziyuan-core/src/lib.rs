@@ -335,6 +335,26 @@ impl Persona {
     }
 }
 
+/// 度支（token 限额）的适用范围。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BudgetScope {
+    /// 朝廷总额：全部诏令（含票拟、廷议等）累计用量的上限。
+    Court,
+    /// 某一官职承办的每件诏令的上限。
+    Office(Office),
+    /// 某件诏令的上限（含其票拟、分办、廷议与复核）。
+    Task(TaskId),
+}
+impl BudgetScope {
+    pub fn label(self) -> String {
+        match self {
+            Self::Court => "朝廷总额".into(),
+            Self::Office(office) => format!("{}每件", office.label()),
+            Self::Task(task) => format!("诏令 #{}", task.0),
+        }
+    }
+}
+
 /// 廷议中一位官员的一段发言。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Speech {
@@ -649,6 +669,11 @@ pub enum CourtEvent {
     OfficeCeilingSet {
         office: Office,
         ceiling: Option<Seal>,
+    },
+    /// 皇帝设定度支（token 限额）；`None` 取消。超支即停，最多超出一次模型调用的用量。
+    BudgetSet {
+        scope: BudgetScope,
+        tokens: Option<u64>,
     },
     /// 诏令入队；此后依次可有 `TaskAssigned`、若干 `ToolInvoked`，并以完成/失败/撤销之一结束。
     EdictIssued(Edict),

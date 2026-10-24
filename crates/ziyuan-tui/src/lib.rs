@@ -20,12 +20,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, estimate_cost,
-    kaocheng_report, render_diff, seal_note,
+    ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, duzhi_report,
+    estimate_cost, kaocheng_report, render_diff, seal_note,
 };
 use ziyuan_core::{
-    AgentId, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech, TaskId,
-    Verdict,
+    AgentId, BudgetScope, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech,
+    TaskId, Verdict,
 };
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -359,6 +359,12 @@ impl App {
             }
             KeyCode::Char('K') => {
                 self.modal = Some(Modal::Notice(kaocheng_report(self.court())));
+            }
+            KeyCode::Char('H') => {
+                let backend = &self.config.backend;
+                let report =
+                    duzhi_report(self.court(), self.model.as_deref(), |m| backend.price(m));
+                self.modal = Some(Modal::Notice(report));
             }
             KeyCode::Char('g') => {
                 let selected = GovernanceMode::ALL
@@ -908,6 +914,15 @@ impl App {
                 self.cost_note(court.tasks()),
             )),
         ];
+        if let (Some(limit), Some(left)) =
+            (court.budget(BudgetScope::Court), court.treasury_remaining())
+        {
+            let style = match left {
+                0 => Style::new().fg(Color::Red).bold(),
+                _ => Style::new(),
+            };
+            spans.push(Span::styled(format!("  度支余 {left}/{limit}"), style));
+        }
         if self.run.is_some() {
             spans.push(Span::styled(
                 "  ● 执行中",
@@ -1336,6 +1351,7 @@ impl App {
                 ("v", "廷议"),
                 ("i", "复核"),
                 ("K", "考成"),
+                ("H", "度支"),
                 ("D", "修道/回朝"),
                 ("g", "改制"),
                 ("Tab", "切换"),
@@ -1680,6 +1696,17 @@ mod tests {
         assert!(screen(&app).contains("西苑修道中"));
         press(&mut app, "D ");
         assert!(!app.court().in_retreat());
+        // H 度支奏销；设了朝廷总额后标题栏显示余额。
+        app.session
+            .set_budget(BudgetScope::Court, Some(9000))
+            .unwrap();
+        press(&mut app, "H");
+        let shown = screen(&app);
+        assert!(
+            shown.contains("度支奏销") && shown.contains("度支余 9000/9000"),
+            "{shown}"
+        );
+        press(&mut app, " ");
         press(&mut app, "K");
         let shown = screen(&app);
         assert!(

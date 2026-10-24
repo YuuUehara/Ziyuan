@@ -477,6 +477,8 @@ mod tests {
             actor,
             edict,
             model: Some("deepseek-v4-pro".into()),
+            budget: None,
+            treasury: None,
         };
         assert_eq!(
             backend.execute(&job, &()).unwrap(),

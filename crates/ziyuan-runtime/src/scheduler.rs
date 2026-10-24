@@ -4,6 +4,7 @@
 //! 取消是协作式的：调度器立即给出结论，后端在下一次检查 [`ExecutionHooks::is_cancelled`] 时停下。
 use crate::{ExecutionHooks, WorkerBackend};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use ziyuan_core::{Agent, Edict, FileChange, TaskId, TokenUsage};
@@ -53,6 +54,12 @@ pub struct Job {
     pub edict: Edict,
     /// 承办者官职指定的模型；`None` 用后端默认模型。
     pub model: Option<String>,
+    /// 本次执行可用的 tokens（度支余额）；用尽即停，结局为「度支超限」。`None` 不限。
+    /// 每次模型调用结束后才知道用量，因此最多超出一次调用。
+    pub budget: Option<u64>,
+    /// 国库余额（tokens），同一次执行的各件共用；用尽后执行中的停支，未开始的不再开始
+    /// （结局为 `NotStarted`，诏令留在队列）。`None` 不限。
+    pub treasury: Option<Arc<AtomicI64>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,12 +162,43 @@ async fn run_job(
     timeout: Duration,
     progress: mpsc::UnboundedSender<Progress>,
 ) -> Outcome {
+    let treasury = job.treasury.clone();
+    if treasury
+        .as_ref()
+        .is_some_and(|t| t.load(Ordering::SeqCst) <= 0)
+    {
+        return Outcome::NotStarted;
+    }
+    let spent = Arc::new(AtomicU64::new(0));
+    let budget = job.budget;
     let hooks = TaskHooks {
         task: job.edict.id,
         cancel: CancelToken::new(),
         progress,
+        budget,
+        spent: spent.clone(),
+        treasury: treasury.clone(),
     };
     let task_cancel = hooks.cancel.clone();
+    // 用到额度即停支；`strict` 时须超出才算（恰好用完而办成的照常采信）。
+    let over_budget = move |strict: bool| {
+        let reached = |left: i64| if strict { left < 0 } else { left <= 0 };
+        if let Some(limit) = budget {
+            let left = limit as i64 - spent.load(Ordering::SeqCst) as i64;
+            if reached(left) {
+                return Some(Outcome::Failed(format!(
+                    "度支超限：本次可用 {limit} tokens 已用尽，户部停支"
+                )));
+            }
+        }
+        if treasury
+            .as_ref()
+            .is_some_and(|t| reached(t.load(Ordering::SeqCst)))
+        {
+            return Some(Outcome::Failed("国库告罄：朝廷度支已用尽，户部停支".into()));
+        }
+        None
+    };
     let handle = tokio::task::spawn_blocking(move || {
         // 许可随执行线程释放：超时后线程仍在收尾时，不会让并发数超过上限。
         let _permit = permit;
@@ -168,7 +206,9 @@ async fn run_job(
     });
     tokio::select! {
         result = handle => match result {
-            Ok(Ok(summary)) => Outcome::Completed(summary),
+            // 超支后即使模型答完也不采信；因停支而中断的，结局记为度支超限。
+            Ok(Ok(summary)) => over_budget(true).unwrap_or(Outcome::Completed(summary)),
+            Ok(Err(_)) if over_budget(false).is_some() => over_budget(false).expect("已停支"),
             Ok(Err(error)) => Outcome::Failed(error.to_string()),
             Err(join) => Outcome::Failed(format!("执行线程异常终止: {join}")),
         },
@@ -187,6 +227,10 @@ struct TaskHooks {
     task: TaskId,
     cancel: CancelToken,
     progress: mpsc::UnboundedSender<Progress>,
+    budget: Option<u64>,
+    /// 本次执行已用的 tokens。
+    spent: Arc<AtomicU64>,
+    treasury: Option<Arc<AtomicI64>>,
 }
 
 impl ExecutionHooks for TaskHooks {
@@ -199,6 +243,15 @@ impl ExecutionHooks for TaskHooks {
             task: self.task,
             usage,
         });
+        let spent = self.spent.fetch_add(usage.total(), Ordering::SeqCst) + usage.total();
+        let total = usage.total() as i64;
+        let left = self
+            .treasury
+            .as_ref()
+            .map(|t| t.fetch_sub(total, Ordering::SeqCst) - total);
+        if self.budget.is_some_and(|limit| spent >= limit) || left.is_some_and(|l| l <= 0) {
+            self.cancel.cancel();
+        }
     }
 
     fn text_delta(&self, text: &str) {
@@ -248,6 +301,8 @@ mod tests {
                 seal: Seal::default(),
             },
             model: None,
+            budget: None,
+            treasury: None,
         }
     }
 
@@ -351,6 +406,86 @@ mod tests {
         );
         // 通道在后端线程退出后才关闭，此时它必然已看到撤销信号。
         assert!(backend.saw_cancel.load(Ordering::SeqCst));
+    }
+
+    /// 调用模型 `calls` 次（每次 40 tokens），被要求停止时中断。
+    struct Spender {
+        calls: usize,
+    }
+    impl WorkerBackend for Spender {
+        fn execute(&self, job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            for _ in 0..self.calls {
+                if hooks.is_cancelled() {
+                    return Err("stopped".into());
+                }
+                hooks.model_usage(TokenUsage {
+                    input: 30,
+                    output: 10,
+                });
+            }
+            Ok(format!("done {}", job.edict.id.0))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn budget_stops_a_job_once_spent() {
+        let scheduler = Scheduler::new(
+            Arc::new(Spender { calls: 5 }),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let budgeted = |id, budget| Job { budget, ..job(id) };
+        // 100：第三次调用后（120）停支；200：恰好用完而办成；199：办成但超支，不采信。
+        let jobs = vec![
+            budgeted(1, Some(100)),
+            budgeted(2, Some(200)),
+            budgeted(3, Some(199)),
+            budgeted(4, None),
+        ];
+        let progress = collect(scheduler.start(jobs, &CancelToken::new())).await;
+        let over = |limit| {
+            Outcome::Failed(format!(
+                "度支超限：本次可用 {limit} tokens 已用尽，户部停支"
+            ))
+        };
+        assert_eq!(
+            outcomes(&progress),
+            [
+                (1, over(100)),
+                (2, Outcome::Completed("done 2".into())),
+                (3, over(199)),
+                (4, Outcome::Completed("done 4".into())),
+            ]
+        );
+        let calls = |id| {
+            progress
+                .iter()
+                .filter(|p| matches!(p, Progress::Usage { task, .. } if task.0 == id))
+                .count()
+        };
+        assert_eq!((calls(1), calls(2), calls(4)), (3, 5, 5));
+
+        // 国库 150，两件共用：第一件用尽后停支，第二件不再开始。
+        let treasury = Arc::new(AtomicI64::new(150));
+        let shared = |id| Job {
+            treasury: Some(treasury.clone()),
+            ..job(id)
+        };
+        let progress =
+            collect(scheduler.start(vec![shared(1), shared(2)], &CancelToken::new())).await;
+        assert_eq!(
+            outcomes(&progress),
+            [
+                (
+                    1,
+                    Outcome::Failed("国库告罄：朝廷度支已用尽，户部停支".into())
+                ),
+                (2, Outcome::NotStarted),
+            ]
+        );
+        assert_eq!(treasury.load(Ordering::SeqCst), -10);
     }
 
     #[tokio::test(flavor = "multi_thread")]

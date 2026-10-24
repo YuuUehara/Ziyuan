@@ -9,11 +9,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
-    ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, estimate_cost,
-    kaocheng_grade, kaocheng_report, render_diff, seal_note,
+    ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, duzhi_report,
+    estimate_cost, kaocheng_grade, kaocheng_report, render_diff, seal_note,
 };
 use ziyuan_core::{
-    AgentId, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId, Verdict,
+    AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
+    Verdict,
 };
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
@@ -66,6 +67,9 @@ const HELP: &str = concat!(
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
   ziyuan censor <诏令ID|all>            都察院复核回奏：核验引用与测试，御史背书或弹劾
+  ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]
+                                       户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支；
+                                       不带参数则出具度支奏销（按用途、模型、官员汇总花费）
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
   ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
@@ -167,6 +171,8 @@ enum Command {
     /// `None` 表示全部已完成、未复核的诏令。
     Censor(Option<TaskId>),
     Kaocheng,
+    /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
+    Budget(Option<(BudgetScope, Option<u64>)>),
     /// 准奏（`true`）或驳回改动。
     Decide(TaskId, bool),
     Recommend(Office),
@@ -288,6 +294,27 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
         "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
         "kaocheng" => no_args(args, Command::Kaocheng)?,
+        "budget" => {
+            const USAGE: &str = "用法: ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]";
+            match args.as_slice() {
+                [] => Command::Budget(None),
+                [scope, amount] => {
+                    let scope = match scope.as_str() {
+                        "court" => BudgetScope::Court,
+                        s if s.bytes().all(|b| b.is_ascii_digit()) => {
+                            BudgetScope::Task(TaskId(s.parse().map_err(|_| USAGE)?))
+                        }
+                        s => BudgetScope::Office(s.parse()?),
+                    };
+                    let tokens = match amount.as_str() {
+                        "none" => None,
+                        n => Some(n.parse().map_err(|_| "额度须为 tokens 数或 none")?),
+                    };
+                    Command::Budget(Some((scope, tokens)))
+                }
+                _ => return Err(USAGE.into()),
+            }
+        }
         "split" => {
             const USAGE: &str = "用法: ziyuan split <诏令ID> [官员ID:子诏令]...";
             let (id, parts) = args.split_first().ok_or(USAGE)?;
@@ -365,6 +392,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 court.total_usage(),
                 cost_note(court.tasks())
             );
+            if let (Some(limit), Some(left)) =
+                (court.budget(BudgetScope::Court), court.treasury_remaining())
+            {
+                println!("朝廷度支：{limit} tokens，余 {left}（`ziyuan budget` 查看奏销）");
+            }
             println!(
                 "调度中枢：{}",
                 match court.mode() {
@@ -701,6 +733,20 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
+        Command::Budget(None) => {
+            let default = OpenAiCompatible::from_env().map(|m| m.model().to_owned());
+            println!(
+                "{}",
+                duzhi_report(session.court(), default.as_deref(), price_for)
+            );
+        }
+        Command::Budget(Some((scope, tokens))) => {
+            session.set_budget(scope, tokens)?;
+            match tokens {
+                Some(t) => println!("诏令已颁：户部度支 · {}：限 {t} tokens。", scope.label()),
+                None => println!("诏令已颁：户部度支 · {}：取消限额。", scope.label()),
+            }
+        }
         Command::Debate(task, members, rounds) => {
             let backend = worker_backend()?;
             println!("诏令 #{} 廷议：", task.0);

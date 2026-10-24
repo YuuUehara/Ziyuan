@@ -8,15 +8,17 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 use ziyuan_core::{
-    Agent, AgentId, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Persona, Price, Seal, Speech, TaskId, TokenUsage, Verdict,
+    Agent, AgentId, BudgetScope, CensorVerdict, CourtEvent, Department, Edict, Evidence,
+    FileChange, GovernanceMode, Office, Persona, Price, Seal, Speech, TaskId, TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{
     ChangeState, Court, GovernanceError, ServiceRecord, Task, TaskStatus, founding_events,
 };
-use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler, WorkerBackend};
+use ziyuan_runtime::{BoxError, CancelToken, Job, Outcome, Progress, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventStore, StorageError};
 
 #[derive(Debug)]
@@ -265,8 +267,11 @@ impl<S: EventStore> Session<S> {
         if let Some(minutes) = debate_minutes(court, entry) {
             user.push_str(&format!("\n{minutes}"));
         }
-        let (worker, note, model, usage) = match backend.complete(model.as_deref(), &system, &user)
-        {
+        let answer = court
+            .check_funds(entry, 0)
+            .map_err(BoxError::from)
+            .and_then(|()| backend.complete(model.as_deref(), &system, &user));
+        let (worker, note, model, usage) = match answer {
             Ok((reply, usage)) => {
                 let reply: String = reply.trim().chars().take(600).collect();
                 match parse_draft(&reply).filter(|id| candidates.iter().any(|(a, _)| a.id == *id)) {
@@ -363,8 +368,11 @@ impl<S: EventStore> Session<S> {
         } else {
             CensorVerdict::Impeached
         };
-        let (verdict, note, model, usage) = match backend.complete(model.as_deref(), &system, &user)
-        {
+        let answer = court
+            .check_funds(entry, 0)
+            .map_err(BoxError::from)
+            .and_then(|()| backend.complete(model.as_deref(), &system, &user));
+        let (verdict, note, model, usage) = match answer {
             Ok((reply, usage)) => {
                 let reply = truncate(reply.trim(), 600);
                 match parse_censure(&reply) {
@@ -431,6 +439,12 @@ impl<S: EventStore> Session<S> {
         model: Option<String>,
     ) -> Result<(), AppError> {
         self.commit(|court| Ok(vec![court.propose_office_model(office, model.clone())?]))?;
+        Ok(())
+    }
+
+    /// 户部度支：设定朝廷总额、某官职每件或某件诏令的 token 限额；`None` 取消。
+    pub fn set_budget(&mut self, scope: BudgetScope, tokens: Option<u64>) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_budget(scope, tokens)?]))?;
         Ok(())
     }
 
@@ -636,7 +650,12 @@ impl<S: EventStore> Session<S> {
                     "{header}\n{turn}现在是第 {round} 轮，轮到你（#{} {}）发言。",
                     agent.id.0, agent.name
                 );
-                match backend.complete(model.as_deref(), &system, &user) {
+                let spent = speeches.iter().map(|s| s.usage.total()).sum();
+                let answer = court
+                    .check_funds(entry, spent)
+                    .map_err(BoxError::from)
+                    .and_then(|()| backend.complete(model.as_deref(), &system, &user));
+                match answer {
                     Ok((reply, usage)) => {
                         let text = strip_own_label(reply.trim(), &agent.name);
                         let text: String = text.chars().take(600).collect();
@@ -761,6 +780,7 @@ impl<S: EventStore> Session<S> {
                 describe_record(&court.service_record(agent.id))
             ));
         }
+        court.check_funds(entry, 0)?;
         let (reply, usage) = backend
             .complete(model.as_deref(), &system, &user)
             .map_err(|e| GovernanceError::InvalidSplit(format!("尚书未能拆分（{e}）")))?;
@@ -817,6 +837,18 @@ impl<S: EventStore> Session<S> {
     ) -> Result<(), AppError> {
         // 修道期间，司礼监先把待批红的诏令代批红。
         self.commit(|court| Ok(court.proxy_approvals(Some(tasks))))?;
+        // 国库告罄：有可执行的诏令也不开工，留在队列待追加度支。
+        let court = &self.court;
+        let runnable = tasks
+            .iter()
+            .filter_map(|&t| court.task(t))
+            .any(|t| t.status.is_open() && !court.needs_approval(t));
+        if runnable {
+            court.check_treasury(0)?;
+        }
+        let treasury = court
+            .treasury_remaining()
+            .map(|left| Arc::new(AtomicI64::new(left as i64)));
         let mut jobs = Vec::new();
         let mut running = Vec::new();
         let default_model = scheduler.backend().model_name().map(str::to_owned);
@@ -833,8 +865,10 @@ impl<S: EventStore> Session<S> {
                 }
                 // 玉玺受承办者官职的上限约束；毫无交集则不予承办。
                 // 内阁制下按票拟派工（拟派者已不在任则按旧例）。
+                // 本件度支（含承办者官职的每件限额）已用尽：不予承办。
                 let assigned = court.route_task(entry).and_then(|route| {
                     let seal = court.effective_seal(route.worker, &entry.edict)?;
+                    court.check_task_funds(entry, Some(route.worker), 0)?;
                     Ok((route, seal))
                 });
                 Ok(vec![match assigned {
@@ -885,7 +919,13 @@ impl<S: EventStore> Session<S> {
                             None => edict.text.clone(),
                         }
                     };
+                    let budget = self
+                        .court
+                        .task_limit(entry, Some(worker))
+                        .map(|limit| limit.saturating_sub(entry.usage.total()));
                     jobs.push(Job {
+                        budget,
+                        treasury: treasury.clone(),
                         actor,
                         edict: Edict {
                             seal,
@@ -1078,7 +1118,7 @@ fn random_seed() -> u64 {
 /// 承办所用的 token：诏令累计用量减去票拟、拆分、复核与廷议的部分。
 fn execution_usage(task: &Task) -> TokenUsage {
     let mut usage = task.usage;
-    for (extra, _) in overheads(task) {
+    for (_, extra, _) in overheads(task) {
         usage.input = usage.input.saturating_sub(extra.input);
         usage.output = usage.output.saturating_sub(extra.output);
     }
@@ -1086,16 +1126,31 @@ fn execution_usage(task: &Task) -> TokenUsage {
 }
 
 /// 承办之外的模型开销及所用模型：内阁票拟、尚书拆分、都察院复核与历次廷议发言。
-fn overheads(task: &Task) -> Vec<(TokenUsage, Option<&str>)> {
-    let draft = task.draft.as_ref().map(|d| (d.usage, d.model.as_deref()));
-    let split = task.split.as_ref().map(|s| (s.usage, s.model.as_deref()));
-    let censure = task.censure.as_ref().map(|c| (c.usage, c.model.as_deref()));
+fn overheads(task: &Task) -> Vec<(&'static str, TokenUsage, Option<&str>)> {
+    let draft = task
+        .draft
+        .as_ref()
+        .map(|d| ("票拟", d.usage, d.model.as_deref()));
+    let split = task
+        .split
+        .as_ref()
+        .map(|s| ("分办", s.usage, s.model.as_deref()));
+    let censure = task
+        .censure
+        .as_ref()
+        .map(|c| ("复核", c.usage, c.model.as_deref()));
     let speeches = task.debates.iter().flatten();
     [draft, split, censure]
         .into_iter()
         .flatten()
-        .chain(speeches.map(|s| (s.usage, s.model.as_deref())))
+        .chain(speeches.map(|s| ("廷议", s.usage, s.model.as_deref())))
         .collect()
+}
+
+/// 一件诏令的全部开销：承办与各项额外开销，各附用途与所用模型。
+fn spending(task: &Task) -> Vec<(&'static str, TokenUsage, Option<&str>)> {
+    let executing = ("承办", execution_usage(task), task.model.as_deref());
+    std::iter::once(executing).chain(overheads(task)).collect()
 }
 
 /// 按各诏令实际所用的模型估算花费，如「约 0.0123 元」。`default_model` 用于未记下模型的早期诏令；
@@ -1108,8 +1163,7 @@ pub fn estimate_cost<'a>(
     let mut total = None::<(f64, String)>;
     for task in tasks {
         // 承办、票拟、拆分、复核与廷议可能用不同模型，分别计价。
-        let executing = (execution_usage(task), task.model.as_deref());
-        for (usage, model) in std::iter::once(executing).chain(overheads(task)) {
+        for (_, usage, model) in spending(task) {
             if usage.total() == 0 {
                 continue;
             }
@@ -1341,6 +1395,105 @@ pub fn kaocheng_report(court: &Court) -> String {
         ));
     }
     out.push_str("称职者可擢，不及者宜黜；然黜陟出自圣裁，考成簿不罢免任何人。");
+    out
+}
+
+/// 户部「度支奏销」：各级度支与余额，以及按用途、模型、承办官员汇总的用量与花费。
+/// `default_model` 用于未记下模型的早期诏令；`price` 查单价（查不到则只列 tokens）。
+pub fn duzhi_report(
+    court: &Court,
+    default_model: Option<&str>,
+    price: impl Fn(&str) -> Option<Price>,
+) -> String {
+    let minister = court.department_head(Department::Revenue).map_or(
+        "户部尚书、侍郎俱缺，天子亲览。".to_owned(),
+        |(a, o)| format!("{}{}谨奏。", o.label(), a.name),
+    );
+    let mut out = format!("度支奏销　{minister}\n");
+    let used = court.total_usage().total();
+    out.push_str(&match court.budget(BudgetScope::Court) {
+        Some(limit) => format!(
+            "朝廷度支：{limit} tokens，已用 {used}，余 {}\n",
+            limit.saturating_sub(used)
+        ),
+        None => format!("朝廷度支：未设上限，已用 {used} tokens\n"),
+    });
+    for office in Office::all() {
+        if let Some(limit) = court.budget(BudgetScope::Office(office)) {
+            out.push_str(&format!("{}每件限 {limit} tokens\n", office.label()));
+        }
+    }
+    for task in court.tasks() {
+        if let Some(limit) = task.budget {
+            let used = task.usage.total();
+            out.push_str(&format!(
+                "诏令 #{} 限 {limit} tokens，已用 {used}\n",
+                task.edict.id.0
+            ));
+        }
+    }
+    // (tokens, 花费, 币种)；花费只计查得到单价的部分。
+    type Tally = BTreeMap<String, (u64, f64, String)>;
+    let (mut by_use, mut by_model, mut by_official) = (Tally::new(), Tally::new(), Tally::new());
+    for task in court.tasks() {
+        let handler = task
+            .handler()
+            .and_then(|id| court.agent(id))
+            .map_or("未承办".to_owned(), |a| {
+                format!("#{} {}", a.id.0, a.name)
+            });
+        for (purpose, usage, model) in spending(task) {
+            if usage.total() == 0 {
+                continue;
+            }
+            let model = model.or(default_model);
+            let cost = model.and_then(&price).map(|p| (p.cost(usage), p.currency));
+            let keys = [
+                (&mut by_use, purpose.to_owned()),
+                (&mut by_model, model.unwrap_or("未记模型").to_owned()),
+                (&mut by_official, handler.clone()),
+            ];
+            for (tally, key) in keys {
+                let entry = tally.entry(key).or_default();
+                entry.0 += usage.total();
+                if let Some((cost, currency)) = &cost {
+                    entry.1 += cost;
+                    entry.2.clone_from(currency);
+                }
+            }
+        }
+    }
+    if by_use.is_empty() {
+        out.push_str("尚无开销。\n");
+    }
+    for (title, tally) in [
+        ("按用途", by_use),
+        ("按模型", by_model),
+        ("按承办官员", by_official),
+    ] {
+        if tally.is_empty() {
+            continue;
+        }
+        let rows: Vec<_> = tally
+            .iter()
+            .map(
+                |(key, (tokens, cost, currency))| match currency.is_empty() {
+                    true => format!("{key} {tokens}"),
+                    false => format!("{key} {tokens}（约 {cost:.4} {currency}）"),
+                },
+            )
+            .collect();
+        out.push_str(&format!("{title}：{}\n", rows.join("；")));
+    }
+    out.push_str(match court.treasury_remaining() {
+        Some(0) => {
+            "太仓空虚，户部已停支。嘉靖末年太仓岁入二百万两、岁出逾三百万，户部尚书也只能奏请节用。"
+        }
+        Some(_) => "量入为出，度支有常。",
+        None => {
+            "未设度支：仿洪武「量入为出」之训，可用 `ziyuan budget court <tokens>` 定一个总额。"
+        }
+    });
     out
 }
 
@@ -1643,6 +1796,10 @@ pub fn describe_event(event: &CourtEvent) -> String {
         CourtEvent::OfficeModelSet { office, model } => match model {
             Some(model) => format!("{}改用模型 {model}", office.label()),
             None => format!("{}恢复默认模型", office.label()),
+        },
+        CourtEvent::BudgetSet { scope, tokens } => match tokens {
+            Some(t) => format!("户部度支 · {}：限 {t} tokens", scope.label()),
+            None => format!("户部度支 · {}：取消限额", scope.label()),
         },
         CourtEvent::OfficeCeilingSet { office, ceiling } => match ceiling {
             Some(seal) => format!("{}玉玺上限：{seal}", office.label()),
@@ -2093,6 +2250,154 @@ mod tests {
             Some("flash")
         );
         assert_eq!(reopened.court().office_model(clerk), None);
+    }
+
+    /// 承办时调用模型 5 次（每次 40 tokens），被要求停止时中断；单轮问答每次 50 tokens。
+    struct Spender;
+    impl WorkerBackend for Spender {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            for _ in 0..5 {
+                if hooks.is_cancelled() {
+                    return Err("停".into());
+                }
+                hooks.model_usage(TokenUsage {
+                    input: 30,
+                    output: 10,
+                });
+            }
+            Ok("办毕".into())
+        }
+        fn model_name(&self) -> Option<&str> {
+            Some("flash")
+        }
+        fn complete(
+            &self,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            let usage = TokenUsage {
+                input: 40,
+                output: 10,
+            };
+            Ok(("臣附议".into(), usage))
+        }
+    }
+
+    #[tokio::test]
+    async fn budgets_stop_spending_and_are_reported() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let issue = |s: &mut Session<_>, text: &str| {
+            s.issue(Department::Works, text.into(), Seal::default())
+                .unwrap()
+                .id
+        };
+        assert!(session.set_budget(BudgetScope::Court, Some(0)).is_err());
+        assert!(
+            session
+                .set_budget(BudgetScope::Task(TaskId(9)), Some(10))
+                .is_err()
+        );
+
+        // 工部郎中每件限 100：第三次调用后（120）停支，结局记为度支超限。
+        let clerk = Office::Clerk(Department::Works);
+        session
+            .set_budget(BudgetScope::Office(clerk), Some(100))
+            .unwrap();
+        let capped = issue(&mut session, "甲");
+        // 本件限 60：廷议两段（100）后用尽，第三段不再开，已有发言照记。
+        let debated = issue(&mut session, "乙");
+        session
+            .set_budget(BudgetScope::Task(debated), Some(60))
+            .unwrap();
+        let stopped = session
+            .debate(debated, &[], 2, &Spender, |_, _| {})
+            .unwrap();
+        assert!(stopped.unwrap().contains("度支超限"));
+        assert_eq!(session.court().task(debated).unwrap().debates[0].len(), 2);
+        let reports = run_all(&mut session, &scheduler(Spender)).await;
+        let outcome = |id| {
+            reports
+                .iter()
+                .find(|r| r.edict.id == id)
+                .unwrap()
+                .outcome
+                .clone()
+        };
+        let over = |limit| {
+            Outcome::Failed(format!(
+                "度支超限：本次可用 {limit} tokens 已用尽，户部停支"
+            ))
+        };
+        assert_eq!(outcome(capped), over(100));
+        // 本件已用尽：不予承办。
+        assert_eq!(
+            outcome(debated),
+            Outcome::Failed("度支超限：诏令 #2 已用尽其 60 tokens 的度支".into())
+        );
+        assert_eq!(session.court().task(capped).unwrap().usage.total(), 120);
+        let third = issue(&mut session, "丙");
+        session
+            .set_budget(BudgetScope::Task(third), Some(1))
+            .unwrap();
+        session.set_budget(BudgetScope::Task(third), None).unwrap();
+        assert_eq!(session.court().task(third).unwrap().budget, None);
+
+        // 国库只余 70：第一件用到 80 时停支（国库告罄），第二件不开工、留在队列；再执行即拒绝。
+        session
+            .set_budget(BudgetScope::Office(clerk), None)
+            .unwrap();
+        let used = session.court().total_usage().total();
+        session
+            .set_budget(BudgetScope::Court, Some(used + 70))
+            .unwrap();
+        let fourth = issue(&mut session, "丁");
+        // 并发执行时各件在国库耗尽前都可能已开工；这里逐件执行，看排队者是否不再开工。
+        let serial = Scheduler::new(
+            Arc::new(Spender),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let reports = run_all(&mut session, &serial).await;
+        let first = reports.iter().find(|r| r.edict.id == third).unwrap();
+        assert_eq!(
+            first.outcome,
+            Outcome::Failed("国库告罄：朝廷度支已用尽，户部停支".into())
+        );
+        assert!(session.court().task(fourth).unwrap().status.is_open());
+        let err = session
+            .run(&[fourth], &scheduler(Spender), &CancelToken::new(), |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("国库告罄"), "{err}");
+        // 票拟、复核之类的额外开销同样受国库约束：廷议一段也开不了。
+        assert!(session.debate(fourth, &[], 1, &Spender, |_, _| {}).is_err());
+
+        let report = duzhi_report(session.court(), None, |model| {
+            (model == "flash").then(|| Price {
+                input_per_million: 1_000_000.0,
+                output_per_million: 0.0,
+                currency: "元".into(),
+            })
+        });
+        assert!(
+            report.contains(&format!("朝廷度支：{} tokens", used + 70)),
+            "{report}"
+        );
+        assert!(
+            !report.contains("工部郎中每件") && report.contains("诏令 #2 限 60"),
+            "{report}"
+        );
+        assert!(
+            report.contains("按用途：廷议 100（约 80.0000 元）；承办"),
+            "{report}"
+        );
+        assert!(report.contains("太仓空虚"), "{report}");
+        let replayed = Court::replay(session.history()).unwrap();
+        assert_eq!(replayed.treasury_remaining(), Some(0));
     }
 
     /// 廷议时第 `fail_at` 次发言起出错；记下每次发言的系统、用户提示，执行时记下承办者与诏令内容。

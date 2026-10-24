@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
-    Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
-    GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage, Verdict,
+    Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
+    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, TokenUsage,
+    Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -79,6 +80,15 @@ pub enum GovernanceError {
     CannotDebate(TaskId),
     /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
     InvalidDebate(String),
+    /// 度支须为正数。
+    InvalidBudget,
+    /// 朝廷度支（tokens）已用尽。
+    TreasuryExhausted(u64),
+    /// 诏令已用尽其度支（tokens）。
+    TaskOverBudget {
+        task: TaskId,
+        limit: u64,
+    },
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -162,6 +172,19 @@ impl fmt::Display for GovernanceError {
             Self::RetreatUnchanged(false) => f.write_str("陛下本在朝中"),
             Self::CannotDebate(id) => write!(f, "诏令 #{} 不能廷议：须尚未执行", id.0),
             Self::InvalidDebate(why) => write!(f, "廷议未成：{why}"),
+            Self::InvalidBudget => f.write_str("度支须为正数（tokens）"),
+            Self::TreasuryExhausted(limit) => write!(
+                f,
+                "国库告罄：朝廷度支 {limit} tokens 已用尽（户部奏：太仓无银）。\
+                 追加请 `ziyuan budget court <额度>`，取消请 `ziyuan budget court none`"
+            ),
+            Self::TaskOverBudget { task, limit } => {
+                write!(
+                    f,
+                    "度支超限：诏令 #{} 已用尽其 {limit} tokens 的度支",
+                    task.0
+                )
+            }
             Self::InRetreat => f.write_str(
                 "陛下正在西苑修道，批红与评定由司礼监代批。要亲自处置请先 `ziyuan return` 回朝",
             ),
@@ -184,6 +207,9 @@ pub struct Court {
     /// 按官职（`Office::code`）指定的承办模型与玉玺上限。
     office_models: BTreeMap<String, String>,
     office_ceilings: BTreeMap<String, Seal>,
+    /// 度支：朝廷总额，与按官职（`Office::code`）的每件诏令限额（tokens）。
+    court_budget: Option<u64>,
+    office_budgets: BTreeMap<String, u64>,
     next_task_id: u64,
     next_agent_id: u64,
     tasks: BTreeMap<TaskId, Task>,
@@ -220,6 +246,8 @@ pub struct Task {
     pub proxied: bool,
     /// 历次廷议的发言（用量已计入 `usage`）；承办时附上最近一次的纪要。
     pub debates: Vec<Vec<Speech>>,
+    /// 本件的度支（tokens），计入票拟、分办、廷议与复核；子诏令各自计。
+    pub budget: Option<u64>,
 }
 
 /// 分办方案。
@@ -326,6 +354,8 @@ impl Court {
             retreat: false,
             office_models: BTreeMap::new(),
             office_ceilings: BTreeMap::new(),
+            court_budget: None,
+            office_budgets: BTreeMap::new(),
             next_task_id: 1,
             next_agent_id: 1,
             tasks: BTreeMap::new(),
@@ -429,6 +459,7 @@ impl Court {
                         split: None,
                         proxied: false,
                         debates: Vec::new(),
+                        budget: None,
                     },
                 );
             }
@@ -453,6 +484,23 @@ impl Court {
                     Some(m) => self.office_models.insert(office.code(), m.clone()),
                     None => self.office_models.remove(&office.code()),
                 };
+            }
+            CourtEvent::BudgetSet { scope, tokens } => {
+                self.propose_budget(*scope, *tokens)?;
+                match scope {
+                    BudgetScope::Court => self.court_budget = *tokens,
+                    BudgetScope::Office(office) => match tokens {
+                        Some(t) => {
+                            self.office_budgets.insert(office.code(), *t);
+                        }
+                        None => {
+                            self.office_budgets.remove(&office.code());
+                        }
+                    },
+                    BudgetScope::Task(task) => {
+                        self.tasks.get_mut(task).expect("已确认存在").budget = *tokens;
+                    }
+                }
             }
             CourtEvent::OfficeCeilingSet { office, ceiling } => {
                 self.propose_office_ceiling(*office, ceiling.clone())?;
@@ -549,6 +597,7 @@ impl Court {
                             split: None,
                             proxied: false,
                             debates: Vec::new(),
+                            budget: None,
                         },
                     );
                 }
@@ -814,6 +863,77 @@ impl Court {
             validate_seal(seal)?;
         }
         Ok(CourtEvent::OfficeCeilingSet { office, ceiling })
+    }
+
+    /// 设定度支：须为正数；诏令须尚未结束。
+    pub fn propose_budget(
+        &self,
+        scope: BudgetScope,
+        tokens: Option<u64>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        if tokens == Some(0) {
+            return Err(GovernanceError::InvalidBudget);
+        }
+        if let BudgetScope::Task(task) = scope {
+            self.open_task(task)?;
+        }
+        Ok(CourtEvent::BudgetSet { scope, tokens })
+    }
+
+    pub fn budget(&self, scope: BudgetScope) -> Option<u64> {
+        match scope {
+            BudgetScope::Court => self.court_budget,
+            BudgetScope::Office(office) => self.office_budgets.get(&office.code()).copied(),
+            BudgetScope::Task(task) => self.tasks.get(&task)?.budget,
+        }
+    }
+
+    /// 朝廷度支的余额；未设总额时为 `None`。
+    pub fn treasury_remaining(&self) -> Option<u64> {
+        let limit = self.court_budget?;
+        Some(limit.saturating_sub(self.total_usage().total()))
+    }
+
+    /// 国库已告罄（计入尚未记账的 `pending` tokens）则报错。
+    pub fn check_treasury(&self, pending: u64) -> Result<(), GovernanceError> {
+        match (self.court_budget, self.treasury_remaining()) {
+            (Some(limit), Some(left)) if left <= pending => {
+                Err(GovernanceError::TreasuryExhausted(limit))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// 为 `task` 再调用模型（票拟、分办、廷议、复核）之前：国库与本件度支都须有余。
+    pub fn check_funds(&self, task: &Task, pending: u64) -> Result<(), GovernanceError> {
+        self.check_treasury(pending)?;
+        self.check_task_funds(task, None, pending)
+    }
+
+    /// `task` 由 `worker` 承办时的度支：本件限额与承办者官职的每件限额中较小者。
+    pub fn task_limit(&self, task: &Task, worker: Option<AgentId>) -> Option<u64> {
+        let office = worker
+            .and_then(|w| self.office_of(w))
+            .and_then(|o| self.budget(BudgetScope::Office(o)));
+        [task.budget, office].into_iter().flatten().min()
+    }
+
+    /// 诏令已用尽 `task_limit`（计入尚未记账的 `pending` tokens）则报错。
+    pub fn check_task_funds(
+        &self,
+        task: &Task,
+        worker: Option<AgentId>,
+        pending: u64,
+    ) -> Result<(), GovernanceError> {
+        match self.task_limit(task, worker) {
+            Some(limit) if task.usage.total() + pending >= limit => {
+                Err(GovernanceError::TaskOverBudget {
+                    task: task.edict.id,
+                    limit,
+                })
+            }
+            _ => Ok(()),
+        }
     }
 
     /// 官职指定的承办模型；未指定时用默认模型。

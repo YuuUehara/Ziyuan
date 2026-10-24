@@ -219,6 +219,7 @@
   pre.diff .hunk { color: var(--muted); display: block; }
   pre.diff .ctx { display: block; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
+  .stat.exhausted { border-color: #e9b4ae; color: #ffd5cf; }
   .split { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid var(--gold); background: #fffaf0; }
   .split ul { margin: 4px 0 0; padding-left: 18px; }
   .debate { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #c9b8d8; background: #f8f4fb; }
@@ -290,6 +291,7 @@
     <span class="stat">制度 <b id="mode-label">—</b></span>
     <span class="stat">诏令 <b id="task-count">0</b> · 待办 <b id="open-count">0</b></span>
     <span class="stat">用量 <b id="usage-total">0</b> tokens<span id="cost-total"></span></span>
+    <span class="stat" id="treasury-stat" hidden title="户部度支：朝廷总额的余额">度支余 <b id="treasury-left">0</b></span>
     <span class="stat" id="run-state">待命</span>
     <button class="gold" id="run-btn">执行待办诏令</button>
     <button id="stop-btn" hidden>中止执行</button>
@@ -366,7 +368,7 @@
           </form>
         </div>
         <div class="side">
-          <h3>吏部荐举 <button class="small" id="kaocheng-btn" title="仿张居正考成法：立限考事，以事责人">考成簿</button></h3>
+          <h3>吏部荐举 <button class="small" id="kaocheng-btn" title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" title="户部：按用途、模型、官员汇总花费">度支奏销</button></h3>
           <div class="row">
             <select id="recommend-office" data-keep></select>
             <button class="shrink" id="recommend-btn">荐举</button>
@@ -392,6 +394,17 @@
             <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> run_tests</label>
             <button class="small shrink" id="ceiling-set">设上限</button>
             <button class="small shrink" id="ceiling-clear">取消</button>
+          </div>
+          <h3>户部度支 <small class="hint">token 上限，用尽即停支</small></h3>
+          <div class="row">
+            <input type="number" min="1" id="office-budget" data-keep placeholder="此官职每件诏令的上限">
+            <button class="small shrink" id="office-budget-set">设限</button>
+            <button class="small shrink" id="office-budget-clear">取消</button>
+          </div>
+          <div class="row">
+            <input type="number" min="1" id="court-budget" data-keep placeholder="朝廷总额">
+            <button class="small shrink" id="court-budget-set">设限</button>
+            <button class="small shrink" id="court-budget-clear">取消</button>
           </div>
         </div>
       </div>
@@ -450,7 +463,7 @@ function renderOfficeConfig(s) {
   const office = s.offices.find((o) => o.code === $("config-office").value) || s.offices[0];
   if (!office) return;
   $("config-current").textContent =
-    `模型：${office.model || (s.model ? `默认（${s.model}）` : "演示后端")}；玉玺上限：${office.ceiling || "无"}`;
+    `模型：${office.model || (s.model ? `默认（${s.model}）` : "演示后端")}；玉玺上限：${office.ceiling || "无"}；每件度支：${office.budget ? fmt(office.budget) + " tokens" : "不限"}`;
 }
 
 function chronicle(note) {
@@ -511,6 +524,7 @@ function taskHtml(t) {
   const meta = [
     t.worker ? `承办：${esc(t.worker)}` : "",
     t.tool_calls ? `工具 ${t.tool_calls} 次${t.tool_failures ? `（失败 ${t.tool_failures}）` : ""}` : "",
+    t.budget ? `度支 ${fmt(t.usage.input + t.usage.output)} / ${fmt(t.budget)}` : "",
     t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${t.model ? ` · ${esc(t.model)}` : ""}${cost(t.cost)}` : "",
   ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
   let body = "";
@@ -607,6 +621,11 @@ function render() {
   $("open-count").textContent = open;
   $("usage-total").textContent = fmt(s.usage.input + s.usage.output);
   $("cost-total").textContent = s.cost ? `（${s.cost}）` : "";
+  $("treasury-stat").hidden = !s.treasury;
+  if (s.treasury) {
+    $("treasury-left").textContent = `${fmt(s.treasury.remaining)} / ${fmt(s.treasury.limit)}`;
+    $("treasury-stat").classList.toggle("exhausted", s.treasury.remaining === 0);
+  }
   $("run-state").textContent = s.running ? "执行中" : "待命";
   $("run-state").classList.toggle("live", s.running);
   $("run-btn").disabled = s.running || open === 0;
@@ -714,6 +733,22 @@ $("kaocheng-btn").addEventListener("click", async () => {
     $("recommend-result").innerHTML = `<pre class="kaocheng">${esc(report)}</pre>`;
   } catch (e) { toast(e.message, true); }
 });
+$("duzhi-btn").addEventListener("click", async () => {
+  try {
+    const { report } = await api("/duzhi");
+    $("recommend-result").innerHTML = `<pre class="kaocheng">${esc(report)}</pre>`;
+  } catch (e) { toast(e.message, true); }
+});
+const setBudget = (body, done) => act(api("/budget", body), done);
+const amount = (id) => Number($(id).value) || 0;
+$("office-budget-set").addEventListener("click", () =>
+  setBudget({ scope: "office", office: configOffice(), tokens: amount("office-budget") }, "已设每件度支"));
+$("office-budget-clear").addEventListener("click", () =>
+  setBudget({ scope: "office", office: configOffice(), tokens: null }, "已取消每件度支"));
+$("court-budget-set").addEventListener("click", () =>
+  setBudget({ scope: "court", tokens: amount("court-budget") }, "已设朝廷度支"));
+$("court-budget-clear").addEventListener("click", () =>
+  setBudget({ scope: "court", tokens: null }, "已取消朝廷度支"));
 $("config-office").addEventListener("change", () => renderOfficeConfig(state));
 const configOffice = () => $("config-office").value;
 $("model-set").addEventListener("click", () =>
