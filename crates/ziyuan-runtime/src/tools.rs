@@ -396,7 +396,7 @@ impl Tool for RunTests {
         ToolSpec {
             name: Capability::RunTests.code().into(),
             description: format!(
-                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾。不能指定其他命令。"
+                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾（未通过时作为工具错误返回）。不能指定其他命令。"
             ),
             input_schema_json: r#"{"type":"object","properties":{},"additionalProperties":false}"#
                 .into(),
@@ -467,6 +467,7 @@ impl RunTests {
         let mut tail = Vec::new();
         log.read_to_end(&mut tail)?;
         let tail = String::from_utf8_lossy(&tail);
+        let passed = status.is_some_and(|s| s.success());
         let verdict = match status {
             None => format!("超时（{} 秒）被终止", TEST_TIMEOUT.as_secs()),
             Some(s) if s.success() => "通过（退出码 0）".to_owned(),
@@ -480,7 +481,13 @@ impl RunTests {
         } else {
             String::new()
         };
-        Ok(format!("测试 `{command}`：{verdict}\n输出{note}：\n{tail}"))
+        let report = format!("测试 `{command}`：{verdict}\n输出{note}：\n{tail}");
+        // 未通过记为工具失败：审计中 `run_tests` 的成败即测试的成败，供都察院核验。
+        if passed {
+            Ok(report)
+        } else {
+            Err(report.into())
+        }
     }
 }
 
@@ -686,7 +693,7 @@ mod tests {
             Some("exit 3"),
         )
         .unwrap();
-        let output = failing.tools[0].execute("{}").unwrap();
+        let output = failing.tools[0].execute("{}").unwrap_err().to_string();
         assert!(output.contains("未通过（退出码 3）"), "{output}");
         let unset = sealed_tools(&root, &seal(&[Capability::RunTests], &["."]), None).unwrap();
         assert!(unset.tools[0].execute("{}").is_err());

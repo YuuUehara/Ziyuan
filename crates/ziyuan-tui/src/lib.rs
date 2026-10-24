@@ -21,9 +21,11 @@ use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, RunUpdate, Session, describe_event, describe_record, estimate_cost,
-    render_diff, seal_note,
+    kaocheng_report, render_diff, seal_note,
 };
-use ziyuan_core::{AgentId, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_core::{
+    AgentId, CensorVerdict, Department, GovernanceMode, Office, Seal, TaskId, Verdict,
+};
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::EventLog;
@@ -86,6 +88,8 @@ pub enum Message {
     RunDone(Option<String>),
     /// 后台内阁票拟结束：拟派的官员，或错误。
     Drafted(TaskId, Result<AgentId, String>),
+    /// 后台都察院复核结束：结论（背书/弹劾），或错误。
+    Censured(TaskId, Result<&'static str, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -271,6 +275,13 @@ impl App {
                     Err(e) => self.error(format!("票拟失败：{e}")),
                 }
             }
+            Message::Censured(task, result) => {
+                self.reload();
+                match result {
+                    Ok(label) => self.info(format!("诏令 #{} 都察院{label}", task.0)),
+                    Err(e) => self.error(format!("复核失败：{e}")),
+                }
+            }
             Message::RunDone(error) => {
                 self.run = None;
                 self.live.clear();
@@ -304,6 +315,9 @@ impl App {
             KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(5),
             KeyCode::Char('r') => self.start_run(),
             KeyCode::Char('s') => self.stop_run(),
+            KeyCode::Char('K') => {
+                self.modal = Some(Modal::Notice(kaocheng_report(self.court())));
+            }
             KeyCode::Char('g') => {
                 let selected = GovernanceMode::ALL
                     .iter()
@@ -343,6 +357,7 @@ impl App {
                 self.mutate(|s| s.cancel(task), |_| format!("诏令 #{} 已撤销", task.0));
             }
             KeyCode::Char('t') => self.start_draft(task),
+            KeyCode::Char('i') => self.start_censor(task),
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
@@ -590,6 +605,21 @@ impl App {
             .iter()
             .map(|(a, o)| (a.id, format!("{}（{}）", a.name, o.label())))
             .collect()
+    }
+
+    /// 在阻塞线程中请都察院复核（会等待御史的模型返回），结果经消息送回。
+    fn start_censor(&mut self, task: TaskId) {
+        self.info(format!("诏令 #{} 都察院复核中…", task.0));
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| s.censor(task, &root, backend.as_ref()))
+                .map(|v| v.label())
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Censured(task, result));
+        });
     }
 
     /// 在阻塞线程中请内阁票拟（会等待模型返回），结果经消息送回。
@@ -909,6 +939,25 @@ impl App {
                 Span::raw(format!("{}{note}", verdict.label())),
             ]));
         }
+        if let Some(c) = &task.censure {
+            let censor = self
+                .court()
+                .agent(c.censor)
+                .map_or("?", |a| a.name.as_str());
+            let color = match c.verdict {
+                CensorVerdict::Endorsed => Color::Cyan,
+                CensorVerdict::Impeached => Color::Red,
+            };
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("都察院{}　", c.verdict.label()),
+                    Style::new().fg(color).bold(),
+                ),
+                Span::raw(format!("左都御史{censor}；证据核验：{}", c.evidence)),
+            ]));
+            lines.extend(c.note.lines().map(|l| Line::from(l.to_owned())));
+        }
         if let Some(changes) = &task.changes {
             let state = match changes.state {
                 ChangeState::Proposed => "待准奏（w 准奏落盘，u 驳回）",
@@ -941,6 +990,9 @@ impl App {
                 if task.review.is_none() {
                     lines.push(Line::default());
                     lines.push(Line::from("按 a 采纳、d 驳回").dim());
+                }
+                if task.censure.is_none() {
+                    lines.push(Line::from("按 i 请都察院复核").dim());
                 }
             }
             TaskStatus::Failed { reason, .. } => {
@@ -1126,6 +1178,8 @@ impl App {
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
                 ("w/u", "准奏/驳回改动"),
+                ("i", "复核"),
+                ("K", "考成"),
                 ("g", "改制"),
                 ("Tab", "切换"),
                 ("q", "退出"),
@@ -1415,6 +1469,25 @@ mod tests {
         // 已评定的回奏不能再评定，错误显示在状态栏。
         press(&mut app, "d\n");
         assert!(screen(&app).contains("已评定"));
+
+        // i 请都察院复核：御史空缺，错误经后台消息显示在状态栏。
+        press(&mut app, "i");
+        let message = tokio::time::timeout(Duration::from_secs(10), messages.recv())
+            .await
+            .expect("复核应在 10 秒内结束")
+            .unwrap();
+        assert!(matches!(message, Message::Censured(TaskId(1), Err(_))));
+        app.handle(message);
+        assert!(screen(&app).contains("左都御史空缺"), "{}", screen(&app));
+        // K 考成簿：承办官员一件采纳，等第平常。
+        press(&mut app, "K");
+        let shown = screen(&app);
+        assert!(
+            shown.contains("考成簿") && shown.contains("平常"),
+            "{shown}"
+        );
+        press(&mut app, " ");
+        assert!(app.modal.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

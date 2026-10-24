@@ -23,7 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, RunUpdate, Session, TaskReport, describe_event, estimate_cost,
-    render_diff,
+    kaocheng_grade, kaocheng_report, render_diff,
 };
 use ziyuan_core::{
     AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
@@ -66,6 +66,7 @@ pub fn router(config: Config) -> Router {
         .route("/state", get(state))
         .route("/history", get(history))
         .route("/recommend", get(recommend))
+        .route("/kaocheng", get(kaocheng))
         .route("/events", get(events_stream))
         .route("/edicts", post(issue))
         .route("/run", post(run))
@@ -75,6 +76,7 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/approve", post(approve))
         .route("/tasks/{id}/draft", post(draft))
         .route("/tasks/{id}/redraft", post(redraft))
+        .route("/tasks/{id}/censor", post(censor))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
         .route("/tasks/{id}/changes/discard", post(discard_changes))
         .route("/reform", post(reform))
@@ -240,6 +242,12 @@ async fn recommend(
         })
         .await?;
     Ok(Json(json!(ranked)))
+}
+
+/// 考成簿（纯文本）。
+async fn kaocheng(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let report = app.with_session(|s| Ok(kaocheng_report(s.court()))).await?;
+    Ok(Json(json!({ "report": report })))
 }
 
 async fn events_stream(
@@ -496,6 +504,20 @@ async fn draft(
     .await
 }
 
+/// 都察院复核（会等待御史的模型返回）。
+async fn censor(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    let root = app.0.config.root.clone();
+    app.mutate(move |s| {
+        let verdict = s.censor(TaskId(id), &root, backend.as_ref())?;
+        Ok(json!({ "verdict": verdict.code(), "label": verdict.label() }))
+    })
+    .await
+}
+
 /// 御笔改票：`{ worker, note? }`。
 async fn redraft(
     State(app): State<AppState>,
@@ -611,6 +633,10 @@ fn record_json(r: &ServiceRecord) -> Value {
         "failed": r.failed,
         "tool_calls": r.tool_calls,
         "tool_failures": r.tool_failures,
+        "endorsed": r.endorsed,
+        "impeached": r.impeached,
+        "verified": r.verified,
+        "grade": kaocheng_grade(r),
         "usage": usage_json(r.usage),
     })
 }
@@ -741,6 +767,15 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "detail": detail,
                 "review": t.review.as_ref().map(|(v, note)| json!({
                     "verdict": v.code(), "label": v.label(), "note": note,
+                })),
+                "censure": t.censure.as_ref().map(|c| json!({
+                    "verdict": c.verdict.code(),
+                    "label": c.verdict.label(),
+                    "censor": name(c.censor),
+                    "note": c.note,
+                    "evidence": c.evidence.to_string(),
+                    "verified": c.evidence.verified(),
+                    "model": c.model,
                 })),
                 "usage": usage_json(t.usage),
                 "model": t.model,
@@ -1042,6 +1077,31 @@ mod tests {
             .find(|o| o["record"]["accepted"] == 1)
             .expect("承办官员的考绩应记上采纳");
         assert_eq!(worker["name"], task["worker"]);
+
+        // 都察院：御史空缺时拒绝；任命后复核。演示回奏无可验证之据，按证据例弹劾。
+        let (status, error) = call(&base, "/tasks/1/censor", t, Some(json!({}))).await;
+        assert!(status == 400 && error["error"].as_str().unwrap().contains("左都御史空缺"));
+        let recruit = json!({ "department": "justice" });
+        let (_, recruited) = call(&base, "/officials", t, Some(recruit)).await;
+        let censor = recruited["id"].as_u64().unwrap();
+        let office = json!({ "office": "censor" });
+        let appoint = format!("/officials/{censor}/appoint");
+        assert_eq!(call(&base, &appoint, t, Some(office)).await.0, 200);
+        let (status, censured) = call(&base, "/tasks/1/censor", t, Some(json!({}))).await;
+        assert_eq!(
+            (status, censured["verdict"].as_str()),
+            (200, Some("impeach"))
+        );
+        let (_, state) = call(&base, "/state", t, None).await;
+        let censure = &state["tasks"][0]["censure"];
+        assert_eq!(censure["evidence"], "回奏未引用代码位置；未跑测试");
+        assert_eq!(censure["verified"], false);
+        let (_, kaocheng) = call(&base, "/kaocheng", t, None).await;
+        let report = kaocheng["report"].as_str().unwrap();
+        assert!(
+            report.contains("考成簿") && report.contains("左都御史"),
+            "{report}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

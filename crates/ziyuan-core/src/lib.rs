@@ -144,6 +144,8 @@ impl FromStr for GovernanceMode {
 /// - 内阁制（仿明中后期）：内阁首辅为首，内阁次辅为副。
 ///
 /// 每个机构的正职空缺时由副职署理；六部尚书空缺时由侍郎署理。
+///
+/// 都察院左都御史（元为御史台御史大夫）各制度都设，独立于派工路线，专司复核回奏、纠劾百官。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Office {
     /// 中书右丞相（元以右为尊）。
@@ -154,6 +156,8 @@ pub enum Office {
     FirstGrandSecretary,
     /// 内阁次辅。
     SecondGrandSecretary,
+    /// 都察院左都御史：复核回奏，出具背书或弹劾。
+    Censor,
     /// 尚书：一部之长。
     Minister(Department),
     /// 侍郎：一部之副。
@@ -169,6 +173,7 @@ impl Office {
             Self::ViceChancellor,
             Self::FirstGrandSecretary,
             Self::SecondGrandSecretary,
+            Self::Censor,
         ];
         for d in Department::ALL {
             offices.extend([Self::Minister(d), Self::ViceMinister(d), Self::Clerk(d)]);
@@ -181,7 +186,7 @@ impl Office {
         match self {
             Self::Chancellor | Self::ViceChancellor => Some(GovernanceMode::Chancellor),
             Self::FirstGrandSecretary | Self::SecondGrandSecretary => Some(GovernanceMode::Cabinet),
-            Self::Minister(_) | Self::ViceMinister(_) | Self::Clerk(_) => None,
+            Self::Censor | Self::Minister(_) | Self::ViceMinister(_) | Self::Clerk(_) => None,
         }
     }
 
@@ -202,6 +207,9 @@ impl Office {
         match self {
             Self::Chancellor | Self::ViceChancellor => "正一品",
             Self::FirstGrandSecretary | Self::SecondGrandSecretary => "正五品",
+            // 元御史大夫从一品；明左都御史正二品。
+            Self::Censor if yuan => "从一品",
+            Self::Censor => "正二品",
             Self::Minister(_) if yuan => "正三品",
             Self::Minister(_) => "正二品",
             Self::ViceMinister(_) if yuan => "正四品",
@@ -217,6 +225,7 @@ impl Office {
             Self::ViceChancellor => "vice-chancellor".into(),
             Self::FirstGrandSecretary => "first-secretary".into(),
             Self::SecondGrandSecretary => "second-secretary".into(),
+            Self::Censor => "censor".into(),
             Self::Minister(d) => format!("minister:{}", d.code()),
             Self::ViceMinister(d) => format!("vice-minister:{}", d.code()),
             Self::Clerk(d) => format!("clerk:{}", d.code()),
@@ -228,6 +237,7 @@ impl Office {
             Self::ViceChancellor => "中书左丞相".into(),
             Self::FirstGrandSecretary => "内阁首辅".into(),
             Self::SecondGrandSecretary => "内阁次辅".into(),
+            Self::Censor => "左都御史".into(),
             Self::Minister(d) => format!("{}尚书", d.label()),
             Self::ViceMinister(d) => format!("{}侍郎", d.label()),
             Self::Clerk(d) => format!("{}郎中", d.label()),
@@ -242,6 +252,7 @@ impl FromStr for Office {
             "vice-chancellor" => Ok(Self::ViceChancellor),
             "first-secretary" => Ok(Self::FirstGrandSecretary),
             "second-secretary" => Ok(Self::SecondGrandSecretary),
+            "censor" => Ok(Self::Censor),
             _ => {
                 let (kind, department) = input
                     .split_once(':')
@@ -336,6 +347,70 @@ impl FromStr for Verdict {
             "accept" => Ok(Self::Accepted),
             "reject" => Ok(Self::Rejected),
             _ => Err(ParseError::UnknownVerdict(input.into())),
+        }
+    }
+}
+
+/// 都察院对一件回奏的结论。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CensorVerdict {
+    Endorsed,
+    Impeached,
+}
+impl CensorVerdict {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Endorsed => "endorse",
+            Self::Impeached => "impeach",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Endorsed => "背书",
+            Self::Impeached => "弹劾",
+        }
+    }
+}
+impl FromStr for CensorVerdict {
+    type Err = ParseError;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "endorse" => Ok(Self::Endorsed),
+            "impeach" => Ok(Self::Impeached),
+            _ => Err(ParseError::UnknownVerdict(input.into())),
+        }
+    }
+}
+
+/// 可机械核验的证据：回奏引用的文件（及行号）是否确实存在，最近一次 `run_tests` 是否通过。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Evidence {
+    /// 回奏中引用的文件位置数（带行号的引用，加上查无此文件的路径）。
+    pub cited: u32,
+    /// 其中查无实据（文件不存在或行号越界）的。
+    pub missing: u32,
+    /// 最近一次 `run_tests` 的结果；未跑测试为 `None`。
+    pub tests: Option<bool>,
+}
+impl Evidence {
+    /// 有据可查：引用全部属实且至少有一项可验证的证据（引用或通过的测试），测试没有失败。
+    pub fn verified(self) -> bool {
+        self.missing == 0
+            && self.tests != Some(false)
+            && (self.cited > 0 || self.tests == Some(true))
+    }
+}
+impl fmt::Display for Evidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.cited == 0 {
+            f.write_str("回奏未引用代码位置")?;
+        } else {
+            write!(f, "引用 {} 处，查无实据 {} 处", self.cited, self.missing)?;
+        }
+        match self.tests {
+            None => f.write_str("；未跑测试"),
+            Some(true) => f.write_str("；测试通过"),
+            Some(false) => f.write_str("；测试未通过"),
         }
     }
 }
@@ -548,6 +623,17 @@ pub enum CourtEvent {
     /// 皇帝驳回改动：不写入项目。
     ChangesDiscarded {
         task: TaskId,
+    },
+    /// 都察院复核已完成的诏令：证据核验结果与御史的背书或弹劾（每件一次）。
+    /// `model`/`usage` 为御史复核所用模型与用量（未调用模型时为 `None` 与零）。
+    CensorReported {
+        task: TaskId,
+        censor: AgentId,
+        verdict: CensorVerdict,
+        note: String,
+        evidence: Evidence,
+        model: Option<String>,
+        usage: TokenUsage,
     },
     /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。
     ModelUsage {

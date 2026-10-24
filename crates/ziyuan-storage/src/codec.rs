@@ -1,7 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
-    Agent, AgentId, Capability, CourtEvent, Department, Edict, FileChange, GovernanceMode, Office,
-    Seal, TaskId, TokenUsage, Verdict,
+    Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
+    GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -122,6 +122,36 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tCHANGES\t{}\t{}", task.0, entries.join(","))
         }
         ChangesApplied { task } => format!("v1\tAPPLIED\t{}", task.0),
+        CensorReported {
+            task,
+            censor,
+            verdict,
+            note,
+            evidence,
+            model,
+            usage,
+        } => {
+            let tests = match evidence.tests {
+                None => "-",
+                Some(true) => "1",
+                Some(false) => "0",
+            };
+            let line = format!(
+                "v1\tCENSURED\t{}\t{}\t{}\t{}\t{}\t{}\t{tests}\t{}\t{}",
+                task.0,
+                censor.0,
+                verdict.code(),
+                to_hex(note),
+                evidence.cited,
+                evidence.missing,
+                usage.input,
+                usage.output
+            );
+            match model {
+                Some(model) => format!("{line}\t{}", to_hex(model)),
+                None => line,
+            }
+        }
         ChangesDiscarded { task } => format!("v1\tDISCARDED\t{}", task.0),
         ModelUsage { task, usage } => {
             format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output)
@@ -284,6 +314,32 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         "APPLIED" => ChangesApplied {
             task: TaskId(id(2)?),
         },
+        "CENSURED" => CensorReported {
+            task: TaskId(id(2)?),
+            censor: AgentId(id(3)?),
+            verdict: field(4)?
+                .parse::<CensorVerdict>()
+                .map_err(|e| e.to_string())?,
+            note: from_hex(field(5)?)?,
+            evidence: Evidence {
+                cited: u32::try_from(id(6)?).map_err(|e| e.to_string())?,
+                missing: u32::try_from(id(7)?).map_err(|e| e.to_string())?,
+                tests: match field(8)? {
+                    "-" => None,
+                    "1" => Some(true),
+                    "0" => Some(false),
+                    other => return Err(format!("测试标记无效: {other}")),
+                },
+            },
+            usage: TokenUsage {
+                input: id(9)?,
+                output: id(10)?,
+            },
+            model: match parts.len() {
+                11 => None,
+                _ => Some(from_hex(field(11)?)?),
+            },
+        },
         "DISCARDED" => ChangesDiscarded {
             task: TaskId(id(2)?),
         },
@@ -311,6 +367,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
         | ChangesDiscarded { .. }
         | TaskCancelled { .. } => 3,
         ChangesProposed { .. } => 4,
+        CensorReported { model: None, .. } => 11,
+        CensorReported { .. } => 12,
         OfficeModelSet { model: None, .. } | OfficeCeilingSet { ceiling: None, .. } => 3,
         OfficialAppointed { .. }
         | TaskAssigned { model: None, .. }
@@ -412,6 +470,31 @@ mod tests {
                 ],
             },
             CourtEvent::ChangesApplied { task },
+            CourtEvent::CensorReported {
+                task,
+                censor: AgentId(7),
+                verdict: CensorVerdict::Impeached,
+                note: "查无\t实据".into(),
+                evidence: Evidence {
+                    cited: 3,
+                    missing: 1,
+                    tests: Some(false),
+                },
+                model: Some("pro".into()),
+                usage: TokenUsage {
+                    input: 9,
+                    output: 2,
+                },
+            },
+            CourtEvent::CensorReported {
+                task,
+                censor: AgentId(7),
+                verdict: CensorVerdict::Endorsed,
+                note: String::new(),
+                evidence: Evidence::default(),
+                model: None,
+                usage: TokenUsage::default(),
+            },
             CourtEvent::ChangesDiscarded { task },
             CourtEvent::EdictApproved { task },
             CourtEvent::EdictDrafted {

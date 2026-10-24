@@ -114,4 +114,12 @@ if "$BIN" edict --dept revenue --tools write_file '越权' > /dev/null 2>&1; the
 WID="$("$BIN" tasks | tail -1 | grep -o '^#[0-9]*' | tr -d '#')"
 "$BIN" diff "$WID" | grep -q '没有呈报改动'
 if "$BIN" apply "$WID" > /dev/null 2>&1; then echo '无改动不应准奏' >&2; exit 1; fi
+# 都察院：御史空缺则拒绝；任命后复核（演示回奏无据，按证据例弹劾）；考成簿
+if "$BIN" censor "$WID" > /dev/null 2>&1; then echo '御史空缺不应复核' >&2; exit 1; fi
+CID="$("$BIN" recruit justice | grep -o '#[0-9]*' | head -1 | tr -d '#')"
+"$BIN" appoint "$CID" censor | grep -q '左都御史'
+"$BIN" censor "$WID" | grep -q '弹劾（回奏未引用代码位置；未跑测试）'
+"$BIN" tasks | grep -q '御史弹劾'
+"$BIN" kaocheng | grep -q '天子亲自考成'
+"$BIN" examine "$CID" | grep -q '考成：无事可考'
 echo 'ZiYuan smoke test PASS'

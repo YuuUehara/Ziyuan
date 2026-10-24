@@ -9,11 +9,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use ziyuan_core::{
-    AgentId, CourtEvent, Department, Edict, FileChange, GovernanceMode, Office, Price, Seal,
-    TaskId, TokenUsage, Verdict,
+    AgentId, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange, GovernanceMode,
+    Office, Price, Seal, TaskId, TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
-use ziyuan_governance::{Court, GovernanceError, ServiceRecord, Task, TaskStatus, founding_events};
+use ziyuan_governance::{
+    ChangeState, Court, GovernanceError, ServiceRecord, Task, TaskStatus, founding_events,
+};
 use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventStore, StorageError};
 
@@ -258,6 +260,112 @@ impl<S: EventStore> Session<S> {
             )?])
         })?;
         Ok(worker)
+    }
+
+    /// 都察院复核一件已完成的诏令：先机械核验证据（回奏引用的文件与行号是否存在于 `root`
+    /// 下的项目、最近一次 `run_tests` 是否通过），再请左都御史（其官职所配模型，否则默认模型）
+    /// 据此背书或弹劾（核验结果另计入考绩的「实证」，不随御史结论改变）。模型不可用（含演示后端）或回复无结论时，
+    /// 按证据例：有据可查则背书，否则弹劾。阻塞直到模型返回。
+    pub fn censor(
+        &mut self,
+        task: TaskId,
+        root: &Path,
+        backend: &dyn WorkerBackend,
+    ) -> Result<CensorVerdict, AppError> {
+        self.reload()?;
+        let court = &self.court;
+        let censor = court
+            .censor()
+            .ok_or(GovernanceError::Vacant(Office::Censor))?
+            .clone();
+        court.propose_censure_check(task, censor.id)?;
+        let entry = court.task(task).expect("已确认存在");
+        let (evidence, findings) = check_evidence(root, entry, &self.history);
+        let model = court
+            .model_of(censor.id)
+            .or(backend.model_name())
+            .map(str::to_owned);
+        let handler = entry
+            .handler()
+            .and_then(|id| court.agent(id))
+            .map_or("?".to_owned(), |a| format!("#{} {}", a.id.0, a.name));
+        let summary = match &entry.status {
+            TaskStatus::Completed { summary, .. } => summary.as_str(),
+            _ => "",
+        };
+        let system = format!(
+            "你是紫垣朝廷都察院左都御史{}，独立复核官员的回奏，风闻亦须核实。\n\
+             依据诏令、回奏、工具调用记录与证据核验，判断回奏是否属实、是否办成了诏令所命之事。\n\
+             回复第一行必须是「背书」或「弹劾」二字之一，其后用不超过 150 字说明理由。\n\
+             证据核验由程序完成、确凿可信：查无实据的引用要分辨是捏造，还是官员如实说明其不存在；\
+             测试未通过而回奏称已办成者，应予弹劾。",
+            censor.name
+        );
+        let mut user = format!(
+            "诏令 #{}（{}）：{}\n玉玺：{}\n承办：{handler}\n\n回奏：\n{}\n\n工具调用：\n",
+            task.0,
+            entry.edict.department.label(),
+            entry.edict.text,
+            entry.edict.seal,
+            truncate(summary, 6000),
+        );
+        for (tool, args, ok) in tool_calls(&self.history, task) {
+            let mark = if ok { "成功" } else { "失败" };
+            user.push_str(&format!("- {tool} {}（{mark}）\n", truncate(&args, 200)));
+        }
+        user.push_str(&format!("\n证据核验：{evidence}\n"));
+        for line in &findings {
+            user.push_str(&format!("- {line}\n"));
+        }
+        if let Some(changes) = &entry.changes {
+            let diff: String = changes.files.iter().map(render_diff).collect();
+            user.push_str(&format!("\n呈报改动：\n{}\n", truncate(&diff, 6000)));
+        }
+        let by_evidence = if evidence.verified() {
+            CensorVerdict::Endorsed
+        } else {
+            CensorVerdict::Impeached
+        };
+        let (verdict, note, model, usage) = match backend.complete(model.as_deref(), &system, &user)
+        {
+            Ok((reply, usage)) => {
+                let reply = truncate(reply.trim(), 600);
+                match parse_censure(&reply) {
+                    Some(verdict) => (verdict, reply, model, usage),
+                    None => (
+                        by_evidence,
+                        format!(
+                            "御史未下结论，按证据例{}。原文：{reply}",
+                            by_evidence.label()
+                        ),
+                        model,
+                        usage,
+                    ),
+                }
+            }
+            Err(e) => (
+                by_evidence,
+                format!(
+                    "都察院未能以模型复核（{e}），按证据例{}：{evidence}。",
+                    by_evidence.label()
+                ),
+                None,
+                TokenUsage::default(),
+            ),
+        };
+        self.commit(|court| {
+            court.propose_censure_check(task, censor.id)?;
+            Ok(vec![CourtEvent::CensorReported {
+                task,
+                censor: censor.id,
+                verdict,
+                note: note.clone(),
+                evidence,
+                model: model.clone(),
+                usage,
+            }])
+        })?;
+        Ok(verdict)
     }
 
     /// 御笔改票：皇帝改定拟派的承办人（仍须批红）。
@@ -641,9 +749,19 @@ fn execution_usage(task: &Task) -> TokenUsage {
         .draft
         .as_ref()
         .map_or_else(TokenUsage::default, |d| d.usage);
+    let censoring = task
+        .censure
+        .as_ref()
+        .map_or_else(TokenUsage::default, |c| c.usage);
     TokenUsage {
-        input: task.usage.input.saturating_sub(drafting.input),
-        output: task.usage.output.saturating_sub(drafting.output),
+        input: task
+            .usage
+            .input
+            .saturating_sub(drafting.input + censoring.input),
+        output: task
+            .usage
+            .output
+            .saturating_sub(drafting.output + censoring.output),
     }
 }
 
@@ -656,15 +774,25 @@ pub fn estimate_cost<'a>(
 ) -> Option<String> {
     let mut total = None::<(f64, String)>;
     for task in tasks {
-        // 票拟与承办可能用不同模型，分别计价。
+        // 票拟、承办与复核可能用不同模型，分别计价。
         let (drafting, draft_model) = task
             .draft
             .as_ref()
             .map_or((TokenUsage::default(), None), |d| {
                 (d.usage, d.model.as_deref())
             });
+        let (censoring, censor_model) = task
+            .censure
+            .as_ref()
+            .map_or((TokenUsage::default(), None), |c| {
+                (c.usage, c.model.as_deref())
+            });
         let executing = execution_usage(task);
-        for (usage, model) in [(executing, task.model.as_deref()), (drafting, draft_model)] {
+        for (usage, model) in [
+            (executing, task.model.as_deref()),
+            (drafting, draft_model),
+            (censoring, censor_model),
+        ] {
             if usage.total() == 0 {
                 continue;
             }
@@ -790,9 +918,238 @@ pub fn seal_note(seal: &Seal) -> String {
 
 pub fn describe_record(r: &ServiceRecord) -> String {
     format!(
-        "采纳 {}，驳回 {}，失败 {}，待评定 {}",
-        r.accepted, r.rejected, r.failed, r.unreviewed
+        "采纳 {}，驳回 {}，失败 {}，待评定 {}；御史背书 {}，弹劾 {}；实证 {}",
+        r.accepted, r.rejected, r.failed, r.unreviewed, r.endorsed, r.impeached, r.verified
     )
+}
+
+/// 考成等第：采纳、背书、实证为功，驳回、弹劾、失败为过。
+pub fn kaocheng_grade(r: &ServiceRecord) -> &'static str {
+    let handled = r.accepted + r.rejected + r.unreviewed + r.failed;
+    let score = r.merit() - i64::from(r.failed);
+    match () {
+        _ if handled == 0 => "无事可考",
+        _ if score >= 2 => "称职",
+        _ if score < 0 => "不及",
+        _ => "平常",
+    }
+}
+
+/// 考成簿（仿万历初张居正考成法：立限考事，以事责人）：在任官员逐一列出功过与等第。
+/// 只是呈现，不入事件簿，也不自动黜陟。
+pub fn kaocheng_report(court: &Court) -> String {
+    let mut out = String::from(match court.mode() {
+        GovernanceMode::Cabinet => {
+            "考成簿　万历元年，首辅张居正上《请稽查章奏随事考成以修实政疏》：立限考事，以事责人，月有考，岁有稽。"
+        }
+        GovernanceMode::DirectRule => {
+            "考成簿　考成法本是内阁首辅张居正所行；今已废相，无人代劳，只好由天子亲自考成。"
+        }
+        GovernanceMode::Chancellor => {
+            "考成簿　元无考成之法，今借明制，由中书省代为考成——丞相考百官，谁来考丞相？"
+        }
+    });
+    out.push('\n');
+    let mut secretary_failed = false;
+    let mut any = false;
+    for agent in court.agents() {
+        let Some(office) = court.office_of(agent.id) else {
+            continue;
+        };
+        any = true;
+        let record = court.service_record(agent.id);
+        let grade = kaocheng_grade(&record);
+        secretary_failed |= office == Office::FirstGrandSecretary && grade == "不及";
+        out.push_str(&format!(
+            "#{} {}（{}）：{} —— {grade}\n",
+            agent.id.0,
+            agent.name,
+            office.label(),
+            describe_record(&record)
+        ));
+    }
+    if !any {
+        out.push_str("朝中无一人在任，无事可考。\n");
+    }
+    if secretary_failed {
+        out.push_str("首辅亦考成不及。万历十年张居正卒，次年即被抄家，考成法随之而废。\n");
+    }
+    out.push_str("称职者可擢，不及者宜黜；然黜陟出自圣裁，考成簿不罢免任何人。");
+    out
+}
+
+/// 截取前 `max` 个字符，超出时注明。
+fn truncate(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().nth(max).is_some() {
+        out.push_str("……（下略）");
+    }
+    out
+}
+
+/// 诏令最近一次指派以来的工具调用：(工具, 参数, 成败)。
+fn tool_calls(history: &[CourtEvent], task: TaskId) -> Vec<(String, String, bool)> {
+    let start = history
+        .iter()
+        .rposition(|e| matches!(e, CourtEvent::TaskAssigned { task: t, .. } if *t == task))
+        .unwrap_or(0);
+    history[start..]
+        .iter()
+        .filter_map(|e| match e {
+            CourtEvent::ToolInvoked {
+                task: t,
+                tool,
+                args_json,
+                ok,
+            } if *t == task => Some((tool.clone(), args_json.clone(), *ok)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 机械核验回奏的证据，返回汇总与逐条结果。
+///
+/// 引用：回奏中形如 `path:行` 或 `path:起-止` 的文件位置，行号在范围内即属实。不带行号的
+/// 路径只在查无此文件时计入（捏造）；只含 `/`、不带扩展名的路径不存在时不计，以免把
+/// 「和/或」之类误作引用。
+/// 呈报待决的改动按改动后的内容核对。测试：最近一次 `run_tests` 的成败。
+fn check_evidence(root: &Path, task: &Task, history: &[CourtEvent]) -> (Evidence, Vec<String>) {
+    let summary = match &task.status {
+        TaskStatus::Completed { summary, .. } => summary.as_str(),
+        _ => "",
+    };
+    let staged = |path: &str| {
+        let changes = task.changes.as_ref()?;
+        if changes.state != ChangeState::Proposed {
+            return None;
+        }
+        let file = changes.files.iter().find(|f| f.path == path)?;
+        Some(file.after.clone())
+    };
+    let mut evidence = Evidence::default();
+    let mut findings = Vec::new();
+    for (path, lines) in citations(summary) {
+        let target = root.join(&path);
+        let label = match lines {
+            Some((a, b)) if a == b => format!("{path}:{a}"),
+            Some((a, b)) => format!("{path}:{a}-{b}"),
+            None => path.clone(),
+        };
+        let escapes = Path::new(&path).components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        let has_extension = Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.len() >= 2 && e.starts_with(|c: char| c.is_ascii_alphabetic()));
+        let content = if escapes {
+            None
+        } else {
+            staged(&path).or_else(|| {
+                let meta = std::fs::metadata(&target).ok()?;
+                if meta.is_dir() {
+                    return Some(String::new());
+                }
+                (meta.len() <= 4 << 20).then(|| std::fs::read_to_string(&target).ok())?
+            })
+        };
+        let found = match (&content, lines) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(text), Some((_, end))) => end <= text.lines().count(),
+        };
+        if !found && !has_extension && !escapes {
+            continue;
+        }
+        // 只提到确实存在的文件而不给行号，证明不了什么，不计为证据（捏造的文件名仍算查无实据）。
+        if found && lines.is_none() {
+            findings.push(format!("{label} 存在（未给行号，不计为证据）"));
+            continue;
+        }
+        evidence.cited += 1;
+        if found {
+            findings.push(format!("{label} 属实"));
+        } else {
+            evidence.missing += 1;
+            let why = if content.is_some() {
+                "行号越界"
+            } else {
+                "文件不存在"
+            };
+            findings.push(format!("{label} 查无实据（{why}）"));
+        }
+    }
+    evidence.tests = tool_calls(history, task.edict.id)
+        .into_iter()
+        .rev()
+        .find(|(tool, _, _)| tool == ziyuan_core::Capability::RunTests.code())
+        .map(|(_, _, ok)| ok);
+    (evidence, findings)
+}
+
+/// 回奏中引用的文件位置（去重，最多 50 处）：(相对路径, 行号范围)。
+fn citations(text: &str) -> Vec<(String, Option<(usize, usize)>)> {
+    const DENIED: &[&str] = &[".ziyuan", ".git", ".jj"];
+    let mut out: Vec<(String, Option<(usize, usize)>)> = Vec::new();
+    let tokens = text
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | ':' | '-')));
+    for token in tokens {
+        // 只去掉句末的标点；开头的 `.`（`./`、`../`、`.env`）有意义。
+        let token = token
+            .trim_end_matches(['.', ':', '-'])
+            .trim_start_matches('-');
+        let (path, rest) = token.split_once(':').unwrap_or((token, ""));
+        let path = path.trim_end_matches('/').trim_start_matches("./");
+        let lines = match rest.split_once('-') {
+            _ if rest.is_empty() => None,
+            Some((a, b)) => a.parse().ok().zip(b.parse().ok()),
+            None => rest.parse().ok().map(|n| (n, n)),
+        };
+        let file_like = path.contains('/') || {
+            let ext = path.rsplit_once('.');
+            ext.is_some_and(|(stem, ext)| {
+                !stem.is_empty()
+                    && ext.len() >= 2
+                    && ext.starts_with(|c: char| c.is_ascii_alphabetic())
+            })
+        };
+        let denied = path
+            .split('/')
+            .any(|p| DENIED.contains(&p) || p.starts_with(".env"));
+        if path.is_empty()
+            || !file_like
+            || denied
+            || path.starts_with('/')
+            || path.starts_with('-')
+            || !path.contains(|c: char| c.is_ascii_alphabetic())
+            || lines.is_some_and(|(a, b): (usize, usize)| a == 0 || b < a)
+        {
+            continue;
+        }
+        let entry = (path.to_owned(), lines);
+        if !out.contains(&entry) {
+            out.push(entry);
+            if out.len() == 50 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 御史回复中最先出现的「背书」或「弹劾」。
+fn parse_censure(reply: &str) -> Option<CensorVerdict> {
+    let endorse = reply.find("背书");
+    let impeach = reply.find("弹劾");
+    match (endorse, impeach) {
+        (Some(e), Some(i)) if i < e => Some(CensorVerdict::Impeached),
+        (Some(_), _) => Some(CensorVerdict::Endorsed),
+        (None, Some(_)) => Some(CensorVerdict::Impeached),
+        (None, None) => None,
+    }
 }
 
 pub fn describe_event(event: &CourtEvent) -> String {
@@ -857,6 +1214,18 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("诏令 #{} 呈报改动：{}", task.0, paths.join("、"))
         }
         CourtEvent::ChangesApplied { task } => format!("诏令 #{} 改动准奏落盘", task.0),
+        CourtEvent::CensorReported {
+            task,
+            censor,
+            verdict,
+            evidence,
+            ..
+        } => format!(
+            "都察院 #{} 复核诏令 #{}：{}（{evidence}）",
+            censor.0,
+            task.0,
+            verdict.label()
+        ),
         CourtEvent::ChangesDiscarded { task } => format!("诏令 #{} 改动驳回", task.0),
         CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
         CourtEvent::TaskReviewed {
@@ -1432,6 +1801,152 @@ mod tests {
             .state;
         assert_eq!(state, ziyuan_governance::ChangeState::Discarded);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 回奏引用若干文件位置并报告测试通过；复核时以 `censor_reply` 作答（`None` 则不可用）。
+    struct Cited {
+        censor_reply: Option<&'static str>,
+    }
+    impl WorkerBackend for Cited {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            hooks.tool_invoked("run_tests", "{}", false);
+            hooks.tool_invoked("run_tests", "{}", true);
+            Ok(
+                "见 `src/lib.rs:2`、src/lib.rs:9 与 ./missing.rs，通读 src/lib.rs；和/或 e.g. v0.2.0、std::fs、.env"
+                    .into(),
+            )
+        }
+        fn complete(
+            &self,
+            _model: Option<&str>,
+            _system: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            assert!(user.contains("src/lib.rs:9 查无实据（行号越界）"), "{user}");
+            let reply = self.censor_reply.ok_or("无模型")?;
+            Ok((
+                reply.into(),
+                TokenUsage {
+                    input: 10,
+                    output: 2,
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn censorate_checks_evidence_and_kaocheng_grades_officials() {
+        let root = std::env::temp_dir().join(format!("ziyuan-app-censor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "a\nb\nc\n").unwrap();
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        for text in ["一", "二"] {
+            session
+                .issue(Department::Works, text.into(), Seal::default())
+                .unwrap();
+        }
+        let endorse = Cited {
+            censor_reply: Some("经查属实，予以背书。\n然 missing.rs 并不存在，不宜弹劾。"),
+        };
+        run_all(&mut session, &scheduler(Cited { censor_reply: None })).await;
+        let handler = session.court().task(TaskId(1)).unwrap().handler().unwrap();
+
+        assert!(matches!(
+            session.censor(TaskId(1), &root, &endorse),
+            Err(AppError::Governance(GovernanceError::Vacant(
+                Office::Censor
+            )))
+        ));
+        let censor = session.recruit(None, Department::Justice).unwrap();
+        session.appoint(censor, Office::Censor).unwrap();
+        // 计入三处（越界的行号与不存在的文件各一处查无实据；只提文件名不计），最近一次测试通过。
+        assert_eq!(
+            session.censor(TaskId(1), &root, &endorse).unwrap(),
+            CensorVerdict::Endorsed
+        );
+        let censure = session
+            .court()
+            .task(TaskId(1))
+            .unwrap()
+            .censure
+            .clone()
+            .unwrap();
+        let expected = Evidence {
+            cited: 3,
+            missing: 2,
+            tests: Some(true),
+        };
+        assert_eq!((censure.evidence, censure.usage.total()), (expected, 12));
+        // 模型不可用：按证据例——引用有查无实据者，弹劾。
+        let unavailable = Cited { censor_reply: None };
+        assert_eq!(
+            session.censor(TaskId(2), &root, &unavailable).unwrap(),
+            CensorVerdict::Impeached
+        );
+        assert!(
+            session
+                .court()
+                .task(TaskId(2))
+                .unwrap()
+                .censure
+                .as_ref()
+                .unwrap()
+                .note
+                .contains("按证据例弹劾")
+        );
+        assert!(matches!(
+            session.censor(TaskId(2), &root, &unavailable),
+            Err(AppError::Governance(GovernanceError::AlreadyCensured(_)))
+        ));
+        let record = session.court().service_record(handler);
+        assert_eq!(
+            (record.endorsed, record.impeached, record.verified),
+            (1, 1, 0)
+        );
+        // 背书 1 − 弹劾 1，两件待评定：平常。复核的 token 不算承办用量。
+        assert_eq!(kaocheng_grade(&record), "平常");
+        assert_eq!(
+            execution_usage(session.court().task(TaskId(1)).unwrap()).total(),
+            0
+        );
+        let report = kaocheng_report(session.court());
+        assert!(
+            report.contains("谁来考丞相") && report.contains("—— 平常"),
+            "{report}"
+        );
+        assert!(
+            report.contains("左都御史") && report.contains("—— 无事可考"),
+            "{report}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn citation_parsing_and_censure_verdicts() {
+        let found = citations(
+            "改了 crates/a/lib.rs:12-20，见 README.md；Cargo.toml:3，和/或 e.g. 0.3.0 v0.2 https://x.io/a lib.rs:0 ../x.rs /etc/passwd .git/config",
+        );
+        let paths: Vec<_> = found.iter().map(|(p, l)| (p.as_str(), *l)).collect();
+        assert_eq!(
+            paths,
+            [
+                ("crates/a/lib.rs", Some((12, 20))),
+                ("README.md", None),
+                ("Cargo.toml", Some((3, 3))),
+                ("../x.rs", None),
+            ]
+        );
+        assert_eq!(
+            parse_censure("背书。此前有人欲弹劾"),
+            Some(CensorVerdict::Endorsed)
+        );
+        assert_eq!(
+            parse_censure("臣以为当弹劾，不当背书"),
+            Some(CensorVerdict::Impeached)
+        );
+        assert_eq!(parse_censure("待查"), None);
     }
 
     /// 调用一次工具后失败。

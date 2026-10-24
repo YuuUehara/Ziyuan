@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
-    Agent, AgentId, Capability, CourtEvent, Department, Edict, FileChange, GovernanceMode, Office,
-    Seal, TaskId, TokenUsage, Verdict,
+    Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence, FileChange,
+    GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -62,6 +62,11 @@ pub enum GovernanceError {
     WorksOnly(Capability),
     /// 诏令没有待决的改动（未呈报，或已落盘/驳回）。
     NoPendingChanges(TaskId),
+    /// 复核者不是现任左都御史。
+    NotCensor(AgentId),
+    /// 御史不得复核自己经手的诏令。
+    SelfReview(AgentId),
+    AlreadyCensured(TaskId),
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -105,6 +110,9 @@ impl fmt::Display for GovernanceError {
             Self::Vacant(Office::Minister(d)) => {
                 write!(f, "{0}尚书、{0}侍郎俱缺，无法承接诏令", d.label())
             }
+            Self::Vacant(Office::Censor) => {
+                f.write_str("左都御史空缺。请先 appoint 一名御史（censor）。")
+            }
             Self::Vacant(office) => write!(f, "{}空缺，无法承接诏令", office.label()),
             Self::Purged(id) => write!(f, "官员 #{} 已革职，永不叙用", id.0),
             Self::ApprovalNotNeeded => {
@@ -129,6 +137,9 @@ impl fmt::Display for GovernanceError {
                 write!(f, "{} 只能授予工部诏令", capability.code())
             }
             Self::NoPendingChanges(id) => write!(f, "诏令 #{} 没有待决的改动", id.0),
+            Self::NotCensor(id) => write!(f, "官员 #{} 不是现任左都御史", id.0),
+            Self::SelfReview(id) => write!(f, "官员 #{} 经手此诏令，须回避，不得自行复核", id.0),
+            Self::AlreadyCensured(id) => write!(f, "诏令 #{} 已经都察院复核", id.0),
         }
     }
 }
@@ -170,6 +181,20 @@ pub struct Task {
     pub draft: Option<Draft>,
     /// 承办官员呈报的文件改动（只有授予 `write_file` 的工部诏令才会有）。
     pub changes: Option<Changes>,
+    /// 都察院的复核（只有已完成的诏令才有）。
+    pub censure: Option<Censure>,
+}
+
+/// 都察院复核的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Censure {
+    pub censor: AgentId,
+    pub verdict: CensorVerdict,
+    pub note: String,
+    pub evidence: Evidence,
+    pub model: Option<String>,
+    /// 复核所用的 token（已计入 `Task::usage`）。
+    pub usage: TokenUsage,
 }
 
 /// 呈报的文件改动及皇帝的处置。
@@ -343,6 +368,7 @@ impl Court {
                         model: None,
                         draft: None,
                         changes: None,
+                        censure: None,
                     },
                 );
             }
@@ -416,6 +442,27 @@ impl Court {
                 self.tasks.get_mut(task).expect("已确认存在").changes = Some(Changes {
                     files: changes.clone(),
                     state: ChangeState::Proposed,
+                });
+            }
+            CourtEvent::CensorReported {
+                task,
+                censor,
+                verdict,
+                note,
+                evidence,
+                model,
+                usage,
+            } => {
+                self.propose_censure_check(*task, *censor)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.usage += *usage;
+                entry.censure = Some(Censure {
+                    censor: *censor,
+                    verdict: *verdict,
+                    note: note.clone(),
+                    evidence: *evidence,
+                    model: model.clone(),
+                    usage: *usage,
                 });
             }
             CourtEvent::ChangesApplied { task } | CourtEvent::ChangesDiscarded { task } => {
@@ -768,6 +815,36 @@ impl Court {
         }
     }
 
+    /// 现任左都御史。
+    pub fn censor(&self) -> Option<&Agent> {
+        self.appointed_as(Office::Censor)
+    }
+
+    /// 都察院可否由 `censor` 复核 `task`：诏令已完成且未复核，`censor` 为现任左都御史且未经手此诏令。
+    pub fn propose_censure_check(
+        &self,
+        task: TaskId,
+        censor: AgentId,
+    ) -> Result<(), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if !matches!(entry.status, TaskStatus::Completed { .. }) {
+            return Err(GovernanceError::NotCompleted(task));
+        }
+        if entry.censure.is_some() {
+            return Err(GovernanceError::AlreadyCensured(task));
+        }
+        if self.appointments.get(&censor) != Some(&Office::Censor) {
+            return Err(GovernanceError::NotCensor(censor));
+        }
+        if entry.handler() == Some(censor) {
+            return Err(GovernanceError::SelfReview(censor));
+        }
+        Ok(())
+    }
+
     pub fn propose_cancellation(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
         self.open_task(task)?;
         Ok(CourtEvent::TaskCancelled { task })
@@ -875,6 +952,13 @@ impl Court {
                 (TaskStatus::Failed { .. }, _) => record.failed += 1,
                 _ => {}
             }
+            if let Some(censure) = &task.censure {
+                match censure.verdict {
+                    CensorVerdict::Endorsed => record.endorsed += 1,
+                    CensorVerdict::Impeached => record.impeached += 1,
+                }
+                record.verified += u32::from(censure.evidence.verified());
+            }
         }
         record
     }
@@ -898,7 +982,7 @@ impl Court {
             .collect();
         candidates.sort_by_key(|c| {
             (
-                std::cmp::Reverse(c.record.net_accepted()),
+                std::cmp::Reverse(c.record.merit()),
                 c.record.failed,
                 c.record.tool_failures,
                 c.agent.id,
@@ -1056,12 +1140,23 @@ pub struct ServiceRecord {
     pub tool_failures: u32,
     /// 经手诏令（含失败）的模型 token 用量。
     pub usage: TokenUsage,
+    /// 都察院背书、弹劾的件数。
+    pub endorsed: u32,
+    pub impeached: u32,
+    /// 经核验有据可查（引用属实或测试通过）的件数。
+    pub verified: u32,
 }
 
 impl ServiceRecord {
-    /// 荐举排序的主要依据：采纳数减驳回数。
+    /// 采纳数减驳回数。
     pub fn net_accepted(&self) -> i64 {
         i64::from(self.accepted) - i64::from(self.rejected)
+    }
+
+    /// 荐举排序的依据：皇帝评定（采纳 − 驳回）加都察院复核（背书 − 弹劾）与实证件数。
+    pub fn merit(&self) -> i64 {
+        self.net_accepted() + i64::from(self.endorsed) - i64::from(self.impeached)
+            + i64::from(self.verified)
     }
 }
 
@@ -1411,6 +1506,116 @@ mod tests {
         assert!(!court.is_purged(AgentId(7)));
     }
     #[test]
+    fn censorate_reviews_completed_edicts_and_feeds_the_service_record() {
+        let mut court = Court::replay(&founding_events(1)).unwrap();
+        let mut apply = |events: Vec<CourtEvent>| {
+            for e in events {
+                court.apply(&e).unwrap();
+            }
+        };
+        let edict = Edict {
+            id: TaskId(1),
+            department: Department::Works,
+            text: "查".into(),
+            seal: Seal::default(),
+        };
+        apply(vec![
+            CourtEvent::EdictIssued(edict),
+            CourtEvent::TaskAssigned {
+                task: TaskId(1),
+                worker: AgentId(4),
+                model: None,
+            },
+        ]);
+        let report = |censor: u64, verdict, evidence| CourtEvent::CensorReported {
+            task: TaskId(1),
+            censor: AgentId(censor),
+            verdict,
+            note: "核".into(),
+            evidence,
+            model: None,
+            usage: TokenUsage::default(),
+        };
+        // 未完成不复核；完成后，非御史不能复核，经手者任御史也须回避。
+        assert_eq!(
+            court.propose_censure_check(TaskId(1), AgentId(4)),
+            Err(GovernanceError::NotCompleted(TaskId(1)))
+        );
+        for e in [
+            CourtEvent::TaskCompleted {
+                task: TaskId(1),
+                worker: AgentId(4),
+                summary: "src/lib.rs:3".into(),
+            },
+            CourtEvent::OfficialDismissed { agent: AgentId(4) },
+            CourtEvent::OfficialAppointed {
+                agent: AgentId(4),
+                office: Office::Censor,
+            },
+        ] {
+            court.apply(&e).unwrap();
+        }
+        assert_eq!(
+            court.propose_censure_check(TaskId(1), AgentId(5)),
+            Err(GovernanceError::NotCensor(AgentId(5)))
+        );
+        assert_eq!(
+            court.apply(&report(4, CensorVerdict::Endorsed, Evidence::default())),
+            Err(GovernanceError::SelfReview(AgentId(4)))
+        );
+        // 御史不随改制撤销；改由吏部郎中 #5 任御史后背书，证据属实。
+        court
+            .apply(&CourtEvent::InstitutionReformed(GovernanceMode::Cabinet))
+            .unwrap();
+        assert_eq!(court.office_of(AgentId(4)), Some(Office::Censor));
+        for e in [
+            CourtEvent::OfficialDismissed { agent: AgentId(4) },
+            CourtEvent::OfficialDismissed { agent: AgentId(5) },
+            CourtEvent::OfficialAppointed {
+                agent: AgentId(5),
+                office: Office::Censor,
+            },
+        ] {
+            court.apply(&e).unwrap();
+        }
+        let sound = Evidence {
+            cited: 1,
+            missing: 0,
+            tests: None,
+        };
+        court
+            .apply(&report(5, CensorVerdict::Endorsed, sound))
+            .unwrap();
+        assert_eq!(
+            court.apply(&report(5, CensorVerdict::Impeached, sound)),
+            Err(GovernanceError::AlreadyCensured(TaskId(1)))
+        );
+        let record = court.service_record(AgentId(4));
+        assert_eq!(
+            (
+                record.endorsed,
+                record.impeached,
+                record.verified,
+                record.unreviewed
+            ),
+            (1, 0, 1, 1)
+        );
+        assert_eq!(record.merit(), 2);
+        // 证据：引用有一处查无实据，或测试失败，都不算有据可查。
+        let flawed = Evidence {
+            cited: 2,
+            missing: 1,
+            tests: Some(true),
+        };
+        let failing = Evidence {
+            cited: 0,
+            missing: 0,
+            tests: Some(false),
+        };
+        assert!(!flawed.verified() && !failing.verified() && !Evidence::default().verified());
+    }
+
+    #[test]
     fn cannot_create_two_chancellors() {
         let court = Court::replay(&founding_events(1)).unwrap();
         let mut court = court;
@@ -1525,6 +1730,7 @@ mod tests {
                     input: 400,
                     output: 28,
                 },
+                ..ServiceRecord::default()
             }
         );
         assert_eq!(court.total_usage().total(), 5 * 107);

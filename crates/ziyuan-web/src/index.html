@@ -218,6 +218,10 @@
   pre.diff .hunk { color: var(--muted); display: block; }
   pre.diff .ctx { display: block; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
+  .censure { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #b9c7d8; background: #f2f6fb; white-space: pre-wrap; }
+  .censure.impeach { border-color: #e9b4ae; background: #fdf1ef; }
+  .censure .ev { color: var(--muted); font-size: 12px; }
+  pre.kaocheng { white-space: pre-wrap; font-size: 12px; background: var(--paper); border: 1px dashed var(--line); border-radius: 6px; padding: 8px; margin: 6px 0 0; }
   .review-row input { flex: 1; }
   .empty { color: var(--muted); text-align: center; padding: 26px 0; }
 
@@ -352,12 +356,12 @@
           </form>
         </div>
         <div class="side">
-          <h3>吏部荐举</h3>
+          <h3>吏部荐举 <button class="small" id="kaocheng-btn" title="仿张居正考成法：立限考事，以事责人">考成簿</button></h3>
           <div class="row">
             <select id="recommend-office" data-keep></select>
             <button class="shrink" id="recommend-btn">荐举</button>
           </div>
-          <div id="recommend-result"><p class="hint">按「采纳 − 驳回」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
+          <div id="recommend-result"><p class="hint">按「采纳 − 驳回 + 背书 − 弹劾 + 实证」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
         </div>
         <div class="side">
           <h3>官职配置 <small class="hint">模型与玉玺上限</small></h3>
@@ -484,7 +488,7 @@ function preserve(render) {
 }
 
 function recordHtml(r) {
-  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}</span>`;
+  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}<br>御史背书 ${r.endorsed} · 弹劾 ${r.impeached} · 实证 ${r.verified} · 考成 <b>${esc(r.grade)}</b></span>`;
 }
 
 const statusLabel = { pending: "待办", assigned: "执行中", completed: "已完成", failed: "失败", cancelled: "已撤销" };
@@ -507,12 +511,19 @@ function taskHtml(t) {
   } else if (t.status === "failed") {
     body = `<div class="reply error">${esc(t.detail)}</div>`;
   }
-  let actions = "";
+  if (t.censure) {
+    const c = t.censure;
+    body += `<div class="censure ${c.verdict}"><b>都察院${esc(c.label)}</b>　左都御史${esc(c.censor || "?")}${c.model ? `（${esc(c.model)}）` : ""}：${esc(c.note)}
+<span class="ev">证据核验：${esc(c.evidence)}${c.verified ? " · 有据可查" : ""}</span></div>`;
+  }
+  const censorBtn = t.status === "completed" && !t.censure
+    ? `<button class="small" data-censor="${t.id}">都察院复核</button>` : "";
+  let actions = censorBtn ? `<div class="review-row"><span style="flex:1"></span>${censorBtn}</div>` : "";
   if (t.status === "completed" && !t.review) {
     actions = `<div class="review-row">
       <input type="text" id="note-${t.id}" data-keep placeholder="评语（可选）">
       <button class="small accept" data-review="${t.id}" data-verdict="accept">采纳</button>
-      <button class="small reject" data-review="${t.id}" data-verdict="reject">驳回</button></div>`;
+      <button class="small reject" data-review="${t.id}" data-verdict="reject">驳回</button>${censorBtn}</div>`;
   } else if (open) {
     const approve = t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
     actions = `<div class="review-row"><span style="flex:1"></span>${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
@@ -662,6 +673,12 @@ $("recommend-btn").addEventListener("click", async () => {
       : `<p class="hint">无人可任此职。</p>`;
   } catch (e) { toast(e.message, true); }
 });
+$("kaocheng-btn").addEventListener("click", async () => {
+  try {
+    const { report } = await api("/kaocheng");
+    $("recommend-result").innerHTML = `<pre class="kaocheng">${esc(report)}</pre>`;
+  } catch (e) { toast(e.message, true); }
+});
 $("config-office").addEventListener("change", () => renderOfficeConfig(state));
 const configOffice = () => $("config-office").value;
 $("model-set").addEventListener("click", () =>
@@ -709,6 +726,10 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.draft}/draft`, {})).then((r) => r && toast(`诏令 #${d.draft} 票拟：拟派 ${r.name}`));
   } else if (d.redraft) {
     act(api(`/tasks/${d.redraft}/redraft`, { worker: Number($("redraft-" + d.redraft).value) }), "已御笔改票");
+  } else if (d.censor) {
+    el.disabled = true;
+    el.textContent = "御史复核中…";
+    act(api(`/tasks/${d.censor}/censor`, {})).then((r) => r && toast(`诏令 #${d.censor} 都察院${r.label}`));
   } else if (d.apply) {
     if (confirm(`把诏令 #${d.apply} 的改动写入项目？`)) act(api(`/tasks/${d.apply}/changes/apply`, {}), "已准奏，改动已落盘");
   } else if (d.discard) {

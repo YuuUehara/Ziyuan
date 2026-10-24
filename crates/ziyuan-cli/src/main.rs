@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
     ABOLITION_NOTE, RunUpdate, Session, TaskReport, describe_event, describe_record, estimate_cost,
-    render_diff, seal_note,
+    kaocheng_grade, kaocheng_report, render_diff, seal_note,
 };
 use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
@@ -54,7 +54,9 @@ const HELP: &str = concat!(
   ziyuan discard <诏令ID>               驳回呈报的改动，不写入
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
-  ziyuan examine <官员ID>               吏部考绩：经评定的履历
+  ziyuan censor <诏令ID|all>            都察院复核回奏：核验引用与测试，御史背书或弹劾
+  ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
+  ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
   ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
   ziyuan history                       查看事件记录
   ziyuan help
@@ -64,6 +66,7 @@ const HELP: &str = concat!(
   废相亲政（仿明初）    不设宰辅，皇帝直领六部
   内阁制（仿明中后期）  first-secretary 内阁首辅、second-secretary 内阁次辅
   六部（各制度通用）    minister:<部门> 尚书、vice-minister:<部门> 侍郎、clerk:<部门> 郎中
+  都察院（各制度通用）  censor 左都御史（元称御史台御史大夫），不入派工路线
   正职空缺时由副职署理。
 部门：personnel / revenue / rites / war / justice / works
 
@@ -139,6 +142,9 @@ enum Command {
     Examine(AgentId),
     Review(TaskId, Verdict, String),
     Diff(TaskId),
+    /// `None` 表示全部已完成、未复核的诏令。
+    Censor(Option<TaskId>),
+    Kaocheng,
     /// 准奏（`true`）或驳回改动。
     Decide(TaskId, bool),
     Recommend(Office),
@@ -241,6 +247,14 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         },
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
         "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
+        "kaocheng" => no_args(args, Command::Kaocheng)?,
+        "censor" => match args.as_slice() {
+            [all] if all == "all" => Command::Censor(None),
+            [id] => Command::Censor(Some(TaskId(
+                id.parse().map_err(|_| "诏令 ID 必须是数字或 all")?,
+            ))),
+            _ => return Err("用法: ziyuan censor <诏令ID|all>".into()),
+        },
         "apply" => Command::Decide(task_id(&args, "ziyuan apply <诏令ID>")?, true),
         "discard" => Command::Decide(task_id(&args, "ziyuan discard <诏令ID>")?, false),
         "review" => {
@@ -419,8 +433,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                             Some((verdict, _)) => verdict.label(),
                             None => "待评定",
                         };
+                        let censure = task
+                            .censure
+                            .as_ref()
+                            .map_or(String::new(), |c| format!("；御史{}", c.verdict.label()));
                         format!(
-                            "已完成（{}），{review}{}",
+                            "已完成（{}），{review}{censure}{}",
                             name(*worker),
                             changes_note(task)
                         )
@@ -526,6 +544,47 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 println!("请 `ziyuan approve <诏令ID|all>` 批红，或 `ziyuan redraft` 改票。");
             }
         }
+        Command::Censor(task) => {
+            let tasks = match task {
+                Some(task) => vec![task],
+                None => session
+                    .court()
+                    .tasks()
+                    .filter(|t| {
+                        matches!(t.status, TaskStatus::Completed { .. }) && t.censure.is_none()
+                    })
+                    .map(|t| t.edict.id)
+                    .collect(),
+            };
+            if tasks.is_empty() {
+                println!("没有待复核的诏令。");
+            }
+            let backend = if tasks.is_empty() {
+                None
+            } else {
+                Some(worker_backend()?)
+            };
+            for task in tasks {
+                let backend = backend.as_deref().expect("有诏令时已构造后端");
+                session.censor(task, &env::current_dir()?, backend)?;
+                let court = session.court();
+                let censure = court
+                    .task(task)
+                    .and_then(|t| t.censure.as_ref())
+                    .expect("刚复核");
+                let censor = court.agent(censure.censor).map_or("?", |a| a.name.as_str());
+                println!(
+                    "诏令 #{} 都察院复核：左都御史{censor}{}（{}）",
+                    task.0,
+                    censure.verdict.label(),
+                    censure.evidence
+                );
+                for line in censure.note.lines().filter(|l| !l.trim().is_empty()) {
+                    println!("  {line}");
+                }
+            }
+        }
+        Command::Kaocheng => println!("{}", kaocheng_report(session.court())),
         Command::Redraft(task, worker, note) => {
             session.redraft(task, worker, note)?;
             print_draft(session, task);
@@ -563,7 +622,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             let agent = court.agent(id).ok_or("官员不存在")?;
             let r = court.service_record(id);
             println!("吏部考绩：{}（#{}）", agent.name, id.0);
-            println!("  {}", describe_record(&r));
+            println!("  {}；考成：{}", describe_record(&r), kaocheng_grade(&r));
             println!(
                 "  工具调用 {} 次，其中失败 {} 次（含越出玉玺的尝试）",
                 r.tool_calls, r.tool_failures
