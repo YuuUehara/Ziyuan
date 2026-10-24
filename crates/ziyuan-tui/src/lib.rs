@@ -324,6 +324,17 @@ impl App {
             KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(5),
             KeyCode::Char('r') => self.start_run(),
             KeyCode::Char('s') => self.stop_run(),
+            KeyCode::Char('D') => {
+                let on = !self.court().in_retreat();
+                let done = if on {
+                    "陛下移居西苑修道"
+                } else {
+                    "陛下回朝亲政"
+                };
+                if let Some(note) = self.mutate(|s| s.retreat(on), |_| done.into()) {
+                    self.modal = Some(Modal::Notice(note));
+                }
+            }
             KeyCode::Char('K') => {
                 self.modal = Some(Modal::Notice(kaocheng_report(self.court())));
             }
@@ -833,6 +844,14 @@ impl App {
             ),
             Span::raw("  制度 "),
             Span::styled(court.mode().label(), Style::new().fg(GOLD).bold()),
+            Span::styled(
+                if court.in_retreat() {
+                    " · 西苑修道中"
+                } else {
+                    ""
+                },
+                Style::new().fg(Color::Magenta).bold(),
+            ),
             Span::raw(format!(
                 "  在册 {} · 有职 {}  模型 {}  用量 输入 {} / 输出 {}{}",
                 court.agents().count(),
@@ -989,7 +1008,11 @@ impl App {
             };
             lines.push(Line::from(vec![
                 label("评定"),
-                Span::raw(format!("{}{note}", verdict.label())),
+                Span::raw(format!(
+                    "{}{}{note}",
+                    if task.proxied { "司礼监代批" } else { "" },
+                    verdict.label()
+                )),
             ]));
         }
         if let Some(c) = &task.censure {
@@ -1234,6 +1257,7 @@ impl App {
                 ("f", "分办"),
                 ("i", "复核"),
                 ("K", "考成"),
+                ("D", "修道/回朝"),
                 ("g", "改制"),
                 ("Tab", "切换"),
                 ("q", "退出"),
@@ -1538,6 +1562,13 @@ mod tests {
         app.handle(message);
         assert!(screen(&app).contains("左都御史空缺"), "{}", screen(&app));
         // K 考成簿：承办官员一件采纳，等第平常。
+        // D 修道：史官记弹出，标题栏标出修道中；再按 D 回朝。
+        press(&mut app, "D");
+        assert!(app.court().in_retreat() && screen(&app).contains("西苑"));
+        press(&mut app, " ");
+        assert!(screen(&app).contains("西苑修道中"));
+        press(&mut app, "D ");
+        assert!(!app.court().in_retreat());
         press(&mut app, "K");
         let shown = screen(&app);
         assert!(

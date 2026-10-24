@@ -61,6 +61,7 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             }
         }
         InstitutionReformed(mode) => format!("v1\tREFORMED\t{}", mode.code()),
+        EmperorRetreat(on) => format!("v1\tRETREAT\t{}", u8::from(*on)),
         EdictIssued(e) => format!(
             "v1\tEDICT\t{}\t{}\t{}\t{}",
             e.id.0,
@@ -260,6 +261,11 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
                 _ => Some(from_hex(field(7)?)?),
             },
         },
+        "RETREAT" => EmperorRetreat(match field(2)? {
+            "1" => true,
+            "0" => false,
+            other => return Err(format!("修道标记无效: {other}")),
+        }),
         "REFORMED" => InstitutionReformed(
             field(2)?
                 .parse::<GovernanceMode>()
@@ -410,6 +416,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, String> {
     let expected_fields = match &event {
         Founded(_)
         | InstitutionReformed(_)
+        | EmperorRetreat(_)
         | OfficialDismissed { .. }
         | OfficialPurged { .. }
         | EdictApproved { .. }
@@ -506,6 +513,8 @@ mod tests {
                 reason: "超时\n（300s）".into(),
             },
             CourtEvent::TaskCancelled { task },
+            CourtEvent::EmperorRetreat(true),
+            CourtEvent::EmperorRetreat(false),
             CourtEvent::ChangesProposed {
                 task,
                 changes: vec![

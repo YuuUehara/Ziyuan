@@ -183,8 +183,22 @@ impl<S: EventStore> Session<S> {
 
     /// 内阁制下对内阁票拟批红，诏令方可执行。
     pub fn approve(&mut self, task: TaskId) -> Result<(), AppError> {
-        self.commit(|court| Ok(vec![court.propose_approval(task)?]))?;
+        self.commit(|court| {
+            if court.in_retreat() {
+                return Err(GovernanceError::InRetreat);
+            }
+            Ok(vec![court.propose_approval(task)?])
+        })?;
         Ok(())
+    }
+
+    /// 修道怠政（`true`）或回朝亲政（`false`），返回史官记述。
+    ///
+    /// 修道期间：执行时待批红的诏令由司礼监代批红（按票拟，未票拟按旧例），完成的回奏由司礼监
+    /// 代批「照准」，皆记为代批；皇帝不能亲自批红与评定。唯工部改动仍须皇帝亲自准奏才落盘。
+    pub fn retreat(&mut self, on: bool) -> Result<String, AppError> {
+        self.commit(|court| Ok(vec![court.propose_retreat(on)?]))?;
+        Ok(retreat_note(&self.court, on))
     }
 
     /// 内阁票拟：首辅（以其官职所配模型，否则默认模型）读诏令，从本部在任官员中拟定承办人，
@@ -464,7 +478,12 @@ impl<S: EventStore> Session<S> {
 
     /// 皇帝评定一件已完成的诏令。吏部考绩只采信这些评定。
     pub fn review(&mut self, task: TaskId, verdict: Verdict, note: String) -> Result<(), AppError> {
-        self.commit(|court| Ok(vec![court.propose_review(task, verdict, note.clone())?]))?;
+        self.commit(|court| {
+            if court.in_retreat() {
+                return Err(GovernanceError::InRetreat);
+            }
+            Ok(vec![court.propose_review(task, verdict, note.clone())?])
+        })?;
         Ok(())
     }
 
@@ -645,6 +664,8 @@ impl<S: EventStore> Session<S> {
         cancel: &CancelToken,
         mut on_update: impl FnMut(RunUpdate<'_>),
     ) -> Result<(), AppError> {
+        // 修道期间，司礼监先把待批红的诏令代批红。
+        self.commit(|court| Ok(court.proxy_approvals(Some(tasks))))?;
         let mut jobs = Vec::new();
         let mut running = Vec::new();
         let default_model = scheduler.backend().model_name().map(str::to_owned);
@@ -799,11 +820,22 @@ impl<S: EventStore> Session<S> {
                             return Ok(Vec::new());
                         };
                         Ok(match &outcome {
-                            Outcome::Completed(summary) => vec![CourtEvent::TaskCompleted {
-                                task,
-                                worker: *worker,
-                                summary: summary.clone(),
-                            }],
+                            Outcome::Completed(summary) => {
+                                let mut events = vec![CourtEvent::TaskCompleted {
+                                    task,
+                                    worker: *worker,
+                                    summary: summary.clone(),
+                                }];
+                                // 修道期间回奏无人御览，司礼监一律照准。
+                                if court.in_retreat() {
+                                    events.push(CourtEvent::TaskReviewed {
+                                        task,
+                                        verdict: Verdict::Accepted,
+                                        note: PROXY_REVIEW_NOTE.into(),
+                                    });
+                                }
+                                events
+                            }
                             Outcome::Failed(reason) => vec![CourtEvent::TaskFailed {
                                 task,
                                 reason: reason.clone(),
@@ -843,6 +875,7 @@ impl<S: EventStore> Session<S> {
         let mut previous = Vec::new();
         loop {
             self.reload()?;
+            self.commit(|court| Ok(court.proxy_approvals(None)))?;
             let tasks = self.court.runnable_tasks();
             if tasks.is_empty() || tasks == previous || cancel.is_cancelled() {
                 return Ok(());
@@ -1009,6 +1042,44 @@ pub fn render_diff(change: &FileChange) -> String {
     out
 }
 
+/// 修道期间司礼监代批回奏的批语。
+pub const PROXY_REVIEW_NOTE: &str = "司礼监代批：照准";
+
+/// 修道或回朝时的史官记述。
+fn retreat_note(court: &Court, on: bool) -> String {
+    if !on {
+        let proxied = court.tasks().filter(|t| t.proxied).count();
+        return format!(
+            "户部主事海瑞抬棺上《治安疏》：「嘉靖者，言家家皆净而无财用也。」陛下怒而复悟，回朝亲政。\
+             修道期间司礼监代批 {proxied} 件，考成簿与事件簿俱在，可一一追查。"
+        );
+    }
+    let regent = match court.mode() {
+        GovernanceMode::Cabinet => match court.coordinator() {
+            Some((agent, office)) => format!(
+                "{}{}票拟、司礼监批红，天下大事尽归内阁",
+                office.label(),
+                agent.name
+            ),
+            None => "内阁无人，司礼监独掌批红".to_owned(),
+        },
+        GovernanceMode::Chancellor => match court.coordinator() {
+            Some((agent, office)) => {
+                format!("{}{}总揽庶务，司礼监代批", office.label(), agent.name)
+            }
+            None => "中书省无人，司礼监独掌批红".to_owned(),
+        },
+        GovernanceMode::DirectRule => {
+            "废了丞相又不上朝，只好由司礼监代批——太祖若知，当从孝陵里爬出来".to_owned()
+        }
+    };
+    format!(
+        "嘉靖二十一年壬寅宫变后，世宗移居西苑，斋醮修玄，二十余年不视朝；万历帝更三十年不上朝。\
+         陛下今亦修道去也：{regent}。批红与评定由司礼监代批，一一记入事件簿；\
+         唯工部改动仍须陛下回朝亲自准奏，方得落盘。"
+    )
+}
+
 /// 一键朱元璋时的史官记述。
 pub const ABOLITION_NOTE: &str = "洪武十三年正月，丞相胡惟庸以谋反伏诛，株连者三万余人。即日罢中书省，升六部，天子亲裁庶务。——一键朱元璋：丞相，从此不再是问题。";
 
@@ -1101,6 +1172,17 @@ pub fn kaocheng_report(court: &Court) -> String {
     }
     if secretary_failed {
         out.push_str("首辅亦考成不及。万历十年张居正卒，次年即被抄家，考成法随之而废。\n");
+    }
+    let proxied = court.tasks().filter(|t| t.proxied).count();
+    if court.in_retreat() || proxied > 0 {
+        let now = if court.in_retreat() {
+            "，今仍在西苑"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "御前：怠政 —— 司礼监代批 {proxied} 件{now}。考成法考得了百官，考不了皇帝。\n"
+        ));
     }
     out.push_str("称职者可擢，不及者宜黜；然黜陟出自圣裁，考成簿不罢免任何人。");
     out
@@ -1365,6 +1447,8 @@ pub fn describe_event(event: &CourtEvent) -> String {
             ),
             None => format!("诏令 #{} 票拟：拟派 #{}", task.0, worker.0),
         },
+        CourtEvent::EmperorRetreat(true) => "皇帝移居西苑修道，司礼监代批".into(),
+        CourtEvent::EmperorRetreat(false) => "皇帝回朝亲政".into(),
         CourtEvent::InstitutionReformed(m) => format!("改制：{}", m.label()),
         CourtEvent::EdictIssued(e) => {
             format!("诏令 #{}：{}{}", e.id.0, e.text, seal_note(&e.seal))
@@ -1509,6 +1593,67 @@ mod tests {
         assert_eq!(
             reopened.court().agents().cloned().collect::<Vec<_>>(),
             before
+        );
+    }
+
+    #[tokio::test]
+    async fn retreating_emperor_lets_the_eunuchs_approve_and_review() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        session.reform(GovernanceMode::Cabinet).unwrap();
+        session.dismiss(AgentId(6)).unwrap();
+        session
+            .appoint(AgentId(6), Office::FirstGrandSecretary)
+            .unwrap();
+        let early = session
+            .issue(Department::Works, "甲".into(), Seal::default())
+            .unwrap()
+            .id;
+        let note = session.retreat(true).unwrap();
+        assert!(note.contains("西苑") && note.contains("内阁首辅"), "{note}");
+        assert!(matches!(
+            session.retreat(true),
+            Err(AppError::Governance(GovernanceError::RetreatUnchanged(
+                true
+            )))
+        ));
+        // 修道期间皇帝不能亲自批红；执行时司礼监代批红，回奏代批照准。
+        assert!(matches!(
+            session.approve(early),
+            Err(AppError::Governance(GovernanceError::InRetreat))
+        ));
+        let later = session
+            .issue(Department::Works, "乙".into(), Seal::default())
+            .unwrap()
+            .id;
+        session
+            .run_open(&scheduler(DemoBackend), &CancelToken::new(), |_| {})
+            .await
+            .unwrap();
+        for id in [early, later] {
+            let task = session.court().task(id).unwrap();
+            assert!(task.approved && task.proxied, "#{}", id.0);
+            assert_eq!(
+                task.review,
+                Some((Verdict::Accepted, PROXY_REVIEW_NOTE.into()))
+            );
+        }
+        assert!(
+            kaocheng_report(session.court()).contains("御前：怠政 —— 司礼监代批 2 件，今仍在西苑")
+        );
+
+        // 回朝后亲自批红，不记为代批；考成簿仍记着怠政。
+        assert!(session.retreat(false).unwrap().contains("代批 2 件"));
+        let third = session
+            .issue(Department::Works, "丙".into(), Seal::default())
+            .unwrap()
+            .id;
+        session.approve(third).unwrap();
+        assert!(!session.court().task(third).unwrap().proxied);
+        let report = kaocheng_report(session.court());
+        assert!(
+            report.contains("司礼监代批 2 件。") && !report.contains("今仍在西苑"),
+            "{report}"
         );
     }
 

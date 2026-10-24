@@ -81,6 +81,7 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/changes/apply", post(apply_changes))
         .route("/tasks/{id}/changes/discard", post(discard_changes))
         .route("/reform", post(reform))
+        .route("/retreat", post(retreat))
         .route("/offices/model", post(office_model))
         .route("/offices/ceiling", post(office_ceiling))
         .route("/abolish", post(abolish))
@@ -412,6 +413,18 @@ async fn review(
         Ok(json!({ "ok": true }))
     })
     .await
+}
+
+/// 修道（`{on: true}`）或回朝（`{on: false}`）。
+async fn retreat(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let on = body["on"]
+        .as_bool()
+        .ok_or_else(|| ApiError::bad("缺少布尔字段 on"))?;
+    app.mutate(move |s| Ok(json!({ "note": s.retreat(on)? })))
+        .await
 }
 
 async fn reform(
@@ -747,6 +760,7 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 },
                 "status": kind,
                 "needs_approval": court.needs_approval(t),
+                "proxied": t.proxied,
                 "draft": t.draft.as_ref().map(|d| json!({
                     "worker": d.worker.0,
                     "name": name(d.worker),
@@ -818,6 +832,7 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
         .collect();
     json!({
         "mode": { "code": court.mode().code(), "label": court.mode().label() },
+        "retreat": court.in_retreat(),
         "modes": GovernanceMode::ALL.iter().map(|m| json!({ "code": m.code(), "label": m.label() })).collect::<Vec<_>>(),
         "departments": departments,
         "offices": offices,

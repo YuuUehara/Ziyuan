@@ -71,6 +71,10 @@ pub enum GovernanceError {
     CannotSplit(TaskId),
     /// 分办须为 2–8 件，每件有内容。
     InvalidSplit(String),
+    /// 已在修道（`true`）或已在朝（`false`）。
+    RetreatUnchanged(bool),
+    /// 皇帝修道期间，批红与评定由司礼监代批，须先回朝。
+    InRetreat,
 }
 impl fmt::Display for GovernanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -150,6 +154,11 @@ impl fmt::Display for GovernanceError {
                 id.0
             ),
             Self::InvalidSplit(why) => write!(f, "分办方案不合法：{why}"),
+            Self::RetreatUnchanged(true) => f.write_str("陛下已在西苑修道"),
+            Self::RetreatUnchanged(false) => f.write_str("陛下本在朝中"),
+            Self::InRetreat => f.write_str(
+                "陛下正在西苑修道，批红与评定由司礼监代批。要亲自处置请先 `ziyuan return` 回朝",
+            ),
         }
     }
 }
@@ -164,6 +173,8 @@ pub struct Court {
     appointments: BTreeMap<AgentId, Office>,
     /// 革职削籍的官员。
     purged: BTreeSet<AgentId>,
+    /// 皇帝修道怠政中。
+    retreat: bool,
     /// 按官职（`Office::code`）指定的承办模型与玉玺上限。
     office_models: BTreeMap<String, String>,
     office_ceilings: BTreeMap<String, Seal>,
@@ -199,6 +210,8 @@ pub struct Task {
     pub assignee: Option<AgentId>,
     /// 此诏令已分办（原诏令才有）。
     pub split: Option<Split>,
+    /// 批红或评定是皇帝修道期间由司礼监代批的。
+    pub proxied: bool,
 }
 
 /// 分办方案。
@@ -302,6 +315,7 @@ impl Court {
             agents: BTreeMap::new(),
             appointments: BTreeMap::new(),
             purged: BTreeSet::new(),
+            retreat: false,
             office_models: BTreeMap::new(),
             office_ceilings: BTreeMap::new(),
             next_task_id: 1,
@@ -364,7 +378,13 @@ impl Court {
             }
             CourtEvent::EdictApproved { task } => {
                 self.propose_approval(*task)?;
-                self.tasks.get_mut(task).expect("已确认存在").approved = true;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.approved = true;
+                entry.proxied |= self.retreat;
+            }
+            CourtEvent::EmperorRetreat(on) => {
+                self.propose_retreat(*on)?;
+                self.retreat = *on;
             }
             CourtEvent::InstitutionReformed(mode) => {
                 self.propose_reform(*mode)?;
@@ -399,6 +419,7 @@ impl Court {
                         parent: None,
                         assignee: None,
                         split: None,
+                        proxied: false,
                     },
                 );
             }
@@ -517,6 +538,7 @@ impl Court {
                             parent: Some(*task),
                             assignee: Some(sub.worker),
                             split: None,
+                            proxied: false,
                         },
                     );
                 }
@@ -591,6 +613,7 @@ impl Court {
                 self.propose_review(*task, *verdict, note.clone())?;
                 let entry = self.tasks.get_mut(task).expect("propose_review 已确认存在");
                 entry.review = Some((*verdict, note.clone()));
+                entry.proxied |= self.retreat;
             }
             CourtEvent::TaskCancelled { task } => {
                 self.propose_cancellation(*task)?;
@@ -802,6 +825,31 @@ impl Court {
                 .within(ceiling)
                 .ok_or(GovernanceError::SealExceedsCeiling(office)),
         }
+    }
+
+    /// 皇帝是否在修道怠政。
+    pub fn in_retreat(&self) -> bool {
+        self.retreat
+    }
+
+    pub fn propose_retreat(&self, on: bool) -> Result<CourtEvent, GovernanceError> {
+        if self.retreat == on {
+            return Err(GovernanceError::RetreatUnchanged(on));
+        }
+        Ok(CourtEvent::EmperorRetreat(on))
+    }
+
+    /// 司礼监代批红：`tasks` 中（`None` 为全部）待批红的诏令。只在修道期间有事可做。
+    pub fn proxy_approvals(&self, tasks: Option<&[TaskId]>) -> Vec<CourtEvent> {
+        if !self.retreat {
+            return Vec::new();
+        }
+        self.tasks
+            .values()
+            .filter(|t| tasks.is_none_or(|ids| ids.contains(&t.edict.id)))
+            .filter(|t| self.needs_approval(t))
+            .map(|t| CourtEvent::EdictApproved { task: t.edict.id })
+            .collect()
     }
 
     pub fn is_purged(&self, agent: AgentId) -> bool {

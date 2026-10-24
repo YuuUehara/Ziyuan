@@ -132,4 +132,15 @@ CLERK="$("$BIN" officials | grep '工部郎中' | head -1 | grep -o '^#[0-9]*' |
 "$BIN" run > /dev/null
 "$BIN" tasks | grep "^#$SID " | grep -q '已完成（.*），'
 "$BIN" history | grep -q "诏令 #$SID 分办"
+# 昏君模式：修道期间不能亲自评定；新诏令执行后司礼监代批照准；回朝
+"$BIN" retreat | grep -q '西苑'
+"$BIN" court | grep -q '西苑修道中'
+"$BIN" edict --queue '修道期间' > /dev/null
+"$BIN" run > /dev/null
+"$BIN" tasks | tail -1 | grep -q '司礼监代批采纳'
+RID="$("$BIN" edict --queue '再办' | grep -o '#[0-9]*' | head -1 | tr -d '#')"
+"$BIN" run > /dev/null
+if "$BIN" review "$RID" reject > /dev/null 2>&1; then echo '修道期间不应亲自评定' >&2; exit 1; fi
+"$BIN" kaocheng | grep -q '御前：怠政'
+"$BIN" return | grep -q '治安疏'
 echo 'ZiYuan smoke test PASS'

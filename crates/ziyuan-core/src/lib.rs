@@ -568,6 +568,8 @@ pub enum CourtEvent {
         agent: AgentId,
     },
     InstitutionReformed(GovernanceMode),
+    /// 皇帝修道怠政（`true`）或回朝亲政（`false`）。怠政期间批红与评定由司礼监代批。
+    EmperorRetreat(bool),
     /// 皇帝为某一官职指定承办模型；`None` 恢复默认模型。
     OfficeModelSet {
         office: Office,

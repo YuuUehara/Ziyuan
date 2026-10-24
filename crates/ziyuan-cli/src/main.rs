@@ -39,6 +39,8 @@ const HELP: &str = concat!(
   ziyuan tui                           启动紫禁城终端界面
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
+  ziyuan retreat                       修道怠政（昏君模式）：批红、评定由司礼监代批，记入事件簿
+  ziyuan return                        回朝亲政
   ziyuan dismiss <官员ID>               罢免现任官职
   ziyuan purge <官员ID>                 革职：削去仕籍，永不叙用
   ziyuan abolish                       一键朱元璋：罢中书省，株连百官（全部在任官员革职削籍）
@@ -129,6 +131,8 @@ enum Command {
     Tui,
     Cancel(TaskId),
     Reform(GovernanceMode),
+    /// `true` 修道，`false` 回朝。
+    Retreat(bool),
     Dismiss(AgentId),
     Purge(AgentId),
     /// `None` 恢复默认模型。
@@ -211,6 +215,8 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Ok([id]) => Command::Cancel(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
             Err(_) => return Err("用法: ziyuan cancel <诏令ID>".into()),
         },
+        "retreat" => no_args(args, Command::Retreat(true))?,
+        "return" => no_args(args, Command::Retreat(false))?,
         "reform" => match <[String; 1]>::try_from(args) {
             Ok([mode]) => Command::Reform(mode.parse()?),
             Err(_) => return Err("用法: ziyuan reform <chancellor|direct|cabinet>".into()),
@@ -298,6 +304,9 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         Command::Court => {
             let court = session.court();
             println!("朝廷制度：{} ({})", court.mode().label(), court.mode());
+            if court.in_retreat() {
+                println!("皇帝：西苑修道中，司礼监代批（`ziyuan return` 回朝）");
+            }
             println!(
                 "在册官员：{}；有职官员：{}；已完成任务：{}",
                 court.agents().count(),
@@ -361,8 +370,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 // 皇帝亲自下诏并立即执行：内阁票拟后当即批红。
                 session.draft(edict.id, backend.as_ref())?;
                 print_draft(session, edict.id);
-                session.approve(edict.id)?;
-                println!("朱笔批红。");
+                if session.court().in_retreat() {
+                    println!("陛下修道，司礼监代批红。");
+                } else {
+                    session.approve(edict.id)?;
+                    println!("朱笔批红。");
+                }
             }
             if queue {
                 println!(
@@ -386,12 +399,13 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             let court = session.court();
             let tasks = court.runnable_tasks();
             let waiting = court.tasks().filter(|t| court.needs_approval(t)).count();
-            if waiting > 0 {
+            if waiting > 0 && !court.in_retreat() {
                 eprintln!(
                     "另有 {waiting} 件诏令待批红（`ziyuan approve <诏令ID|all>`），本次不执行。"
                 );
             }
-            if tasks.is_empty() {
+            // 修道期间待批红的诏令由司礼监在执行时代批红。
+            if tasks.is_empty() && !(court.in_retreat() && waiting > 0) {
                 println!("没有未结束的诏令。");
             } else {
                 run_tasks(session, None, worker_backend()?, limits)?;
@@ -454,8 +468,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     TaskStatus::Assigned(w) => format!("已指派 {}（未结束）", name(*w)),
                     TaskStatus::Completed { worker, .. } => {
                         let review = match &task.review {
-                            Some((verdict, _)) => verdict.label(),
-                            None => "待评定",
+                            Some((verdict, _)) if task.proxied => {
+                                format!("司礼监代批{}", verdict.label())
+                            }
+                            Some((verdict, _)) => verdict.label().to_owned(),
+                            None => "待评定".to_owned(),
                         };
                         let censure = task
                             .censure
@@ -513,6 +530,15 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         Command::Cancel(task) => {
             session.cancel(task)?;
             println!("诏令 #{} 已撤销。", task.0);
+        }
+        Command::Retreat(on) => {
+            let note = session.retreat(on)?;
+            if on {
+                println!("诏令已颁：朕移居西苑修道，朝政付内阁与司礼监。");
+            } else {
+                println!("诏令已颁：朕回朝亲政。");
+            }
+            println!("史官记：{note}");
         }
         Command::Reform(mode) => {
             let note = session.reform(mode)?;

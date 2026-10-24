@@ -186,6 +186,7 @@
   .draft { margin-top: 8px; font-size: 13px; color: var(--muted); }
   .draft b { color: var(--vermilion); font-family: var(--serif); }
   #abolish-choice .actions { flex-direction: column; margin-top: 8px; }
+  #retreat-btn { width: 100%; margin-bottom: 14px; }
   button.zhu {
     padding: 9px; font-family: var(--serif); font-size: 15px;
     background: #2b1b17; color: var(--gold-soft); border-color: #000;
@@ -319,6 +320,7 @@
       <h2>朝堂 <small>制度与派工路线</small></h2>
       <div class="body">
         <div class="modes" id="modes"></div>
+        <button class="zhu" id="retreat-btn" title="昏君模式：批红与评定由司礼监代批，一一记入事件簿；工部改动仍须亲自准奏"></button>
         <div class="chronicle" id="abolish-choice" hidden>
           <h3>罢中书省，丞相如何处置？</h3>
           <div class="actions">
@@ -528,13 +530,17 @@ function taskHtml(t) {
   const censorBtn = t.status === "completed" && !t.censure
     ? `<button class="small" data-censor="${t.id}">都察院复核</button>` : "";
   let actions = censorBtn ? `<div class="review-row"><span style="flex:1"></span>${censorBtn}</div>` : "";
-  if (t.status === "completed" && !t.review) {
+  if (t.status === "completed" && !t.review && state.retreat) {
+    actions = `<div class="review-row"><span class="hint" style="flex:1">陛下修道中，回奏由司礼监代批</span>${censorBtn}</div>`;
+  } else if (t.status === "completed" && !t.review) {
     actions = `<div class="review-row">
       <input type="text" id="note-${t.id}" data-keep placeholder="评语（可选）">
       <button class="small accept" data-review="${t.id}" data-verdict="accept">采纳</button>
       <button class="small reject" data-review="${t.id}" data-verdict="reject">驳回</button>${censorBtn}</div>`;
   } else if (open) {
-    const approve = t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
+    const approve = t.needs_approval && state.retreat
+      ? `<span class="hint">执行时由司礼监代批红</span>`
+      : t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
     const split = t.status === "pending" && !t.split && !t.parent
       ? `<button class="small" data-split="${t.id}" title="尚书把此诏令拆给本部官员分办，事后汇总">尚书分办</button>` : "";
     actions = `<div class="review-row"><span style="flex:1"></span>${split}${approve}<button class="small" data-cancel="${t.id}">撤销诏令</button></div>`;
@@ -577,7 +583,8 @@ function taskHtml(t) {
 
 function render() {
   const s = state;
-  $("mode-label").textContent = s.mode.label;
+  $("mode-label").textContent = s.mode.label + (s.retreat ? " · 西苑修道中" : "");
+  $("retreat-btn").textContent = s.retreat ? "回朝亲政" : "移居西苑修道（怠政）";
   const open = s.tasks.filter((t) => t.status === "pending" || t.status === "assigned").length;
   $("task-count").textContent = s.tasks.length;
   $("open-count").textContent = open;
@@ -729,6 +736,11 @@ document.addEventListener("click", (event) => {
     }
   } else if (el.id === "abolish-cancel") {
     $("abolish-choice").hidden = true;
+  } else if (el.id === "retreat-btn") {
+    const on = !state.retreat;
+    if (!on || confirm("移居西苑修道？批红与评定将由司礼监代批，一一记入事件簿。")) {
+      act(api("/retreat", { on }), on ? "陛下移居西苑修道" : "陛下回朝亲政").then((r) => r && chronicle(r.note));
+    }
   } else if (el.id === "chronicle-close") {
     $("chronicle").hidden = true;
   } else if (d.draft) {
