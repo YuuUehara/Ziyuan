@@ -225,8 +225,8 @@
   pre.diff .add { color: #1d6b3a; background: #e8f6ec; display: block; }
   pre.diff .del { color: #8c2620; background: #fdf1ef; display: block; }
   pre.diff .hunk { color: var(--muted); display: block; margin-top: 4px; }
-  pre.diff .pick { margin-left: 12px; font-family: system-ui, sans-serif; color: var(--ink); cursor: pointer; }
-  pre.diff .pick input { vertical-align: -2px; }
+  pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; font-family: system-ui, sans-serif; color: var(--ink); cursor: pointer; }
+  pre.diff .pick input { margin: 0; }
   pre.diff .ctx { display: block; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
   .stat.exhausted { border-color: #e9b4ae; color: #ffd5cf; }
