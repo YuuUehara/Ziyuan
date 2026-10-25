@@ -150,6 +150,8 @@ enum ChooseKind {
     Redraft(TaskId),
     /// 丞相制下废相：罢免丞相，或一键朱元璋（革职削籍）。
     Abolish,
+    /// 按翰林院模板下诏（入队）。
+    Template,
 }
 
 /// 现行制度下 `agent` 可任的官职：本制度的协调官职，以及本部（专长所在部门）的官职。
@@ -385,6 +387,12 @@ impl App {
                 self.modal = Some(Modal::Choose {
                     kind: ChooseKind::Reform,
                     selected,
+                });
+            }
+            KeyCode::Char('T') if self.tab == Tab::Edicts => {
+                self.modal = Some(Modal::Choose {
+                    kind: ChooseKind::Template,
+                    selected: 0,
                 });
             }
             KeyCode::Char('n') => {
@@ -646,6 +654,18 @@ impl App {
                     self.modal = Some(Modal::Notice(format!("{summary}\n\n{ABOLITION_NOTE}")));
                 }
             }
+            ChooseKind::Template => {
+                let Some((name, t, _)) = self.court().templates().into_iter().nth(selected) else {
+                    return;
+                };
+                let issued = self.mutate(
+                    |s| s.issue_templated(&name, t.department, t.text, t.seal),
+                    |e| format!("诏令 #{} 按模板「{name}」入队（按 r 执行）", e.id.0),
+                );
+                if let Some(edict) = issued {
+                    self.selected_task = Some(edict.id);
+                }
+            }
             ChooseKind::Redraft(task) => {
                 let Some(worker) = self
                     .redraft_candidates(task)
@@ -781,6 +801,15 @@ impl App {
                 .redraft_candidates(task)
                 .into_iter()
                 .map(|(_, label)| label)
+                .collect(),
+            ChooseKind::Template => self
+                .court()
+                .templates()
+                .into_iter()
+                .map(|(name, t, builtin)| {
+                    let origin = if builtin { "内置" } else { "自定" };
+                    format!("{name}（{origin}·验收{}条）", t.criteria.len())
+                })
                 .collect(),
         }
     }
@@ -1071,6 +1100,15 @@ impl App {
             status_line.push(Span::raw(format!("  承办 {}", name(w))));
         }
         lines.push(Line::from(status_line));
+        if let Some(used) = &task.template {
+            lines.push(Line::from(vec![
+                label("翰林院"),
+                Span::raw(format!("模板「{}」，都察院复核时逐条核验：", used.name)),
+            ]));
+            for (i, c) in used.criteria.iter().enumerate() {
+                lines.push(Line::from(format!("  {}. {c}", i + 1)).dim());
+            }
+        }
         if task.urgent || task.courier.is_some() {
             let mut military = vec![label("兵部")];
             if task.urgent {
@@ -1428,6 +1466,7 @@ impl App {
             (Some(Modal::Notice(_)), _) => &[("任意键", "退朝")],
             (None, Tab::Edicts) => &[
                 ("n", "下诏"),
+                ("T", "模板"),
                 ("r", "执行"),
                 ("s", "停止"),
                 ("c", "撤销"),
@@ -1534,6 +1573,7 @@ impl App {
                     }
                     ChooseKind::Redraft(task) => format!("御笔改票 · 诏令 #{}", task.0),
                     ChooseKind::Abolish => "罢中书省，丞相如何处置？".to_owned(),
+                    ChooseKind::Template => "翰林院模板 · 选定即入队".to_owned(),
                 };
                 let popup = centered(area, 36, options.len() as u16 + 2);
                 frame.render_widget(Clear, popup);
@@ -1897,6 +1937,28 @@ mod tests {
         assert!(redrafted.note.contains("御笔改票"));
         press(&mut app, "b");
         assert!(app.court().runnable_tasks() == [TaskId(1)]);
+
+        // T 翰林院模板：第二项「补测试」入队并选中，详情列出验收标准。
+        press(&mut app, "T");
+        assert!(
+            screen(&app).contains("审查unsafe（内置·验收3条）"),
+            "{}",
+            screen(&app)
+        );
+        press(&mut app, "↓\n");
+        let used = app
+            .court()
+            .task(TaskId(2))
+            .unwrap()
+            .template
+            .clone()
+            .unwrap();
+        assert_eq!(used.name, "补测试");
+        let shown = screen(&app);
+        assert!(
+            shown.contains("按模板「补测试」入队") && shown.contains("2. run_tests 运行通过"),
+            "{shown}"
+        );
 
         // 改回丞相制：土木堡之变，史官记弹出，任意键关闭。
         press(&mut app, "g↓\n");

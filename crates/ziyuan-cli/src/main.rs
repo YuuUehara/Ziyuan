@@ -14,7 +14,7 @@ use ziyuan_app::{
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
-    Verdict, missing_sections,
+    Template, Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
@@ -33,7 +33,7 @@ const HELP: &str = concat!(
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职、品级、所用模型及任务完成数
   ziyuan recruit [姓名] <部门>          招募新官（不给姓名则随机取名；须另行 appoint 任职）
-  ziyuan edict [--dept works] [--scope <路径>]... [--tools <工具>] [--queue] <内容>
+  ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具>] [--queue] <内容>
                                        下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
@@ -74,6 +74,11 @@ const HELP: &str = concat!(
                                          兵部驿传：外部事件（CI 失败、新 issue）入队为诏令，`-` 读标准输入；
                                          默认玉玺（只读），仍须批红、受度支约束；只入队，不执行
   ziyuan urgent <诏令ID>                 八百里加急：插队先行，时限加倍
+  ziyuan template                        翰林院：列出诏令模板（内置「审查unsafe」「补测试」「写文档」）
+  ziyuan template save <名> [--dept works] [--scope <路径>]... [--tools <工具,…>|none] --criteria <甲；乙> <内容>
+                                         存模板（同名覆盖，可覆盖内置的）；验收标准以「；」分条
+  ziyuan template rm <名>                撤去自定的模板（内置的恢复原样）
+  ziyuan edict --template <名> [补充内容]  按模板下诏；--dept/--scope/--tools 可覆盖模板的默认值
   ziyuan exam <官员ID>                   礼部科举：官员应试 .ziyuan/exam/ 下的考题，按要点判分，记入履历
   ziyuan exam --palace <题目>            殿试：天子亲策，在任官员各答一卷
   ziyuan crown <官员ID>                  钦点状元（须为最近一次殿试的答卷者）
@@ -144,7 +149,18 @@ enum Command {
         text: String,
         queue: bool,
         seal: Seal,
+        /// `--template`：按翰林院模板下诏；未显式给出的部门、工具、范围取模板的。
+        template: Option<TemplateChoice>,
     },
+    /// 翰林院：列出模板。
+    Templates,
+    /// 翰林院存模板。
+    SaveTemplate {
+        name: String,
+        template: Template,
+    },
+    /// 翰林院撤去自定的模板。
+    RemoveTemplate(String),
     Run(Limits),
     Tasks,
     Serve {
@@ -247,6 +263,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             _ => return Err("用法: ziyuan recruit [姓名] <部门>".into()),
         },
         "edict" => parse_edict(args)?,
+        "template" => parse_template(args)?,
         "run" => Command::Run(parse_limits(args)?),
         "tasks" => no_args(args, Command::Tasks)?,
         "tui" => no_args(args, Command::Tui)?,
@@ -482,11 +499,38 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             department,
             text,
             queue,
-            seal,
+            mut seal,
+            template,
         } => {
             // 先取得执行者锁再下诏，避免被拒绝的诏令残留在队列中。
             let executor = if queue { None } else { Some(lock_executor()?) };
-            let edict = session.issue(department, text, seal)?;
+            let edict = match template {
+                None => session.issue(department, text, seal)?,
+                Some(choice) => {
+                    let defaults = session.court().template(&choice.name).ok_or(format!(
+                        "翰林院没有模板「{}」；`ziyuan template` 查看",
+                        choice.name
+                    ))?;
+                    if !choice.tools {
+                        seal.capabilities = defaults.seal.capabilities;
+                    }
+                    if !choice.scope {
+                        seal.scope = defaults.seal.scope;
+                    }
+                    let department = if choice.department {
+                        department
+                    } else {
+                        defaults.department
+                    };
+                    // 命令行给出的内容附在模板内容之后。
+                    let text = match defaults.text.chars().last() {
+                        _ if text.trim().is_empty() => defaults.text,
+                        Some(c) if c.is_ascii_alphanumeric() => format!("{} {text}", defaults.text),
+                        _ => format!("{}{text}", defaults.text),
+                    };
+                    session.issue_templated(&choice.name, department, text, seal)?
+                }
+            };
             let backend = if queue { None } else { Some(worker_backend()?) };
             if let Some(backend) = &backend
                 && session.court().mode() == GovernanceMode::Cabinet
@@ -659,7 +703,10 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     task.courier
                         .as_ref()
                         .map_or(String::new(), |c| format!("【驿传·{c}】"))
-                );
+                ) + &task
+                    .template
+                    .as_ref()
+                    .map_or(String::new(), |t| format!("【模板·{}】", t.name));
                 println!(
                     "#{:<3} {parent}{military}{} {}  —  {}{flagged}{debated}{usage}",
                     task.edict.id.0,
@@ -827,6 +874,33 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             if session.court().needs_approval(task) {
                 println!("待批红：`ziyuan approve {}`。", edict.id.0);
             }
+        }
+        Command::Templates => {
+            for (name, t, builtin) in session.court().templates() {
+                let origin = if builtin { "内置" } else { "自定" };
+                println!(
+                    "「{name}」（{origin}，{}，玉玺 {}）",
+                    t.department.label(),
+                    t.seal
+                );
+                println!("  {}", t.text);
+                for (i, c) in t.criteria.iter().enumerate() {
+                    println!("  验收 {}. {c}", i + 1);
+                }
+            }
+            println!(
+                "用法：`ziyuan edict --template <名> [补充内容]`；验收标准随诏令附给承办官员，`ziyuan censor` 时都察院逐条核验。"
+            );
+        }
+        Command::SaveTemplate { name, template } => {
+            let overrides = session.court().template(&name).is_some();
+            session.save_template(&name, template)?;
+            let verb = if overrides { "覆盖" } else { "新存" };
+            println!("翰林院{verb}模板「{name}」。");
+        }
+        Command::RemoveTemplate(name) => {
+            session.remove_template(&name)?;
+            println!("翰林院撤去模板「{name}」。");
         }
         Command::Urgent(task) => {
             session.expedite(task)?;
@@ -1298,19 +1372,29 @@ fn parse_limits(args: Vec<String>) -> Result<Limits, Box<dyn Error>> {
     Ok(limits)
 }
 
+/// `edict --template` 的模板名，以及哪些项由命令行显式给出（其余取模板的）。
+#[derive(Debug)]
+struct TemplateChoice {
+    name: String,
+    department: bool,
+    tools: bool,
+    scope: bool,
+}
+
 fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan edict [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--queue] <诏令内容>";
+    const USAGE: &str = "用法: ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--queue] <诏令内容>";
     let mut department = None;
     let mut queue = false;
     let mut seal = Seal::default();
     let mut scope = Vec::new();
+    let (mut template, mut tools_given) = (None, false);
     while let Some(flag) = args.first().cloned() {
         match flag.as_str() {
             "--queue" => {
                 args.remove(0);
                 queue = true;
             }
-            "--dept" | "--scope" | "--tools" => {
+            "--dept" | "--scope" | "--tools" | "--template" => {
                 if args.len() < 2 {
                     return Err(USAGE.into());
                 }
@@ -1319,13 +1403,23 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 match flag.as_str() {
                     "--dept" => department = Some(value.parse::<Department>()?),
                     "--scope" => scope.push(value),
-                    _ => seal.capabilities = parse_capabilities(&value)?,
+                    "--template" => template = Some(value),
+                    _ => {
+                        seal.capabilities = parse_capabilities(&value)?;
+                        tools_given = true;
+                    }
                 }
             }
             _ => break,
         }
     }
-    if args.is_empty() {
+    let template = template.map(|name| TemplateChoice {
+        name,
+        department: department.is_some(),
+        tools: tools_given,
+        scope: !scope.is_empty(),
+    });
+    if args.is_empty() && template.is_none() {
         return Err(USAGE.into());
     }
     if !scope.is_empty() {
@@ -1352,7 +1446,63 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         text: args.join(" "),
         queue,
         seal,
+        template,
     })
+}
+
+/// `template`（列出）、`template save <名> [--dept] [--scope]... [--tools] --criteria <甲；乙> <内容>`、
+/// `template rm <名>`。
+fn parse_template(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    const USAGE: &str = "用法: ziyuan template | template save <名> [--dept works] [--scope <路径>]... [--tools <工具,…>|none] --criteria <甲；乙> <内容> | template rm <名>";
+    match args.first().map(String::as_str) {
+        None => return Ok(Command::Templates),
+        Some("rm") if args.len() == 2 => return Ok(Command::RemoveTemplate(args.remove(1))),
+        Some("save") if args.len() >= 2 => {}
+        _ => return Err(USAGE.into()),
+    }
+    args.remove(0);
+    let name = args.remove(0);
+    let mut template = Template {
+        department: Department::Works,
+        text: String::new(),
+        seal: Seal::default(),
+        criteria: Vec::new(),
+    };
+    let mut scope = Vec::new();
+    while let Some(flag) = args.first().cloned() {
+        if !matches!(
+            flag.as_str(),
+            "--dept" | "--scope" | "--tools" | "--criteria"
+        ) {
+            break;
+        }
+        if args.len() < 2 {
+            return Err(USAGE.into());
+        }
+        args.remove(0);
+        let value = args.remove(0);
+        match flag.as_str() {
+            "--dept" => template.department = value.parse()?,
+            "--scope" => scope.push(value),
+            "--tools" => template.seal.capabilities = parse_capabilities(&value)?,
+            _ => {
+                template.criteria = value
+                    .split(['；', ';'])
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }
+        }
+    }
+    if !scope.is_empty() {
+        template.seal.scope = scope;
+    }
+    template.text = args.join(" ");
+    if template.text.trim().is_empty() || template.criteria.is_empty() {
+        return Err(USAGE.into());
+    }
+    Ok(Command::SaveTemplate { name, template })
 }
 
 /// `post [--dept works] [--station 驿站] [--urgent] <内容|->`；`-` 从标准输入读取内容。

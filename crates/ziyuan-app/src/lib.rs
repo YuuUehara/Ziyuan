@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, CensorVerdict, CourtEvent, Department, Edict, Evidence,
-    FileChange, GovernanceMode, Office, Persona, Price, Seal, Speech, TaskId, Threat, TokenUsage,
-    Verdict,
+    FileChange, GovernanceMode, Office, Persona, Price, Seal, Speech, TaskId, Template, Threat,
+    TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{
@@ -343,8 +343,14 @@ impl<S: EventStore> Session<S> {
              依据诏令、回奏、工具调用记录与证据核验，判断回奏是否属实、是否办成了诏令所命之事。\n\
              回复第一行必须是「背书」或「弹劾」二字之一，其后用不超过 150 字说明理由。\n\
              证据核验由程序完成、确凿可信：查无实据的引用要分辨是捏造，还是官员如实说明其不存在；\
-             测试未通过而回奏称已办成者，应予弹劾。\n{}",
+             测试未通过而回奏称已办成者，应予弹劾。\n{}{}",
             censor.name,
+            if entry.template.is_some() {
+                "本诏令按翰林院模板验收：第二行起逐条写「第 n 条：达成／未达成——理由」（每条不超过 60 字），\
+                 任何一条未达成或无从查证，应予弹劾。\n"
+            } else {
+                ""
+            },
             Persona::of(censor.id).prompt()
         );
         let nonce = guard::nonce();
@@ -362,6 +368,9 @@ impl<S: EventStore> Session<S> {
             user.push_str(&format!("- {tool} {}（{mark}）\n", truncate(&args, 200)));
         }
         user.push_str(&format!("\n证据核验：{evidence}\n"));
+        if let Some(note) = criteria_note(entry) {
+            user.push_str(&format!("\n{note}\n"));
+        }
         if !entry.suspicions.is_empty() {
             user.push_str("刑部与锦衣卫检出（关键词机械检出，可能误报，须结合原文判断）：\n");
             for s in &entry.suspicions {
@@ -387,7 +396,9 @@ impl<S: EventStore> Session<S> {
             .and_then(|()| backend.complete(model.as_deref(), &system, &user));
         let (verdict, note, model, usage) = match answer {
             Ok((reply, usage)) => {
-                let reply = truncate(reply.trim(), 600);
+                // 逐条核验的批语较长。
+                let limit = if entry.template.is_some() { 1200 } else { 600 };
+                let reply = truncate(reply.trim(), limit);
                 match parse_censure(&reply) {
                     Some(verdict) => (verdict, reply, model, usage),
                     None => (
@@ -680,6 +691,45 @@ impl<S: EventStore> Session<S> {
         match committed.into_iter().next() {
             Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
             _ => unreachable!("issue 只产生 EdictIssued"),
+        }
+    }
+
+    /// 翰林院存模板（同名覆盖）。
+    pub fn save_template(&mut self, name: &str, template: Template) -> Result<(), AppError> {
+        self.commit(|court| {
+            Ok(vec![
+                court.propose_template(name.to_owned(), template.clone())?,
+            ])
+        })?;
+        Ok(())
+    }
+
+    /// 翰林院撤去自定的模板。
+    pub fn remove_template(&mut self, name: &str) -> Result<(), AppError> {
+        self.commit(|court| Ok(vec![court.propose_template_removal(name.to_owned())?]))?;
+        Ok(())
+    }
+
+    /// 按模板「`name`」下诏：部门、内容与玉玺由调用方给出（通常取自模板，可改），
+    /// 验收标准取当时的模板，执行时附在诏令之后，复核时交都察院逐条核验。
+    pub fn issue_templated(
+        &mut self,
+        name: &str,
+        department: Department,
+        text: String,
+        seal: Seal,
+    ) -> Result<Edict, AppError> {
+        let committed = self.commit(|court| {
+            let edict = court.new_edict(department, text.clone(), seal.clone())?;
+            court.route(&edict)?;
+            let issued = CourtEvent::EdictIssued(edict.clone());
+            let mut next = court.clone();
+            next.apply(&issued)?;
+            Ok(vec![issued, next.propose_template_use(edict.id, name)?])
+        })?;
+        match committed.into_iter().next() {
+            Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
+            _ => unreachable!("issue_templated 先记 EdictIssued"),
         }
     }
 
@@ -1122,7 +1172,7 @@ impl<S: EventStore> Session<S> {
                         .clone();
                     let mut seal = sealed.take().expect("指派时已算出玉玺");
                     let entry = self.court.task(task).expect("刚提交的诏令");
-                    let text = if entry.split.is_some() {
+                    let mut text = if entry.split.is_some() {
                         // 汇总只核对、不动土木：收回写文件与跑测试之权。
                         seal.capabilities.retain(|c| !c.is_works_only());
                         summary_prompt(&self.court, entry)
@@ -1132,6 +1182,9 @@ impl<S: EventStore> Session<S> {
                             None => edict.text.clone(),
                         }
                     };
+                    if let Some(note) = criteria_note(entry) {
+                        text = format!("{text}\n\n{note}");
+                    }
                     let budget = self
                         .court
                         .task_limit(entry, Some(worker))
@@ -2027,6 +2080,19 @@ fn strip_own_label<'a>(reply: &'a str, name: &str) -> &'a str {
     }
 }
 
+/// 按模板下达的诏令的验收标准，附在承办与复核的提示中；不是按模板下达的为 `None`。
+pub fn criteria_note(task: &Task) -> Option<String> {
+    let used = task.template.as_ref()?;
+    let mut note = format!(
+        "验收标准（翰林院模板「{}」，都察院将逐条核验）：\n",
+        used.name
+    );
+    for (i, c) in used.criteria.iter().enumerate() {
+        note.push_str(&format!("{}. {c}\n", i + 1));
+    }
+    Some(note.trim_end().to_owned())
+}
+
 /// 最近一次廷议的纪要，附在票拟与承办的提示中；没有廷议则为 `None`。
 pub fn debate_minutes(court: &Court, task: &Task) -> Option<String> {
     let speeches = task.debates.last()?;
@@ -2249,6 +2315,21 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("兵部驿传：诏令 #{} 自「{station}」入队", task.0)
         }
         CourtEvent::EdictExpedited { task } => format!("八百里加急：诏令 #{} 插队先行", task.0),
+        CourtEvent::TemplateSaved { name, template } => format!(
+            "翰林院存模板「{name}」（{}，验收 {} 条）",
+            template.department.label(),
+            template.criteria.len()
+        ),
+        CourtEvent::TemplateRemoved { name } => format!("翰林院撤去模板「{name}」"),
+        CourtEvent::TemplateApplied {
+            task,
+            name,
+            criteria,
+        } => format!(
+            "诏令 #{} 按模板「{name}」下达，验收 {} 条",
+            task.0,
+            criteria.len()
+        ),
         CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
         CourtEvent::TaskReviewed {
             task,
@@ -2834,6 +2915,132 @@ mod tests {
             *self.0.lock().unwrap() = user.into();
             Ok(("弹劾：回奏夹带越权请求".into(), TokenUsage::default()))
         }
+    }
+
+    /// 记下承办时收到的诏令内容与复核时收到的提示。
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<(String, String, String)>);
+    impl WorkerBackend for Recorder {
+        fn execute(&self, job: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            self.0.lock().unwrap().0 = job.edict.text.clone();
+            Ok("结论：已列出。\n依据：src/lib.rs。\n未办之事：无".into())
+        }
+        fn complete(
+            &self,
+            _: Option<&str>,
+            system: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            let mut seen = self.0.lock().unwrap();
+            (seen.1, seen.2) = (system.into(), user.into());
+            Ok((
+                "背书\n第 1 条：达成——已列行号".into(),
+                TokenUsage::default(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn templates_carry_criteria_to_the_worker_and_the_censor() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        // 内置三份；同名覆盖后以自定的为准，撤去后恢复内置；内置的不能撤去。
+        let names: Vec<_> = session
+            .court()
+            .templates()
+            .into_iter()
+            .map(|t| t.0)
+            .collect();
+        assert_eq!(names, ["审查unsafe", "补测试", "写文档"]);
+        let mut custom = session.court().template("审查unsafe").unwrap();
+        custom.criteria = vec!["列出行号".into(), "说明前提".into()];
+        session.save_template("审查unsafe", custom).unwrap();
+        assert!(
+            !session
+                .court()
+                .templates()
+                .iter()
+                .find(|t| t.0 == "审查unsafe")
+                .unwrap()
+                .2
+        );
+        let err = session.remove_template("补测试").unwrap_err().to_string();
+        assert!(err.contains("内置模板，只能覆盖"), "{err}");
+        // 写权限唯工部、验收标准须单行：存模板时就拒绝。
+        let mut bad = session.court().template("补测试").unwrap();
+        bad.department = Department::Rites;
+        assert!(session.save_template("礼部补测试", bad).is_err());
+        let mut bad = session.court().template("写文档").unwrap();
+        bad.criteria = vec!["两\n行".into()];
+        assert!(session.save_template("坏", bad).is_err());
+
+        let template = session.court().template("审查unsafe").unwrap();
+        let task = session
+            .issue_templated(
+                "审查unsafe",
+                template.department,
+                template.text,
+                template.seal,
+            )
+            .unwrap()
+            .id;
+        // 之后再改模板，不影响已下达诏令的验收标准。
+        let mut later = session.court().template("审查unsafe").unwrap();
+        later.criteria = vec!["改过了".into()];
+        session.save_template("审查unsafe", later).unwrap();
+        let used = session
+            .court()
+            .task(task)
+            .unwrap()
+            .template
+            .clone()
+            .unwrap();
+        assert_eq!((used.name.as_str(), used.criteria.len()), ("审查unsafe", 2));
+        assert!(matches!(
+            session.court().propose_template_use(task, "写文档"),
+            Err(GovernanceError::Template(why)) if why.contains("已按模板下达")
+        ));
+        assert!(
+            session
+                .issue_templated("没有", Department::Works, "x".into(), Seal::default())
+                .is_err()
+        );
+        assert_eq!(session.court().tasks().count(), 1, "被拒的不留诏令");
+
+        let backend = Arc::new(Recorder::default());
+        let limits = Limits {
+            max_concurrent: 1,
+            timeout: Duration::from_secs(10),
+        };
+        run_all(&mut session, &Scheduler::new(backend.clone(), limits)).await;
+        let worker_saw = backend.0.lock().unwrap().0.clone();
+        assert!(
+            worker_saw.contains("能否改为安全写法。\n\n验收标准（翰林院模板「审查unsafe」")
+                && worker_saw.ends_with("1. 列出行号\n2. 说明前提"),
+            "{worker_saw}"
+        );
+        // 都察院按模板逐条核验：提示附上验收标准，批语逐条保留。
+        let censor = session.recruit(None, Department::Justice).unwrap();
+        session.appoint(censor, Office::Censor).unwrap();
+        let verdict = session
+            .censor(task, &std::env::temp_dir(), backend.as_ref())
+            .unwrap();
+        assert_eq!(verdict, CensorVerdict::Endorsed);
+        let (_, system, user) = backend.0.lock().unwrap().clone();
+        assert!(system.contains("逐条写「第 n 条"), "{system}");
+        assert!(
+            user.contains("1. 列出行号\n2. 说明前提") && !user.contains("改过了"),
+            "{user}"
+        );
+        let note = &session
+            .court()
+            .task(task)
+            .unwrap()
+            .censure
+            .as_ref()
+            .unwrap()
+            .note;
+        assert!(note.contains("第 1 条：达成"), "{note}");
     }
 
     #[tokio::test]

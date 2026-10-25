@@ -203,6 +203,12 @@
   .badge.reject { color: #fff; background: var(--vermilion); border-color: var(--vermilion); }
   .badge.seal { color: var(--lacquer); border-color: var(--gold); background: #fff4d6; }
   .badge.urgent { color: #fff; border-color: #b8461f; background: linear-gradient(90deg, #b8461f, #e07a2e); }
+  .badge.template { color: #3d4f7a; border-color: #b6c2df; background: #eef1f9; }
+  ol.criteria { margin: 4px 0 6px; padding-left: 22px; font-size: 12px; color: var(--muted); }
+  .task ol.criteria { margin: 4px 0 0; }
+  details.save-template { margin-top: 10px; font-size: 13px; }
+  details.save-template summary { cursor: pointer; color: var(--muted); }
+  details.save-template textarea { min-height: 80px; margin-top: 6px; }
   .badge.courier { color: #2f5d62; border-color: #9cc3c0; background: #e8f3f1; }
   .meta { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
   .reply {
@@ -311,6 +317,9 @@
     <section class="card">
       <h2>下诏 <small>皇帝颁布诏令</small></h2>
       <form class="body" id="edict-form">
+        <label for="edict-template">翰林院模板 <span>（选后填入内容与玉玺，可再改）</span></label>
+        <select id="edict-template" data-keep></select>
+        <ol class="criteria" id="template-criteria" hidden></ol>
         <label for="edict-text">诏令内容</label>
         <textarea id="edict-text" data-keep placeholder="例如：检查 storage crate 中的 unsafe 代码并说明用途" required></textarea>
         <label for="edict-dept">承办部门</label>
@@ -329,6 +338,16 @@
           <button type="submit" class="primary" data-run="1">下诏并执行</button>
           <button type="submit" data-run="0">仅入队</button>
         </div>
+        <details class="save-template">
+          <summary>存为翰林院模板</summary>
+          <div class="row">
+            <input type="text" id="template-name" data-keep placeholder="模板名，如 查死锁">
+            <button type="button" class="small shrink" id="template-save">存模板</button>
+            <button type="button" class="small shrink reject" id="template-remove" hidden>撤去所选模板</button>
+          </div>
+          <textarea id="template-criteria-input" data-keep placeholder="验收标准，一行一条（1–8 条），都察院复核时逐条核验"></textarea>
+          <p class="hint">以上方的内容、部门与玉玺为模板；同名覆盖，内置模板可覆盖、不能撤去。</p>
+        </details>
       </form>
     </section>
 
@@ -629,14 +648,32 @@ function taskHtml(t) {
         <button class="small" data-redraft="${t.id}">御笔改票</button></div>`;
   }
   return `<article class="task ${t.status}">
-    <div class="task-head"><span class="task-id">#${t.id}</span>${t.urgent ? '<span class="badge urgent">八百里加急</span>' : ""}${t.courier ? `<span class="badge courier" title="兵部驿站投递的外部事件">驿传 · ${esc(t.courier)}</span>` : ""}<span>${esc(t.department)}</span>
+    <div class="task-head"><span class="task-id">#${t.id}</span>${t.urgent ? '<span class="badge urgent">八百里加急</span>' : ""}${t.courier ? `<span class="badge courier" title="兵部驿站投递的外部事件">驿传 · ${esc(t.courier)}</span>` : ""}${t.template ? `<span class="badge template" title="翰林院模板；都察院复核时逐条核验">模板 · ${esc(t.template.name)}</span>` : ""}<span>${esc(t.department)}</span>
       ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
-    <div class="task-text">${esc(t.text)}</div>
+    <div class="task-text">${esc(t.text)}</div>${t.template ? `<ol class="criteria" title="验收标准">${t.template.criteria.map((c) => `<li>${esc(c)}</li>`).join("")}</ol>` : ""}
     <div class="meta">${meta}</div>${body}${actions}</article>`;
+}
+
+function renderTemplates(s) {
+  const select = $("edict-template");
+  select.innerHTML = `<option value="">（不用模板）</option>` + s.templates.map((t) =>
+    `<option value="${esc(t.name)}">${esc(t.name)}${t.builtin ? "（内置）" : ""}</option>`).join("");
+}
+
+function chosenTemplate() {
+  return state.templates.find((t) => t.name === $("edict-template").value);
+}
+
+function showCriteria() {
+  const t = chosenTemplate();
+  $("template-criteria").hidden = !t;
+  $("template-criteria").innerHTML = t ? t.criteria.map((c) => `<li>${esc(c)}</li>`).join("") : "";
+  $("template-remove").hidden = !t || t.builtin;
 }
 
 function render() {
   const s = state;
+  renderTemplates(s);
   $("mode-label").textContent = s.mode.label + (s.retreat ? " · 西苑修道中" : "");
   $("retreat-btn").textContent = s.retreat ? "回朝亲政" : "移居西苑修道（怠政）";
   const open = s.tasks.filter((t) => t.status === "pending" || t.status === "assigned").length;
@@ -709,6 +746,7 @@ async function refresh() {
   try {
     state = await api("/state");
     preserve(render);
+    showCriteria();
     renderOfficeConfig(state);
     if ($("history").open) loadHistory();
   } catch (e) {
@@ -733,10 +771,13 @@ $("edict-form").addEventListener("submit", async (event) => {
     text: $("edict-text").value.trim(),
     scope: $("edict-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
     tools,
+    template: $("edict-template").value,
   };
   const result = await act(api("/edicts", body));
   if (!result) return;
   $("edict-text").value = "";
+  $("edict-template").value = "";
+  showCriteria();
   toast(`诏令 #${result.id} 已颁布${state.mode.code === "cabinet" && !run ? "，待批红" : ""}`);
   // 皇帝亲自「下诏并执行」：内阁当即票拟，随即批红。
   if (run && state.mode.code === "cabinet") {
@@ -746,6 +787,41 @@ $("edict-form").addEventListener("submit", async (event) => {
   if (run && !state.running) await act(api("/run", {}));
 });
 
+// 选模板：填入内容、部门与玉玺，皇帝可再改；验收标准随诏令记下。
+$("edict-template").addEventListener("change", () => {
+  const t = chosenTemplate();
+  showCriteria();
+  if (!t) return;
+  $("edict-text").value = t.text;
+  $("edict-dept").value = t.department;
+  $("edict-scope").value = t.scope.filter((p) => p !== ".").join(", ");
+  TOOLS.forEach((tool) => { $("tool-" + tool).checked = t.tools.includes(tool); });
+  $("template-name").value = t.name;
+  $("template-criteria-input").value = t.criteria.join("\n");
+});
+$("template-save").addEventListener("click", async () => {
+  const name = $("template-name").value.trim();
+  const body = {
+    name,
+    department: $("edict-dept").value,
+    text: $("edict-text").value.trim(),
+    scope: $("edict-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
+    tools: TOOLS.filter((t) => $("tool-" + t).checked),
+    criteria: $("template-criteria-input").value.split("\n").map((c) => c.trim()).filter(Boolean),
+  };
+  if (await act(api("/templates", body), `翰林院已存模板「${name}」`)) {
+    $("edict-template").value = name;
+    showCriteria();
+  }
+});
+$("template-remove").addEventListener("click", async () => {
+  const name = $("edict-template").value;
+  if (!confirm(`撤去模板「${name}」？`)) return;
+  if (await act(api("/templates/remove", { name }), `已撤去模板「${name}」`)) {
+    $("edict-template").value = "";
+    showCriteria();
+  }
+});
 $("run-btn").addEventListener("click", () => act(api("/run", {}), "开始执行"));
 $("stop-btn").addEventListener("click", () => act(api("/run/stop", {}), "已下令中止"));
 $("recruit-form").addEventListener("submit", async (event) => {

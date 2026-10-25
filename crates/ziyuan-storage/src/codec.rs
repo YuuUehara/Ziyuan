@@ -1,7 +1,7 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, Threat,
+    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, Template, Threat,
     TokenUsage, Verdict,
 };
 
@@ -219,6 +219,26 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tCOURIER\t{}\t{}", task.0, to_hex(station))
         }
         EdictExpedited { task } => format!("v1\tURGENT\t{}", task.0),
+        // 验收标准各条单行，以换行连接后整体 hex。
+        TemplateSaved { name, template } => format!(
+            "v1\tTEMPLATE\t{}\t{}\t{}\t{}\t{}",
+            to_hex(name),
+            template.department.code(),
+            to_hex(&template.text),
+            encode_seal(&template.seal),
+            to_hex(&template.criteria.join("\n"))
+        ),
+        TemplateRemoved { name } => format!("v1\tUNTEMPLATE\t{}", to_hex(name)),
+        TemplateApplied {
+            task,
+            name,
+            criteria,
+        } => format!(
+            "v1\tTEMPLATED\t{}\t{}\t{}",
+            task.0,
+            to_hex(name),
+            to_hex(&criteria.join("\n"))
+        ),
         CensorReported {
             task,
             censor,
@@ -278,6 +298,10 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
     }
 }
 /// 玉玺占两个字段：工具代码列表、hex 编码的路径列表。
+fn split_criteria(joined: &str) -> Vec<String> {
+    joined.split('\n').map(str::to_owned).collect()
+}
+
 fn encode_seal(seal: &Seal) -> String {
     let tools: Vec<_> = seal.capabilities.iter().map(|c| c.code()).collect();
     let scope: Vec<_> = seal.scope.iter().map(|p| to_hex(p)).collect();
@@ -578,6 +602,23 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         "URGENT" => EdictExpedited {
             task: TaskId(id(2)?),
         },
+        "TEMPLATE" => TemplateSaved {
+            name: from_hex(field(2)?)?,
+            template: Template {
+                department: field(3)?.parse::<Department>().map_err(|e| e.to_string())?,
+                text: from_hex(field(4)?)?,
+                seal: decode_seal(field(5)?, field(6)?)?,
+                criteria: split_criteria(&from_hex(field(7)?)?),
+            },
+        },
+        "UNTEMPLATE" => TemplateRemoved {
+            name: from_hex(field(2)?)?,
+        },
+        "TEMPLATED" => TemplateApplied {
+            task: TaskId(id(2)?),
+            name: from_hex(field(3)?)?,
+            criteria: split_criteria(&from_hex(field(4)?)?),
+        },
         "CENSURED" => CensorReported {
             task: TaskId(id(2)?),
             censor: AgentId(id(3)?),
@@ -640,6 +681,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
         ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
         CourierDelivered { .. } => 4,
+        TemplateRemoved { .. } => 3,
+        TemplateApplied { .. } => 5,
+        TemplateSaved { .. } => 8,
         ExamTaken { model: None, .. } => 8,
         ExamTaken { .. } => 9,
         CensorReported { model: None, .. } => 11,
@@ -764,6 +808,26 @@ mod tests {
                 station: "CI\t驿站".into(),
             },
             CourtEvent::EdictExpedited { task },
+            CourtEvent::TemplateSaved {
+                name: "补\t测试".into(),
+                template: Template {
+                    department: Department::Works,
+                    text: "补测试\n两行".into(),
+                    seal: Seal {
+                        capabilities: [Capability::WriteFile, Capability::RunTests].into(),
+                        scope: vec!["crates/a b".into(), "README.md".into()],
+                    },
+                    criteria: vec!["测试通过".into(), "不改行为".into()],
+                },
+            },
+            CourtEvent::TemplateRemoved {
+                name: "补\t测试".into(),
+            },
+            CourtEvent::TemplateApplied {
+                task,
+                name: "审查unsafe".into(),
+                criteria: vec!["列出行号".into()],
+            },
             CourtEvent::BudgetSet {
                 scope: BudgetScope::Court,
                 tokens: Some(1_000_000),

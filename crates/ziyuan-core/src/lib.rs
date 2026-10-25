@@ -707,6 +707,16 @@ pub struct Edict {
     pub seal: Seal,
 }
 
+/// 翰林院诏令模板：常用诏令的内容、默认部门与玉玺，以及交都察院核验的验收标准。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Template {
+    pub department: Department,
+    pub text: String,
+    pub seal: Seal,
+    /// 验收标准，各条单行。
+    pub criteria: Vec<String>,
+}
+
 /// Event Sourcing: 朝廷状态由此事件列表重放而来。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CourtEvent {
@@ -857,6 +867,21 @@ pub enum CourtEvent {
     /// 八百里加急：待办诏令插队先行，执行时限放宽。
     EdictExpedited {
         task: TaskId,
+    },
+    /// 翰林院存一份诏令模板（同名的覆盖，包括覆盖内置模板）。
+    TemplateSaved {
+        name: String,
+        template: Template,
+    },
+    /// 翰林院撤去自定的模板（同名的内置模板随之恢复）。
+    TemplateRemoved {
+        name: String,
+    },
+    /// 诏令按模板下达：与 `EdictIssued` 一同记录，验收标准以当时的模板为准（之后改模板不影响）。
+    TemplateApplied {
+        task: TaskId,
+        name: String,
+        criteria: Vec<String>,
     },
     /// 一次模型调用的 token 用量。指派后的任何时刻都可记录：失败、超时的诏令同样消耗了 token。
     ModelUsage {

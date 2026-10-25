@@ -29,7 +29,7 @@ use ziyuan_app::{
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
-    TokenUsage, Verdict, missing_sections,
+    Template, TokenUsage, Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -104,6 +104,8 @@ pub fn router(config: Config) -> Router {
         .route("/events", get(events_stream))
         .route("/edicts", post(issue))
         .route("/courier", post(courier))
+        .route("/templates", post(save_template))
+        .route("/templates/remove", post(remove_template))
         .route("/tasks/{id}/urgent", post(urgent))
         .route("/run", post(run))
         .route("/run/stop", post(stop_run))
@@ -463,9 +465,59 @@ async fn issue(
         }
         seal.scope = scope;
     }
+    // 按翰林院模板下诏：部门、内容与玉玺以页面所填为准，验收标准取模板的。
+    let template = body["template"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
     app.mutate(move |s| {
-        let edict = s.issue(department, text, seal)?;
+        let edict = match &template {
+            Some(name) => s.issue_templated(name, department, text, seal)?,
+            None => s.issue(department, text, seal)?,
+        };
         Ok(json!({ "id": edict.id.0 }))
+    })
+    .await
+}
+
+/// 翰林院存模板：`{ name, department, text, tools?, scope?, criteria: [..] }`（同名覆盖）。
+async fn save_template(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let name = str_field(&body, "name")?.trim().to_owned();
+    let mut template = Template {
+        department: parse::<Department>(str_field(&body, "department")?)?,
+        text: str_field(&body, "text")?.trim().to_owned(),
+        seal: Seal::default(),
+        criteria: string_list(&body["criteria"]),
+    };
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        template.seal.capabilities = tools
+            .iter()
+            .map(|t| parse::<Capability>(t.as_str().unwrap_or_default()))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+    }
+    let scope = string_list(&body["scope"]);
+    if !scope.is_empty() {
+        template.seal.scope = scope;
+    }
+    app.mutate(move |s| {
+        s.save_template(&name, template)?;
+        Ok(json!({ "ok": true }))
+    })
+    .await
+}
+
+/// 翰林院撤去自定的模板：`{ name }`。
+async fn remove_template(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let name = str_field(&body, "name")?.to_owned();
+    app.mutate(move |s| {
+        s.remove_template(&name)?;
+        Ok(json!({ "ok": true }))
     })
     .await
 }
@@ -1023,6 +1075,10 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "budget": t.budget,
                 "urgent": t.urgent,
                 "courier": t.courier,
+                "template": t.template.as_ref().map(|u| json!({
+                    "name": u.name,
+                    "criteria": u.criteria,
+                })),
                 "suspicions": t.suspicions.iter().map(|s| json!({
                     "bureau": s.bureau(),
                     "source": s.origin(),
@@ -1122,6 +1178,15 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
         "offices": offices,
         "officials": officials,
         "tasks": tasks,
+        "templates": court.templates().into_iter().map(|(name, t, builtin)| json!({
+            "name": name,
+            "builtin": builtin,
+            "department": t.department.code(),
+            "text": t.text,
+            "tools": t.seal.capabilities.iter().map(|c| c.code()).collect::<Vec<_>>(),
+            "scope": t.seal.scope,
+            "criteria": t.criteria,
+        })).collect::<Vec<_>>(),
         // 最近一次殿试。
         "palace": court.palace_exams().last().map(|p| json!({
             "question": p.question,
@@ -1475,6 +1540,68 @@ mod tests {
         assert!(
             officials.iter().all(|o| o["office"].is_null()),
             "{officials:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn templates_are_saved_listed_and_applied() {
+        let (base, root) = start("templates").await;
+        let t = Some(TOKEN);
+        let save = json!({
+            "name": "查锁", "department": "works", "text": "检查加锁顺序",
+            "tools": ["search_code"], "scope": ["src"], "criteria": ["列出所有锁", " ", "说明顺序"],
+        });
+        assert_eq!(call(&base, "/templates", t, Some(save)).await.0, 200);
+        // 写权限唯工部：礼部模板盖 write_file 被拒。
+        let bad = json!({ "name": "坏", "department": "rites", "text": "x", "tools": ["write_file"], "criteria": ["a"] });
+        assert_eq!(call(&base, "/templates", t, Some(bad)).await.0, 400);
+        let edict = json!({ "department": "works", "text": "检查加锁顺序：只看 src", "scope": ["src"], "tools": ["search_code"], "template": "查锁" });
+        let (status, issued) = call(&base, "/edicts", t, Some(edict)).await;
+        assert_eq!((status, issued["id"].as_u64()), (200, Some(1)));
+        let missing = json!({ "department": "works", "text": "x", "template": "没有" });
+        assert_eq!(call(&base, "/edicts", t, Some(missing)).await.0, 400);
+        let (_, state) = call(&base, "/state", t, None).await;
+        let names: Vec<_> = state["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["审查unsafe", "补测试", "写文档", "查锁"]);
+        let custom = &state["templates"][3];
+        assert_eq!(
+            (custom["builtin"].as_bool(), custom["scope"].clone()),
+            (Some(false), json!(["src"]))
+        );
+        assert_eq!(custom["criteria"], json!(["列出所有锁", "说明顺序"]));
+        assert_eq!(
+            state["tasks"].as_array().unwrap().len(),
+            1,
+            "被拒的不留诏令"
+        );
+        assert_eq!(
+            state["tasks"][0]["template"],
+            json!({ "name": "查锁", "criteria": ["列出所有锁", "说明顺序"] })
+        );
+        let (status, error) = call(
+            &base,
+            "/templates/remove",
+            t,
+            Some(json!({ "name": "写文档" })),
+        )
+        .await;
+        assert!(status == 400 && error["error"].as_str().unwrap().contains("内置模板"));
+        assert_eq!(
+            call(
+                &base,
+                "/templates/remove",
+                t,
+                Some(json!({ "name": "查锁" }))
+            )
+            .await
+            .0,
+            200
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -181,4 +181,15 @@ if "$BIN" post --station '' x > /dev/null 2>&1; then echo '驿站名须非空' >
 if "$BIN" urgent "$CI" > /dev/null 2>&1; then echo '不应重复加急' >&2; exit 1; fi
 "$BIN" history | has '兵部驿传'
 for id in $("$BIN" tasks | sed -n 's/^#\([0-9]*\) .*【驿传·.*/\1/p'); do "$BIN" cancel "$id" > /dev/null; done
+# 翰林院：内置模板可列、可按模板入队；自定模板可存可撤；内置的不能撤
+"$BIN" template | has '「审查unsafe」（内置'
+"$BIN" template save 查锁 --tools search_code --criteria '列出所有锁；说明顺序' 检查加锁顺序 | has '新存模板「查锁」'
+TID="$("$BIN" edict --queue --template 查锁 只看 src | sed -n 's/^诏令 #\([0-9]*\) 已入队.*/\1/p')"
+[ -n "$TID" ]
+"$BIN" tasks | grep "^#$TID " | has '【模板·查锁】工部 检查加锁顺序只看 src'
+"$BIN" history | has "诏令 #$TID 按模板「查锁」下达，验收 2 条"
+if "$BIN" template rm 补测试 > /dev/null 2>&1; then echo '内置模板不能撤' >&2; exit 1; fi
+if "$BIN" edict --queue --template 无此 > /dev/null 2>&1; then echo '没有的模板应拒绝' >&2; exit 1; fi
+"$BIN" template rm 查锁 | has '撤去模板'
+"$BIN" cancel "$TID" > /dev/null
 echo 'ZiYuan smoke test PASS'
