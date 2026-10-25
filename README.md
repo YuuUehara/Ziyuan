@@ -23,6 +23,7 @@ crates/
   ziyuan-governance/  朝廷状态重放、改制、任免与任务路由（规则唯一来源）
   ziyuan-runtime/     Scheduler、WorkerBackend（Demo / Agent）、Tool Calling Loop、工作区工具（只读与工部受控写）
   ziyuan-llm/         OpenAI 兼容 Chat Completions Adapter（ureq + serde_json）
+  ziyuan-github/      兵部驿站 · GitHub：issue/PR 入队、回奏写回评论、草稿 PR（凭据只在此使用）
   ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
   ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
   ziyuan-web/         紫禁城 Web 界面（axum + 内嵌单页，SSE 实时推送）
@@ -314,6 +315,22 @@ ziyuan urgent 7                                          # 已在队列的诏令
 - **八百里加急**（`EdictExpedited`）：执行时排在最前，先得并发空位；时限为常规的两倍。已分办的诏令加急，未结的子诏令一并加急。Web 诏令卡片上有「八百里加急」按钮，TUI 按 `U`。
 - 另一个进程正在执行诏令（执行者锁被占）时，各前端提示「军情紧急，另有将领在外」。
 
+### 兵部驿站 · GitHub
+
+```bash
+export ZIYUAN_GITHUB_REPO=owner/repo
+export ZIYUAN_GITHUB_TOKEN=...          # 或 GITHUB_TOKEN；需 issues 与 contents、pull requests 写权限
+ziyuan github pull                      # 标签 ziyuan 的 issue/PR 入队（--label、--dept 可改）
+ziyuan run && ziyuan review 3 accept
+ziyuan github reply all                 # 已评定的回奏写回 issue/PR 评论
+ziyuan apply 3 && ziyuan github pr 3    # 准奏落盘后，把改动在远端开为草稿 PR
+```
+
+- **入队**：带标签的未关闭 issue/PR 各入队一件；其下仓库所有者、成员或协作者以 `/ziyuan` 开头的评论各另入队一件（外人的评论不收）。驿站名形如 `github:owner/repo#12`（评论加 `/c<评论ID>`），重复 `pull` 不会重复入队。入队后与其他驿传诏令一样：锦衣卫入队即查，默认只读玉玺，内阁制下须批红。
+- **回奏写回**：只送出皇帝已评定（含司礼监代批）且没有未平反密报的回奏，每件只送一次；评论含承办者、评定、都察院复核与回奏全文。
+- **草稿 PR**：只开已准奏落盘的改动（逐段驳回的不含），经 GitHub API 在远端以默认分支最新提交为底建分支 `ziyuan/task-<ID>` 与一次提交，不碰本地版本库。先逐个核对远端原文与呈报时一致，不一致则不开。
+- **凭据**只在 `ziyuan-github` 中读取与使用，不进入朝廷事件簿、执行后端或任何模型提示，报错信息也不含令牌。回报的网址记入事件簿（`CourierReplied`）。
+
 ### 人格与廷议
 
 每位官员有一种性格（刚直、持重、锐进、圆融、精细、宏阔）和一种文风（简劲、典雅、平实、条陈），由官员 ID 决定，`ziyuan officials` 可见，旧朝廷同样适用。人格写进该官员承办、票拟、拆分、复核时的提示词，只影响措辞与论证方式。
@@ -505,7 +522,7 @@ v0.4 让朝廷办得稳、花得明白；v0.5 的重点是**从演示走向日�
 3. ~~**起居注可查**~~ 已完成：`history` 按诏令、官员、事件类型、时间筛选（同样支持 `--json`），Web 起居注可筛选，TUI 显示时间；每次承办的模型调用把 trace ID 记在用量事件上。
 4. ~~**翰林院修史**~~ 已完成：已结诏令的回奏与评定归档为实录，承办官员可用只读工具 `search_records` 查前例，票拟与廷推附上相关实录；`ziyuan records [检索词]` 可查（支持 `--json`）。
 5. ~~**刑部复勘**~~ 已完成：`ziyuan recheck` 请刑部官员（模型）复勘检出，「维持」或「误报」记入事件簿；皇帝 `ziyuan acquit` 平反后不再妨碍代批。Web 密报框可复勘、逐处平反。
-6. **兵部对接 GitHub**：带指定标签的 issue 或 PR 评论入队为诏令；回奏写回评论，准奏的改动可开为草稿 PR。GitHub 凭据只在驿站使用，不进入任何模型提示。
+6. ~~**兵部对接 GitHub**~~ 已完成：`ziyuan github pull` 让带标签的 issue/PR 与成员的 `/ziyuan` 评论入队，`github reply` 把已评定的回奏写回评论，`github pr` 把准奏的改动开为草稿 PR；凭据只在 `ziyuan-github` 中使用。
 7. **礼部修 CHANGELOG**：发版时由礼部官员据事件簿与提交记录起草 CHANGELOG，写权限只限该文件，皇帝准奏后落盘（v0.4 推迟的一项）。
 8. **CI 与安装**：GitHub Actions 跑 fmt、clippy、测试与 smoke；发版时附各平台预编译二进制，支持 `cargo install`。
 9. **外藩朝贡：接入 MCP 工具**（视进度）：外部 MCP 服务的工具按玉玺单独授权、受查阅范围与审计约束，默认不授。

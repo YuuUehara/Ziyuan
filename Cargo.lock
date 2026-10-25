@@ -2269,6 +2269,7 @@ dependencies = [
  "tokio",
  "ziyuan-app",
  "ziyuan-core",
+ "ziyuan-github",
  "ziyuan-governance",
  "ziyuan-llm",
  "ziyuan-runtime",
@@ -2280,6 +2281,15 @@ dependencies = [
 [[package]]
 name = "ziyuan-core"
 version = "0.4.0"
+
+[[package]]
+name = "ziyuan-github"
+version = "0.4.0"
+dependencies = [
+ "serde_json",
+ "ureq",
+ "ziyuan-core",
+]
 
 [[package]]
 name = "ziyuan-governance"

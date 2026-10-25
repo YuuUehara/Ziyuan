@@ -1098,6 +1098,12 @@ pub enum CourtEvent {
         task: TaskId,
         station: String,
     },
+    /// 驿站把结果送回来处：`pull_request` 为假是回奏评论，为真是准奏改动开的草稿 PR；`url` 为其网址。
+    CourierReplied {
+        task: TaskId,
+        pull_request: bool,
+        url: String,
+    },
     /// 八百里加急：待办诏令插队先行，执行时限放宽。
     EdictExpedited {
         task: TaskId,

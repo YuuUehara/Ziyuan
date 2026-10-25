@@ -4,6 +4,7 @@ members = [
     "crates/ziyuan-governance",
     "crates/ziyuan-runtime",
     "crates/ziyuan-llm",
+    "crates/ziyuan-github",
     "crates/ziyuan-storage",
     "crates/ziyuan-app",
     "crates/ziyuan-web",
@@ -23,6 +24,7 @@ ziyuan-core = { path = "crates/ziyuan-core" }
 ziyuan-governance = { path = "crates/ziyuan-governance" }
 ziyuan-runtime = { path = "crates/ziyuan-runtime" }
 ziyuan-llm = { path = "crates/ziyuan-llm" }
+ziyuan-github = { path = "crates/ziyuan-github" }
 ziyuan-storage = { path = "crates/ziyuan-storage" }
 ziyuan-app = { path = "crates/ziyuan-app" }
 ziyuan-web = { path = "crates/ziyuan-web" }

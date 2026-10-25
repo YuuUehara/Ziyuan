@@ -91,6 +91,10 @@ const HELP: &str = concat!(
   ziyuan cane <官员ID>                   廷杖：屡遭弹劾（两次以上）者降一级留用，收回 write_file、run_tests，三件获采纳即复
   ziyuan pardon <官员ID>                 宽宥受杖者，复其品级与玉玺
   ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
+  ziyuan github pull [--label ziyuan] [--dept works]
+                                       兵部驿站·GitHub：带标签的 issue/PR 及成员的 `/ziyuan` 评论入队（去重）
+  ziyuan github reply <诏令ID|all>      已评定、无未平反密报的回奏写回 issue/PR 评论
+  ziyuan github pr <诏令ID>             准奏的改动在远端开为草稿 PR（先核对远端原文；不碰本地版本库）
   ziyuan recheck <诏令ID|all>            刑部复勘：刑部官员（模型）逐处判断检出是真有其事还是误报，只是意见
   ziyuan acquit <诏令ID> [序号,…|all]    平反：不给序号则平反刑部判为误报的各处；平反后不再妨碍代批
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
@@ -216,6 +220,8 @@ enum Command {
     Kaocheng,
     /// `None` 列出全部诏令的密报。
     Flags(Option<TaskId>),
+    /// 兵部驿站 · GitHub。
+    GitHub(GitHubAction),
     /// 刑部复勘；`None` 表示全部有待复勘检出的诏令。
     Recheck(Option<TaskId>),
     /// 平反：序号从 0 起；`None` 为刑部判为误报的各处，`Some(空)` 为全部未平反的。
@@ -264,6 +270,19 @@ enum Shell {
     Fish,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GitHubAction {
+    /// 带标签的 issue / PR 及成员的 `/ziyuan` 评论入队（交给 `department`）。
+    Pull {
+        label: String,
+        department: Department,
+    },
+    /// 回奏写回评论；`None` 为全部可回报的。
+    Reply(Option<TaskId>),
+    /// 准奏的改动开为草稿 PR。
+    PullRequest(TaskId),
+}
+
 /// 全部子命令（补全用；测试保证每个都能被 `parse` 识别）。
 const SUBCOMMANDS: &[&str] = &[
     "help",
@@ -305,6 +324,7 @@ const SUBCOMMANDS: &[&str] = &[
     "flags",
     "recheck",
     "acquit",
+    "github",
     "budget",
     "split",
     "debate",
@@ -569,6 +589,38 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 }
             }
             Command::Debate(task, members, rounds)
+        }
+        "github" => {
+            const USAGE: &str = "用法: ziyuan github pull [--label ziyuan] [--dept works] | reply <诏令ID|all> | pr <诏令ID>";
+            let id = |s: &str| -> Result<TaskId, Box<dyn Error>> {
+                Ok(TaskId(s.parse().map_err(|_| "诏令 ID 必须是数字")?))
+            };
+            match args.first().map(String::as_str) {
+                Some("pull") => {
+                    let (mut label, mut department) =
+                        (ziyuan_github::DEFAULT_LABEL.to_owned(), Department::Works);
+                    let mut rest = args[1..].iter();
+                    while let Some(flag) = rest.next() {
+                        let value = rest.next().ok_or(USAGE)?;
+                        match flag.as_str() {
+                            "--label" => label = value.clone(),
+                            "--dept" => department = value.parse()?,
+                            _ => return Err(USAGE.into()),
+                        }
+                    }
+                    Command::GitHub(GitHubAction::Pull { label, department })
+                }
+                Some("reply") => match &args[1..] {
+                    [all] if all == "all" => Command::GitHub(GitHubAction::Reply(None)),
+                    [task] => Command::GitHub(GitHubAction::Reply(Some(id(task)?))),
+                    _ => return Err(USAGE.into()),
+                },
+                Some("pr") => match &args[1..] {
+                    [task] => Command::GitHub(GitHubAction::PullRequest(id(task)?)),
+                    _ => return Err(USAGE.into()),
+                },
+                _ => return Err(USAGE.into()),
+            }
         }
         "recheck" => match args.as_slice() {
             [all] if all == "all" => Command::Recheck(None),
@@ -1209,6 +1261,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 );
             }
         }
+        Command::GitHub(action) => github(session, action)?,
         Command::Recheck(only) => {
             let tasks: Vec<TaskId> = match only {
                 Some(task) => vec![task],
@@ -1504,6 +1557,132 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 let at = entry.at.map_or("—".repeat(16), |t| format_time(t, offset));
                 println!("{:>3}: {at}  {}", entry.seq, entry.text);
             }
+        }
+    }
+    Ok(())
+}
+
+/// 兵部驿站 · GitHub。凭据只在 `ziyuan_github` 中使用，不经朝廷与模型。
+fn github(session: &mut Session<EventLog>, action: GitHubAction) -> Result<(), Box<dyn Error>> {
+    let hub = ziyuan_github::GitHub::from_env()?
+        .ok_or("未设 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN，驿站不通 GitHub")?;
+    match action {
+        GitHubAction::Pull { label, department } => {
+            let mut queued = 0;
+            let issues = hub.labeled(&label)?;
+            for issue in &issues {
+                let comments = hub.comments(issue.number)?;
+                for d in ziyuan_github::intake(hub.repo(), issue, &comments) {
+                    let known = session
+                        .court()
+                        .tasks()
+                        .any(|t| t.courier.as_deref() == Some(d.station.as_str()));
+                    if known {
+                        continue;
+                    }
+                    let edict = session.post(department, d.text, &d.station, false)?;
+                    queued += 1;
+                    let flagged = session
+                        .court()
+                        .task(edict.id)
+                        .map_or(0, |t| t.suspicions.len());
+                    let note = if flagged > 0 {
+                        format!("，锦衣卫密报 {flagged} 条")
+                    } else {
+                        String::new()
+                    };
+                    println!("驿传：诏令 #{} 自「{}」入队{note}。", edict.id.0, d.station);
+                }
+            }
+            println!(
+                "GitHub {}：标签「{label}」的 issue/PR {} 件，新入队 {queued} 件（只入队，执行请 `ziyuan run`）。",
+                hub.repo(),
+                issues.len()
+            );
+        }
+        GitHubAction::Reply(only) => {
+            let tasks: Vec<TaskId> = match only {
+                Some(task) => {
+                    session.check_reply(task, false)?;
+                    vec![task]
+                }
+                None => {
+                    let ids: Vec<TaskId> = session.court().tasks().map(|t| t.edict.id).collect();
+                    ids.into_iter()
+                        .filter(|id| session.check_reply(*id, false).is_ok())
+                        .collect()
+                }
+            };
+            let mut sent = 0;
+            for task in tasks {
+                let entry = session.court().task(task).expect("已校验");
+                let station = entry.courier.clone().unwrap_or_default();
+                let Some((repo, number)) = ziyuan_github::parse_station(&station) else {
+                    if only.is_some() {
+                        return Err(format!(
+                            "诏令 #{} 来自「{station}」，不是 GitHub 驿站",
+                            task.0
+                        )
+                        .into());
+                    }
+                    continue;
+                };
+                if repo != hub.repo() {
+                    if only.is_some() {
+                        return Err(format!(
+                            "诏令 #{} 来自 {repo}，与 ZIYUAN_GITHUB_REPO 不符",
+                            task.0
+                        )
+                        .into());
+                    }
+                    continue;
+                }
+                let url = hub.comment(number, &ziyuan_app::reply_text(session.court(), entry))?;
+                session.record_reply(task, false, url.clone())?;
+                sent += 1;
+                println!("诏令 #{} 回奏已送回 #{number}：{url}", task.0);
+            }
+            if sent == 0 {
+                println!(
+                    "没有可回报的诏令（须经 GitHub 驿传入队、已评定、无未平反的密报、尚未回报）。"
+                );
+            }
+        }
+        GitHubAction::PullRequest(task) => {
+            session.check_reply(task, true)?;
+            let entry = session.court().task(task).expect("已校验");
+            let station = entry.courier.clone().unwrap_or_default();
+            let number = match ziyuan_github::parse_station(&station) {
+                Some((repo, number)) if repo == hub.repo() => number,
+                _ => {
+                    return Err(format!(
+                        "诏令 #{} 来自「{station}」，不是本仓库的 GitHub 驿站",
+                        task.0
+                    )
+                    .into());
+                }
+            };
+            let changes = entry.changes.as_ref().expect("已校验有准奏的改动");
+            let files = ziyuan_app::selected_files(&changes.files, &changes.skipped);
+            let first: String = entry
+                .edict
+                .text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(60)
+                .collect();
+            let title = format!("紫垣诏令 #{}：{first}", task.0);
+            let body = format!(
+                "Refs #{number}\n\n由紫垣 `ziyuan github pr` 开出的草稿 PR：改动已经皇帝准奏，共 {} 个文件。\n\n{}",
+                files.len(),
+                ziyuan_app::reply_text(session.court(), entry)
+            );
+            let url =
+                hub.draft_pull_request(&format!("ziyuan/task-{}", task.0), &title, &body, &files)?;
+            session.record_reply(task, true, url.clone())?;
+            println!("诏令 #{} 的改动已开为草稿 PR：{url}", task.0);
         }
     }
     Ok(())

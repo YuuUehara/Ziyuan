@@ -226,6 +226,16 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tCOURIER\t{}\t{}", task.0, to_hex(station))
         }
         EdictExpedited { task } => format!("v1\tURGENT\t{}", task.0),
+        CourierReplied {
+            task,
+            pull_request,
+            url,
+        } => format!(
+            "v1\tREPLIED\t{}\t{}\t{}",
+            task.0,
+            if *pull_request { "pr" } else { "comment" },
+            to_hex(url)
+        ),
         // 验收标准各条单行，以换行连接后整体 hex。
         TemplateSaved { name, template } => format!(
             "v1\tTEMPLATE\t{}\t{}\t{}\t{}\t{}",
@@ -691,6 +701,15 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             task: TaskId(id(2)?),
             station: from_hex(field(3)?)?,
         },
+        "REPLIED" => CourierReplied {
+            task: TaskId(id(2)?),
+            pull_request: match field(3)? {
+                "pr" => true,
+                "comment" => false,
+                other => return Err(format!("回报类型无效: {other}").into()),
+            },
+            url: from_hex(field(4)?)?,
+        },
         "URGENT" => EdictExpedited {
             task: TaskId(id(2)?),
         },
@@ -813,6 +832,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
         ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
         CourierDelivered { .. } => 4,
+        CourierReplied { .. } => 5,
         TemplateRemoved { .. } | OfficialCaned { .. } | OfficialPardoned { .. } => 3,
         CourtNominated { .. } => 4,
         TemplateApplied { .. } => 5,
@@ -966,6 +986,16 @@ mod tests {
             CourtEvent::CourierDelivered {
                 task,
                 station: "CI\t驿站".into(),
+            },
+            CourtEvent::CourierReplied {
+                task,
+                pull_request: true,
+                url: "https://github.com/o/r/pull/9".into(),
+            },
+            CourtEvent::CourierReplied {
+                task,
+                pull_request: false,
+                url: "https://x/\t,".into(),
             },
             CourtEvent::EdictExpedited { task },
             CourtEvent::TemplateSaved {
