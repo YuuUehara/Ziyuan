@@ -108,6 +108,8 @@ const HELP: &str = concat!(
   ZIYUAN_TEST_COMMAND  run_tests 运行的测试命令（如 cargo test；由皇帝设定，模型不能更改）
   ZIYUAN_LLM_PRICE     估算花费用的单价「输入,输出[,币种]」（每百万 token）；
                        deepseek-flash / deepseek-v4-pro 内置官方高峰价（估算上限）
+  ZIYUAN_LLM_RETRIES   网络错误、429、5xx 时的重试次数（默认 3，指数退避，遵守 Retry-After）
+  ZIYUAN_MAX_STEPS     单件诏令最多的模型调用步数（默认 12）；用尽后官员不带工具据已查阅的内容回奏
 
 示例：
   ziyuan init
@@ -124,7 +126,7 @@ const HELP: &str = concat!(
 "#
 );
 
-/// 单件诏令最多的模型调用轮数。
+/// 单件诏令默认最多的模型调用步数（`ZIYUAN_MAX_STEPS` 可改）。
 const MAX_AGENT_STEPS: usize = 12;
 const DEFAULT_LIMITS: Limits = Limits {
     max_concurrent: 4,
@@ -1238,8 +1240,16 @@ fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
         model.model()
     );
     let catalog = Box::new(model.catalog());
+    let steps = match env::var("ZIYUAN_MAX_STEPS") {
+        Ok(n) => n
+            .parse()
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or("ZIYUAN_MAX_STEPS 须为正整数")?,
+        Err(_) => MAX_AGENT_STEPS,
+    };
     Ok(Arc::new(
-        AgentBackend::new(Box::new(model), env::current_dir()?, MAX_AGENT_STEPS)
+        AgentBackend::new(Box::new(model), env::current_dir()?, steps)
             .with_catalog(catalog)
             .with_test_command(env::var("ZIYUAN_TEST_COMMAND").ok()),
     ))

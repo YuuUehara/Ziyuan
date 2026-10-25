@@ -51,6 +51,16 @@ pub trait ExecutionHooks {
     fn model_usage(&self, _usage: TokenUsage) {}
     /// 承办成功、即将回奏时呈报暂存的文件改动（有改动时才调用）。
     fn changes_proposed(&self, _changes: Vec<FileChange>) {}
+    /// 本件还可花的 tokens（本件度支与国库余额中较小者）；`None` 不限。
+    /// `agent_loop` 在每次模型调用前据此预判。
+    fn token_allowance(&self) -> Option<u64> {
+        None
+    }
+    /// 本次模型调用的输出上限（tokens），由 `agent_loop` 据度支预判后给出；`None` 不限。
+    /// 模型 Adapter 应据此设置 API 的输出长度上限。
+    fn max_output(&self) -> Option<u64> {
+        None
+    }
     /// 锦衣卫在外来文书（`source` 如 `tool:read_file`）中检出可疑内容。
     fn suspicion(&self, _source: &str, _threat: Threat, _excerpt: &str) {}
 }

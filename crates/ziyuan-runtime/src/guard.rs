@@ -117,6 +117,16 @@ pub fn fence(output: &str, nonce: &str) -> String {
     format!("〔外来文书 {nonce} 起〕\n{output}\n〔外来文书 {nonce} 止〕")
 }
 
+/// 取出 [`fence`] 包起的原文；不是以 `nonce` 包起的，原样返回。
+pub fn unfence<'a>(fenced: &'a str, nonce: &str) -> &'a str {
+    let head = format!("〔外来文书 {nonce} 起〕\n");
+    let tail = format!("\n〔外来文书 {nonce} 止〕");
+    fenced
+        .strip_prefix(&head)
+        .and_then(|rest| rest.strip_suffix(&tail))
+        .unwrap_or(fenced)
+}
+
 /// 写入提示词的告诫；`what` 为被包起来的内容，如「工具返回的内容」。
 pub fn warning(what: &str, nonce: &str) -> String {
     format!(

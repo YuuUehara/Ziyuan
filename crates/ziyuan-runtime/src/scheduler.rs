@@ -264,6 +264,20 @@ impl ExecutionHooks for TaskHooks {
         }
     }
 
+    fn token_allowance(&self) -> Option<u64> {
+        let own = self
+            .budget
+            .map(|limit| limit.saturating_sub(self.spent.load(Ordering::SeqCst)));
+        let treasury = self
+            .treasury
+            .as_ref()
+            .map(|t| t.load(Ordering::SeqCst).max(0) as u64);
+        match (own, treasury) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     fn text_delta(&self, text: &str) {
         let _ = self.progress.send(Progress::TextDelta {
             task: self.task,
@@ -514,6 +528,54 @@ mod tests {
             ]
         );
         assert_eq!(treasury.load(Ordering::SeqCst), -10);
+    }
+
+    /// 花 40 tokens 后回报余额。
+    struct Allowance;
+    impl WorkerBackend for Allowance {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let before = hooks.token_allowance();
+            hooks.model_usage(TokenUsage {
+                input: 30,
+                output: 10,
+            });
+            Ok(format!("{before:?} {:?}", hooks.token_allowance()))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allowance_is_the_smaller_of_task_budget_and_treasury() {
+        let scheduler = Scheduler::new(
+            Arc::new(Allowance),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let treasury = Arc::new(AtomicI64::new(500));
+        let jobs = vec![
+            Job {
+                budget: Some(100),
+                treasury: Some(treasury.clone()),
+                ..job(1)
+            },
+            Job {
+                budget: Some(9000),
+                treasury: Some(treasury.clone()),
+                ..job(2)
+            },
+            job(3),
+        ];
+        let progress = collect(scheduler.start(jobs, &CancelToken::new())).await;
+        let done = |s: &str| Outcome::Completed(s.into());
+        assert_eq!(
+            outcomes(&progress),
+            [
+                (1, done("Some(100) Some(60)")),
+                (2, done("Some(460) Some(420)")),
+                (3, done("None None")),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -7,16 +7,54 @@ use std::io::{BufRead, BufReader};
 use std::time::Duration;
 use ziyuan_core::{Price, TokenUsage};
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
-use ziyuan_runtime::{BoxError, ExecutionHooks, ModelCatalog};
+use ziyuan_runtime::{BoxError, ExecutionHooks, ModelCatalog, guard};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// 度支余额低于此数时才向 API 传 `max_tokens`（再高的值有些服务会拒绝）。
+const MAX_TOKENS_CAP: u64 = 8192;
+
+/// 请求失败（网络错误、429、5xx）时的重试：第 n 次重试前等待 `base × 2ⁿ`（不超过 `max`），
+/// 服务端给了 `Retry-After` 则照办（同样不超过 `max`）。流式响应开始之后不重试。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    pub attempts: u32,
+    pub base: Duration,
+    pub max: Duration,
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self {
+            attempts: 3,
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(30),
+        }
+    }
+}
+
+impl Retry {
+    fn delay(&self, retry: u32, after: Option<Duration>) -> Duration {
+        after
+            .unwrap_or_else(|| self.base.saturating_mul(1 << retry.min(16)))
+            .min(self.max)
+    }
+}
 
 pub struct OpenAiCompatible {
     base_url: String,
     api_key: Option<String>,
     model: String,
     agent: ureq::Agent,
+    retry: Retry,
+}
+
+/// 一次请求的失败：可否重试、服务端要求等多久、服务端的请求 ID。
+struct Failure {
+    error: BoxError,
+    retryable: bool,
+    after: Option<Duration>,
+    request_id: Option<String>,
 }
 
 impl OpenAiCompatible {
@@ -35,7 +73,13 @@ impl OpenAiCompatible {
             api_key,
             model: model.into(),
             agent,
+            retry: Retry::default(),
         }
+    }
+
+    pub fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// 读取 `ZIYUAN_LLM_MODEL`（必需）、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`。
@@ -48,7 +92,14 @@ impl OpenAiCompatible {
         let api_key = env::var("ZIYUAN_LLM_API_KEY")
             .ok()
             .filter(|k| !k.is_empty());
-        Some(Self::new(base_url, api_key, model))
+        let mut retry = Retry::default();
+        if let Some(n) = env::var("ZIYUAN_LLM_RETRIES")
+            .ok()
+            .and_then(|n| n.parse().ok())
+        {
+            retry.attempts = n;
+        }
+        Some(Self::new(base_url, api_key, model).with_retry(retry))
     }
 
     pub fn model(&self) -> &str {
@@ -60,6 +111,7 @@ impl OpenAiCompatible {
         Catalog {
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
+            retry: self.retry,
         }
     }
 }
@@ -67,15 +119,15 @@ impl OpenAiCompatible {
 pub struct Catalog {
     base_url: String,
     api_key: Option<String>,
+    retry: Retry,
 }
 
 impl ModelCatalog for Catalog {
     fn provider(&self, model: &str) -> Box<dyn ModelProvider> {
-        Box::new(OpenAiCompatible::new(
-            self.base_url.clone(),
-            self.api_key.clone(),
-            model,
-        ))
+        Box::new(
+            OpenAiCompatible::new(self.base_url.clone(), self.api_key.clone(), model)
+                .with_retry(self.retry),
+        )
     }
 
     fn price(&self, model: &str) -> Option<Price> {
@@ -120,6 +172,8 @@ impl ModelProvider for OpenAiCompatible {
         Some(&self.model)
     }
 
+    /// 每次调用带一个 trace ID（请求头 `X-Client-Request-Id`，重试沿用），出错时连同服务端的
+    /// 请求 ID 写进错误信息，便于对照服务商的日志。
     fn next_turn(
         &self,
         messages: &[Message],
@@ -136,37 +190,115 @@ impl ModelProvider for OpenAiCompatible {
         if !tools.is_empty() {
             body["tools"] = encode_tools(tools)?;
         }
+        // 度支将尽：输出至多用完余额。
+        if let Some(room) = hooks.max_output().filter(|&room| room < MAX_TOKENS_CAP) {
+            body["max_tokens"] = json!(room.max(1));
+        }
+        let body = body.to_string();
+        let trace = format!("zy-{}", &guard::nonce()[..12]);
+        let mut retry = 0;
+        loop {
+            let failure = match self.attempt(&body, &trace, hooks) {
+                Ok(turn) => return Ok(turn),
+                Err(failure) => failure,
+            };
+            if !failure.retryable || retry >= self.retry.attempts || hooks.is_cancelled() {
+                let server = failure
+                    .request_id
+                    .map_or(String::new(), |id| format!("，服务端 {id}"));
+                let tries = if retry > 0 {
+                    format!("，已重试 {retry} 次")
+                } else {
+                    String::new()
+                };
+                return Err(format!("{}（trace {trace}{server}{tries}）", failure.error).into());
+            }
+            // 退避期间也响应撤销。
+            let wait = self.retry.delay(retry, failure.after);
+            let until = std::time::Instant::now() + wait;
+            while std::time::Instant::now() < until {
+                if hooks.is_cancelled() {
+                    return Err("已撤销，不再重试".into());
+                }
+                std::thread::sleep(
+                    (until - std::time::Instant::now()).min(Duration::from_millis(50)),
+                );
+            }
+            retry += 1;
+        }
+    }
+}
+
+impl OpenAiCompatible {
+    fn attempt(
+        &self,
+        body: &str,
+        trace: &str,
+        hooks: &dyn ExecutionHooks,
+    ) -> Result<ModelTurn, Failure> {
+        let fail = |error: BoxError, retryable: bool| Failure {
+            error,
+            retryable,
+            after: None,
+            request_id: None,
+        };
         let mut request = self
             .agent
             .post(format!("{}/chat/completions", self.base_url))
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("X-Client-Request-Id", trace);
         if let Some(key) = &self.api_key {
             request = request.header("Authorization", format!("Bearer {key}"));
         }
-        let response = request.send(body.to_string())?;
+        // 连接失败、超时等网络错误可以重试。
+        let response = request
+            .send(body)
+            .map_err(|e| fail(format!("模型 API 请求失败: {e}").into(), true))?;
         let status = response.status();
-        let is_stream = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.starts_with("text/event-stream"));
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let request_id = header("x-request-id").or_else(|| header("request-id"));
+        let after = header("retry-after")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let is_stream = header("content-type").is_some_and(|v| v.starts_with("text/event-stream"));
         let mut body = response.into_body();
+        let failed = |error: BoxError, retryable: bool| Failure {
+            error,
+            retryable,
+            after,
+            request_id: request_id.clone(),
+        };
         if !status.is_success() {
-            let text = body.read_to_string()?;
+            let text = body.read_to_string().unwrap_or_default();
             let snippet: String = text.chars().take(500).collect();
-            return Err(format!("模型 API 返回 {status}: {snippet}").into());
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            return Err(failed(
+                format!("模型 API 返回 {status}: {snippet}").into(),
+                retryable,
+            ));
         }
+        // 以下已开始接收答复（可能已流式显示了文字），出错不再重试。
         if !is_stream {
             // 不支持流式的服务会忽略 `stream`，直接返回完整 JSON。
-            let response: Value = serde_json::from_str(&body.read_to_string()?)?;
+            let parsed = body
+                .read_to_string()
+                .map_err(BoxError::from)
+                .and_then(|text| serde_json::from_str::<Value>(&text).map_err(BoxError::from));
+            let response = parsed.map_err(|e| failed(e, false))?;
             report_usage(&response, hooks);
-            let turn = decode_turn(&response)?;
+            let turn = decode_turn(&response).map_err(|e| failed(e, false))?;
             if let ModelTurn::Final(text) = &turn {
                 hooks.text_delta(text);
             }
             return Ok(turn);
         }
-        read_stream(BufReader::new(body.into_reader()), hooks)
+        read_stream(BufReader::new(body.into_reader()), hooks).map_err(|e| failed(e, false))
     }
 }
 
@@ -380,26 +512,38 @@ mod tests {
     use ziyuan_core::{Agent, AgentId, Capability, Department, Edict, Seal, TaskId};
     use ziyuan_runtime::{AgentBackend, Job, WorkerBackend};
 
-    /// 每个请求的 JSON 请求体与 Authorization 头。
-    type Requests = Arc<Mutex<Vec<(Value, String)>>>;
+    /// 每个请求的 JSON 请求体、Authorization 头与 X-Client-Request-Id 头。
+    type Requests = Arc<Mutex<Vec<(Value, String, String)>>>;
 
-    /// 依次返回 `replies`，并记录收到的请求体与 Authorization 头。
     fn mock_server(replies: Vec<(u16, String)>) -> (String, Requests) {
+        mock_server_with(
+            replies
+                .into_iter()
+                .map(|(s, r)| (s, r, String::new()))
+                .collect(),
+        )
+    }
+
+    /// 依次返回 `replies`（状态、正文、额外响应头），并记录收到的请求。
+    fn mock_server_with(replies: Vec<(u16, String, String)>) -> (String, Requests) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
         thread::spawn(move || {
-            for (status, reply) in replies {
+            for (status, reply, extra) in replies {
                 let (stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream);
-                let (mut length, mut auth) = (0, String::new());
+                let (mut length, mut auth, mut trace) = (0, String::new(), String::new());
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).unwrap();
                     let lower = line.to_ascii_lowercase();
                     if let Some(v) = lower.strip_prefix("content-length:") {
                         length = v.trim().parse().unwrap();
+                    }
+                    if lower.starts_with("x-client-request-id:") {
+                        trace = line["x-client-request-id:".len()..].trim().to_owned();
                     }
                     if lower.starts_with("authorization:") {
                         auth = line["authorization:".len()..].trim().to_owned();
@@ -412,7 +556,7 @@ mod tests {
                 reader.read_exact(&mut body).unwrap();
                 log.lock()
                     .unwrap()
-                    .push((serde_json::from_slice(&body).unwrap(), auth));
+                    .push((serde_json::from_slice(&body).unwrap(), auth, trace));
                 let mut stream = reader.into_inner();
                 // 以 `data:` 开头的回复按 SSE 流发送，其余按普通 JSON。
                 let content_type = if reply.starts_with("data:") {
@@ -422,7 +566,7 @@ mod tests {
                 };
                 write!(
                     stream,
-                    "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                     reply.len()
                 )
                 .unwrap();
@@ -454,7 +598,12 @@ mod tests {
             ),
             (200, final_reply("lib.rs 第 1 行有 unsafe")),
         ]);
-        let default = OpenAiCompatible::new(url, Some("sk-test".into()), "m");
+        // 回奏不合体例会发回重写，那次请求打到已关闭的模拟服务上：不重试，照收原奏。
+        let no_retry = Retry {
+            attempts: 0,
+            ..Retry::default()
+        };
+        let default = OpenAiCompatible::new(url, Some("sk-test".into()), "m").with_retry(no_retry);
         let catalog = Box::new(default.catalog());
         let backend = AgentBackend::new(Box::new(default), root.clone(), 4).with_catalog(catalog);
         let actor = Agent {
@@ -491,7 +640,7 @@ mod tests {
         );
 
         let seen = seen.lock().unwrap();
-        let (first, auth) = &seen[0];
+        let (first, auth, _) = &seen[0];
         assert_eq!(auth, "Bearer sk-test");
         assert_eq!(first["model"], "deepseek-v4-pro");
         assert_eq!(first["messages"][0]["role"], "system");
@@ -692,6 +841,85 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("401") && err.contains("bad key"), "{err}");
+    }
+
+    fn quick(url: String, attempts: u32) -> OpenAiCompatible {
+        OpenAiCompatible::new(url, None, "m").with_retry(Retry {
+            attempts,
+            base: Duration::from_millis(10),
+            max: Duration::from_millis(200),
+        })
+    }
+
+    #[test]
+    fn transient_failures_are_retried_with_the_same_trace_id() {
+        let (url, seen) = mock_server_with(vec![
+            (503, "busy".into(), String::new()),
+            (429, "slow down".into(), "Retry-After: 0\r\n".into()),
+            (200, final_reply("好"), String::new()),
+        ]);
+        let turn = quick(url, 3).next_turn(&[Message::User("hi".into())], &[], &());
+        assert!(matches!(turn, Ok(ModelTurn::Final(t)) if t == "好"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(
+            seen[0].2.starts_with("zy-") && seen[0].2.len() == 15,
+            "{}",
+            seen[0].2
+        );
+        assert!(seen.iter().all(|r| r.2 == seen[0].2), "重试沿用同一 trace");
+    }
+
+    #[test]
+    fn retries_give_up_with_trace_and_server_request_id() {
+        let busy = || {
+            (
+                502,
+                "bad gateway".to_owned(),
+                "X-Request-Id: req-42\r\n".to_owned(),
+            )
+        };
+        let (url, seen) = mock_server_with(vec![busy(), busy()]);
+        let err = quick(url, 1)
+            .next_turn(&[Message::User("hi".into())], &[], &())
+            .unwrap_err()
+            .to_string();
+        let trace = seen.lock().unwrap()[1].2.clone();
+        assert!(
+            err.contains("502") && err.contains(&format!("trace {trace}")),
+            "{err}"
+        );
+        assert!(
+            err.contains("服务端 req-42") && err.contains("已重试 1 次"),
+            "{err}"
+        );
+        // 4xx（429 除外）是请求本身的问题，不重试。
+        let (url, seen) = mock_server(vec![(400, "bad request".into())]);
+        assert!(
+            quick(url, 3)
+                .next_turn(&[Message::User("hi".into())], &[], &())
+                .is_err()
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    struct Cap(u64);
+    impl ExecutionHooks for Cap {
+        fn max_output(&self) -> Option<u64> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn low_allowance_caps_max_tokens() {
+        let messages = [Message::User("hi".into())];
+        let (url, seen) = mock_server(vec![(200, final_reply("a")), (200, final_reply("b"))]);
+        let model = quick(url, 0);
+        model.next_turn(&messages, &[], &Cap(300)).unwrap();
+        model.next_turn(&messages, &[], &Cap(1_000_000)).unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0["max_tokens"], 300);
+        assert!(seen[1].0.get("max_tokens").is_none(), "余额充裕时不传");
     }
 
     #[test]
