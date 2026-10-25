@@ -548,6 +548,7 @@ impl Court {
 
     pub fn apply(&mut self, event: &CourtEvent) -> Result<(), GovernanceError> {
         match event {
+            CourtEvent::Clock(_) => {}
             CourtEvent::Founded(mode) => self.mode = *mode,
             CourtEvent::AgentRegistered(agent) => {
                 if agent.name.trim().is_empty() {
@@ -972,7 +973,7 @@ impl Court {
                     excerpt: excerpt.clone(),
                 });
             }
-            CourtEvent::ModelUsage { task, usage } => {
+            CourtEvent::ModelUsage { task, usage, .. } => {
                 let entry = self
                     .tasks
                     .get_mut(task)
@@ -3103,6 +3104,7 @@ mod tests {
                     input: 100,
                     output: 7,
                 },
+                trace: None,
             });
             for _ in 0..bad_tools {
                 events.push(CourtEvent::ToolInvoked {
@@ -3249,6 +3251,7 @@ mod tests {
                 input: 1,
                 output: 1,
             },
+            trace: None,
         };
         assert_eq!(
             with(std::slice::from_ref(&usage)).unwrap_err(),

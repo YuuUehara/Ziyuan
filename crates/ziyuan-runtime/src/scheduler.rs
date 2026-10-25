@@ -75,7 +75,12 @@ pub enum Progress {
     /// 模型流式生成的文本片段，只用于实时显示。
     TextDelta { task: TaskId, text: String },
     /// 一次模型调用的 token 用量。
-    Usage { task: TaskId, usage: TokenUsage },
+    Usage {
+        task: TaskId,
+        usage: TokenUsage,
+        /// 该次调用的 trace ID（模型 Adapter 报告时）。
+        trace: Option<String>,
+    },
     /// 承办官员呈报的暂存改动；总在该任务的 `Finished` 之前（除非已超时或被撤销）。
     Changes {
         task: TaskId,
@@ -188,6 +193,7 @@ async fn run_job(
         budget,
         spent: spent.clone(),
         treasury: treasury.clone(),
+        trace: Default::default(),
     };
     let task_cancel = hooks.cancel.clone();
     // 用到额度即停支；`strict` 时须超出才算（恰好用完而办成的照常采信）。
@@ -241,9 +247,15 @@ struct TaskHooks {
     /// 本次执行已用的 tokens。
     spent: Arc<AtomicU64>,
     treasury: Option<Arc<AtomicI64>>,
+    /// 当前模型调用的 trace ID。
+    trace: std::sync::Mutex<Option<String>>,
 }
 
 impl ExecutionHooks for TaskHooks {
+    fn model_trace(&self, trace: &str) {
+        *self.trace.lock().expect("锁未中毒") = Some(trace.to_owned());
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
@@ -252,6 +264,7 @@ impl ExecutionHooks for TaskHooks {
         let _ = self.progress.send(Progress::Usage {
             task: self.task,
             usage,
+            trace: self.trace.lock().expect("锁未中毒").clone(),
         });
         let spent = self.spent.fetch_add(usage.total(), Ordering::SeqCst) + usage.total();
         let total = usage.total() as i64;

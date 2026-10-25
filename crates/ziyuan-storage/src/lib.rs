@@ -76,9 +76,23 @@ pub trait EventStore {
     /// 仅当事件簿中恰好有 `expected` 条事件时追加 `events`（乐观并发），否则返回
     /// [`StorageError::Conflict`] 且不写入。调用者负责先校验事件（见 `ziyuan-app`）。
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError>;
+    /// 写入者是否记时辰（[`CourtEvent::Clock`]）。持久化的事件簿记；内存事件簿（测试）不记，
+    /// 以免事件条数随时钟变化。
+    fn stamps_time(&self) -> bool {
+        false
+    }
+}
+
+/// 事件类型的代码（事件簿中的类型字段，小写），如 `edict`、`tool`、`usage`。
+pub fn event_kind(event: &CourtEvent) -> String {
+    let line = codec::encode_event(event);
+    line.split('\t').nth(1).unwrap_or_default().to_lowercase()
 }
 
 impl<T: EventStore + ?Sized> EventStore for &mut T {
+    fn stamps_time(&self) -> bool {
+        (**self).stamps_time()
+    }
     fn load(&self) -> Result<Vec<CourtEvent>, StorageError> {
         (**self).load()
     }
@@ -194,6 +208,10 @@ pub struct ExecutorLock {
 }
 
 impl EventStore for EventLog {
+    fn stamps_time(&self) -> bool {
+        true
+    }
+
     fn load(&self) -> Result<Vec<CourtEvent>, StorageError> {
         self.set_cursor(Cursor::default());
         self.load_since(0)

@@ -24,8 +24,9 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, demotion_note,
-    describe_event, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diffs,
+    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, HistoryFilter, RunUpdate, Session, TaskReport,
+    demotion_note, duzhi_report, estimate_cost, format_time, history_entries, kaocheng_grade,
+    kaocheng_report, parse_time, render_diffs, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -313,11 +314,51 @@ async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(value))
 }
 
-async fn history(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let lines = app
-        .with_session(|s| Ok(s.history().iter().map(describe_event).collect::<Vec<_>>()))
-        .await?;
-    Ok(Json(json!(lines)))
+/// 起居注：可按 `task`、`official`、`kind`、`since`、`until`（同 CLI：`2h`、`2026-10-25 14:30`）筛选。
+async fn history(
+    State(app): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let get = |key: &str| query.get(key).map(|v| v.trim()).filter(|v| !v.is_empty());
+    let id = |key: &str| -> Result<Option<u64>, ApiError> {
+        get(key)
+            .map(|v| {
+                v.parse()
+                    .map_err(|_| ApiError::bad(format!("{key} 须为数字")))
+            })
+            .transpose()
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let offset = tz_offset();
+    let time = |key: &str| -> Result<Option<u64>, ApiError> {
+        get(key)
+            .map(|v| parse_time(v, now, offset).map_err(ApiError::bad))
+            .transpose()
+    };
+    let filter = HistoryFilter {
+        task: id("task")?.map(TaskId),
+        agent: id("official")?.map(AgentId),
+        kind: get("kind").map(str::to_lowercase),
+        since: time("since")?,
+        until: time("until")?,
+    };
+    let entries = app
+        .with_session(move |s| Ok(history_entries(s.history(), &filter)))
+        .await?
+        .map_err(ApiError::bad)?;
+    Ok(Json(json!(
+        entries
+            .into_iter()
+            .map(|e| json!({
+                "seq": e.seq,
+                "time": e.at.map(|t| format_time(t, offset)),
+                "kind": e.kind,
+                "text": e.text,
+            }))
+            .collect::<Vec<_>>()
+    )))
 }
 
 async fn recommend(
@@ -1646,6 +1687,34 @@ mod tests {
                 400,
                 "{path}"
             );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn history_can_be_filtered() {
+        let (base, root) = start("history").await;
+        let t = Some(TOKEN);
+        let edict = json!({ "department": "works", "text": "查起居注", "queue": true });
+        assert_eq!(call(&base, "/edicts", t, Some(edict)).await.0, 200);
+        let (_, all) = call(&base, "/history", t, None).await;
+        let all = all.as_array().unwrap();
+        // 时辰不单列；持久化的事件簿记了时辰，各条都有时间。
+        assert!(
+            all.iter()
+                .all(|e| e["kind"] != "clock" && e["time"].is_string()),
+            "{all:?}"
+        );
+        let (_, edicts) = call(&base, "/history?kind=edict&since=1h&task=1", t, None).await;
+        assert_eq!(edicts.as_array().unwrap().len(), 1, "{edicts}");
+        let (_, none) = call(&base, "/history?until=2000-01-01", t, None).await;
+        assert!(none.as_array().unwrap().is_empty());
+        for bad in [
+            "/history?kind=nope",
+            "/history?since=yesterday",
+            "/history?task=x",
+        ] {
+            assert_eq!(call(&base, bad, t, None).await.0, 400, "{bad}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }

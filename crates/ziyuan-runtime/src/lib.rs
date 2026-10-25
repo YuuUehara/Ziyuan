@@ -49,6 +49,8 @@ pub trait ExecutionHooks {
     fn text_delta(&self, _text: &str) {}
     /// 一次模型调用的 token 用量（服务端报告时）。
     fn model_usage(&self, _usage: TokenUsage) {}
+    /// 即将发出的模型调用的 trace ID；其后报告的用量属于这次调用。
+    fn model_trace(&self, _trace: &str) {}
     /// 承办成功、即将回奏时呈报暂存的文件改动（有改动时才调用）。
     fn changes_proposed(&self, _changes: Vec<FileChange>) {}
     /// 本件还可花的 tokens（本件度支与国库余额中较小者）；`None` 不限。

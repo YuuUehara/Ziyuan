@@ -250,6 +250,9 @@ impl ExecutionHooks for Metered<'_> {
         self.last.set((len, usage));
         self.inner.model_usage(usage);
     }
+    fn model_trace(&self, trace: &str) {
+        self.inner.model_trace(trace);
+    }
     fn token_allowance(&self) -> Option<u64> {
         self.inner.token_allowance()
     }

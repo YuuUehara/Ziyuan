@@ -859,6 +859,9 @@ pub struct Template {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CourtEvent {
     Founded(GovernanceMode),
+    /// 时辰：此后的事件发生于该时刻（Unix 秒）之后、下一个时辰之前。不改变朝廷状态，
+    /// 只供起居注按时间筛选；写入者在分钟变化时才记一条。
+    Clock(u64),
     AgentRegistered(Agent),
     OfficialAppointed {
         agent: AgentId,
@@ -1040,6 +1043,8 @@ pub enum CourtEvent {
     ModelUsage {
         task: TaskId,
         usage: TokenUsage,
+        /// 该次调用的 trace ID（请求头 `X-Client-Request-Id`）；早期日志与演示后端为 `None`。
+        trace: Option<String>,
     },
     /// 皇帝评定已完成的诏令（每件一次）。这是吏部考绩唯一采信的质量依据。
     TaskReviewed {

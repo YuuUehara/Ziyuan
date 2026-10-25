@@ -273,6 +273,9 @@
   details.history[open] summary h2::after { content: "收起"; }
   .history-list { margin: 0; padding: 12px 18px 16px 52px; max-height: 360px; overflow: auto; font-size: 13px; columns: 2; column-gap: 40px; }
   .history-list li { break-inside: avoid; margin-bottom: 3px; }
+  .history-filter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 18px 0; }
+  .history-filter input[type=text] { width: 9em; padding: 4px 8px; font-size: 13px; }
+  .history-filter #hf-kind, .history-filter #hf-since { width: 13em; }
 
   #toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
@@ -451,7 +454,17 @@
   </section>
 
   <details class="card full history" id="history">
-    <summary><h2>起居注 <small>事件簿全文</small></h2></summary>
+    <summary><h2>起居注 <small>事件簿全文，可筛选</small></h2></summary>
+    <form class="history-filter" id="history-filter">
+      <input type="text" id="hf-task" data-keep placeholder="诏令 ID">
+      <input type="text" id="hf-official" data-keep placeholder="官员 ID">
+      <input type="text" id="hf-kind" data-keep placeholder="类型，如 tool、usage">
+      <input type="text" id="hf-since" data-keep placeholder="起：2h、3d、2026-10-25">
+      <input type="text" id="hf-until" data-keep placeholder="止">
+      <button class="small shrink" type="submit">筛选</button>
+      <button class="small shrink" type="button" id="hf-clear">全部</button>
+      <span class="hint" id="hf-count"></span>
+    </form>
     <ol class="history-list" id="history-list"></ol>
   </details>
 </main>
@@ -769,8 +782,15 @@ async function refresh() {
 }
 
 async function loadHistory() {
-  const lines = await api("/history");
-  $("history-list").innerHTML = lines.map((l) => `<li>${esc(l)}</li>`).join("");
+  const params = new URLSearchParams();
+  for (const key of ["task", "official", "kind", "since", "until"]) {
+    const value = $("hf-" + key).value.trim();
+    if (value) params.set(key, value);
+  }
+  const entries = await api("/history" + (params.size ? "?" + params : ""));
+  $("hf-count").textContent = params.size ? `共 ${entries.length} 条` : "";
+  $("history-list").innerHTML = entries.map((e) =>
+    `<li value="${e.seq}"><span class="hint">${e.time ? esc(e.time.slice(5)) : ""}</span> ${esc(e.text)}</li>`).join("");
 }
 
 const TOOLS = ["read_file", "search_code", "write_file", "run_tests"];
@@ -917,6 +937,14 @@ $("palace-btn").addEventListener("click", () => {
     .finally(() => { palaceLive = null; refresh(); });
 });
 $("history").addEventListener("toggle", () => { if ($("history").open) loadHistory(); });
+$("history-filter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadHistory().catch((e) => toast(e.message, true));
+});
+$("hf-clear").addEventListener("click", () => {
+  for (const key of ["task", "official", "kind", "since", "until"]) $("hf-" + key).value = "";
+  loadHistory().catch((e) => toast(e.message, true));
+});
 
 document.addEventListener("click", (event) => {
   const el = event.target.closest("button");

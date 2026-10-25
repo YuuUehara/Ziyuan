@@ -196,6 +196,7 @@ impl ModelProvider for OpenAiCompatible {
         }
         let body = body.to_string();
         let trace = format!("zy-{}", &guard::nonce()[..12]);
+        hooks.model_trace(&trace);
         let mut retry = 0;
         loop {
             let failure = match self.attempt(&body, &trace, hooks) {
@@ -715,6 +716,7 @@ mod tests {
     struct Recorder {
         deltas: std::cell::RefCell<Vec<String>>,
         usage: std::cell::RefCell<Vec<TokenUsage>>,
+        traces: std::cell::RefCell<Vec<String>>,
         cancel_after: Option<usize>,
     }
     impl ExecutionHooks for Recorder {
@@ -727,6 +729,9 @@ mod tests {
         }
         fn model_usage(&self, usage: TokenUsage) {
             self.usage.borrow_mut().push(usage);
+        }
+        fn model_trace(&self, trace: &str) {
+            self.traces.borrow_mut().push(trace.into());
         }
     }
 
@@ -773,7 +778,7 @@ mod tests {
             ],
             true,
         );
-        let (url, _) = mock_server(vec![(200, reply)]);
+        let (url, seen) = mock_server(vec![(200, reply)]);
         let hooks = Recorder::default();
         let turn = OpenAiCompatible::new(url, Some("k".into()), "gpt-5-mini")
             .next_turn(&[Message::User("q".into())], &[], &hooks)
@@ -784,6 +789,8 @@ mod tests {
         assert_eq!((calls.len(), calls[0].id.as_str()), (1, "call_1"));
         assert_eq!(calls[0].args_json, r#"{"path":"src/lib.rs"}"#);
         assert!(text.is_empty());
+        // 用量之前先报 trace ID，与请求头一致（事件簿据此把 trace 记在用量上）。
+        assert_eq!(*hooks.traces.borrow(), [seen.lock().unwrap()[0].2.clone()]);
         // 推理 token 已含在 completion_tokens 内，不重复计。
         assert_eq!(
             *hooks.usage.borrow(),

@@ -294,9 +294,14 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             to_hex(source),
             to_hex(excerpt)
         ),
-        ModelUsage { task, usage } => {
-            format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output)
+        ModelUsage { task, usage, trace } => {
+            let line = format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output);
+            match trace {
+                Some(trace) => format!("{line}\t{}", to_hex(trace)),
+                None => line,
+            }
         }
+        Clock(at) => format!("v1\tCLOCK\t{at}"),
         TaskReviewed {
             task,
             verdict,
@@ -727,13 +732,19 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             source: from_hex(field(4)?)?,
             excerpt: from_hex(field(5)?)?,
         },
+        // v0.4 及更早的日志没有 trace 字段。
         "USAGE" => ModelUsage {
             task: TaskId(id(2)?),
             usage: TokenUsage {
                 input: id(3)?,
                 output: id(4)?,
             },
+            trace: match parts.len() {
+                5 => None,
+                _ => Some(from_hex(field(5)?)?),
+            },
         },
+        "CLOCK" => Clock(id(2)?),
         "REVIEWED" => TaskReviewed {
             task: TaskId(id(2)?),
             verdict: field(3)?.parse::<Verdict>().map_err(|e| e.to_string())?,
@@ -778,7 +789,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictDrafted { .. } => 8,
         OfficeCeilingSet { .. } => 5,
         EdictIssued(_) if parts.len() == 5 => 5,
+        ModelUsage { trace: Some(_), .. } => 6,
         AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
+        Clock(_) => 3,
         EdictIssued(_) => 7,
         ToolInvoked { .. } | SuspicionRaised { .. } => 6,
     };
@@ -1076,7 +1089,14 @@ mod tests {
                     input: 12_345,
                     output: 678,
                 },
+                trace: None,
             },
+            CourtEvent::ModelUsage {
+                task,
+                usage: TokenUsage::default(),
+                trace: Some("zy-0123456789ab".into()),
+            },
+            CourtEvent::Clock(1_792_909_102),
             CourtEvent::TaskReviewed {
                 task,
                 verdict: Verdict::Rejected,

@@ -20,8 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, describe_event, describe_record,
-    duzhi_report, estimate_cost, kaocheng_report, render_diffs, seal_note, skipped_note,
+    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, HistoryEntry, HistoryFilter, RunUpdate, Session,
+    describe_record, duzhi_report, estimate_cost, format_time, history_entries, kaocheng_report,
+    render_diffs, seal_note, skipped_note, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech,
@@ -1002,7 +1003,7 @@ impl App {
                     step(self.selected_official, self.court().agents().count());
             }
             Tab::History => {
-                let len = self.session.history().len();
+                let len = self.history().len();
                 let index = self.selected_event.unwrap_or(len.saturating_sub(1));
                 let next = step(index, len);
                 self.selected_event = (next + 1 < len).then_some(next);
@@ -1586,15 +1587,22 @@ impl App {
         );
     }
 
+    /// 起居注各条（时辰并入各条的时间，不单列）。
+    fn history(&self) -> Vec<HistoryEntry> {
+        history_entries(self.session.history(), &HistoryFilter::default()).unwrap_or_default()
+    }
+
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
-        let history = self.session.history();
+        let history = self.history();
+        let offset = tz_offset();
         let items: Vec<ListItem> = history
             .iter()
-            .enumerate()
-            .map(|(i, e)| {
+            .map(|e| {
+                let at =
+                    e.at.map_or(String::new(), |t| format_time(t, offset)[5..].to_owned());
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:>4} ", i + 1), Style::new().dim()),
-                    Span::raw(describe_event(e)),
+                    Span::styled(format!("{:>4} {at:<11} ", e.seq), Style::new().dim()),
+                    Span::raw(e.text.clone()),
                 ]))
             })
             .collect();

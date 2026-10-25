@@ -9,9 +9,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
-    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, WatchOptions, WatchUpdate,
-    demotion_note, describe_event, describe_record, duzhi_report, estimate_cost, kaocheng_grade,
-    kaocheng_report, render_diffs, seal_note, skipped_note,
+    ABOLITION_NOTE, EXECUTOR_BUSY, HistoryFilter, RunUpdate, Session, TaskReport, WatchOptions,
+    WatchUpdate, demotion_note, describe_record, duzhi_report, estimate_cost, format_time,
+    history_entries, kaocheng_grade, kaocheng_report, parse_time, render_diffs, seal_note,
+    skipped_note, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -93,7 +94,9 @@ const HELP: &str = concat!(
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
   ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
-  ziyuan history                       查看事件记录
+  ziyuan history [--task ID] [--official ID] [--kind 类型] [--since 时间] [--until 时间]
+                                       查看起居注（事件记录）；时间如 30m、2h、3d、2026-10-25、2026-10-25 14:30，
+                                       按 ZIYUAN_TZ（如 +08:00，默认 UTC）
   ziyuan <court|officials|tasks|history> --json
                                        以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
   ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
@@ -240,7 +243,7 @@ enum Command {
     Apply(TaskId, Vec<u32>),
     Discard(TaskId),
     Recommend(Office),
-    History,
+    History(HistoryFilter),
     /// 输出 shell 补全脚本。
     Completions(Shell),
 }
@@ -378,7 +381,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "init" => no_args(args, Command::Init)?,
         "court" => no_args(args, Command::Court)?,
         "officials" => no_args(args, Command::Officials)?,
-        "history" => no_args(args, Command::History)?,
+        "history" => parse_history(args)?,
         "recruit" => match args.as_slice() {
             [dept] => Command::Recruit(None, dept.parse()?),
             [name, dept] => Command::Recruit(Some(name.clone()), dept.parse()?),
@@ -1336,9 +1339,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
             println!("仅为建议：任命须由皇帝 `ziyuan appoint`（如有现职须先 dismiss）。");
         }
-        Command::History => {
-            for (i, event) in session.history().iter().enumerate() {
-                println!("{:>3}: {}", i + 1, describe_event(event));
+        Command::History(filter) => {
+            let offset = tz_offset();
+            for entry in history_entries(session.history(), &filter)? {
+                let at = entry.at.map_or("—".repeat(16), |t| format_time(t, offset));
+                println!("{:>3}: {at}  {}", entry.seq, entry.text);
             }
         }
     }
@@ -1571,12 +1576,21 @@ fn json_output(
         Command::Court => state()?,
         Command::Officials => state()?["officials"].take(),
         Command::Tasks => state()?["tasks"].take(),
-        Command::History => session
-            .history()
-            .iter()
-            .enumerate()
-            .map(|(i, e)| serde_json::json!({ "seq": i + 1, "text": describe_event(e) }))
-            .collect(),
+        Command::History(filter) => {
+            let offset = tz_offset();
+            history_entries(session.history(), filter)?
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "seq": e.seq,
+                        "at": e.at,
+                        "time": e.at.map(|t| format_time(t, offset)),
+                        "kind": e.kind,
+                        "text": e.text,
+                    })
+                })
+                .collect()
+        }
         _ => unreachable!("run 已检查 JSON_COMMANDS"),
     })
 }
@@ -1691,6 +1705,34 @@ fn task_id(args: &[String], usage: &str) -> Result<TaskId, Box<dyn Error>> {
         [id] => Ok(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
         _ => Err(format!("用法: {usage}").into()),
     }
+}
+
+fn parse_history(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    const USAGE: &str = "用法: ziyuan history [--task <诏令ID>] [--official <官员ID>] [--kind <类型>] \\
+                         [--since <时间>] [--until <时间>]";
+    let mut filter = HistoryFilter::default();
+    let (now, offset) = (
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        tz_offset(),
+    );
+    for pair in args.chunks(2) {
+        let [flag, value] = pair else {
+            return Err(USAGE.into());
+        };
+        match flag.as_str() {
+            "--task" => {
+                filter.task = Some(TaskId(value.parse().map_err(|_| "诏令 ID 必须是数字")?))
+            }
+            "--official" => filter.agent = Some(agent_id(value)?),
+            "--kind" => filter.kind = Some(value.to_lowercase()),
+            "--since" => filter.since = Some(parse_time(value, now, offset)?),
+            "--until" => filter.until = Some(parse_time(value, now, offset)?),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    Ok(Command::History(filter))
 }
 
 fn parse_run(args: Vec<String>) -> Result<Command, Box<dyn Error>> {

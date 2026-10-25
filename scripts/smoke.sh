@@ -224,4 +224,11 @@ kill -INT "$WATCH"
 wait "$WATCH"
 has "诏令 #$WID 都察院自动复核" < "$DEMO/watch.out"
 { "$BIN" run --poll 3 2>&1 || true; } | has '只用于常朝'
+# 起居注可查：按诏令、类型、时间筛选；时辰不单列；错误的条件报错
+"$BIN" history --task 1 --kind edict | has '诏令 #1：'
+"$BIN" history --since 1h --json | has '"time": "20'
+[ -z "$("$BIN" history --until 2000-01-01)" ]
+{ "$BIN" history --kind nope 2>&1 || true; } | has '本事件簿有'
+{ "$BIN" history --since 昨天 2>&1 || true; } | has '时间不合法'
+! "$BIN" history | grep -q '时辰：'
 echo 'ZiYuan smoke test PASS'

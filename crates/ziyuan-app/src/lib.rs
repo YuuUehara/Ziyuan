@@ -125,7 +125,10 @@ pub struct Session<S: EventStore> {
 impl<S: EventStore> Session<S> {
     /// 在空事件簿上建立默认朝廷（丞相制）。并发 init 只有一个成功。
     pub fn found(mut store: S) -> Result<Self, AppError> {
-        let history = founding_events(random_seed());
+        let mut history = founding_events(random_seed());
+        if store.stamps_time() {
+            history.insert(1, CourtEvent::Clock(now()));
+        }
         let court = Court::replay(&history)?;
         match store.append(0, &history) {
             Err(StorageError::Conflict { .. }) => return Err(AppError::AlreadyFounded),
@@ -1437,12 +1440,16 @@ impl<S: EventStore> Session<S> {
                 break;
             };
             match update {
-                Progress::Usage { task, usage } => {
+                Progress::Usage { task, usage, trace } => {
                     // 结束后才返回的调用同样消耗了 token，照记不误。
                     self.commit(|court| {
                         Ok(match court.task(task).map(|t| &t.status) {
                             Some(TaskStatus::Pending) | None => Vec::new(),
-                            Some(_) => vec![CourtEvent::ModelUsage { task, usage }],
+                            Some(_) => vec![CourtEvent::ModelUsage {
+                                task,
+                                usage,
+                                trace: trace.clone(),
+                            }],
                         })
                     })?;
                 }
@@ -1689,10 +1696,23 @@ impl<S: EventStore> Session<S> {
             for event in &events {
                 next.apply(event)?;
             }
-            match self.store.append(self.history.len(), &events) {
+            // 分钟变了才记一条时辰，置于本批之前。
+            let mut written = Vec::with_capacity(events.len() + 1);
+            if self.store.stamps_time() {
+                let at = now();
+                let last = self.history.iter().rev().find_map(|e| match e {
+                    CourtEvent::Clock(t) => Some(*t),
+                    _ => None,
+                });
+                if last.is_none_or(|t| t / 60 != at / 60) {
+                    written.push(CourtEvent::Clock(at));
+                }
+            }
+            written.extend(events.iter().cloned());
+            match self.store.append(self.history.len(), &written) {
                 Ok(()) => {
                     self.court = next;
-                    self.history.extend(events.iter().cloned());
+                    self.history.extend(written);
                     return Ok(events);
                 }
                 Err(StorageError::Conflict { .. }) => self.reload()?,
@@ -1700,6 +1720,245 @@ impl<S: EventStore> Session<S> {
             }
         }
     }
+}
+
+/// 当前 Unix 时间（秒）。
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// 起居注的筛选条件；各项同时满足。时间为 Unix 秒。
+#[derive(Clone, Debug, Default)]
+pub struct HistoryFilter {
+    pub task: Option<TaskId>,
+    pub agent: Option<AgentId>,
+    /// 事件类型代码（见 [`ziyuan_storage::event_kind`]），如 `tool`、`usage`。
+    pub kind: Option<String>,
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+}
+
+/// 起居注的一条：`seq` 为事件簿中的序号（从 1 起，时辰不单列，故可能跳号），`at` 为所属时辰。
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    pub seq: usize,
+    pub at: Option<u64>,
+    pub kind: String,
+    pub text: String,
+}
+
+/// 按条件筛选起居注。早于第一条时辰的事件（v0.5 以前的日志）没有时间，按时间筛选时不列出。
+/// 事件类型不认识时报错，并列出本事件簿中有的类型。
+pub fn history_entries(
+    history: &[CourtEvent],
+    filter: &HistoryFilter,
+) -> Result<Vec<HistoryEntry>, String> {
+    if let Some(kind) = &filter.kind {
+        let kinds: std::collections::BTreeSet<String> =
+            history.iter().map(ziyuan_storage::event_kind).collect();
+        if !kinds.contains(kind) {
+            let known: Vec<_> = kinds.into_iter().filter(|k| k != "clock").collect();
+            return Err(format!(
+                "没有「{kind}」类事件；本事件簿有：{}",
+                known.join(" ")
+            ));
+        }
+    }
+    // 开国须为第一条，其时辰紧随其后。
+    let mut at = match history.get(1) {
+        Some(CourtEvent::Clock(t)) => Some(*t),
+        _ => None,
+    };
+    let mut entries = Vec::new();
+    for (i, event) in history.iter().enumerate() {
+        if let CourtEvent::Clock(t) = event {
+            at = Some(*t);
+            continue;
+        }
+        let kind = ziyuan_storage::event_kind(event);
+        let keep = filter.kind.as_ref().is_none_or(|k| *k == kind)
+            && filter.task.is_none_or(|t| event_tasks(event).contains(&t))
+            && filter
+                .agent
+                .is_none_or(|a| event_agents(event).contains(&a))
+            && filter.since.is_none_or(|s| at.is_some_and(|t| t >= s))
+            && filter.until.is_none_or(|u| at.is_some_and(|t| t <= u));
+        if keep {
+            entries.push(HistoryEntry {
+                seq: i + 1,
+                at,
+                kind,
+                text: describe_event(event),
+            });
+        }
+    }
+    Ok(entries)
+}
+
+/// 事件涉及的诏令（分办含各子诏令）。
+fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
+    use CourtEvent::*;
+    match event {
+        EdictIssued(edict) => vec![edict.id],
+        EdictSplit { task, subtasks, .. } => std::iter::once(*task)
+            .chain(subtasks.iter().map(|s| s.id))
+            .collect(),
+        EdictDrafted { task, .. }
+        | CourtDebated { task, .. }
+        | EdictApproved { task }
+        | TaskAssigned { task, .. }
+        | ToolInvoked { task, .. }
+        | TaskCompleted { task, .. }
+        | TaskFailed { task, .. }
+        | TaskCancelled { task }
+        | ChangesProposed { task, .. }
+        | ChangesApplied { task, .. }
+        | ChangesDiscarded { task }
+        | CensorReported { task, .. }
+        | SuspicionRaised { task, .. }
+        | CourierDelivered { task, .. }
+        | EdictExpedited { task }
+        | TemplateApplied { task, .. }
+        | ModelUsage { task, .. }
+        | TaskReviewed { task, .. } => vec![*task],
+        Founded(_)
+        | Clock(_)
+        | AgentRegistered(_)
+        | OfficialAppointed { .. }
+        | OfficialDismissed { .. }
+        | OfficialPurged { .. }
+        | InstitutionReformed(_)
+        | EmperorRetreat(_)
+        | OfficeModelSet { .. }
+        | OfficeCeilingSet { .. }
+        | BudgetSet { .. }
+        | ExamTaken { .. }
+        | PalaceExamHeld { .. }
+        | ZhuangyuanNamed { .. }
+        | CourtNominated { .. }
+        | OfficialCaned { .. }
+        | OfficialPardoned { .. }
+        | TemplateSaved { .. }
+        | TemplateRemoved { .. } => Vec::new(),
+    }
+}
+
+/// 事件点名的官员（承办、拟派、复核、发言、推举等）。
+fn event_agents(event: &CourtEvent) -> Vec<AgentId> {
+    use CourtEvent::*;
+    match event {
+        AgentRegistered(a) => vec![a.id],
+        OfficialAppointed { agent, .. }
+        | OfficialDismissed { agent }
+        | OfficialPurged { agent }
+        | ExamTaken { agent, .. }
+        | ZhuangyuanNamed { agent }
+        | OfficialCaned { agent }
+        | OfficialPardoned { agent } => vec![*agent],
+        EdictDrafted { worker, .. }
+        | TaskAssigned { worker, .. }
+        | TaskCompleted { worker, .. } => vec![*worker],
+        CensorReported { censor, .. } => vec![*censor],
+        EdictSplit { subtasks, .. } => subtasks.iter().map(|s| s.worker).collect(),
+        CourtDebated { speeches, .. } => speeches.iter().map(|s| s.speaker).collect(),
+        PalaceExamHeld { answers, .. } => answers.iter().map(|s| s.speaker).collect(),
+        CourtNominated { votes, .. } => votes.iter().flat_map(|v| [v.voter, v.candidate]).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 显示时间所用的时区（秒）：`ZIYUAN_TZ` 如 `+08:00`、`-05:30`，未设或不合法为 UTC。
+pub fn tz_offset() -> i64 {
+    std::env::var("ZIYUAN_TZ")
+        .ok()
+        .and_then(|s| parse_offset(&s))
+        .unwrap_or(0)
+}
+
+fn parse_offset(s: &str) -> Option<i64> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => return None,
+    };
+    let (h, m) = rest.split_once(':').unwrap_or((rest, "0"));
+    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+    (h <= 14 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+/// 公历日期距 1970-01-01 的天数（Howard Hinnant 的算法）。
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// `YYYY-MM-DD HH:MM`（按 `offset` 秒的时区）。
+pub fn format_time(at: u64, offset: i64) -> String {
+    let local = at as i64 + offset;
+    let (y, m, d) = civil_from_days(local.div_euclid(86_400));
+    let secs = local.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        secs / 3600,
+        secs % 3600 / 60
+    )
+}
+
+/// 解析起居注筛选的时间：`30m`、`2h`、`3d`（距 `now` 之前），或 `YYYY-MM-DD[ HH:MM]`
+/// （按 `offset` 秒的时区）。
+pub fn parse_time(input: &str, now: u64, offset: i64) -> Result<u64, String> {
+    let bad = || format!("时间不合法：{input}（如 30m、2h、3d、2026-10-25 或 2026-10-25 14:30）");
+    let s = input.trim();
+    if let Some(unit) = s.chars().last().filter(|c| "mhd".contains(*c)) {
+        let n: u64 = s[..s.len() - 1].parse().map_err(|_| bad())?;
+        let secs = match unit {
+            'm' => 60,
+            'h' => 3600,
+            _ => 86_400,
+        };
+        return Ok(now.saturating_sub(n.saturating_mul(secs)));
+    }
+    let (date, clock) = s.split_once([' ', 'T']).unwrap_or((s, "00:00"));
+    let date: Vec<i64> = date
+        .split('-')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .map_err(|_| bad())?;
+    let clock: Vec<i64> = clock
+        .split(':')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .map_err(|_| bad())?;
+    let (&[y, m, d], &[h, min]) = (date.as_slice(), clock.as_slice()) else {
+        return Err(bad());
+    };
+    if !(1..=12).contains(&m)
+        || !(1..=31).contains(&d)
+        || !(0..24).contains(&h)
+        || !(0..60).contains(&min)
+    {
+        return Err(bad());
+    }
+    let local = days_from_civil(y, m, d) * 86_400 + h * 3600 + min * 60;
+    u64::try_from(local - offset).map_err(|_| bad())
 }
 
 /// 每次调用都不同的随机种子（标准库的 `RandomState` 由系统随机数初始化）。
@@ -2694,7 +2953,13 @@ pub fn describe_event(event: &CourtEvent) -> String {
             task.0,
             criteria.len()
         ),
-        CourtEvent::ModelUsage { task, usage } => format!("诏令 #{} 模型用量：{usage}", task.0),
+        CourtEvent::ModelUsage { task, usage, trace } => {
+            let trace = trace
+                .as_ref()
+                .map_or(String::new(), |t| format!("（trace {t}）"));
+            format!("诏令 #{} 模型用量：{usage}{trace}", task.0)
+        }
+        CourtEvent::Clock(at) => format!("时辰：{}", format_time(*at, tz_offset())),
         CourtEvent::TaskReviewed {
             task,
             verdict,
@@ -4070,6 +4335,88 @@ mod tests {
             ]);
             Ok("改毕".into())
         }
+    }
+
+    #[test]
+    fn history_filters_by_task_official_kind_and_time() {
+        assert_eq!(parse_time("2026-10-25", 0, 0), Ok(1_792_886_400));
+        assert_eq!(
+            parse_time("2026-10-25 14:30", 0, 8 * 3600),
+            Ok(1_792_909_800)
+        );
+        assert_eq!(parse_time("2000-02-29T23:59", 0, 0), Ok(951_868_740));
+        assert_eq!(parse_time("2h", 10_000, 0), Ok(10_000 - 7200));
+        for bad in ["2026-13-01", "昨天", "2026-10", "5x", "-3h"] {
+            assert!(parse_time(bad, 10_000, 0).is_err(), "{bad}");
+        }
+        assert_eq!(format_time(1_792_909_102, 8 * 3600), "2026-10-25 14:18");
+        assert_eq!(parse_offset("-05:30"), Some(-(5 * 3600 + 1800)));
+        assert_eq!(parse_offset("8"), None);
+
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let first = session
+            .issue(Department::Works, "一".into(), Seal::default())
+            .unwrap()
+            .id;
+        let mut history = session.history().to_vec();
+        // 时辰由写入者记；内存事件簿不记，这里手工插入：开国无时辰，第一件在 1000 秒，第二件在 5000 秒。
+        history.insert(history.len() - 1, CourtEvent::Clock(1000));
+        history.push(CourtEvent::Clock(5000));
+        history.push(CourtEvent::TaskAssigned {
+            task: first,
+            worker: AgentId(4),
+            model: None,
+        });
+        history.push(CourtEvent::ModelUsage {
+            task: first,
+            usage: TokenUsage {
+                input: 3,
+                output: 4,
+            },
+            trace: Some("zy-abc".into()),
+        });
+        let entries = |filter: HistoryFilter| history_entries(&history, &filter).unwrap();
+        let task = entries(HistoryFilter {
+            task: Some(first),
+            ..Default::default()
+        });
+        assert_eq!(
+            task.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            ["edict", "assigned", "usage"]
+        );
+        assert!(task[2].text.contains("trace zy-abc"), "{}", task[2].text);
+        assert_eq!(task[0].seq + 2, task[1].seq, "时辰不单列，序号跳过");
+        let worker = entries(HistoryFilter {
+            agent: Some(AgentId(4)),
+            ..Default::default()
+        });
+        assert!(
+            worker.iter().any(|e| e.kind == "assigned") && worker.iter().all(|e| e.kind != "edict")
+        );
+        let since = entries(HistoryFilter {
+            since: Some(2000),
+            ..Default::default()
+        });
+        assert_eq!(since.len(), 2);
+        let until = entries(HistoryFilter {
+            until: Some(2000),
+            ..Default::default()
+        });
+        assert_eq!(
+            until.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+            ["edict"],
+            "开国无时辰，按时间筛选不列出"
+        );
+        let err = history_entries(
+            &history,
+            &HistoryFilter {
+                kind: Some("bogus".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("usage") && !err.contains("clock"), "{err}");
     }
 
     /// 常朝一轮，见史官记即退朝；返回复核与提示。
