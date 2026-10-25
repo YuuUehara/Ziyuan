@@ -86,6 +86,8 @@ pub enum GovernanceError {
     Court(String),
     /// 逐段准奏的段号不合规矩。
     Changes(String),
+    /// 复勘、平反不合规矩。
+    Suspicion(String),
     /// 廷议须在诏令待办时进行。
     CannotDebate(TaskId),
     /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
@@ -187,6 +189,7 @@ impl fmt::Display for GovernanceError {
             Self::Template(why) => write!(f, "翰林院不准：{why}"),
             Self::Court(why) => write!(f, "{why}"),
             Self::Changes(why) => write!(f, "逐段准奏不成：{why}"),
+            Self::Suspicion(why) => write!(f, "刑部不准：{why}"),
             Self::InvalidBudget => f.write_str("度支须为正数（tokens）"),
             Self::TreasuryExhausted(limit) => write!(
                 f,
@@ -397,7 +400,30 @@ pub struct Suspicion {
     pub source: String,
     pub threat: Threat,
     pub excerpt: String,
+    /// 刑部复勘（见 `CourtEvent::SuspicionReviewed`）。
+    pub review: Option<SuspicionReview>,
+    /// 皇帝已平反：不再妨碍代批。
+    pub acquitted: bool,
 }
+
+/// 刑部复勘的意见（用量已计入 `Task::usage`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuspicionReview {
+    pub reviewer: AgentId,
+    /// 维持原检；否则判为误报。
+    pub upheld: bool,
+    pub note: String,
+    pub model: Option<String>,
+    pub usage: TokenUsage,
+}
+
+impl Task {
+    /// 尚未平反的检出。有这样的检出时，司礼监不代批。
+    pub fn standing_suspicions(&self) -> impl Iterator<Item = &Suspicion> {
+        self.suspicions.iter().filter(|s| !s.acquitted)
+    }
+}
+
 impl Suspicion {
     /// 驿传入队时对诏令内容的检出所记的来源。
     pub const COURIER: &'static str = "courier";
@@ -971,7 +997,34 @@ impl Court {
                     source: source.clone(),
                     threat: *threat,
                     excerpt: excerpt.clone(),
+                    review: None,
+                    acquitted: false,
                 });
+            }
+            CourtEvent::SuspicionReviewed {
+                task,
+                index,
+                reviewer,
+                upheld,
+                note,
+                model,
+                usage,
+            } => {
+                self.propose_recheck(*task, *index, *reviewer)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.usage += *usage;
+                entry.suspicions[*index as usize].review = Some(SuspicionReview {
+                    reviewer: *reviewer,
+                    upheld: *upheld,
+                    note: note.clone(),
+                    model: model.clone(),
+                    usage: *usage,
+                });
+            }
+            CourtEvent::SuspicionAcquitted { task, index } => {
+                self.propose_acquittal(*task, *index)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry.suspicions[*index as usize].acquitted = true;
             }
             CourtEvent::ModelUsage { task, usage, .. } => {
                 let entry = self
@@ -1359,8 +1412,8 @@ impl Court {
             .values()
             .filter(|t| tasks.is_none_or(|ids| ids.contains(&t.edict.id)))
             .filter(|t| self.needs_approval(t))
-            // 有密报的（如驿传内容可疑），司礼监不敢代批红。
-            .filter(|t| t.suspicions.is_empty())
+            // 有未平反的密报（如驿传内容可疑），司礼监不敢代批红。
+            .filter(|t| t.standing_suspicions().next().is_none())
             .map(|t| CourtEvent::EdictApproved { task: t.edict.id })
             .collect()
     }
@@ -1974,6 +2027,90 @@ impl Court {
             return bad("各段都驳回了，请直接驳回改动".into());
         }
         Ok(CourtEvent::ChangesApplied { task, skipped })
+    }
+
+    /// 诏令的第 `index` 处检出（从 0 起）。
+    fn suspicion(&self, task: TaskId, index: u32) -> Result<(&Task, &Suspicion), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        let found = entry.suspicions.get(index as usize).ok_or_else(|| {
+            GovernanceError::Suspicion(format!(
+                "诏令 #{} 没有第 {} 处检出（共 {} 处）",
+                task.0,
+                index + 1,
+                entry.suspicions.len()
+            ))
+        })?;
+        Ok((entry, found))
+    }
+
+    /// 刑部复勘可否：检出存在且未复勘、未平反，`reviewer` 现任刑部官职且未经手此诏令。
+    pub fn propose_recheck(
+        &self,
+        task: TaskId,
+        index: u32,
+        reviewer: AgentId,
+    ) -> Result<(), GovernanceError> {
+        let (entry, found) = self.suspicion(task, index)?;
+        if found.review.is_some() || found.acquitted {
+            return Err(GovernanceError::Suspicion(format!(
+                "诏令 #{} 第 {} 处检出已复勘或已平反",
+                task.0,
+                index + 1
+            )));
+        }
+        let justice = matches!(
+            self.appointments.get(&reviewer),
+            Some(
+                Office::Minister(Department::Justice)
+                    | Office::ViceMinister(Department::Justice)
+                    | Office::Clerk(Department::Justice)
+            )
+        );
+        if !justice {
+            return Err(GovernanceError::Suspicion(format!(
+                "官员 #{} 不是现任刑部官员",
+                reviewer.0
+            )));
+        }
+        if entry.handler() == Some(reviewer) {
+            return Err(GovernanceError::SelfReview(reviewer));
+        }
+        Ok(())
+    }
+
+    /// 复勘此诏令检出的刑部官员：尚书（空缺则侍郎），回避经手者时取刑部郎中。
+    pub fn recheck_official(&self, task: TaskId) -> Option<&Agent> {
+        let handler = self.tasks.get(&task).and_then(Task::handler);
+        let justice = [
+            Office::Minister(Department::Justice),
+            Office::ViceMinister(Department::Justice),
+            Office::Clerk(Department::Justice),
+        ];
+        justice.into_iter().find_map(|office| {
+            self.appointments
+                .iter()
+                .find(|(id, o)| **o == office && Some(**id) != handler)
+                .and_then(|(id, _)| self.agents.get(id))
+        })
+    }
+
+    /// 平反可否：检出存在且未平反，皇帝在朝。
+    pub fn propose_acquittal(&self, task: TaskId, index: u32) -> Result<(), GovernanceError> {
+        if self.retreat {
+            return Err(GovernanceError::InRetreat);
+        }
+        let (_, found) = self.suspicion(task, index)?;
+        if found.acquitted {
+            return Err(GovernanceError::Suspicion(format!(
+                "诏令 #{} 第 {} 处检出已平反",
+                task.0,
+                index + 1
+            )));
+        }
+        Ok(())
     }
 
     /// 现任左都御史。

@@ -12,7 +12,7 @@ use ziyuan_app::{
     ABOLITION_NOTE, EXECUTOR_BUSY, HistoryFilter, RunUpdate, Session, TaskReport, WatchOptions,
     WatchUpdate, demotion_note, describe_record, duzhi_report, estimate_cost, format_time,
     history_entries, kaocheng_grade, kaocheng_report, parse_time, render_diffs, seal_note,
-    skipped_note, tz_offset,
+    skipped_note, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Record, Seal,
@@ -91,6 +91,8 @@ const HELP: &str = concat!(
   ziyuan cane <官员ID>                   廷杖：屡遭弹劾（两次以上）者降一级留用，收回 write_file、run_tests，三件获采纳即复
   ziyuan pardon <官员ID>                 宽宥受杖者，复其品级与玉玺
   ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
+  ziyuan recheck <诏令ID|all>            刑部复勘：刑部官员（模型）逐处判断检出是真有其事还是误报，只是意见
+  ziyuan acquit <诏令ID> [序号,…|all]    平反：不给序号则平反刑部判为误报的各处；平反后不再妨碍代批
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
   ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
@@ -214,6 +216,10 @@ enum Command {
     Kaocheng,
     /// `None` 列出全部诏令的密报。
     Flags(Option<TaskId>),
+    /// 刑部复勘；`None` 表示全部有待复勘检出的诏令。
+    Recheck(Option<TaskId>),
+    /// 平反：序号从 0 起；`None` 为刑部判为误报的各处，`Some(空)` 为全部未平反的。
+    Acquit(TaskId, Option<Vec<u32>>),
     /// 兵部驿传：外部事件入队为诏令（只入队，不执行）。
     Post {
         department: Department,
@@ -297,6 +303,8 @@ const SUBCOMMANDS: &[&str] = &[
     "cane",
     "pardon",
     "flags",
+    "recheck",
+    "acquit",
     "budget",
     "split",
     "debate",
@@ -561,6 +569,35 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 }
             }
             Command::Debate(task, members, rounds)
+        }
+        "recheck" => match args.as_slice() {
+            [all] if all == "all" => Command::Recheck(None),
+            [id] => Command::Recheck(Some(TaskId(
+                id.parse().map_err(|_| "诏令 ID 必须是数字或 all")?,
+            ))),
+            _ => return Err("用法: ziyuan recheck <诏令ID|all>".into()),
+        },
+        "acquit" => {
+            const USAGE: &str = "用法: ziyuan acquit <诏令ID> [序号,…|all]";
+            match args.as_slice() {
+                [id] => Command::Acquit(task_id(std::slice::from_ref(id), USAGE)?, None),
+                [id, all] if all == "all" => {
+                    Command::Acquit(task_id(std::slice::from_ref(id), USAGE)?, Some(Vec::new()))
+                }
+                [id, list] => Command::Acquit(
+                    task_id(std::slice::from_ref(id), USAGE)?,
+                    Some(
+                        list.split([',', '，'])
+                            .filter(|n| !n.trim().is_empty())
+                            .map(|n| match n.trim().parse::<u32>() {
+                                Ok(n) if n >= 1 => Ok(n - 1),
+                                _ => Err(format!("序号必须是从 1 起的数字：{n}")),
+                            })
+                            .collect::<Result<_, _>>()?,
+                    ),
+                ),
+                _ => return Err(USAGE.into()),
+            }
         }
         "censor" => match args.as_slice() {
             [all] if all == "all" => Command::Censor(None),
@@ -1149,15 +1186,17 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 .tasks()
                 .filter(|t| only.is_none_or(|id| t.edict.id == id))
             {
-                for s in &task.suspicions {
+                for (i, s) in task.suspicions.iter().enumerate() {
                     any = true;
                     let source = s.origin();
                     println!(
-                        "诏令 #{} {}（{source}）：{}「{}」",
+                        "诏令 #{} 第 {} 处 {}（{source}）：{}「{}」{}",
                         task.edict.id.0,
+                        i + 1,
                         s.bureau(),
                         s.threat.label(),
-                        s.excerpt
+                        s.excerpt,
+                        suspicion_status(s)
                     );
                 }
             }
@@ -1165,9 +1204,75 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 println!("刑部与锦衣卫无所奏报。");
             } else {
                 println!(
-                    "（关键词机械检出，可能误报；玉玺不因此改变。请对照回奏与 `ziyuan diff` 自行判断。）"
+                    "（关键词机械检出，可能误报；玉玺不因此改变。可 `ziyuan recheck <诏令ID>` 请刑部复勘，\
+                     `ziyuan acquit <诏令ID> [序号]` 平反误报。）"
                 );
             }
+        }
+        Command::Recheck(only) => {
+            let tasks: Vec<TaskId> = match only {
+                Some(task) => vec![task],
+                None => session
+                    .court()
+                    .tasks()
+                    .filter(|t| {
+                        t.suspicions
+                            .iter()
+                            .any(|s| s.review.is_none() && !s.acquitted)
+                    })
+                    .map(|t| t.edict.id)
+                    .collect(),
+            };
+            if tasks.is_empty() {
+                println!("没有待复勘的检出。");
+            } else {
+                let backend = worker_backend()?;
+                for task in tasks {
+                    session.recheck(task, backend.as_ref())?;
+                    let court = session.court();
+                    let entry = court.task(task).expect("刚复勘");
+                    for (i, s) in entry.suspicions.iter().enumerate() {
+                        let Some(r) = &s.review else { continue };
+                        let name = court.agent(r.reviewer).map_or("?", |a| a.name.as_str());
+                        println!(
+                            "诏令 #{} 第 {} 处 {}「{}」：刑部{name}复勘为{}——{}",
+                            task.0,
+                            i + 1,
+                            s.threat.label(),
+                            s.excerpt,
+                            if r.upheld { "维持" } else { "误报" },
+                            r.note
+                        );
+                    }
+                }
+                println!(
+                    "复勘只是意见：平反请 `ziyuan acquit <诏令ID>`（平反刑部判为误报的各处）。"
+                );
+            }
+        }
+        Command::Acquit(task, indices) => {
+            let indices = match indices {
+                Some(list) if list.is_empty() => {
+                    let entry = session
+                        .court()
+                        .task(task)
+                        .ok_or(format!("诏令 #{} 不存在", task.0))?;
+                    Some(
+                        (0..entry.suspicions.len() as u32)
+                            .filter(|&i| !entry.suspicions[i as usize].acquitted)
+                            .collect(),
+                    )
+                }
+                other => other,
+            };
+            let (done, note) = session.acquit(task, indices)?;
+            let list: Vec<String> = done.iter().map(|i| (i + 1).to_string()).collect();
+            println!(
+                "诏令已颁：平反诏令 #{} 第 {} 处检出，不再妨碍司礼监代批。",
+                task.0,
+                list.join("、")
+            );
+            println!("{note}");
         }
         Command::Budget(None) => {
             let default = OpenAiCompatible::from_env().map(|m| m.model().to_owned());

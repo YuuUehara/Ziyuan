@@ -22,7 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, EXECUTOR_BUSY, HistoryEntry, HistoryFilter, RunUpdate, Session,
     describe_record, duzhi_report, estimate_cost, format_time, history_entries, kaocheng_report,
-    render_diffs, seal_note, skipped_note, tz_offset,
+    render_diffs, seal_note, skipped_note, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech,
@@ -1368,16 +1368,17 @@ impl App {
         if !task.suspicions.is_empty() {
             lines.push(Line::default());
             lines.push(Line::styled(
-                "刑部与锦衣卫密报（关键词检出，可能误报）",
+                "刑部与锦衣卫密报（关键词检出，可能误报；`ziyuan recheck` 复勘、`acquit` 平反）",
                 Style::new().fg(Color::Red).bold(),
             ));
             for s in &task.suspicions {
                 let source = s.origin();
                 lines.push(Line::from(format!(
-                    "  {}（{source}）{}：「{}」",
+                    "  {}（{source}）{}：「{}」{}",
                     s.bureau(),
                     s.threat.label(),
-                    s.excerpt
+                    s.excerpt,
+                    suspicion_status(s)
                 )));
             }
         }

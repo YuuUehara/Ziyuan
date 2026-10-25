@@ -282,6 +282,30 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             }
         }
         ChangesDiscarded { task } => format!("v1\tDISCARDED\t{}", task.0),
+        SuspicionReviewed {
+            task,
+            index,
+            reviewer,
+            upheld,
+            note,
+            model,
+            usage,
+        } => {
+            let line = format!(
+                "v1\tRECHECKED\t{}\t{index}\t{}\t{}\t{}\t{}\t{}",
+                task.0,
+                reviewer.0,
+                u8::from(*upheld),
+                to_hex(note),
+                usage.input,
+                usage.output
+            );
+            match model {
+                Some(model) => format!("{line}\t{}", to_hex(model)),
+                None => line,
+            }
+        }
+        SuspicionAcquitted { task, index } => format!("v1\tACQUITTED\t{}\t{index}", task.0),
         SuspicionRaised {
             task,
             source,
@@ -726,6 +750,29 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         "DISCARDED" => ChangesDiscarded {
             task: TaskId(id(2)?),
         },
+        "RECHECKED" => SuspicionReviewed {
+            task: TaskId(id(2)?),
+            index: u32::try_from(id(3)?).map_err(|e| e.to_string())?,
+            reviewer: AgentId(id(4)?),
+            upheld: match field(5)? {
+                "1" => true,
+                "0" => false,
+                other => return Err(format!("复勘结论无效: {other}").into()),
+            },
+            note: from_hex(field(6)?)?,
+            usage: TokenUsage {
+                input: id(7)?,
+                output: id(8)?,
+            },
+            model: match parts.len() {
+                9 => None,
+                _ => Some(from_hex(field(9)?)?),
+            },
+        },
+        "ACQUITTED" => SuspicionAcquitted {
+            task: TaskId(id(2)?),
+            index: u32::try_from(id(3)?).map_err(|e| e.to_string())?,
+        },
         "SUSPECT" => SuspicionRaised {
             task: TaskId(id(2)?),
             threat: field(3)?.parse::<Threat>().map_err(|e| e.to_string())?,
@@ -776,6 +823,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictSplit { model: None, .. } => 7,
         EdictSplit { .. } => 8,
         CensorReported { .. } => 12,
+        SuspicionReviewed { model: None, .. } => 9,
+        SuspicionReviewed { .. } => 10,
+        SuspicionAcquitted { .. } => 4,
         OfficeModelSet { model: None, .. }
         | OfficeCeilingSet { ceiling: None, .. }
         | BudgetSet { tokens: None, .. } => 3,
@@ -861,6 +911,28 @@ mod tests {
                 threat: Threat::Hijack,
                 excerpt: "忽略以上\t,规定".into(),
             },
+            CourtEvent::SuspicionReviewed {
+                task,
+                index: 0,
+                reviewer: AgentId(5),
+                upheld: false,
+                note: "误\t报".into(),
+                model: Some("flash".into()),
+                usage: TokenUsage {
+                    input: 9,
+                    output: 2,
+                },
+            },
+            CourtEvent::SuspicionReviewed {
+                task,
+                index: 1,
+                reviewer: AgentId(5),
+                upheld: true,
+                note: String::new(),
+                model: None,
+                usage: TokenUsage::default(),
+            },
+            CourtEvent::SuspicionAcquitted { task, index: 0 },
             CourtEvent::ExamTaken {
                 agent: AgentId(3),
                 exam: "事件簿\t,一".into(),

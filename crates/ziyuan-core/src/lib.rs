@@ -1057,6 +1057,22 @@ pub enum CourtEvent {
         threat: Threat,
         excerpt: String,
     },
+    /// 刑部复勘一处检出（`index` 为该诏令检出的序号，从 0 起）：`upheld` 为维持原检，
+    /// 否则判为误报。只是复勘意见，不改变代批；平反须皇帝亲自（`SuspicionAcquitted`）。
+    SuspicionReviewed {
+        task: TaskId,
+        index: u32,
+        reviewer: AgentId,
+        upheld: bool,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    },
+    /// 皇帝平反一处检出：此后不再妨碍司礼监代批。
+    SuspicionAcquitted {
+        task: TaskId,
+        index: u32,
+    },
     /// 礼部开科：官员以其官职所配模型（未任官职用默认模型）作答一道考题，按要点程序判分（0–100）。
     ExamTaken {
         agent: AgentId,

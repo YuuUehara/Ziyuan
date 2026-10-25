@@ -116,6 +116,8 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/draft", post(draft))
         .route("/tasks/{id}/redraft", post(redraft))
         .route("/tasks/{id}/censor", post(censor))
+        .route("/tasks/{id}/recheck", post(recheck))
+        .route("/tasks/{id}/acquit", post(acquit))
         .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/debate", post(debate))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
@@ -856,6 +858,44 @@ async fn censor(
     .await
 }
 
+/// 刑部复勘该诏令尚未复勘的检出（会等待模型返回）。
+async fn recheck(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let backend = app.0.config.backend.clone();
+    app.mutate(move |s| {
+        let results = s.recheck(TaskId(id), backend.as_ref())?;
+        let results: Vec<Value> = results
+            .into_iter()
+            .map(|(index, upheld)| json!({ "index": index, "upheld": upheld }))
+            .collect();
+        Ok(json!({ "results": results }))
+    })
+    .await
+}
+
+/// 平反：`{ index? }`（从 0 起）；不给则平反刑部判为误报的各处。
+async fn acquit(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let index = match &body["index"] {
+        Value::Null => None,
+        v => Some(vec![
+            v.as_u64()
+                .and_then(|i| u32::try_from(i).ok())
+                .ok_or_else(|| ApiError::bad("`index` 须为从 0 起的序号"))?,
+        ]),
+    };
+    app.mutate(move |s| {
+        let (done, note) = s.acquit(TaskId(id), index)?;
+        Ok(json!({ "acquitted": done, "note": note }))
+    })
+    .await
+}
+
 /// 御笔改票：`{ worker, note? }`。
 async fn redraft(
     State(app): State<AppState>,
@@ -1190,6 +1230,14 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                     "source": s.origin(),
                     "threat": s.threat.label(),
                     "excerpt": s.excerpt,
+                    "review": s.review.as_ref().map(|r| json!({
+                        "upheld": r.upheld,
+                        "label": if r.upheld { "维持" } else { "误报" },
+                        "note": r.note,
+                        "reviewer": name(r.reviewer),
+                        "model": r.model,
+                    })),
+                    "acquitted": s.acquitted,
                 })).collect::<Vec<_>>(),
                 "draft": t.draft.as_ref().map(|d| json!({
                     "worker": d.worker.0,
@@ -1816,6 +1864,20 @@ mod tests {
         );
         assert_eq!(tasks[0]["suspicions"][0]["source"], "驿传");
         assert_eq!(tasks[0]["suspicions"][0]["bureau"], "锦衣卫");
+        assert_eq!(tasks[0]["suspicions"][0]["acquitted"], false);
+        // 刑部无人不能复勘；皇帝可按序号平反，平反后状态里标出。
+        let (status, error) = call(&base, "/tasks/1/recheck", t, Some(json!({}))).await;
+        assert!(
+            status == 400 && error["error"].as_str().unwrap().contains("刑部无人"),
+            "{error}"
+        );
+        let (status, done) = call(&base, "/tasks/1/acquit", t, Some(json!({ "index": 0 }))).await;
+        assert_eq!((status, done["acquitted"].clone()), (200, json!([0])));
+        assert!(done["note"].as_str().unwrap().contains("于少保"));
+        let (status, _) = call(&base, "/tasks/1/acquit", t, Some(json!({ "index": 0 }))).await;
+        assert_eq!(status, 400, "不能重复平反");
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(state["tasks"][0]["suspicions"][0]["acquitted"], true);
         // 加急的 #2 先于 #1 派出。
         let court = Session::open(EventLog::new(&root)).unwrap();
         assert_eq!(court.court().runnable_tasks(), [TaskId(2), TaskId(1)]);
