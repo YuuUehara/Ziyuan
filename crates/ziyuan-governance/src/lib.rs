@@ -6,8 +6,8 @@ use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, Template, Threat,
-    TokenUsage, Verdict,
+    Evidence, FileChange, GovernanceMode, Nomination, Office, Seal, Speech, Subtask, TaskId,
+    Template, Threat, TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -82,6 +82,8 @@ pub enum GovernanceError {
     Military(String),
     /// 翰林院模板不合规矩。
     Template(String),
+    /// 廷推、廷杖不合规矩。
+    Court(String),
     /// 廷议须在诏令待办时进行。
     CannotDebate(TaskId),
     /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
@@ -181,6 +183,7 @@ impl fmt::Display for GovernanceError {
             Self::InvalidExam(why) => write!(f, "礼部不准：{why}"),
             Self::Military(why) => write!(f, "兵部不准：{why}"),
             Self::Template(why) => write!(f, "翰林院不准：{why}"),
+            Self::Court(why) => write!(f, "{why}"),
             Self::InvalidBudget => f.write_str("度支须为正数（tokens）"),
             Self::TreasuryExhausted(limit) => write!(
                 f,
@@ -228,6 +231,32 @@ pub struct Court {
     palace_exams: Vec<PalaceExam>,
     /// 翰林院自定（或覆盖内置）的模板。
     templates: BTreeMap<String, Template>,
+    /// 各官职（`Office::code`）最近一次廷推，任命该官职后清空。
+    nominations: BTreeMap<String, Vec<Nomination>>,
+    /// 历次廷推所用的 token，与各官员累计所得的票数。
+    nomination_usage: TokenUsage,
+    nomination_votes: BTreeMap<AgentId, u32>,
+    /// 受过廷杖的官员。
+    canings: BTreeMap<AgentId, Caning>,
+}
+
+/// 一位官员的廷杖记录。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caning {
+    /// 受杖次数（历来累计）。
+    pub times: u32,
+    /// 现降几级；宽宥或戴罪立功后为 0。
+    pub demoted: u32,
+    /// 最近一次受杖时的弹劾数与获采纳数，用来计「再遭弹劾」与「戴罪立功」。
+    pub impeached_at: u32,
+    pub accepted_at: u32,
+}
+
+impl Caning {
+    /// 受杖后再获采纳这么多件回奏，即戴罪立功、复其品级与玉玺。
+    pub const REDEMPTION: u32 = 3;
+    /// 受杖前须（自上次受杖以来）遭弹劾这么多次。
+    pub const IMPEACHMENTS: u32 = 2;
 }
 
 /// 一次科举应试（见 `CourtEvent::ExamTaken`）。
@@ -501,6 +530,10 @@ impl Court {
             exams: Vec::new(),
             palace_exams: Vec::new(),
             templates: BTreeMap::new(),
+            nominations: BTreeMap::new(),
+            nomination_usage: TokenUsage::default(),
+            nomination_votes: BTreeMap::new(),
+            canings: BTreeMap::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -524,6 +557,31 @@ impl Court {
             CourtEvent::OfficialAppointed { agent, office } => {
                 self.propose_appointment(*agent, *office)?;
                 self.appointments.insert(*agent, *office);
+                // 官缺已补，此前的廷推作罢。
+                self.nominations.remove(office.code().as_str());
+            }
+            CourtEvent::CourtNominated { office, votes } => {
+                self.propose_nomination(*office, votes.clone())?;
+                for vote in votes {
+                    self.nomination_usage += vote.usage;
+                    *self.nomination_votes.entry(vote.candidate).or_default() += 1;
+                }
+                self.nominations.insert(office.code(), votes.clone());
+            }
+            CourtEvent::OfficialCaned { agent } => {
+                self.propose_caning(*agent)?;
+                let record = self.service_record(*agent);
+                // 戴罪未立功又受杖的，再降一级。
+                let demoted = self.demotion(*agent) + 1;
+                let entry = self.canings.entry(*agent).or_default();
+                entry.times += 1;
+                entry.demoted = demoted;
+                entry.impeached_at = record.impeached;
+                entry.accepted_at = record.accepted;
+            }
+            CourtEvent::OfficialPardoned { agent } => {
+                self.propose_pardon(*agent)?;
+                self.canings.get_mut(agent).expect("已确认受杖").demoted = 0;
             }
             CourtEvent::OfficialDismissed { agent } => {
                 self.propose_dismissal(*agent)?;
@@ -969,6 +1027,7 @@ impl Court {
             total += task.usage;
         }
         total += self.exam_usage();
+        total += self.nomination_usage;
         total
     }
 
@@ -1213,16 +1272,21 @@ impl Court {
     /// `agent` 承办 `edict` 时实际可用的玉玺：受其现任官职上限约束。
     /// 诏令的查阅范围与上限毫无交集时返回 `Err(SealExceedsCeiling)`。
     pub fn effective_seal(&self, agent: AgentId, edict: &Edict) -> Result<Seal, GovernanceError> {
-        let Some(office) = self.office_of(agent) else {
-            return Ok(edict.seal.clone());
-        };
-        match self.office_ceiling(office) {
-            None => Ok(edict.seal.clone()),
-            Some(ceiling) => edict
+        let mut seal = match self
+            .office_of(agent)
+            .and_then(|o| Some((o, self.office_ceiling(o)?)))
+        {
+            None => edict.seal.clone(),
+            Some((office, ceiling)) => edict
                 .seal
                 .within(ceiling)
-                .ok_or(GovernanceError::SealExceedsCeiling(office)),
+                .ok_or(GovernanceError::SealExceedsCeiling(office))?,
+        };
+        // 廷杖降级留用期间，收回工部动土之权。
+        if self.demotion(agent) > 0 {
+            seal.capabilities.retain(|c| !c.is_works_only());
         }
+        Ok(seal)
     }
 
     /// 皇帝是否在修道怠政。
@@ -1409,6 +1473,177 @@ impl Court {
             }
         }
         Ok(())
+    }
+
+    /// 参与廷推的九卿：六部尚书、左都御史与丞相或首辅（在任者）。须有吏部尚书主持。
+    pub fn nine_ministers(&self) -> Result<Vec<(&Agent, Office)>, GovernanceError> {
+        let personnel = Office::Minister(Department::Personnel);
+        if self.appointed_as(personnel).is_none() {
+            return Err(GovernanceError::Court(
+                "廷推须由吏部会同九卿，吏部尚书空缺，不能廷推".into(),
+            ));
+        }
+        let mut offices: Vec<Office> = Department::ALL
+            .iter()
+            .map(|&d| Office::Minister(d))
+            .collect();
+        offices.extend([
+            Office::Censor,
+            Office::Chancellor,
+            Office::FirstGrandSecretary,
+        ]);
+        Ok(offices
+            .into_iter()
+            .filter_map(|o| self.appointed_as(o).map(|a| (a, o)))
+            .collect())
+    }
+
+    /// 廷推 `office` 的候选人：可任此职（专长、制度符合，未革职）且现不任此职，按吏部考绩排序。
+    pub fn nomination_candidates(
+        &self,
+        office: Office,
+    ) -> Result<Vec<Candidate<'_>>, GovernanceError> {
+        let candidates = self.recommend(office)?;
+        Ok(candidates
+            .into_iter()
+            .filter(|c| c.current != Some(office))
+            .collect())
+    }
+
+    /// 廷推的投票者与候选人；官职未出缺、无吏部尚书、无候选人时报错。
+    pub fn nomination_ballot(
+        &self,
+        office: Office,
+    ) -> Result<NominationBallot<'_>, GovernanceError> {
+        let bad = |why: String| Err(GovernanceError::Court(format!("廷推不成：{why}")));
+        if office.is_unique() && self.appointed_as(office).is_some() {
+            return bad(format!("{}未出缺", office.label()));
+        }
+        let ministers = self.nine_ministers()?;
+        let candidates = self.nomination_candidates(office)?;
+        if candidates.is_empty() {
+            return bad(format!("无人可任{}", office.label()));
+        }
+        Ok((ministers, candidates))
+    }
+
+    /// 廷推：唯一的官职须出缺；每位投票者须是九卿之一、各投一次，所推须是候选人且不是自己。
+    pub fn propose_nomination(
+        &self,
+        office: Office,
+        votes: Vec<Nomination>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let bad = |why: String| Err(GovernanceError::Court(format!("廷推不成：{why}")));
+        let (ministers, candidates) = self.nomination_ballot(office)?;
+        if votes.is_empty() {
+            return bad("无人推举".into());
+        }
+        let mut seen = BTreeSet::new();
+        for vote in &votes {
+            if !ministers.iter().any(|(a, _)| a.id == vote.voter) {
+                return bad(format!("#{} 不在九卿之列", vote.voter.0));
+            }
+            if !seen.insert(vote.voter) {
+                return bad(format!("#{} 重复推举", vote.voter.0));
+            }
+            if vote.candidate == vote.voter
+                || !candidates.iter().any(|c| c.agent.id == vote.candidate)
+            {
+                return bad(format!("#{} 不可任{}", vote.candidate.0, office.label()));
+            }
+        }
+        Ok(CourtEvent::CourtNominated { office, votes })
+    }
+
+    /// `office` 最近一次（任命之前）的廷推。
+    pub fn nomination(&self, office: Office) -> Option<&[Nomination]> {
+        self.nominations
+            .get(office.code().as_str())
+            .map(Vec::as_slice)
+    }
+
+    /// 廷推得票，按票数从多到少（同票者先得票的在前）。
+    pub fn nomination_tally(&self, office: Office) -> Vec<(AgentId, u32)> {
+        let mut tally: Vec<(AgentId, u32)> = Vec::new();
+        for vote in self.nomination(office).unwrap_or_default() {
+            match tally.iter_mut().find(|(id, _)| *id == vote.candidate) {
+                Some((_, n)) => *n += 1,
+                None => tally.push((vote.candidate, 1)),
+            }
+        }
+        tally.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        tally
+    }
+
+    /// 廷杖：须为在任、未革职的官员，且自上次受杖以来遭都察院弹劾至少 [`Caning::IMPEACHMENTS`] 次。
+    pub fn propose_caning(&self, agent: AgentId) -> Result<CourtEvent, GovernanceError> {
+        if !self.agents.contains_key(&agent) {
+            return Err(GovernanceError::UnknownAgent(agent));
+        }
+        if self.purged.contains(&agent) {
+            return Err(GovernanceError::Purged(agent));
+        }
+        if !self.appointments.contains_key(&agent) {
+            return Err(GovernanceError::Court(
+                "廷杖是降级留用之罚，须为在任官员；未任官职者无级可降".into(),
+            ));
+        }
+        let since = self.impeachments_since_caning(agent);
+        if since < Caning::IMPEACHMENTS {
+            return Err(GovernanceError::Court(format!(
+                "廷杖须屡遭弹劾：#{} 自上次受杖以来遭弹劾 {since} 次，不足 {} 次",
+                agent.0,
+                Caning::IMPEACHMENTS
+            )));
+        }
+        Ok(CourtEvent::OfficialCaned { agent })
+    }
+
+    /// 自上次受杖（未受过则自始）以来遭弹劾的次数。
+    pub fn impeachments_since_caning(&self, agent: AgentId) -> u32 {
+        let at = self.canings.get(&agent).map_or(0, |c| c.impeached_at);
+        self.service_record(agent).impeached.saturating_sub(at)
+    }
+
+    /// 宽宥：须正在降级留用。
+    pub fn propose_pardon(&self, agent: AgentId) -> Result<CourtEvent, GovernanceError> {
+        if self.demotion(agent) == 0 {
+            return Err(GovernanceError::Court(format!(
+                "#{} 并未降级留用，无须宽宥",
+                agent.0
+            )));
+        }
+        Ok(CourtEvent::OfficialPardoned { agent })
+    }
+
+    /// 廷杖记录。
+    pub fn caning(&self, agent: AgentId) -> Option<Caning> {
+        self.canings.get(&agent).copied()
+    }
+
+    /// 现降几级留用；未受杖、已宽宥或已戴罪立功的为 0。
+    pub fn demotion(&self, agent: AgentId) -> u32 {
+        match self.canings.get(&agent) {
+            Some(c) if !self.redeemed(agent) => c.demoted,
+            _ => 0,
+        }
+    }
+
+    /// 受杖后已获采纳的件数，与戴罪立功尚差几件（不在降级中为 `None`）。
+    pub fn redemption_left(&self, agent: AgentId) -> Option<u32> {
+        let c = self.canings.get(&agent).filter(|c| c.demoted > 0)?;
+        let done = self
+            .service_record(agent)
+            .accepted
+            .saturating_sub(c.accepted_at);
+        Caning::REDEMPTION
+            .checked_sub(done)
+            .filter(|&left| left > 0)
+    }
+
+    fn redeemed(&self, agent: AgentId) -> bool {
+        self.canings.get(&agent).is_none_or(|c| c.demoted == 0)
+            || self.redemption_left(agent).is_none()
     }
 
     /// 翰林院存模板：名为 1–20 字、不含空白；内容非空；玉玺合乎部门（写权限唯工部）；
@@ -1817,6 +2052,8 @@ impl Court {
             .iter()
             .filter(|p| p.zhuangyuan == Some(agent));
         record.zhuangyuan = crowned.count() as u32;
+        record.nominated = self.nomination_votes.get(&agent).copied().unwrap_or(0);
+        record.caned = self.canings.get(&agent).map_or(0, |c| c.times);
         record
     }
 
@@ -2037,6 +2274,9 @@ pub struct ServiceRecord {
     pub exams: u32,
     pub exams_passed: u32,
     pub zhuangyuan: u32,
+    /// 历次廷推所得的票数，与受廷杖的次数（不计入荐举排序）。
+    pub nominated: u32,
+    pub caned: u32,
 }
 
 impl ServiceRecord {
@@ -2054,6 +2294,9 @@ impl ServiceRecord {
             + i64::from(self.zhuangyuan)
     }
 }
+
+/// 廷推的选票：九卿（及其官职）与候选人。
+pub type NominationBallot<'a> = (Vec<(&'a Agent, Office)>, Vec<Candidate<'a>>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate<'a> {
@@ -2519,6 +2762,128 @@ mod tests {
             tests: Some(false),
         };
         assert!(!flawed.verified() && !failing.verified() && !Evidence::default().verified());
+    }
+
+    #[test]
+    fn caning_needs_repeated_impeachments_and_lifts_after_redemption_or_pardon() {
+        let mut court = Court::replay(&founding_events(1)).unwrap();
+        // #6 改任左都御史；#4（工部郎中）承办的诏令由他复核。
+        for e in [
+            CourtEvent::OfficialDismissed { agent: AgentId(6) },
+            CourtEvent::OfficialAppointed {
+                agent: AgentId(6),
+                office: Office::Censor,
+            },
+        ] {
+            court.apply(&e).unwrap();
+        }
+        let mut next = 0;
+        let mut finish = |court: &mut Court, impeach: bool| {
+            next += 1;
+            let task = TaskId(next);
+            let verdict = if impeach {
+                CourtEvent::CensorReported {
+                    task,
+                    censor: AgentId(6),
+                    verdict: CensorVerdict::Impeached,
+                    note: "不实".into(),
+                    evidence: Evidence::default(),
+                    model: None,
+                    usage: TokenUsage::default(),
+                }
+            } else {
+                CourtEvent::TaskReviewed {
+                    task,
+                    verdict: Verdict::Accepted,
+                    note: String::new(),
+                }
+            };
+            for e in [
+                CourtEvent::EdictIssued(Edict {
+                    id: task,
+                    department: Department::Works,
+                    text: "办".into(),
+                    seal: Seal::default(),
+                }),
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker: AgentId(4),
+                    model: None,
+                },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker: AgentId(4),
+                    summary: "毕".into(),
+                },
+                verdict,
+            ] {
+                court.apply(&e).unwrap();
+            }
+        };
+        let clerk = AgentId(4);
+        let cane = |court: &mut Court| court.apply(&CourtEvent::OfficialCaned { agent: clerk });
+        // 弹劾不足两次不能杖；未任官职者无级可降。
+        finish(&mut court, true);
+        assert!(
+            matches!(cane(&mut court), Err(GovernanceError::Court(why)) if why.contains("遭弹劾 1 次"))
+        );
+        finish(&mut court, true);
+        assert!(court.propose_caning(AgentId(2)).is_err());
+        cane(&mut court).unwrap();
+        assert_eq!(
+            (court.demotion(clerk), court.redemption_left(clerk)),
+            (1, Some(3))
+        );
+        // 降级留用期间收回写权；同一批弹劾不能再杖。
+        let works = Edict {
+            id: TaskId(99),
+            department: Department::Works,
+            text: "改".into(),
+            seal: Seal {
+                capabilities: [
+                    Capability::ReadFile,
+                    Capability::WriteFile,
+                    Capability::RunTests,
+                ]
+                .into(),
+                scope: vec![".".into()],
+            },
+        };
+        let seal = court.effective_seal(clerk, &works).unwrap();
+        assert_eq!(seal.capabilities, [Capability::ReadFile].into());
+        assert!(cane(&mut court).is_err());
+        // 未立功又遭两次弹劾，再杖则再降一级，立功的件数重新算起。
+        finish(&mut court, false);
+        finish(&mut court, false);
+        assert_eq!(court.redemption_left(clerk), Some(1));
+        finish(&mut court, true);
+        finish(&mut court, true);
+        cane(&mut court).unwrap();
+        assert_eq!(
+            (court.demotion(clerk), court.redemption_left(clerk)),
+            (2, Some(3))
+        );
+        // 宽宥即复；再宽宥报错。
+        court
+            .apply(&CourtEvent::OfficialPardoned { agent: clerk })
+            .unwrap();
+        assert_eq!(court.demotion(clerk), 0);
+        assert_eq!(court.effective_seal(clerk, &works).unwrap(), works.seal);
+        assert!(court.propose_pardon(clerk).is_err());
+        // 宽宥后再杖从一级起；获采纳三件即戴罪立功，自动复职。
+        finish(&mut court, true);
+        finish(&mut court, true);
+        cane(&mut court).unwrap();
+        assert_eq!(court.demotion(clerk), 1);
+        for _ in 0..3 {
+            finish(&mut court, false);
+        }
+        assert_eq!(
+            (court.demotion(clerk), court.redemption_left(clerk)),
+            (0, None)
+        );
+        assert!(court.propose_pardon(clerk).is_err(), "已立功，无须宽宥");
+        assert_eq!(court.service_record(clerk).caned, 3);
     }
 
     #[test]

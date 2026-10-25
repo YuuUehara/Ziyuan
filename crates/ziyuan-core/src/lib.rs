@@ -707,6 +707,16 @@ pub struct Edict {
     pub seal: Seal,
 }
 
+/// 廷推中一位大臣的推举。`model`/`usage` 为推举所用模型与用量（按吏部考绩代推时为 `None` 与零）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nomination {
+    pub voter: AgentId,
+    pub candidate: AgentId,
+    pub note: String,
+    pub model: Option<String>,
+    pub usage: TokenUsage,
+}
+
 /// 翰林院诏令模板：常用诏令的内容、默认部门与玉玺，以及交都察院核验的验收标准。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Template {
@@ -867,6 +877,19 @@ pub enum CourtEvent {
     /// 八百里加急：待办诏令插队先行，执行时限放宽。
     EdictExpedited {
         task: TaskId,
+    },
+    /// 廷推：吏部会同九卿为 `office` 各推一人，只是建议；任命仍由皇帝。
+    CourtNominated {
+        office: Office,
+        votes: Vec<Nomination>,
+    },
+    /// 廷杖：屡遭弹劾的官员降一级留用，收回工部动土之权，戴罪立功。
+    OfficialCaned {
+        agent: AgentId,
+    },
+    /// 宽宥受杖的官员：恢复品级与玉玺。
+    OfficialPardoned {
+        agent: AgentId,
     },
     /// 翰林院存一份诏令模板（同名的覆盖，包括覆盖内置模板）。
     TemplateSaved {

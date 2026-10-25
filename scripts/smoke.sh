@@ -192,4 +192,16 @@ if "$BIN" template rm 补测试 > /dev/null 2>&1; then echo '内置模板不能�
 if "$BIN" edict --queue --template 无此 > /dev/null 2>&1; then echo '没有的模板应拒绝' >&2; exit 1; fi
 "$BIN" template rm 查锁 | has '撤去模板'
 "$BIN" cancel "$TID" > /dev/null
+# 廷推与廷杖：未出缺不能廷推；出缺后九卿会推、枚卜即任；弹劾不足不能廷杖，未降级无须宽宥
+"$BIN" appoint 1 minister:personnel > /dev/null
+{ "$BIN" nominate minister:works 2>&1 || true; } | has '未出缺'
+WID="$("$BIN" officials | sed -n 's/^#\([0-9]*\) .*工部尚书.*/\1/p')"
+"$BIN" dismiss "$WID" > /dev/null
+"$BIN" nominate minister:works | has '得票'
+"$BIN" history | has '廷推工部尚书'
+"$BIN" nominate minister:works --lots | has '金瓯'
+NID="$("$BIN" officials | sed -n 's/^#\([0-9]*\) .*工部尚书.*/\1/p')"
+[ -n "$NID" ]
+{ "$BIN" cane "$NID" 2>&1 || true; } | has '弹劾'
+{ "$BIN" pardon "$NID" 2>&1 || true; } | has '降级'
 echo 'ZiYuan smoke test PASS'

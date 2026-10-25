@@ -399,6 +399,8 @@
           <div class="row">
             <select id="recommend-office" data-keep></select>
             <button class="shrink" id="recommend-btn">荐举</button>
+            <button class="shrink" id="nominate-btn" title="廷推：九卿会推出缺之职，各举一人">廷推</button>
+            <button class="shrink" id="lots-btn" title="枚卜：于廷推得票者中掣签，径直任命">枚卜</button>
           </div>
           <div id="recommend-result"><p class="hint">按「采纳 − 驳回 + 背书 − 弹劾 + 实证」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
         </div>
@@ -547,7 +549,7 @@ function preserve(render) {
 }
 
 function recordHtml(r) {
-  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}<br>御史背书 ${r.endorsed} · 弹劾 ${r.impeached} · 实证 ${r.verified} · 考成 <b>${esc(r.grade)}</b>${r.exams ? `<br>科举及格 ${r.exams_passed}/${r.exams}${r.zhuangyuan ? ` · <b class="a">状元 ${r.zhuangyuan}</b>` : ""}` : ""}</span>`;
+  return `<span class="record"><span class="a">采纳 ${r.accepted}</span> · <span class="r">驳回 ${r.rejected}</span> · 失败 ${r.failed} · 待评定 ${r.unreviewed}<br>御史背书 ${r.endorsed} · 弹劾 ${r.impeached} · 实证 ${r.verified} · 考成 <b>${esc(r.grade)}</b>${r.nominated || r.caned ? `<br>廷推得票 ${r.nominated}${r.caned ? ` · <b class="r">受廷杖 ${r.caned}</b>` : ""}` : ""}${r.exams ? `<br>科举及格 ${r.exams_passed}/${r.exams}${r.zhuangyuan ? ` · <b class="a">状元 ${r.zhuangyuan}</b>` : ""}` : ""}</span>`;
 }
 
 const statusLabel = { pending: "待办", assigned: "执行中", completed: "已完成", failed: "失败", cancelled: "已撤销" };
@@ -719,12 +721,12 @@ function render() {
     const action = o.purged
       ? ""
       : o.office
-      ? `<div class="row"><button class="small" data-dismiss="${o.id}">罢免</button>${purge}</div>`
+      ? `<div class="row"><button class="small" data-dismiss="${o.id}">罢免</button><button class="small reject" data-cane="${o.id}" title="廷杖：自上次受杖以来遭弹劾两次以上者，降一级留用、收回写权">廷杖</button>${o.demotion ? `<button class="small" data-pardon="${o.id}">宽宥</button>` : ""}${purge}</div>`
       : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.filter((of) => !of.department || of.department === o.speciality.code).map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
          <button class="small shrink" data-appoint="${o.id}">任命</button>${purge}</div>`;
     const usage = o.record.usage.input + o.record.usage.output;
     return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}<br><span class="persona">${esc(o.persona)}</span></td><td>${esc(o.speciality.label)}</td>
-      <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
+      <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>${o.demotion ? `<br><span class="badge failed" title="廷杖">${esc(o.demotion)}</span>` : ""}` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
       <td class="record">${o.model ? esc(o.model) : '<span class="hint">演示</span>'}${o.ceiling ? `<br><span class="hint">上限 ${esc(o.ceiling)}</span>` : ""}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.cost) : "—"}</td><td>${action}</td></tr>`;
   }).join("");
@@ -838,6 +840,25 @@ $("recommend-btn").addEventListener("click", async () => {
       : `<p class="hint">无人可任此职。</p>`;
   } catch (e) { toast(e.message, true); }
 });
+async function nominate(lots) {
+  const office = $("recommend-office").value;
+  const btn = $(lots ? "lots-btn" : "nominate-btn");
+  btn.disabled = true;
+  $("recommend-result").innerHTML = `<p class="hint">九卿会推中…</p>`;
+  try {
+    const r = await api("/nominate", { office, lots });
+    const votes = r.votes.map((v) => `<li><b>${esc(v.voter)}</b> 举 <b>${esc(v.candidate_name || "#" + v.candidate)}</b>${v.note ? "：" + esc(v.note) : ""}</li>`).join("");
+    const tally = r.tally.map((c) => `${esc(c.name || "#" + c.id)}（#${c.id}）${c.votes} 票`).join("、");
+    $("recommend-result").innerHTML = `<p><b>廷推得票</b>：${tally || "无"}</p><ol class="ranking">${votes}</ol>`;
+    if (r.note) chronicle(r.note);
+    await refresh();
+  } catch (e) {
+    $("recommend-result").innerHTML = "";
+    toast(e.message, true);
+  } finally { btn.disabled = false; }
+}
+$("nominate-btn").addEventListener("click", () => nominate(false));
+$("lots-btn").addEventListener("click", () => nominate(true));
 $("kaocheng-btn").addEventListener("click", async () => {
   try {
     const { report } = await api("/kaocheng");
@@ -963,7 +984,11 @@ document.addEventListener("click", (event) => {
   } else if (d.dismiss) {
     act(api(`/officials/${d.dismiss}/dismiss`, {}), "已罢免（身份与履历保留）");
   } else if (d.appoint) {
-    act(api(`/officials/${d.appoint}/appoint`, { office: $("appoint-" + d.appoint).value }), "已任命");
+    act(api(`/officials/${d.appoint}/appoint`, { office: $("appoint-" + d.appoint).value }), "已任命").then((r) => r && chronicle(r.note));
+  } else if (d.cane) {
+    if (confirm(`廷杖官员 #${d.cane}？降一级留用，收回写权。`)) act(api(`/officials/${d.cane}/cane`, {})).then((r) => r && chronicle(r.note));
+  } else if (d.pardon) {
+    act(api(`/officials/${d.pardon}/pardon`, {})).then((r) => r && chronicle(r.note));
   }
 });
 

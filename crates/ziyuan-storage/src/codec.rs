@@ -1,8 +1,8 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Office, Seal, Speech, Subtask, TaskId, Template, Threat,
-    TokenUsage, Verdict,
+    Evidence, FileChange, GovernanceMode, Nomination, Office, Seal, Speech, Subtask, TaskId,
+    Template, Threat, TokenUsage, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -229,6 +229,11 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             to_hex(&template.criteria.join("\n"))
         ),
         TemplateRemoved { name } => format!("v1\tUNTEMPLATE\t{}", to_hex(name)),
+        CourtNominated { office, votes } => {
+            format!("v1\tNOMINATED\t{}\t{}", office.code(), encode_votes(votes))
+        }
+        OfficialCaned { agent } => format!("v1\tCANED\t{}", agent.0),
+        OfficialPardoned { agent } => format!("v1\tPARDONED\t{}", agent.0),
         TemplateApplied {
             task,
             name,
@@ -349,6 +354,51 @@ fn decode_speeches(field: &str) -> Result<Vec<Speech>, String> {
                 speaker: AgentId(number(speaker)?),
                 office: office.parse::<Office>().map_err(|e| e.to_string())?,
                 text: from_hex(text)?,
+                usage: TokenUsage {
+                    input: number(input)?,
+                    output: number(output)?,
+                },
+                model: match model {
+                    "" => None,
+                    model => Some(from_hex(model)?),
+                },
+            })
+        })
+        .collect()
+}
+
+/// 廷推的各票为 `投票者;候选人;理由hex;输入;输出;模型hex（无模型为空）`，以逗号分隔。
+fn encode_votes(votes: &[Nomination]) -> String {
+    let parts: Vec<_> = votes
+        .iter()
+        .map(|v| {
+            format!(
+                "{};{};{};{};{};{}",
+                v.voter.0,
+                v.candidate.0,
+                to_hex(&v.note),
+                v.usage.input,
+                v.usage.output,
+                v.model.as_deref().map(to_hex).unwrap_or_default()
+            )
+        })
+        .collect();
+    parts.join(",")
+}
+
+fn decode_votes(field: &str) -> Result<Vec<Nomination>, String> {
+    split_list(field)
+        .map(|entry| {
+            let [voter, candidate, note, input, output, model] =
+                entry.split(';').collect::<Vec<_>>()[..]
+            else {
+                return Err("廷推字段不合法".into());
+            };
+            let number = |s: &str| s.parse::<u64>().map_err(|e| e.to_string());
+            Ok(Nomination {
+                voter: AgentId(number(voter)?),
+                candidate: AgentId(number(candidate)?),
+                note: from_hex(note)?,
                 usage: TokenUsage {
                     input: number(input)?,
                     output: number(output)?,
@@ -614,6 +664,16 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         "UNTEMPLATE" => TemplateRemoved {
             name: from_hex(field(2)?)?,
         },
+        "NOMINATED" => CourtNominated {
+            office: field(2)?.parse::<Office>().map_err(|e| e.to_string())?,
+            votes: decode_votes(field(3)?)?,
+        },
+        "CANED" => OfficialCaned {
+            agent: AgentId(id(2)?),
+        },
+        "PARDONED" => OfficialPardoned {
+            agent: AgentId(id(2)?),
+        },
         "TEMPLATED" => TemplateApplied {
             task: TaskId(id(2)?),
             name: from_hex(field(3)?)?,
@@ -681,7 +741,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
         ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
         CourierDelivered { .. } => 4,
-        TemplateRemoved { .. } => 3,
+        TemplateRemoved { .. } | OfficialCaned { .. } | OfficialPardoned { .. } => 3,
+        CourtNominated { .. } => 4,
         TemplateApplied { .. } => 5,
         TemplateSaved { .. } => 8,
         ExamTaken { model: None, .. } => 8,
@@ -823,6 +884,30 @@ mod tests {
             CourtEvent::TemplateRemoved {
                 name: "补\t测试".into(),
             },
+            CourtEvent::CourtNominated {
+                office: Office::Minister(Department::Works),
+                votes: vec![
+                    Nomination {
+                        voter: AgentId(1),
+                        candidate: AgentId(4),
+                        note: "精细,平实;可任".into(),
+                        model: Some("deepseek-flash".into()),
+                        usage: TokenUsage {
+                            input: 30,
+                            output: 5,
+                        },
+                    },
+                    Nomination {
+                        voter: AgentId(3),
+                        candidate: AgentId(4),
+                        note: String::new(),
+                        model: None,
+                        usage: TokenUsage::default(),
+                    },
+                ],
+            },
+            CourtEvent::OfficialCaned { agent: AgentId(4) },
+            CourtEvent::OfficialPardoned { agent: AgentId(4) },
             CourtEvent::TemplateApplied {
                 task,
                 name: "审查unsafe".into(),

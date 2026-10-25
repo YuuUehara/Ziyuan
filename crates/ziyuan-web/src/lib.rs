@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, describe_event,
-    duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff,
+    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, demotion_note,
+    describe_event, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -130,6 +130,9 @@ pub fn router(config: Config) -> Router {
         .route("/officials/{id}/purge", post(purge))
         .route("/officials/{id}/exam", post(exam))
         .route("/officials/{id}/crown", post(crown))
+        .route("/officials/{id}/cane", post(cane))
+        .route("/officials/{id}/pardon", post(pardon))
+        .route("/nominate", post(nominate))
         .route("/palace", post(palace))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
     Router::new()
@@ -915,13 +918,59 @@ async fn appoint(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let office = parse::<Office>(str_field(&body, "office")?)?;
+    app.mutate(move |s| Ok(json!({ "note": s.appoint(AgentId(id), office)? })))
+        .await
+}
+
+/// 廷推：九卿各举一人；`lots` 则再于得票者中枚卜，径直任命。
+async fn nominate(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let office = parse::<Office>(str_field(&body, "office")?)?;
+    let lots = body.get("lots").and_then(Value::as_bool).unwrap_or(false);
+    let backend = app.0.config.backend.clone();
     app.mutate(move |s| {
-        s.appoint(AgentId(id), office)?;
-        Ok(json!({ "ok": true }))
+        let mut votes = Vec::new();
+        s.nominate(office, backend.as_ref(), |voter, vote| {
+            votes.push(
+                json!({ "voter": voter.name, "candidate": vote.candidate.0, "note": vote.note }),
+            );
+        })?;
+        let court = s.court();
+        let name = |id: AgentId| court.agent(id).map(|a| a.name.clone());
+        for vote in &mut votes {
+            let id = AgentId(vote["candidate"].as_u64().unwrap_or_default());
+            vote["candidate_name"] = json!(name(id));
+        }
+        let tally: Vec<_> = court
+            .nomination_tally(office)
+            .into_iter()
+            .map(|(id, n)| json!({ "id": id.0, "name": name(id), "votes": n }))
+            .collect();
+        let note = if lots {
+            Some(s.draw_lots(office)?.1)
+        } else {
+            None
+        };
+        Ok(json!({ "votes": votes, "tally": tally, "note": note }))
     })
     .await
 }
-
+async fn cane(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    app.mutate(move |s| Ok(json!({ "note": s.cane(AgentId(id))? })))
+        .await
+}
+async fn pardon(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    app.mutate(move |s| Ok(json!({ "note": s.pardon(AgentId(id))? })))
+        .await
+}
 async fn dismiss(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
@@ -972,6 +1021,8 @@ fn record_json(r: &ServiceRecord) -> Value {
         "exams": r.exams,
         "exams_passed": r.exams_passed,
         "zhuangyuan": r.zhuangyuan,
+        "nominated": r.nominated,
+        "caned": r.caned,
         "grade": kaocheng_grade(r),
         "usage": usage_json(r.usage),
     })
@@ -1041,6 +1092,7 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "speciality": { "code": a.speciality.code(), "label": a.speciality.label() },
                 "office": court.office_of(a.id).map(|o| office_json(o, court.mode())),
                 "purged": court.is_purged(a.id),
+                "demotion": demotion_note(court, a.id),
                 "model": court.model_of(a.id).or(default_model),
                 "ceiling": court.office_of(a.id).and_then(|o| court.office_ceiling(o)).map(|c| c.to_string()),
                 "record": record_json(&court.service_record(a.id)),
@@ -1541,6 +1593,46 @@ mod tests {
             officials.iter().all(|o| o["office"].is_null()),
             "{officials:?}"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nominations_appoint_with_a_note_and_caning_is_guarded() {
+        let (base, root) = start("court").await;
+        let t = Some(TOKEN);
+        let works = json!({ "office": "minister:works" });
+        // 未出缺不能廷推。
+        assert_eq!(
+            call(&base, "/nominate", t, Some(works.clone())).await.0,
+            400
+        );
+        call(&base, "/officials/2/dismiss", t, Some(json!({}))).await;
+        let (status, r) = call(&base, "/nominate", t, Some(works.clone())).await;
+        assert_eq!(status, 200, "{r}");
+        let top = r["tally"][0]["id"].as_u64().unwrap();
+        assert!(!r["votes"].as_array().unwrap().is_empty(), "{r}");
+        assert!(r["note"].is_null(), "不枚卜则不任命");
+        let (status, r) = call(&base, &format!("/officials/{top}/appoint"), t, Some(works)).await;
+        assert_eq!(status, 200, "{r}");
+        assert!(r["note"].as_str().unwrap().contains("廷推"), "{r}");
+        let (_, state) = call(&base, "/state", t, None).await;
+        let official = &state["officials"][(top - 1) as usize];
+        assert!(
+            official["record"]["nominated"].as_u64().unwrap() > 0,
+            "{official}"
+        );
+        assert!(official["demotion"].is_null());
+        // 未遭弹劾不能廷杖；未降级无须宽宥。
+        for path in [
+            format!("/officials/{top}/cane"),
+            format!("/officials/{top}/pardon"),
+        ] {
+            assert_eq!(
+                call(&base, &path, t, Some(json!({}))).await.0,
+                400,
+                "{path}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

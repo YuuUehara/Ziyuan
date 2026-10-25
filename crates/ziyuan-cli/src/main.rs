@@ -9,8 +9,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
-    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, describe_event, describe_record,
-    duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff, seal_note,
+    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, demotion_note, describe_event,
+    describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff,
+    seal_note,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -82,6 +83,9 @@ const HELP: &str = concat!(
   ziyuan exam <官员ID>                   礼部科举：官员应试 .ziyuan/exam/ 下的考题，按要点判分，记入履历
   ziyuan exam --palace <题目>            殿试：天子亲策，在任官员各答一卷
   ziyuan crown <官员ID>                  钦点状元（须为最近一次殿试的答卷者）
+  ziyuan nominate <官职> [--lots]        廷推：官缺时吏部会同九卿各推一人（只是建议）；--lots 枚卜，从被推者中抽签任命
+  ziyuan cane <官员ID>                   廷杖：屡遭弹劾（两次以上）者降一级留用，收回 write_file、run_tests，三件获采纳即复
+  ziyuan pardon <官员ID>                 宽宥受杖者，复其品级与玉玺
   ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
   ziyuan kaocheng                      考成簿：在任官员的功过与等第（仿张居正考成法）
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
@@ -214,6 +218,15 @@ enum Command {
     Palace(String),
     /// 钦点状元。
     Crown(AgentId),
+    /// 廷推（`lots` 为枚卜：从最近一次廷推的被推者中抽签任命）。
+    Nominate {
+        office: Office,
+        lots: bool,
+    },
+    /// 廷杖。
+    Cane(AgentId),
+    /// 宽宥受杖者。
+    Pardon(AgentId),
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
     /// 准奏（`true`）或驳回改动。
@@ -351,6 +364,19 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             _ => return Err("用法: ziyuan exam <官员ID> | ziyuan exam --palace <题目>".into()),
         },
         "crown" => Command::Crown(parse_id(&args, "ziyuan crown <官员ID>")?),
+        "nominate" => match args.as_slice() {
+            [office] => Command::Nominate {
+                office: office.parse()?,
+                lots: false,
+            },
+            [office, flag] if flag == "--lots" => Command::Nominate {
+                office: office.parse()?,
+                lots: true,
+            },
+            _ => return Err("用法: ziyuan nominate <官职> [--lots]".into()),
+        },
+        "cane" => Command::Cane(parse_id(&args, "ziyuan cane <官员ID>")?),
+        "pardon" => Command::Pardon(parse_id(&args, "ziyuan pardon <官员ID>")?),
         "flags" => match args.as_slice() {
             [] => Command::Flags(None),
             [id] => Command::Flags(Some(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?))),
@@ -474,7 +500,10 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             for agent in court.agents() {
                 let model = court.model_of(agent.id).unwrap_or(&default);
                 let office = match court.office_of(agent.id) {
-                    Some(o) => format!("{}（{}）", o.label(), o.rank(court.mode())),
+                    Some(o) => match demotion_note(court, agent.id) {
+                        Some(note) => format!("{}（{}，{note}）", o.label(), o.rank(court.mode())),
+                        None => format!("{}（{}）", o.label(), o.rank(court.mode())),
+                    },
                     None if court.is_purged(agent.id) => "已革职".into(),
                     None => "未任官职".into(),
                 };
@@ -1057,9 +1086,56 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             println!("诏令已颁：官员 #{} 已罢免现职（身份与履历保留）。", id.0);
         }
         Command::Appoint(id, office) => {
-            session.appoint(id, office)?;
+            let note = session.appoint(id, office)?;
             println!("诏令已颁：任命官员 #{} 为{}。", id.0, office.label());
+            if let Some(note) = note {
+                println!("{note}");
+            }
         }
+        Command::Nominate { office, lots: true } => {
+            let (agent, note) = session.draw_lots(office)?;
+            println!("诏令已颁：枚卜得官员 #{}，任{}。", agent.0, office.label());
+            println!("{note}");
+        }
+        Command::Nominate {
+            office,
+            lots: false,
+        } => {
+            let backend = worker_backend()?;
+            println!("吏部会同九卿，廷推{}：", office.label());
+            let mut lines = Vec::new();
+            let votes = session.nominate(office, backend.as_ref(), |voter, vote| {
+                lines.push((voter.name.clone(), vote.candidate, vote.note.clone()));
+            })?;
+            let names = |id: AgentId| {
+                session
+                    .court()
+                    .agent(id)
+                    .map_or("?".to_owned(), |a| format!("#{} {}", id.0, a.name))
+            };
+            for (voter, candidate, note) in lines {
+                let note = if note.is_empty() {
+                    String::new()
+                } else {
+                    format!("——{note}")
+                };
+                println!("  {voter} 推 {}{note}", names(candidate));
+            }
+            let tally: Vec<String> = session
+                .court()
+                .nomination_tally(office)
+                .into_iter()
+                .map(|(id, n)| format!("{} {n} 票", names(id)))
+                .collect();
+            println!("得票：{}（共 {} 票）", tally.join("、"), votes.len());
+            println!(
+                "廷推只是建议：`ziyuan appoint <官员ID> {}` 任命（被推者现任他职的径直擢升），或 `ziyuan nominate {} --lots` 枚卜。",
+                office.code(),
+                office.code()
+            );
+        }
+        Command::Cane(id) => println!("{}", session.cane(id)?),
+        Command::Pardon(id) => println!("{}", session.pardon(id)?),
         Command::Examine(id) => {
             let court = session.court();
             let agent = court.agent(id).ok_or("官员不存在")?;

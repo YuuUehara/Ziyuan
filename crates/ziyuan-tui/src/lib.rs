@@ -99,6 +99,8 @@ pub enum Message {
     Debated(TaskId, Result<Option<String>, String>),
     /// 后台礼部科举结束：各题「题名 分数」，或错误。
     Examined(AgentId, Result<Vec<String>, String>),
+    /// 后台廷推结束：各票与得票（已排好），或错误。
+    Nominated(Office, Result<String, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,6 +135,7 @@ enum Modal {
 #[derive(Clone, Copy)]
 enum ConfirmKind {
     Purge(AgentId),
+    Cane(AgentId),
 }
 
 #[derive(Clone, Copy)]
@@ -152,9 +155,29 @@ enum ChooseKind {
     Abolish,
     /// 按翰林院模板下诏（入队）。
     Template,
+    /// 廷推出缺之职。
+    Nominate,
+    /// 于廷推得票者中枚卜，径直任命。
+    Lots,
 }
 
 /// 现行制度下 `agent` 可任的官职：本制度的协调官职，以及本部（专长所在部门）的官职。
+/// 现行制度下可廷推（出缺且有九卿、有候选）的官职。
+fn nominable(court: &Court) -> Vec<Office> {
+    Office::all()
+        .into_iter()
+        .filter(|o| o.exists_in(court.mode()) && court.nomination_ballot(*o).is_ok())
+        .collect()
+}
+
+/// 已有廷推、可枚卜的官职。
+fn drawable(court: &Court) -> Vec<Office> {
+    Office::all()
+        .into_iter()
+        .filter(|o| o.exists_in(court.mode()) && court.nomination(*o).is_some())
+        .collect()
+}
+
 fn appointable(court: &Court, agent: AgentId) -> Vec<Office> {
     let speciality = court.agent(agent).map(|a| a.speciality);
     Office::all()
@@ -317,6 +340,16 @@ impl App {
                         self.info(format!("礼部判卷 #{}：{}", agent.0, scores.join("，")))
                     }
                     Err(e) => self.error(format!("科举未成：{e}")),
+                }
+            }
+            Message::Nominated(office, result) => {
+                self.reload();
+                match result {
+                    Ok(note) => {
+                        self.info(format!("廷推{}毕，按 p 任命或 L 枚卜", office.label()));
+                        self.modal = Some(Modal::Notice(note));
+                    }
+                    Err(e) => self.error(format!("廷推未成：{e}")),
                 }
             }
             Message::Censured(task, result) => {
@@ -491,6 +524,30 @@ impl App {
                 })
             }
             KeyCode::Char('x') => self.modal = Some(Modal::Confirm(ConfirmKind::Purge(agent))),
+            KeyCode::Char('c') => self.modal = Some(Modal::Confirm(ConfirmKind::Cane(agent))),
+            KeyCode::Char('P') => {
+                if let Some(note) =
+                    self.mutate(|s| s.pardon(agent), |_| format!("官员 #{} 蒙宽宥", agent.0))
+                {
+                    self.modal = Some(Modal::Notice(note));
+                }
+            }
+            KeyCode::Char(c @ ('N' | 'L')) => {
+                let kind = if c == 'N' {
+                    ChooseKind::Nominate
+                } else {
+                    ChooseKind::Lots
+                };
+                if self.options(kind).is_empty() {
+                    self.error(if c == 'N' {
+                        "无可廷推的官职：须有出缺之职，且吏部尚书在任"
+                    } else {
+                        "尚无廷推，无从枚卜：先按 N 廷推"
+                    });
+                } else {
+                    self.modal = Some(Modal::Choose { kind, selected: 0 });
+                }
+            }
             KeyCode::Char('e') => self.start_exam(agent),
             KeyCode::Char('d') => {
                 self.mutate(
@@ -604,6 +661,13 @@ impl App {
                     |_| format!("官员 #{} 革职，削去仕籍，永不叙用", agent.0),
                 );
             }
+            ConfirmKind::Cane(agent) => {
+                if let Some(note) =
+                    self.mutate(|s| s.cane(agent), |_| format!("官员 #{} 受廷杖", agent.0))
+                {
+                    self.modal = Some(Modal::Notice(note));
+                }
+            }
         }
     }
 
@@ -633,10 +697,28 @@ impl App {
                 let Some(&office) = appointable(self.court(), agent).get(selected) else {
                     return;
                 };
-                self.mutate(
+                if let Some(Some(note)) = self.mutate(
                     |s| s.appoint(agent, office),
                     |_| format!("任命官员 #{} 为{}", agent.0, office.label()),
-                );
+                ) {
+                    self.modal = Some(Modal::Notice(note));
+                }
+            }
+            ChooseKind::Nominate => {
+                if let Some(&office) = nominable(self.court()).get(selected) {
+                    self.start_nomination(office);
+                }
+            }
+            ChooseKind::Lots => {
+                let Some(&office) = drawable(self.court()).get(selected) else {
+                    return;
+                };
+                if let Some((_, note)) = self.mutate(
+                    |s| s.draw_lots(office),
+                    |(agent, _)| format!("枚卜得 #{}，任{}", agent.0, office.label()),
+                ) {
+                    self.modal = Some(Modal::Notice(note));
+                }
             }
             ChooseKind::Abolish if selected == 0 => {
                 let mode = GovernanceMode::DirectRule;
@@ -768,6 +850,39 @@ impl App {
         });
     }
 
+    /// 在阻塞线程中请九卿廷推（会等待模型作答），各票与得票经消息送回。
+    fn start_nomination(&mut self, office: Office) {
+        self.info(format!("九卿会推{}中…", office.label()));
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut lines = vec![format!("廷推{}：", office.label())];
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| {
+                    s.nominate(office, backend.as_ref(), |voter, vote| {
+                        lines.push(format!(
+                            "{} 举 #{}：{}",
+                            voter.name, vote.candidate.0, vote.note
+                        ));
+                    })?;
+                    let court = s.court();
+                    let tally: Vec<String> = court
+                        .nomination_tally(office)
+                        .into_iter()
+                        .map(|(id, n)| {
+                            let name = court.agent(id).map_or("", |a| a.name.as_str());
+                            format!("#{} {name} {n} 票", id.0)
+                        })
+                        .collect();
+                    lines.push(format!("得票：{}", tally.join("、")));
+                    Ok(lines.join("\n"))
+                })
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Nominated(office, result));
+        });
+    }
+
     /// 在阻塞线程中请内阁票拟（会等待模型返回），结果经消息送回。
     fn start_draft(&mut self, task: TaskId) {
         self.info(format!("诏令 #{} 内阁票拟中…", task.0));
@@ -809,6 +924,17 @@ impl App {
                 .map(|(name, t, builtin)| {
                     let origin = if builtin { "内置" } else { "自定" };
                     format!("{name}（{origin}·验收{}条）", t.criteria.len())
+                })
+                .collect(),
+            ChooseKind::Nominate => nominable(self.court())
+                .iter()
+                .map(|o| format!("{}（{}）", o.label(), o.rank(mode)))
+                .collect(),
+            ChooseKind::Lots => drawable(self.court())
+                .iter()
+                .map(|o| {
+                    let n = self.court().nomination_tally(*o).len();
+                    format!("{}（{n} 人得票）", o.label())
                 })
                 .collect(),
         }
@@ -1336,14 +1462,20 @@ impl App {
         let rows: Vec<Row> = court
             .agents()
             .map(|a| {
-                let office = court
-                    .office_of(a.id)
-                    .map(|o| format!("{}·{}", o.label(), o.rank(court.mode())));
+                let demoted = court.demotion(a.id);
+                let office = court.office_of(a.id).map(|o| {
+                    let mut label = format!("{}·{}", o.label(), o.rank(court.mode()));
+                    if demoted > 0 {
+                        label.push_str(&format!("（降{demoted}级）"));
+                    }
+                    label
+                });
                 let record = court.service_record(a.id);
                 Row::new(vec![
                     Cell::from(format!("#{}", a.id.0)).dim(),
                     Cell::from(a.name.clone()),
                     match office {
+                        Some(o) if demoted > 0 => Cell::from(o).fg(Color::Red),
                         Some(o) => Cell::from(o).fg(GOLD),
                         None if court.is_purged(a.id) => Cell::from("已革职").fg(Color::Red),
                         None => Cell::from("未任官职").dim(),
@@ -1491,6 +1623,8 @@ impl App {
                 ("d", "罢免"),
                 ("x", "革职"),
                 ("e", "应试"),
+                ("N/L", "廷推/枚卜"),
+                ("c/P", "廷杖/宽宥"),
                 ("g", "改制"),
                 ("Tab", "切换"),
                 ("q", "退出"),
@@ -1574,6 +1708,8 @@ impl App {
                     ChooseKind::Redraft(task) => format!("御笔改票 · 诏令 #{}", task.0),
                     ChooseKind::Abolish => "罢中书省，丞相如何处置？".to_owned(),
                     ChooseKind::Template => "翰林院模板 · 选定即入队".to_owned(),
+                    ChooseKind::Nominate => "廷推 · 九卿会推出缺之职".to_owned(),
+                    ChooseKind::Lots => "枚卜 · 金瓯覆名，掣签即任".to_owned(),
                 };
                 let popup = centered(area, 36, options.len() as u16 + 2);
                 frame.render_widget(Clear, popup);
@@ -1592,6 +1728,10 @@ impl App {
                     ConfirmKind::Purge(agent) => {
                         let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
                         format!("革去官员 #{} {name}？削去仕籍，永不叙用。", agent.0)
+                    }
+                    ConfirmKind::Cane(agent) => {
+                        let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
+                        format!("廷杖官员 #{} {name}？降一级留用，收回写权。", agent.0)
                     }
                 };
                 let paragraph = Paragraph::new(vec![
@@ -1855,6 +1995,51 @@ mod tests {
         );
         press(&mut app, " ");
         assert!(app.modal.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nominations_lots_and_caning_from_the_officials_tab() {
+        let (mut app, mut messages, root) = temp_app("tingtui");
+        let works = Office::Minister(Department::Works);
+        // 百官页选中 #2 工部尚书，罢免后出缺；N 廷推在后台进行，各票以史官记示之。
+        press(&mut app, "2↓d");
+        assert_eq!(app.court().office_of(AgentId(2)), None);
+        press(&mut app, "N");
+        assert!(
+            screen(&app).contains("九卿会推出缺之职"),
+            "{}",
+            screen(&app)
+        );
+        // 丞相制下左丞相亦出缺，选单中工部尚书不在首位。
+        let index = nominable(app.court())
+            .iter()
+            .position(|o| *o == works)
+            .unwrap();
+        press(&mut app, &format!("{}\n", "↓".repeat(index)));
+        let message = tokio::time::timeout(Duration::from_secs(10), messages.recv())
+            .await
+            .expect("廷推应在 10 秒内结束")
+            .unwrap();
+        assert!(matches!(message, Message::Nominated(o, Ok(_)) if o == works));
+        app.handle(message);
+        let shown = screen(&app);
+        assert!(
+            shown.contains("廷推工部尚书") && shown.contains("得票"),
+            "{shown}"
+        );
+        // 任意键关闭史官记；L 枚卜径直任命，并附崇祯故事。
+        press(&mut app, " L\n");
+        assert!(screen(&app).contains("金瓯"), "{}", screen(&app));
+        assert!(
+            app.court()
+                .agents()
+                .any(|a| app.court().office_of(a.id) == Some(works))
+        );
+        // 未遭弹劾者廷杖被拒，错误见于状态栏。
+        press(&mut app, " ↑cy");
+        assert_eq!(app.court().demotion(AgentId(1)), 0);
+        assert!(screen(&app).contains("弹劾"), "{}", screen(&app));
         std::fs::remove_dir_all(root).unwrap();
     }
 

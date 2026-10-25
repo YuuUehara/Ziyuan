@@ -12,12 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, CensorVerdict, CourtEvent, Department, Edict, Evidence,
-    FileChange, GovernanceMode, Office, Persona, Price, Seal, Speech, TaskId, Template, Threat,
-    TokenUsage, Verdict,
+    FileChange, GovernanceMode, Nomination, Office, Persona, Price, Seal, Speech, TaskId, Template,
+    Threat, TokenUsage, Verdict,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{
-    ChangeState, Court, GovernanceError, ServiceRecord, Suspicion, Task, TaskStatus,
+    Caning, ChangeState, Court, GovernanceError, ServiceRecord, Suspicion, Task, TaskStatus,
     founding_events,
 };
 use ziyuan_runtime::{
@@ -179,9 +179,172 @@ impl<S: EventStore> Session<S> {
         }
     }
 
-    pub fn appoint(&mut self, agent: AgentId, office: Office) -> Result<(), AppError> {
-        self.commit(|court| Ok(vec![court.propose_appointment(agent, office)?]))?;
-        Ok(())
+    /// 任命；此官职有廷推时返回史官记（从廷推、择而用之或中旨特简）。
+    pub fn appoint(&mut self, agent: AgentId, office: Office) -> Result<Option<String>, AppError> {
+        self.reload()?;
+        // 任命后廷推即作罢，须先写好史官记。
+        let note = appointment_note(&self.court, agent, office);
+        self.commit(|court| appointment_events(court, agent, office))?;
+        Ok(note)
+    }
+
+    /// 廷推：吏部会同九卿为出缺的 `office` 各推一人（经 `WorkerBackend::complete`，以各自的模型与人格）。
+    /// 模型不可用、度支不足或所答不合规矩的，按吏部考绩代推并注明。只是建议，不任命。
+    pub fn nominate(
+        &mut self,
+        office: Office,
+        backend: &dyn WorkerBackend,
+        mut on_vote: impl FnMut(&Agent, &Nomination),
+    ) -> Result<Vec<Nomination>, AppError> {
+        self.reload()?;
+        let court = &self.court;
+        let (ministers, candidates) = court.nomination_ballot(office)?;
+        let mut votes = Vec::new();
+        let mut spent = 0;
+        for (voter, voter_office) in &ministers {
+            let eligible: Vec<_> = candidates
+                .iter()
+                .filter(|c| c.agent.id != voter.id)
+                .collect();
+            let Some(fallback) = eligible.first() else {
+                continue;
+            };
+            let roster: String = eligible
+                .iter()
+                .take(12)
+                .map(|c| {
+                    let current = c
+                        .current
+                        .map_or("未任官职".to_owned(), |o| format!("现任{}", o.label()));
+                    format!(
+                        "#{} {}（专长{}，{current}）：{}\n",
+                        c.agent.id.0,
+                        c.agent.name,
+                        c.agent.speciality.label(),
+                        describe_record(&c.record)
+                    )
+                })
+                .collect();
+            let system = format!(
+                "你是紫垣朝廷{}{}，奉旨与九卿廷推{}。从候选人中推举一人，不得推举自己。\n\
+                 回复第一行只写所推官员的 ID（数字），第二行起用不超过 80 字说明理由。\
+                 廷推只是建议，任命由皇帝决定。\n{}",
+                voter_office.label(),
+                voter.name,
+                office.label(),
+                Persona::of(voter.id).prompt()
+            );
+            let user = format!("候选人（按吏部考绩排序）：\n{roster}");
+            let model = court
+                .model_of(voter.id)
+                .or(backend.model_name())
+                .map(str::to_owned);
+            let answer = court
+                .check_treasury(spent)
+                .map_err(BoxError::from)
+                .and_then(|()| backend.complete(model.as_deref(), &system, &user));
+            let vote = match answer {
+                Ok((reply, usage)) => {
+                    spent += usage.total();
+                    let mut lines = reply.trim().lines();
+                    let first = lines.next().unwrap_or_default();
+                    let digits: String = first.chars().filter(char::is_ascii_digit).collect();
+                    let picked = digits
+                        .parse()
+                        .ok()
+                        .map(AgentId)
+                        .filter(|id| eligible.iter().any(|c| c.agent.id == *id));
+                    let reason = truncate(lines.collect::<Vec<_>>().join(" ").trim(), 200);
+                    match picked {
+                        Some(candidate) => Nomination {
+                            voter: voter.id,
+                            candidate,
+                            note: reason,
+                            model,
+                            usage,
+                        },
+                        None => Nomination {
+                            voter: voter.id,
+                            candidate: fallback.agent.id,
+                            note: format!(
+                                "所推不在候选之列（「{}」），按吏部考绩代推",
+                                truncate(first, 40)
+                            ),
+                            model,
+                            usage,
+                        },
+                    }
+                }
+                Err(e) => Nomination {
+                    voter: voter.id,
+                    candidate: fallback.agent.id,
+                    note: format!("未能以模型推举（{e}），按吏部考绩代推"),
+                    model: None,
+                    usage: TokenUsage::default(),
+                },
+            };
+            on_vote(voter, &vote);
+            votes.push(vote);
+        }
+        self.commit(|court| Ok(vec![court.propose_nomination(office, votes.clone())?]))?;
+        Ok(votes)
+    }
+
+    /// 枚卜：从 `office` 最近一次廷推的被推者中（可即任命者）随机取一人任命，返回其人与史官记。
+    pub fn draw_lots(&mut self, office: Office) -> Result<(AgentId, String), AppError> {
+        self.reload()?;
+        let court = &self.court;
+        let pool: Vec<AgentId> = court
+            .nomination_tally(office)
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|&id| appointment_events(court, id, office).is_ok())
+            .collect();
+        if pool.is_empty() {
+            let why = format!("{}尚无廷推，或被推者都不能任命", office.label());
+            return Err(GovernanceError::Court(why).into());
+        }
+        let agent = pool[(random_seed() % pool.len() as u64) as usize];
+        let name = court.agent(agent).expect("在册").name.clone();
+        self.commit(|court| appointment_events(court, agent, office))?;
+        Ok((
+            agent,
+            format!(
+                "枚卜：金瓯覆名，焚香拜天，以箸夹之，得{name}为{}（{} 人中取一）。\n\
+                 ——崇祯元年，帝疑廷推阁臣结党，纳诸臣之名于金瓯，焚香肃拜而枚卜之；然十七年间易相五十，终无救于亡。",
+                office.label(),
+                pool.len()
+            ),
+        ))
+    }
+
+    /// 廷杖：屡遭弹劾的在任官员降一级留用、收回写权，返回史官记。
+    pub fn cane(&mut self, agent: AgentId) -> Result<String, AppError> {
+        self.commit(|court| Ok(vec![court.propose_caning(agent)?]))?;
+        let court = &self.court;
+        let name = &court.agent(agent).expect("在册").name;
+        let office = court.office_of(agent).expect("在任方可受杖");
+        let levels = court.demotion(agent);
+        let history = if office == Office::Censor {
+            "——言官受杖，直声动天下：正德十四年百官谏南巡，跪阙下五日，杖于午门者百余人。"
+        } else {
+            "——嘉靖三年大礼议，群臣伏阙左顺门哭谏，廷杖百八十余人，死者十余人。廷杖之辱，明一代之弊政。"
+        };
+        Ok(format!(
+            "廷杖：{}{name}屡遭弹劾，于午门外受杖，降 {levels} 级留用，收回工部动土之权（write_file、run_tests）；\
+             再有 {} 件回奏获采纳，即戴罪立功、复其品级与玉玺。\n{history}",
+            office.label(),
+            Caning::REDEMPTION
+        ))
+    }
+
+    /// 宽宥受杖的官员，返回史官记。
+    pub fn pardon(&mut self, agent: AgentId) -> Result<String, AppError> {
+        self.commit(|court| Ok(vec![court.propose_pardon(agent)?]))?;
+        let name = &self.court.agent(agent).expect("在册").name;
+        Ok(format!(
+            "宽宥：{name}复其品级与玉玺。圣恩浩荡，臣当戴罪图报。"
+        ))
     }
 
     pub fn dismiss(&mut self, agent: AgentId) -> Result<(), AppError> {
@@ -1623,9 +1786,71 @@ pub fn seal_note(seal: &Seal) -> String {
     }
 }
 
+/// 任命的事件：被廷推者现任他职的，先罢现职再任命（擢升），一并提交；其余照常须未任官职。
+fn appointment_events(
+    court: &Court,
+    agent: AgentId,
+    office: Office,
+) -> Result<Vec<CourtEvent>, GovernanceError> {
+    let nominated = court
+        .nomination_tally(office)
+        .iter()
+        .any(|(id, _)| *id == agent);
+    match court.office_of(agent) {
+        Some(current) if nominated && current != office => {
+            let dismissed = court.propose_dismissal(agent)?;
+            let mut next = court.clone();
+            next.apply(&dismissed)?;
+            Ok(vec![dismissed, next.propose_appointment(agent, office)?])
+        }
+        _ => Ok(vec![court.propose_appointment(agent, office)?]),
+    }
+}
+
+/// 任命 `agent` 为 `office` 时的史官记：此官职有廷推才有。
+pub fn appointment_note(court: &Court, agent: AgentId, office: Office) -> Option<String> {
+    court.nomination(office)?;
+    let tally = court.nomination_tally(office);
+    let name = &court.agent(agent)?.name;
+    let total: u32 = tally.iter().map(|(_, n)| n).sum();
+    let promoted = match court.office_of(agent) {
+        Some(current) if current != office && tally.iter().any(|(id, _)| *id == agent) => {
+            format!("由{}擢升。", current.label())
+        }
+        _ => String::new(),
+    };
+    Some(
+        promoted
+            + &match tally.iter().position(|(id, _)| *id == agent) {
+                Some(0) => format!(
+                    "从廷推：{name}得 {} 票（共 {total} 票），居廷推之首，众望所归。",
+                    tally[0].1
+                ),
+                Some(rank) => format!(
+                    "廷推第 {}（{} 票），陛下择而用之，不取票多者。",
+                    rank + 1,
+                    tally[rank].1
+                ),
+                None => format!(
+                    "中旨特简：{name}不在廷推之列，言官交章论列，然任命出自圣裁。\n\
+             ——成化年间，宪宗屡以中旨授官，不经吏部，号「传奉官」，朝野非之。"
+                ),
+            },
+    )
+}
+
+/// 降级留用的说明（未受杖或已复职为 `None`）。
+pub fn demotion_note(court: &Court, agent: AgentId) -> Option<String> {
+    let levels = court.demotion(agent);
+    (levels > 0).then(|| {
+        let left = court.redemption_left(agent).unwrap_or(0);
+        format!("降 {levels} 级留用，再获采纳 {left} 件即复")
+    })
+}
+
 pub fn describe_record(r: &ServiceRecord) -> String {
     format!(
-        "采纳 {}，驳回 {}，失败 {}，待评定 {}；御史背书 {}，弹劾 {}；实证 {}{}{}",
+        "采纳 {}，驳回 {}，失败 {}，待评定 {}；御史背书 {}，弹劾 {}；实证 {}{}{}{}{}",
         r.accepted,
         r.rejected,
         r.failed,
@@ -1640,6 +1865,14 @@ pub fn describe_record(r: &ServiceRecord) -> String {
         match r.zhuangyuan {
             0 => String::new(),
             n => format!("；状元 {n}"),
+        },
+        match r.nominated {
+            0 => String::new(),
+            n => format!("；廷推得票 {n}"),
+        },
+        match r.caned {
+            0 => String::new(),
+            n => format!("；受廷杖 {n} 次"),
         }
     )
 }
@@ -2321,6 +2554,30 @@ pub fn describe_event(event: &CourtEvent) -> String {
             template.criteria.len()
         ),
         CourtEvent::TemplateRemoved { name } => format!("翰林院撤去模板「{name}」"),
+        CourtEvent::CourtNominated { office, votes } => {
+            let mut tally: Vec<(AgentId, usize)> = Vec::new();
+            for v in votes {
+                match tally.iter_mut().find(|(id, _)| *id == v.candidate) {
+                    Some((_, n)) => *n += 1,
+                    None => tally.push((v.candidate, 1)),
+                }
+            }
+            let ranked: Vec<String> = {
+                tally.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                tally
+                    .iter()
+                    .map(|(id, n)| format!("#{} {n} 票", id.0))
+                    .collect()
+            };
+            format!(
+                "廷推{}：{} 位大臣推举，{}",
+                office.label(),
+                votes.len(),
+                ranked.join("、")
+            )
+        }
+        CourtEvent::OfficialCaned { agent } => format!("廷杖 #{}，降级留用", agent.0),
+        CourtEvent::OfficialPardoned { agent } => format!("宽宥 #{}，复其品级与玉玺", agent.0),
         CourtEvent::TemplateApplied {
             task,
             name,
@@ -2915,6 +3172,104 @@ mod tests {
             *self.0.lock().unwrap() = user.into();
             Ok(("弹劾：回奏夹带越权请求".into(), TokenUsage::default()))
         }
+    }
+
+    /// 吏部尚书推 #4，其余大臣答非所问。
+    struct Ballot;
+    impl WorkerBackend for Ballot {
+        fn execute(&self, _: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            Err("不承办".into())
+        }
+        fn complete(
+            &self,
+            _: Option<&str>,
+            system: &str,
+            _: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            let reply = if system.contains("吏部尚书") {
+                "#4\n郎中精细，可擢尚书"
+            } else {
+                "臣以为诸公皆贤"
+            };
+            Ok((
+                reply.into(),
+                TokenUsage {
+                    input: 10,
+                    output: 5,
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn nominations_advise_and_appointments_note_how_they_were_made() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let works = Office::Minister(Department::Works);
+        let err = session
+            .nominate(works, &Ballot, |_, _| {})
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("工部尚书未出缺"), "{err}");
+        session.dismiss(AgentId(2)).unwrap();
+        // 吏部尚书空缺不能廷推。
+        session.dismiss(AgentId(3)).unwrap();
+        assert!(
+            session
+                .nominate(works, &Ballot, |_, _| {})
+                .unwrap_err()
+                .to_string()
+                .contains("吏部尚书空缺")
+        );
+        session
+            .appoint(AgentId(3), Office::Minister(Department::Personnel))
+            .unwrap();
+
+        let mut seen = Vec::new();
+        let votes = session
+            .nominate(works, &Ballot, |voter, vote| {
+                seen.push((voter.id, vote.candidate))
+            })
+            .unwrap();
+        // 九卿在任者：吏部尚书 #3 与丞相 #1。吏部尚书推 #4；丞相答非所问，按考绩代推 #2。
+        assert_eq!(seen, [(AgentId(3), AgentId(4)), (AgentId(1), AgentId(2))]);
+        assert!(
+            votes[1].note.contains("按吏部考绩代推"),
+            "{}",
+            votes[1].note
+        );
+        assert_eq!(
+            session.court().total_usage().total(),
+            30,
+            "廷推用量计入总账"
+        );
+        assert_eq!(
+            session.court().nomination_tally(works),
+            [(AgentId(4), 1), (AgentId(2), 1)]
+        );
+        // 三种史官记：同票先得者为首，次者「择而用之」，不在推举之列的「中旨特简」。
+        let note = |id| appointment_note(session.court(), AgentId(id), works).unwrap();
+        assert!(note(2).contains("廷推第 2"), "{}", note(2));
+        assert!(note(5).contains("中旨特简") && note(5).contains("传奉官"));
+        let appointed = session.appoint(AgentId(4), works).unwrap().unwrap();
+        assert!(
+            appointed.starts_with("由工部郎中擢升。从廷推") && appointed.contains("共 2 票"),
+            "{appointed}"
+        );
+        assert!(
+            session.court().nomination(works).is_none(),
+            "官缺已补，廷推作罢"
+        );
+        assert_eq!(session.court().service_record(AgentId(4)).nominated, 1);
+        assert!(session.appoint(AgentId(4), works).is_err());
+
+        // 枚卜：演示后端不调用模型，都按考绩代推；从被推者中取一人任命。
+        session.dismiss(AgentId(4)).unwrap();
+        assert!(session.draw_lots(works).is_err(), "无廷推不能枚卜");
+        session.nominate(works, &DemoBackend, |_, _| {}).unwrap();
+        let (drawn, note) = session.draw_lots(works).unwrap();
+        assert_eq!(session.court().office_of(drawn), Some(works));
+        assert!(note.contains("金瓯") && note.contains("崇祯"), "{note}");
     }
 
     /// 记下承办时收到的诏令内容与复核时收到的提示。
