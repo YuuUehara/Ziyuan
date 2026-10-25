@@ -190,6 +190,7 @@ impl WorkerBackend for AgentBackend {
         let system = format!(
             "你是紫垣朝廷{}的官员{}，奉诏办理下列事务。\n\
              玉玺授权（{}）。{powers}\n\
+             先调用工具查阅，再作结论；不要凭记忆或猜测回奏。\n\
              请如实回奏：说明查阅了哪些内容、得出什么结论；没有做到的事不得声称已完成。\n\\
              回奏须依礼部体例分三段，各以标题开头：「结论」「依据」（查阅了什么、引用文件与行号）、\\
              「未办之事」（没有做到或无法确认的，没有就写「无」）。\n{}\n{}",
@@ -223,7 +224,8 @@ impl WorkerBackend for AgentBackend {
                  只调整格式，不得增删事实；不要再调用工具。",
                 missing.join("」「")
             )));
-            agent_loop::run(model, &sealed.tools, messages, 2, &nonce, hooks).unwrap_or(summary)
+            // 只改格式：不给工具（也就不会因「未查阅」被发回）。
+            agent_loop::run(model, &[], messages, 2, &nonce, hooks).unwrap_or(summary)
         };
         let changes = sealed.changes();
         if !changes.is_empty() {

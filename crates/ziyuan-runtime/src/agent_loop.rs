@@ -316,6 +316,10 @@ impl Metered<'_> {
 /// 步数用尽时的收束：不再提供工具，请模型就已查阅的内容回奏。
 pub const STEP_LIMIT_NOTE: &str = "〔步数用尽，据已查阅的内容回奏〕";
 
+/// 授了工具却一次未查就回奏时，发回重办的话（小模型常见）。只发回一次。
+pub const UNCHECKED_SEND_BACK: &str = "发回重办：你尚未调用任何工具查阅，就已回奏。请先调用工具（如 read_file、search_code）查证，再按体例回奏；\
+     确实无须查阅的，在「依据」中说明理由。";
+
 /// 从 `messages`（通常是 System + User）开始，循环调用模型与工具，直到模型给出最终答复。
 ///
 /// 工具输出是外来文书：以 `nonce` 为暗号包上边界（系统提示应含 [`guard::warning`]），
@@ -337,9 +341,19 @@ pub fn run(
         last: Cell::new((0, TokenUsage::default())),
         cap: Cell::new(None),
     };
+    // 有工具可用、对话中尚无工具输出：首次回奏若一次未查，发回重办一次。
+    let mut unchecked = !specs.is_empty()
+        && !messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolOutput { .. }));
     for _ in 0..max_steps {
         abridge(&mut messages, &specs, CONTEXT_TOKENS, nonce);
         match hooks.call(model, &messages, &specs)? {
+            ModelTurn::Final(answer) if unchecked => {
+                unchecked = false;
+                messages.push(Message::Assistant(answer));
+                messages.push(Message::User(UNCHECKED_SEND_BACK.into()));
+            }
             ModelTurn::Final(answer) => return Ok(guard::strip_fences(&answer, nonce)),
             ModelTurn::Calls {
                 calls,
@@ -349,6 +363,7 @@ pub fn run(
                 if calls.is_empty() {
                     return Err(LoopError::EmptyToolCalls);
                 }
+                unchecked = false;
                 // 只有注册的工具才能执行；任何一个未授权即整轮拒绝。
                 let resolved = calls
                     .into_iter()
@@ -657,6 +672,52 @@ mod tests {
         ]) {
             assert!(output.contains(why), "{output}");
         }
+    }
+
+    #[test]
+    fn an_unchecked_first_report_is_sent_back_once() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(PathTool::default())];
+        // 首次未查即奏：发回；再奏仍未查则照收（只发回一次）。
+        let lazy = Script::new(vec![
+            ModelTurn::Final("凭空一".into()),
+            ModelTurn::Final("凭空二".into()),
+        ]);
+        let answer = run(&lazy, &tools, vec![Message::User("q".into())], 4, "n", &()).unwrap();
+        assert_eq!(answer, "凭空二");
+        let seen = lazy.seen.lock().unwrap();
+        assert!(matches!(seen[1].1.last(), Some(Message::User(t)) if t == UNCHECKED_SEND_BACK));
+        // 发回后去查：照常回奏。
+        let reformed = Script::new(vec![
+            ModelTurn::Final("凭空".into()),
+            call(r#"{"path":"a"}"#),
+            ModelTurn::Final("查过".into()),
+        ]);
+        let answer = run(
+            &reformed,
+            &tools,
+            vec![Message::User("q".into())],
+            4,
+            "n",
+            &(),
+        )
+        .unwrap();
+        assert_eq!(answer, "查过");
+        // 查过再奏、或本无工具：不发回。
+        let diligent = Script::new(vec![call(r#"{"path":"a"}"#), ModelTurn::Final("毕".into())]);
+        run(
+            &diligent,
+            &tools,
+            vec![Message::User("q".into())],
+            4,
+            "n",
+            &(),
+        )
+        .unwrap();
+        let plain = Script::new(vec![ModelTurn::Final("毕".into())]);
+        assert_eq!(
+            run(&plain, &[], vec![Message::User("q".into())], 4, "n", &()).unwrap(),
+            "毕"
+        );
     }
 
     #[test]
