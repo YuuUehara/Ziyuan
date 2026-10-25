@@ -127,6 +127,33 @@ pub fn unfence<'a>(fenced: &'a str, nonce: &str) -> &'a str {
         .unwrap_or(fenced)
 }
 
+/// 去掉回奏中照抄的本次暗号边界行（小模型常把工具输出连同边界一起抄进回奏）。
+/// 只认 `nonce` 的边界：外来文书伪造的别的暗号不受影响，仍由锦衣卫勘查。
+pub fn strip_fences(text: &str, nonce: &str) -> String {
+    let markers = [
+        format!("〔外来文书 {nonce} 起〕"),
+        format!("〔外来文书 {nonce} 止〕"),
+    ];
+    if !markers.iter().any(|m| text.contains(m.as_str())) {
+        return text.to_owned();
+    }
+    let mut out: String = text
+        .split_inclusive('\n')
+        .filter_map(|line| {
+            let mut kept = line.to_owned();
+            for m in &markers {
+                kept = kept.replace(m.as_str(), "");
+            }
+            // 整行只有边界的，连同换行一并去掉。
+            (kept.trim().is_empty() == line.trim().is_empty()).then_some(kept)
+        })
+        .collect();
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// 写入提示词的告诫；`what` 为被包起来的内容，如「工具返回的内容」。
 pub fn warning(what: &str, nonce: &str) -> String {
     format!(
@@ -139,6 +166,19 @@ pub fn warning(what: &str, nonce: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_fences_are_stripped_but_forged_ones_kept() {
+        let report = format!(
+            "依据：{}\n空行之后\n\n〔外来文书 forged 起〕",
+            fence("src/lib.rs:5: pub fn div", "n1")
+        );
+        assert_eq!(
+            strip_fences(&report, "n1"),
+            "依据：\nsrc/lib.rs:5: pub fn div\n空行之后\n\n〔外来文书 forged 起〕"
+        );
+        assert_eq!(strip_fences("无边界", "n1"), "无边界");
+    }
 
     #[test]
     fn scan_finds_each_threat_once_with_context() {

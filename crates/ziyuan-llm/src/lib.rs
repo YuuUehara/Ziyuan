@@ -192,7 +192,7 @@ impl ModelProvider for OpenAiCompatible {
         }
         // 度支将尽：输出至多用完余额。
         if let Some(room) = hooks.max_output().filter(|&room| room < MAX_TOKENS_CAP) {
-            body["max_tokens"] = json!(room.max(1));
+            body[output_cap_field(&self.base_url)] = json!(room.max(1));
         }
         let body = body.to_string();
         let trace = format!("zy-{}", &guard::nonce()[..12]);
@@ -336,7 +336,7 @@ fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<Model
         report_usage(&chunk, hooks);
         let delta = &chunk["choices"][0]["delta"];
         // 思考模式的思维链不显示，但须保留以便回传。
-        if let Some(text) = delta["reasoning_content"].as_str() {
+        if let Some(text) = reasoning_of(delta) {
             reasoning.push_str(text);
         }
         if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
@@ -366,6 +366,11 @@ fn read_stream(reader: impl BufRead, hooks: &dyn ExecutionHooks) -> Result<Model
     }
     if !done {
         return Err("流式响应在 [DONE] 之前中断".into());
+    }
+    let (think, rest) = split_think(&content);
+    if let Some(think) = think {
+        reasoning.push_str(think);
+        content = rest.to_owned();
     }
     if calls.is_empty() {
         return Ok(ModelTurn::Final(content));
@@ -490,16 +495,47 @@ fn decode_turn(response: &Value) -> Result<ModelTurn, BoxError> {
             .map(|calls| ModelTurn::Calls {
                 calls,
                 text: message["content"].as_str().unwrap_or_default().to_owned(),
-                reasoning: message["reasoning_content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
+                reasoning: reasoning_of(message).unwrap_or_default().to_owned(),
             });
     }
     match message["content"].as_str() {
-        Some(content) => Ok(ModelTurn::Final(content.to_owned())),
+        Some(content) => Ok(ModelTurn::Final(split_think(content).1.to_owned())),
         None => Err(format!("无法识别的模型响应: {response}").into()),
     }
+}
+
+/// 输出上限的参数名：OpenAI 已弃用 `max_tokens`（推理模型直接拒绝），改用
+/// `max_completion_tokens`；DeepSeek、Ollama 等仍只认 `max_tokens`。按服务地址的主机名区分。
+fn output_cap_field(base_url: &str) -> &'static str {
+    let host = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default();
+    if host == "api.openai.com" {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
+/// 思维链：DeepSeek 为 `reasoning_content`，Ollama 等为 `reasoning`。
+fn reasoning_of(message: &Value) -> Option<&str> {
+    message["reasoning_content"]
+        .as_str()
+        .or_else(|| message["reasoning"].as_str())
+}
+
+/// 有些服务把思维链以 `<think>…</think>` 写在正文开头：分出（思维链, 正文）。
+fn split_think(content: &str) -> (Option<&str>, &str) {
+    let trimmed = content.trim_start();
+    trimmed
+        .strip_prefix("<think>")
+        .and_then(|rest| rest.split_once("</think>"))
+        .map_or((None, content), |(think, rest)| {
+            (Some(think.trim()), rest.trim_start())
+        })
 }
 
 #[cfg(test)]
@@ -704,6 +740,98 @@ mod tests {
 
     fn delta(delta: Value) -> Value {
         json!({"choices": [{"index": 0, "delta": delta}]})
+    }
+
+    /// 按 OpenAI Chat Completions 文档的流式格式回放（未经真实账号实测）：首块 `content: null`、
+    /// 工具调用首块 `arguments` 为空串、`finish_reason: "tool_calls"`、末块 `choices` 为空只带 usage。
+    #[test]
+    fn openai_shaped_stream_is_understood() {
+        let chunk = |choices: Value| {
+            json!({"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1,
+                   "model": "gpt-5-mini", "system_fingerprint": null, "choices": choices})
+        };
+        let reply = sse(
+            &[
+                chunk(
+                    json!([{"index": 0, "delta": {"role": "assistant", "content": null,
+                    "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "read_file", "arguments": ""}}], "refusal": null},
+                    "logprobs": null, "finish_reason": null}]),
+                ),
+                chunk(json!([{"index": 0, "delta": {"tool_calls": [{"index": 0,
+                    "function": {"arguments": "{\"path\":"}}]}, "finish_reason": null}])),
+                chunk(json!([{"index": 0, "delta": {"tool_calls": [{"index": 0,
+                    "function": {"arguments": "\"src/lib.rs\"}"}}]}, "finish_reason": null}])),
+                chunk(json!([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])),
+                {
+                    let mut last = chunk(json!([]));
+                    last["usage"] = json!({"prompt_tokens": 120, "completion_tokens": 40,
+                        "total_tokens": 160, "prompt_tokens_details": {"cached_tokens": 0},
+                        "completion_tokens_details": {"reasoning_tokens": 32}});
+                    last
+                },
+            ],
+            true,
+        );
+        let (url, _) = mock_server(vec![(200, reply)]);
+        let hooks = Recorder::default();
+        let turn = OpenAiCompatible::new(url, Some("k".into()), "gpt-5-mini")
+            .next_turn(&[Message::User("q".into())], &[], &hooks)
+            .unwrap();
+        let ModelTurn::Calls { calls, text, .. } = turn else {
+            panic!("应为工具调用: {turn:?}");
+        };
+        assert_eq!((calls.len(), calls[0].id.as_str()), (1, "call_1"));
+        assert_eq!(calls[0].args_json, r#"{"path":"src/lib.rs"}"#);
+        assert!(text.is_empty());
+        // 推理 token 已含在 completion_tokens 内，不重复计。
+        assert_eq!(
+            *hooks.usage.borrow(),
+            [TokenUsage {
+                input: 120,
+                output: 40
+            }]
+        );
+    }
+
+    #[test]
+    fn ollama_reasoning_and_inline_think_stay_out_of_the_answer() {
+        // Ollama 的思维链在 `reasoning`；另一些服务把 `<think>` 写在正文开头。
+        let ollama = sse(
+            &[
+                delta(json!({"role": "assistant", "content": "", "reasoning": "想"})),
+                delta(json!({"content": "", "reasoning": "一想"})),
+                delta(json!({"content": "工具后"})),
+                delta(
+                    json!({"tool_calls": [{"index": 0, "id": "a", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"}}]}),
+                ),
+            ],
+            true,
+        );
+        let inline = sse(
+            &[delta(
+                json!({"content": "<think>\n先想\n</think>\n\n7\n理由"}),
+            )],
+            true,
+        );
+        let (url, _) = mock_server(vec![(200, ollama), (200, inline)]);
+        let model = OpenAiCompatible::new(url, None, "m");
+        let ask = [Message::User("q".into())];
+        let turn = model.next_turn(&ask, &[], &Recorder::default()).unwrap();
+        assert!(
+            matches!(&turn, ModelTurn::Calls { reasoning, text, .. } if reasoning == "想一想" && text == "工具后"),
+            "{turn:?}"
+        );
+        let turn = model.next_turn(&ask, &[], &Recorder::default()).unwrap();
+        assert!(
+            matches!(&turn, ModelTurn::Final(t) if t == "7\n理由"),
+            "{turn:?}"
+        );
+        assert_eq!(
+            split_think("答：<think>不是开头</think>"),
+            (None, "答：<think>不是开头</think>")
+        );
     }
 
     #[test]
@@ -920,6 +1048,17 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0].0["max_tokens"], 300);
         assert!(seen[1].0.get("max_tokens").is_none(), "余额充裕时不传");
+        assert_eq!(
+            output_cap_field("https://api.openai.com/v1"),
+            "max_completion_tokens"
+        );
+        for other in [
+            "https://api.deepseek.com/v1",
+            "http://127.0.0.1:11434/v1",
+            "https://x.dev/api.openai.com/v1",
+        ] {
+            assert_eq!(output_cap_field(other), "max_tokens", "{other}");
+        }
     }
 
     #[test]

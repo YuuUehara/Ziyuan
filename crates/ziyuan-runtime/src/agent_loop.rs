@@ -340,7 +340,7 @@ pub fn run(
     for _ in 0..max_steps {
         abridge(&mut messages, &specs, CONTEXT_TOKENS, nonce);
         match hooks.call(model, &messages, &specs)? {
-            ModelTurn::Final(answer) => return Ok(answer),
+            ModelTurn::Final(answer) => return Ok(guard::strip_fences(&answer, nonce)),
             ModelTurn::Calls {
                 calls,
                 text,
@@ -396,7 +396,10 @@ pub fn run(
     )));
     abridge(&mut messages, &[], CONTEXT_TOKENS, nonce);
     match hooks.call(model, &messages, &[]) {
-        Ok(ModelTurn::Final(answer)) => Ok(format!("{STEP_LIMIT_NOTE}\n{answer}")),
+        Ok(ModelTurn::Final(answer)) => Ok(format!(
+            "{STEP_LIMIT_NOTE}\n{}",
+            guard::strip_fences(&answer, nonce)
+        )),
         Err(e @ (LoopError::Cancelled | LoopError::Budget { .. })) => Err(e),
         _ => Err(LoopError::StepLimit(max_steps)),
     }
