@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use ziyuan_core::{Agent, Edict, FileChange, TaskId, Threat, TokenUsage};
+use ziyuan_core::{Agent, Edict, FileChange, Record, TaskId, Threat, TokenUsage};
 
 /// 可克隆的撤销信号；同步代码用 `is_cancelled` 轮询，异步代码 `await cancelled()`。
 #[derive(Clone, Debug)]
@@ -62,6 +62,8 @@ pub struct Job {
     pub treasury: Option<Arc<AtomicI64>>,
     /// 八百里加急：时限为常规的两倍（入队次序由调用方排定，加急在前、先得空位）。
     pub urgent: bool,
+    /// 翰林院实录（同一次执行的各件共用）；非空时承办者多一件只读工具 `search_records`。
+    pub records: Arc<Vec<Record>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -350,6 +352,7 @@ mod tests {
             budget: None,
             treasury: None,
             urgent: false,
+            records: Arc::default(),
         }
     }
 

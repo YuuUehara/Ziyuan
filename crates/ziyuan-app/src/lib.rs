@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, CensorVerdict, CourtEvent, Department, Edict, Evidence,
-    FileChange, GovernanceMode, Nomination, Office, Persona, Price, Seal, Speech, TaskId, Template,
-    Threat, TokenUsage, Verdict,
+    FileChange, GovernanceMode, Nomination, Office, Persona, Price, Record, Seal, Speech, TaskId,
+    Template, Threat, TokenUsage, Verdict, search_records,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{
@@ -228,6 +228,7 @@ impl<S: EventStore> Session<S> {
         self.reload()?;
         let court = &self.court;
         let (ministers, candidates) = court.nomination_ballot(office)?;
+        let records = court.records();
         let mut votes = Vec::new();
         let mut spent = 0;
         for (voter, voter_office) in &ministers {
@@ -245,8 +246,15 @@ impl<S: EventStore> Session<S> {
                     let current = c
                         .current
                         .map_or("未任官职".to_owned(), |o| format!("现任{}", o.label()));
+                    // 翰林院实录中此人最近经办的一件，供九卿参考前例。
+                    let recent = records
+                        .iter()
+                        .rev()
+                        .find(|r| r.worker == c.agent.id)
+                        .map(|r| format!("；近办 {}", precedent(r)))
+                        .unwrap_or_default();
                     format!(
-                        "#{} {}（专长{}，{current}）：{}\n",
+                        "#{} {}（专长{}，{current}）：{}{recent}\n",
                         c.agent.id.0,
                         c.agent.name,
                         c.agent.speciality.label(),
@@ -462,6 +470,14 @@ impl<S: EventStore> Session<S> {
         }
         if let Some(minutes) = debate_minutes(court, entry) {
             user.push_str(&format!("\n{minutes}"));
+        }
+        let records = court.records();
+        let precedents = search_records(&records, &entry.edict.text, 3);
+        if !precedents.is_empty() {
+            user.push_str("\n翰林院实录（相关前例，供参考）：\n");
+            for r in precedents {
+                user.push_str(&format!("{}\n", precedent(r)));
+            }
         }
         let answer = court
             .check_funds(entry, 0)
@@ -1329,6 +1345,8 @@ impl<S: EventStore> Session<S> {
         let treasury = court
             .treasury_remaining()
             .map(|left| Arc::new(AtomicI64::new(left as i64)));
+        // 翰林院实录：本次开工前已结的诏令，供承办者以 search_records 查阅前例。
+        let records = Arc::new(court.records());
         let mut jobs = Vec::new();
         let mut running = Vec::new();
         let default_model = scheduler.backend().model_name().map(str::to_owned);
@@ -1410,6 +1428,7 @@ impl<S: EventStore> Session<S> {
                         budget,
                         treasury: treasury.clone(),
                         urgent: entry.urgent,
+                        records: records.clone(),
                         actor,
                         edict: Edict {
                             seal,
@@ -2503,6 +2522,18 @@ pub fn exam_papers(root: &Path) -> Result<Vec<ExamPaper>, AppError> {
 }
 
 /// 截取前 `max` 个字符，超出时注明。
+/// 一件实录的一行摘要（票拟、廷推参考前例用）。
+fn precedent(r: &Record) -> String {
+    format!(
+        "#{}「{}」，#{} {}承办，{}",
+        r.task.0,
+        truncate(&r.edict, 40),
+        r.worker.0,
+        r.handler,
+        truncate(&r.verdict, 40)
+    )
+}
+
 fn truncate(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max).collect();
     if text.chars().nth(max).is_some() {
@@ -4270,6 +4301,82 @@ mod tests {
         assert_eq!(
             estimate_cost([task], None, price).as_deref(),
             Some("约 50.0000 元")
+        );
+    }
+
+    /// 执行时记下承办者可查的实录件数；票拟时记下提示并拟派 #4。
+    #[derive(Default)]
+    struct Annalist(std::sync::Mutex<(Vec<usize>, Vec<String>)>);
+    impl WorkerBackend for Annalist {
+        fn execute(&self, job: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            self.0.lock().unwrap().0.push(job.records.len());
+            Ok("办毕：div 未处理除数为零".into())
+        }
+        fn complete(
+            &self,
+            _: Option<&str>,
+            _: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            self.0.lock().unwrap().1.push(user.into());
+            Ok(("拟派：#4".into(), TokenUsage::default()))
+        }
+    }
+
+    #[tokio::test]
+    async fn records_archive_finished_edicts_for_tools_and_drafts() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let backend = Arc::new(Annalist::default());
+        let scheduler = Scheduler::new(
+            backend.clone(),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let issue = |s: &mut Session<_>, text: &str| {
+            s.issue(Department::Works, text.into(), Seal::default())
+                .unwrap()
+                .id
+        };
+        let first = issue(&mut session, "检查除零");
+        run_all(&mut session, &scheduler).await;
+        session
+            .review(first, Verdict::Accepted, "好".into())
+            .unwrap();
+        let cancelled = issue(&mut session, "也查除零");
+        session.cancel(cancelled).unwrap();
+        // 已撤销的不入实录；第二件开工时可查第一件。
+        issue(&mut session, "整理文档");
+        run_all(&mut session, &scheduler).await;
+        assert_eq!(backend.0.lock().unwrap().0, [0, 1]);
+        let records = session.court().records();
+        assert_eq!(records.len(), 2);
+        let worker = records[0].worker;
+        assert_eq!(
+            (records[0].task, records[0].verdict.as_str()),
+            (first, "采纳：好")
+        );
+        assert_eq!(records[1].verdict, "待评定");
+
+        // 内阁票拟附上相关前例（「除零」），不附无关的「整理文档」。
+        session.reform(GovernanceMode::Cabinet).unwrap();
+        session.dismiss(AgentId(6)).unwrap();
+        session
+            .appoint(AgentId(6), Office::FirstGrandSecretary)
+            .unwrap();
+        let again = issue(&mut session, "再查除零");
+        session.draft(again, backend.as_ref()).unwrap();
+        let prompts = backend.0.lock().unwrap().1.clone();
+        let user = &prompts[0];
+        assert!(
+            user.contains(&format!(
+                "翰林院实录（相关前例，供参考）：\n#{}「检查除零」，#{} ",
+                first.0, worker.0
+            )) && user.contains("采纳：好")
+                && !user.contains("整理文档"),
+            "{user}"
         );
     }
 

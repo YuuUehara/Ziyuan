@@ -666,6 +666,16 @@ mod tests {
             budget: None,
             treasury: None,
             urgent: false,
+            // 有实录时另给只读的 search_records，不受玉玺工具所限。
+            records: std::sync::Arc::new(vec![ziyuan_core::Record {
+                task: TaskId(0),
+                department: Department::Works,
+                edict: "旧诏".into(),
+                worker: AgentId(4),
+                handler: "陈工".into(),
+                summary: "旧奏".into(),
+                verdict: "待评定".into(),
+            }]),
         };
         assert_eq!(
             backend.execute(&job, &()).unwrap(),
@@ -688,7 +698,7 @@ mod tests {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["search_code"]);
+        assert_eq!(names, ["search_code", "search_records"]);
         let system = first["messages"][0]["content"].as_str().unwrap();
         assert!(system.contains("工具：search_code"), "{system}");
         // 第二次请求带回工具调用与真实工具输出。

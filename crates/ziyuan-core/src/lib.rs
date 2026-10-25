@@ -819,6 +819,81 @@ impl FileChange {
     }
 }
 
+/// 翰林院实录：一件已结诏令的始末（由事件簿推出，不另记事件）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Record {
+    pub task: TaskId,
+    pub department: Department,
+    /// 诏令内容。
+    pub edict: String,
+    /// 承办官员及其姓名（已削籍者为空）。
+    pub worker: AgentId,
+    pub handler: String,
+    /// 回奏全文。
+    pub summary: String,
+    /// 皇帝评定与都察院复核，如「采纳：好」「御史弹劾」；尚无则为「待评定」。
+    pub verdict: String,
+}
+
+impl Record {
+    /// 检索用的全文。
+    fn haystack(&self) -> String {
+        format!("{}\n{}\n{}", self.edict, self.summary, self.verdict)
+    }
+}
+
+/// 检索词：ASCII 词（小写，≥2 字符）与中文等其他字符的相邻二字组。
+fn search_terms(text: &str) -> std::collections::BTreeSet<String> {
+    let mut terms = std::collections::BTreeSet::new();
+    let mut word = String::new();
+    let mut run: Vec<char> = Vec::new();
+    let flush_word = |word: &mut String, terms: &mut std::collections::BTreeSet<String>| {
+        if word.chars().count() >= 2 {
+            terms.insert(word.to_lowercase());
+        }
+        word.clear();
+    };
+    let flush_run = |run: &mut Vec<char>, terms: &mut std::collections::BTreeSet<String>| {
+        for pair in run.windows(2) {
+            terms.insert(pair.iter().collect());
+        }
+        if run.len() == 1 {
+            terms.insert(run[0].to_string());
+        }
+        run.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            flush_run(&mut run, &mut terms);
+            word.push(c);
+        } else if c.is_alphanumeric() {
+            flush_word(&mut word, &mut terms);
+            run.push(c);
+        } else {
+            flush_word(&mut word, &mut terms);
+            flush_run(&mut run, &mut terms);
+        }
+    }
+    flush_word(&mut word, &mut terms);
+    flush_run(&mut run, &mut terms);
+    terms
+}
+
+/// 按与 `query` 共有的检索词数检索实录，得分高者在前（同分时新者在前），至多 `limit` 件。
+pub fn search_records<'a>(records: &'a [Record], query: &str, limit: usize) -> Vec<&'a Record> {
+    let wanted = search_terms(query);
+    let mut scored: Vec<(usize, &Record)> = records
+        .iter()
+        .map(|r| {
+            let have = search_terms(&r.haystack());
+            (wanted.intersection(&have).count(), r)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.task.cmp(&a.1.task)));
+    scored.into_iter().take(limit).map(|(_, r)| r).collect()
+}
+
 /// 分办出去的一件子诏令：沿用原诏令的部门与玉玺，由指定官员承办。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subtask {
@@ -1057,6 +1132,35 @@ pub enum CourtEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_are_found_by_shared_words_and_chinese_bigrams() {
+        let record = |id, edict: &str, summary: &str| Record {
+            task: TaskId(id),
+            department: Department::Works,
+            edict: edict.into(),
+            worker: AgentId(4),
+            handler: "某".into(),
+            summary: summary.into(),
+            verdict: "待评定".into(),
+        };
+        let records = [
+            record(1, "检查除零", "div 未处理除数为零"),
+            record(2, "整理 README", "补了目录"),
+            record(3, "再查除零", "Div 已改为返回 0"),
+        ];
+        let ids = |q| {
+            search_records(&records, q, 5)
+                .iter()
+                .map(|r| r.task.0)
+                .collect::<Vec<_>>()
+        };
+        // 「除零」二字组命中 1、3；同分新者在前。英文不分大小写。
+        assert_eq!(ids("div 函数会不会除零"), [3, 1]);
+        assert_eq!(ids("readme"), [2]);
+        assert!(ids("数据库").is_empty());
+        assert_eq!(search_records(&records, "除零", 1).len(), 1);
+    }
 
     #[test]
     fn hunks_select_keeps_line_endings_and_new_files_can_be_dropped() {

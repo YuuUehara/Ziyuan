@@ -15,8 +15,8 @@ use ziyuan_app::{
     skipped_note, tz_offset,
 };
 use ziyuan_core::{
-    AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
-    Template, Verdict, missing_sections,
+    AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Record, Seal,
+    TaskId, Template, Verdict, missing_sections, search_records,
 };
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
@@ -97,7 +97,8 @@ const HELP: &str = concat!(
   ziyuan history [--task ID] [--official ID] [--kind 类型] [--since 时间] [--until 时间]
                                        查看起居注（事件记录）；时间如 30m、2h、3d、2026-10-25、2026-10-25 14:30，
                                        按 ZIYUAN_TZ（如 +08:00，默认 UTC）
-  ziyuan <court|officials|tasks|history> --json
+  ziyuan records [检索词]                翰林院实录：已结诏令的诏令、回奏与评定（只增不改）；给检索词则查前例
+  ziyuan <court|officials|tasks|history|records> --json
                                        以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
   ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
   ziyuan help
@@ -244,6 +245,8 @@ enum Command {
     Discard(TaskId),
     Recommend(Office),
     History(HistoryFilter),
+    /// 翰林院实录：检索词为空则列出全部。
+    Records(String),
     /// 输出 shell 补全脚本。
     Completions(Shell),
 }
@@ -262,6 +265,7 @@ const SUBCOMMANDS: &[&str] = &[
     "court",
     "officials",
     "history",
+    "records",
     "recruit",
     "edict",
     "template",
@@ -305,7 +309,7 @@ const SUBCOMMANDS: &[&str] = &[
 ];
 
 /// 支持 `--json` 的子命令。
-const JSON_COMMANDS: &[&str] = &["court", "officials", "tasks", "history"];
+const JSON_COMMANDS: &[&str] = &["court", "officials", "tasks", "history", "records"];
 
 fn main() -> ExitCode {
     quiet_broken_pipe();
@@ -382,6 +386,19 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "court" => no_args(args, Command::Court)?,
         "officials" => no_args(args, Command::Officials)?,
         "history" => parse_history(args)?,
+        "records" => {
+            if let Some(flag) = args.iter().find(|a| a.starts_with("--")) {
+                return Err(
+                    if ["--edit", "--amend", "--delete", "--rm"].contains(&flag.as_str()) {
+                        "实录只增不改。史官记：靖难之后重修《太祖实录》，建文四年遂成「洪武三十五年」——紫垣不开此例。"
+                        .into()
+                    } else {
+                        "用法: ziyuan records [检索词]".into()
+                    },
+                );
+            }
+            Command::Records(args.join(" "))
+        }
         "recruit" => match args.as_slice() {
             [dept] => Command::Recruit(None, dept.parse()?),
             [name, dept] => Command::Recruit(Some(name.clone()), dept.parse()?),
@@ -1339,6 +1356,43 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
             println!("仅为建议：任命须由皇帝 `ziyuan appoint`（如有现职须先 dismiss）。");
         }
+        Command::Records(query) => {
+            let records = session.court().records();
+            let found = found_records(&records, &query);
+            if found.is_empty() {
+                println!(
+                    "{}",
+                    if records.is_empty() {
+                        "翰林院尚无实录：诏令完成后自动归档。"
+                    } else {
+                        "实录中无相关前例。"
+                    }
+                );
+            }
+            for r in found {
+                println!(
+                    "#{} {} · #{} {} · {}",
+                    r.task.0,
+                    r.department.label(),
+                    r.worker.0,
+                    r.handler,
+                    r.verdict
+                );
+                println!("    诏令：{}", r.edict);
+                let summary = r
+                    .summary
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("");
+                let short: String = summary.trim().chars().take(80).collect();
+                let more = if short.len() < summary.trim().len() {
+                    "…"
+                } else {
+                    ""
+                };
+                println!("    回奏：{short}{more}");
+            }
+        }
         Command::History(filter) => {
             let offset = tz_offset();
             for entry in history_entries(session.history(), &filter)? {
@@ -1591,6 +1645,23 @@ fn json_output(
                 })
                 .collect()
         }
+        Command::Records(query) => {
+            let records = session.court().records();
+            found_records(&records, query)
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "task": r.task.0,
+                        "department": r.department.code(),
+                        "edict": r.edict,
+                        "worker": r.worker.0,
+                        "handler": r.handler,
+                        "summary": r.summary,
+                        "verdict": r.verdict,
+                    })
+                })
+                .collect()
+        }
         _ => unreachable!("run 已检查 JSON_COMMANDS"),
     })
 }
@@ -1704,6 +1775,15 @@ fn task_id(args: &[String], usage: &str) -> Result<TaskId, Box<dyn Error>> {
     match args {
         [id] => Ok(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
         _ => Err(format!("用法: {usage}").into()),
+    }
+}
+
+/// `ziyuan records` 列出的实录：无检索词时全部（新者在前），否则按检索词至多 20 件。
+fn found_records<'a>(records: &'a [Record], query: &str) -> Vec<&'a Record> {
+    if query.trim().is_empty() {
+        records.iter().rev().collect()
+    } else {
+        search_records(records, query, 20)
     }
 }
 

@@ -181,7 +181,11 @@ impl WorkerBackend for AgentBackend {
         let (actor, edict) = (&job.actor, &job.edict);
         let switched = self.switch_to(job.model.as_deref())?;
         let model = switched.as_deref().unwrap_or(self.model.as_ref());
-        let sealed = tools::sealed_tools(&self.root, &edict.seal, self.test_command.as_deref())?;
+        let mut sealed =
+            tools::sealed_tools(&self.root, &edict.seal, self.test_command.as_deref())?;
+        if !job.records.is_empty() {
+            sealed.tools.push(tools::record_search(job.records.clone()));
+        }
         let nonce = guard::nonce();
         let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
             "你可以用 write_file 改写授权范围内的文件，但改动只暂存，回奏后由皇帝审阅 diff 决定是否落盘；\

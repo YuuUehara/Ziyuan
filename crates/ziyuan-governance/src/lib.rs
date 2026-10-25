@@ -6,8 +6,8 @@ use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Nomination, Office, Seal, Speech, Subtask, TaskId,
-    Template, Threat, TokenUsage, Verdict,
+    Evidence, FileChange, GovernanceMode, Nomination, Office, Record, Seal, Speech, Subtask,
+    TaskId, Template, Threat, TokenUsage, Verdict,
 };
 
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
@@ -1059,6 +1059,46 @@ impl Court {
     /// 按 ID 升序列出全部诏令。
     pub fn tasks(&self) -> impl DoubleEndedIterator<Item = &Task> {
         self.tasks.values()
+    }
+
+    /// 翰林院实录：已完成的原诏令（子诏令随原诏令归档），按 ID 升序。
+    pub fn records(&self) -> Vec<Record> {
+        self.tasks
+            .values()
+            .filter(|t| t.parent.is_none())
+            .filter_map(|t| {
+                let TaskStatus::Completed { worker, summary } = &t.status else {
+                    return None;
+                };
+                let mut verdict = Vec::new();
+                if let Some((v, note)) = &t.review {
+                    verdict.push(if note.is_empty() {
+                        v.label().to_owned()
+                    } else {
+                        format!("{}：{note}", v.label())
+                    });
+                }
+                if let Some(c) = &t.censure {
+                    verdict.push(format!("都察院{}", c.verdict.label()));
+                }
+                Some(Record {
+                    task: t.edict.id,
+                    department: t.edict.department,
+                    edict: t.edict.text.clone(),
+                    worker: *worker,
+                    handler: self
+                        .agent(*worker)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_default(),
+                    summary: summary.clone(),
+                    verdict: if verdict.is_empty() {
+                        "待评定".into()
+                    } else {
+                        verdict.join("；")
+                    },
+                })
+            })
+            .collect()
     }
 
     /// 未结束的诏令，按 ID 升序。

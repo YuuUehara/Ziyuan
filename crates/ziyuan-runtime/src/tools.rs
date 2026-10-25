@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use ziyuan_core::{Capability, FileChange, Seal};
+use ziyuan_core::{Capability, FileChange, Record, Seal, search_records};
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
@@ -86,6 +86,63 @@ pub fn sealed_tools(
         })
         .collect();
     Ok(Sealed { tools, sandbox })
+}
+
+/// 单次 `search_records` 最多返回的实录件数。
+const MAX_RECORDS: usize = 5;
+
+/// 只读工具 `search_records`：查阅翰林院实录（已结诏令的回奏与评定）中的前例。
+/// 不读文件，故不受玉玺范围所限；输出与其他工具一样作为外来文书包上边界。
+pub fn record_search(records: Arc<Vec<Record>>) -> Box<dyn Tool> {
+    Box::new(SearchRecords(records))
+}
+
+struct SearchRecords(Arc<Vec<Record>>);
+
+impl Tool for SearchRecords {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "search_records".into(),
+            description: format!(
+                "查阅翰林院实录：按关键词检索已结诏令的诏令、回奏与皇帝评定，作为前例参考，最多 {MAX_RECORDS} 件。只读；实录只增不改。"
+            ),
+            input_schema_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"关键词，如函数名、文件名或事由"}},"required":["query"],"additionalProperties":false}"#.into(),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let query = string_arg(args_json, "query")?;
+        if query.trim().is_empty() {
+            return Err("query 不能为空".into());
+        }
+        let found = search_records(&self.0, &query, MAX_RECORDS);
+        if found.is_empty() {
+            return Ok("实录中无相关前例".into());
+        }
+        let clip = |text: &str, max: usize| {
+            let text = text.trim();
+            match text.char_indices().nth(max) {
+                Some((at, _)) => format!("{}…", &text[..at]),
+                None => text.to_owned(),
+            }
+        };
+        Ok(found
+            .iter()
+            .map(|r| {
+                format!(
+                    "#{} {} 承办 #{} {}（{}）\n诏令：{}\n回奏：{}",
+                    r.task.0,
+                    r.department.label(),
+                    r.worker.0,
+                    r.handler,
+                    r.verdict,
+                    clip(&r.edict, 200),
+                    clip(&r.summary, 600)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
 }
 
 /// 审计所记的工具参数：`write_file` 的全文已在奏本中，只记行数与字节数。
@@ -541,6 +598,28 @@ fn string_arg(args_json: &str, key: &str) -> Result<String, BoxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_records_reports_precedents_with_handler_and_verdict() {
+        let record = |id, edict: &str| Record {
+            task: ziyuan_core::TaskId(id),
+            department: ziyuan_core::Department::Works,
+            edict: edict.into(),
+            worker: ziyuan_core::AgentId(4),
+            handler: "陈工".into(),
+            summary: "回奏".repeat(400),
+            verdict: "采纳：好".into(),
+        };
+        let tool = record_search(Arc::new(vec![record(1, "检查除零"), record(2, "整理文档")]));
+        let out = tool.execute(r#"{"query":"除零"}"#).unwrap();
+        assert!(out.starts_with("#1 工部 承办 #4 陈工（采纳：好）\n诏令：检查除零\n回奏："));
+        assert!(!out.contains("整理文档") && out.ends_with('…'), "{out}");
+        assert_eq!(
+            tool.execute(r#"{"query":"数据库"}"#).unwrap(),
+            "实录中无相关前例"
+        );
+        assert!(tool.execute(r#"{"query":" "}"#).is_err());
+    }
 
     fn workspace(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ziyuan-tools-{name}-{}", std::process::id()));

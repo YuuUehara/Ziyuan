@@ -75,6 +75,11 @@ if "$BIN" review "$C" accept > /dev/null 2>&1; then echo '已撤销的诏令不�
 WORKER="$("$BIN" history | sed -n "s/.*诏令 #$A 由 #\([0-9]*\) 回奏.*/\1/p")"
 "$BIN" examine "$WORKER" | has '采纳 1，'
 "$BIN" recommend clerk:works | sed -n 2p | has "^#$WORKER "
+# 翰林院修史：已结诏令归档为实录，可检索前例；实录只增不改
+"$BIN" records 排队一 | has "^#$A .* · #$WORKER .* · 采纳：属实"
+"$BIN" records --json | has '"verdict": "采纳：属实"'
+! "$BIN" records 撤销我 | grep -q "^#$C "
+{ "$BIN" records --edit "$A" 2>&1 || true; } | has '靖难之后重修《太祖实录》'
 # 官制：不给姓名则随机取名；官员列表显示品级与所用模型
 RECRUITED="$("$BIN" recruit works)"
 grep -q '招募官员 #[0-9]* ..*（未授官职）' <<< "$RECRUITED"
