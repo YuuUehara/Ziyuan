@@ -127,6 +127,20 @@ cd /path/to/your/project && ziyuan tui
 - 键盘操作：`n` 下诏/招募，`r` 执行、`s` 停止，`c` 撤销，`a`/`d` 采纳/驳回，`p`/`d` 任命/罢免，`g` 改制，`q` 退出。
 - 每秒重新加载事件簿，与 CLI、Web 共用多进程规则。
 
+### 命令行：JSON 与补全
+
+```bash
+ziyuan officials --json | jq '.[] | select(.office) | .name'   # 与 Web /api/state 同构
+ziyuan history --json | jq -r '.[-1].text'                     # [{seq, text}]
+ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan
+ziyuan completions zsh > ~/.zfunc/_ziyuan        # 借 bashcompinit
+ziyuan completions fish > ~/.config/fish/completions/ziyuan.fish
+```
+
+- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`；其他命令带 `--json` 会报错。
+- 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名；官职代码含冒号，bash 中也能正常补全。
+- 输出被提前关闭（如 `ziyuan history | head`）时安静退出，退出码为 0。
+
 ### 玉玺：限定官员的权限
 
 每件诏令都盖有玉玺（`Seal`），规定承办官员可用的工具与可查阅的路径，并随 `EdictIssued` 记入事件簿：
@@ -417,7 +431,7 @@ v0.3 让朝廷「能办事、能分工、能互相监督」；v0.4 的重点是�
 5. ~~**工部改动的增量呈报**~~ 已完成：`write_file` 的工具审计只记摘要，全文只在奏本里；diff 按段编号，皇帝可以逐段准奏（CLI `apply --skip`、Web 勾选、TUI `W`）。
 6. ~~**翰林院：可复用的诏令模板**~~ 已完成：内置「审查unsafe」「补测试」「写文档」，可自定、覆盖；模板带默认部门、玉玺与验收标准，标准随诏令记下，附给承办官员，都察院复核时逐条核验。
 7. ~~**廷推与廷杖**~~ 已完成：官职出缺时由吏部会同九卿「廷推」，任命仍由皇帝，史官记注明是否从廷推，另有「枚卜」彩蛋；屡遭弹劾者可以「廷杖」（降级留用、收回写权），获采纳 3 件或蒙宽宥即复。
-8. **CLI 打磨**：管道提前关闭时安静退出（不再 panic）、`--json` 输出便于脚本使用、shell 补全。
+8. ~~**CLI 打磨**~~ 已完成：管道提前关闭时安静退出；`court`、`officials`、`tasks`、`history` 支持 `--json`；`ziyuan completions bash|zsh|fish` 生成补全脚本。
 9. ~~**礼部：科举与文书**~~ 已完成：`.ziyuan/exam/` 中的考题开科取士，按要点判分记入履历；回奏须分结论、依据、未办之事三段，不合者发回重写一次；「殿试」彩蛋由皇帝出题点状元。发版时撰写 CHANGELOG（写权限只限该文件）推迟。
 10. ~~**兵部：驿传与军情**~~ 已完成：外部事件经通用驿站（`ziyuan post` / `POST /api/courier`）入队为诏令，仍受批红、玉玺与度支约束，锦衣卫入队即查；「八百里加急」插队先行、时限加倍；执行者锁被占时报「军情紧急，另有将领在外」。直接对接 GitHub 等平台留待以后。
 

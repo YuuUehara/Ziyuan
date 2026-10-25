@@ -206,4 +206,11 @@ NID="$("$BIN" officials | sed -n 's/^#\([0-9]*\) .*工部尚书.*/\1/p')"
 { "$BIN" pardon "$NID" 2>&1 || true; } | has '降级'
 # 逐段准奏：段号须为数字
 { "$BIN" apply 1 --skip x 2>&1 || true; } | has '段号必须是数字'
+# CLI 打磨：管道提前关闭时安静退出（pipefail 下仍成功）；--json；补全
+"$BIN" history | head -1 > /dev/null
+"$BIN" officials --json | has '"office"'
+"$BIN" history --json | has '"seq": 1'
+{ "$BIN" edict --json x 2>&1 || true; } | has '只支持'
+"$BIN" completions bash | has 'complete -F _ziyuan ziyuan'
+"$BIN" completions fish | has 'minister:works'
 echo 'ZiYuan smoke test PASS'

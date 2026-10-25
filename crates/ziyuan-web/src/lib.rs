@@ -1058,7 +1058,8 @@ fn report_json(report: &TaskReport) -> Value {
     })
 }
 
-fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
+/// 朝廷全貌（Web 的 `/api/state`，亦供 CLI `--json`）。
+pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
     let name = |id: AgentId| court.agent(id).map(|a| a.name.clone());
     // 按各诏令实际所用模型估算花费；演示后端为 null。
     let default_model = backend.model_name();

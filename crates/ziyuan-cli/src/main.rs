@@ -92,6 +92,9 @@ const HELP: &str = concat!(
   ziyuan examine <官员ID>               吏部考绩：经评定与复核的履历
   ziyuan recommend <官职>               吏部荐举：按履历排列可任该职者（不自动任命）
   ziyuan history                       查看事件记录
+  ziyuan <court|officials|tasks|history> --json
+                                       以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
+  ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
   ziyuan help
 
 官制（品级随制度而变）：
@@ -230,15 +233,76 @@ enum Command {
     Pardon(AgentId),
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
-    /// 准奏（`true`）或驳回改动。
     /// 准奏（驳回其中若干段）。
     Apply(TaskId, Vec<u32>),
     Discard(TaskId),
     Recommend(Office),
     History,
+    /// 输出 shell 补全脚本。
+    Completions(Shell),
 }
 
+#[derive(Clone, Copy)]
+enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+/// 全部子命令（补全用；测试保证每个都能被 `parse` 识别）。
+const SUBCOMMANDS: &[&str] = &[
+    "help",
+    "init",
+    "court",
+    "officials",
+    "history",
+    "recruit",
+    "edict",
+    "template",
+    "run",
+    "tasks",
+    "tui",
+    "serve",
+    "cancel",
+    "retreat",
+    "return",
+    "reform",
+    "dismiss",
+    "purge",
+    "abolish",
+    "model",
+    "ceiling",
+    "draft",
+    "redraft",
+    "approve",
+    "appoint",
+    "examine",
+    "diff",
+    "kaocheng",
+    "post",
+    "urgent",
+    "exam",
+    "crown",
+    "nominate",
+    "cane",
+    "pardon",
+    "flags",
+    "budget",
+    "split",
+    "debate",
+    "censor",
+    "apply",
+    "discard",
+    "review",
+    "recommend",
+    "completions",
+];
+
+/// 支持 `--json` 的子命令。
+const JSON_COMMANDS: &[&str] = &["court", "officials", "tasks", "history"];
+
 fn main() -> ExitCode {
+    quiet_broken_pipe();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -248,11 +312,50 @@ fn main() -> ExitCode {
     }
 }
 
+/// 输出被提前关闭（如 `ziyuan history | head`）时安静退出，不报 panic。
+///
+/// Rust 忽略 SIGPIPE，`println!` 写入断开的管道会 panic；工作区禁用 unsafe，无法恢复默认
+/// 信号处理，故在 panic hook 中识别这一种情况，以成功状态退出（与 ripgrep 等工具一致）。
+fn quiet_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.contains("failed printing to stdout") && message.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
-    let command = parse(env::args().skip(1).collect())?;
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let json = args.iter().any(|a| a == "--json");
+    args.retain(|a| a != "--json");
+    if json
+        && !args
+            .first()
+            .is_some_and(|a| JSON_COMMANDS.contains(&a.as_str()))
+    {
+        return Err(format!("--json 只支持 {}", JSON_COMMANDS.join("、")).into());
+    }
+    let command = parse(args)?;
     let log = EventLog::new(&env::current_dir()?);
+    if json {
+        let session = Session::open(log)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_output(&session, &command)?)?
+        );
+        return Ok(());
+    }
     match command {
         Command::Help => println!("{HELP}"),
+        Command::Completions(shell) => print!("{}", completions(shell)),
         Command::Init => {
             Session::found(log)?;
             println!("紫垣已建立。当前制度：丞相制。请执行 `ziyuan court`。");
@@ -466,6 +569,12 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             let verdict = args[1].parse::<Verdict>()?;
             Command::Review(task, verdict, args[2..].join(" "))
         }
+        "completions" => match args.as_slice() {
+            [shell] if shell == "bash" => Command::Completions(Shell::Bash),
+            [shell] if shell == "zsh" => Command::Completions(Shell::Zsh),
+            [shell] if shell == "fish" => Command::Completions(Shell::Fish),
+            _ => return Err("用法: ziyuan completions <bash|zsh|fish>".into()),
+        },
         "recommend" => match <[String; 1]>::try_from(args) {
             Ok([office]) => Command::Recommend(office.parse()?),
             Err(_) => return Err("用法: ziyuan recommend <官职>".into()),
@@ -477,7 +586,9 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
 
 fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<dyn Error>> {
     match command {
-        Command::Help | Command::Init => unreachable!("在 run 中处理"),
+        Command::Help | Command::Init | Command::Completions(_) => {
+            unreachable!("在 run 中处理")
+        }
         Command::Court => {
             let court = session.court();
             println!("朝廷制度：{} ({})", court.mode().label(), court.mode());
@@ -1437,6 +1548,118 @@ fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
     ))
 }
 
+/// `--json`：朝廷全貌与 Web 的 `/api/state` 同构；`officials`、`tasks` 取其中一项；
+/// `history` 为 `[{seq, text}]`（`seq` 从 1 起，与 `ziyuan history` 的序号一致）。
+fn json_output(
+    session: &Session<EventLog>,
+    command: &Command,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let state = || -> Result<serde_json::Value, Box<dyn Error>> {
+        Ok(ziyuan_web::court_json(
+            session.court(),
+            worker_backend()?.as_ref(),
+        ))
+    };
+    Ok(match command {
+        Command::Court => state()?,
+        Command::Officials => state()?["officials"].take(),
+        Command::Tasks => state()?["tasks"].take(),
+        Command::History => session
+            .history()
+            .iter()
+            .enumerate()
+            .map(|(i, e)| serde_json::json!({ "seq": i + 1, "text": describe_event(e) }))
+            .collect(),
+        _ => unreachable!("run 已检查 JSON_COMMANDS"),
+    })
+}
+
+/// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
+fn completions(shell: Shell) -> String {
+    let words = |items: Vec<String>| items.join(" ");
+    let offices = words(Office::all().into_iter().map(|o| o.code()).collect());
+    let departments = words(
+        Department::ALL
+            .iter()
+            .map(|d| d.code().to_owned())
+            .collect(),
+    );
+    let modes = words(
+        GovernanceMode::ALL
+            .iter()
+            .map(|m| m.code().to_owned())
+            .collect(),
+    );
+    let tools = words(
+        Capability::ALL
+            .iter()
+            .map(|c| c.code().to_owned())
+            .collect(),
+    );
+    let commands = SUBCOMMANDS.join(" ");
+    let json = JSON_COMMANDS.join(" ");
+    let bash = format!(
+        r#"_ziyuan() {{
+  # 官职代码含冒号，而 bash 默认在冒号处分词：从 COMP_LINE 取完整的当前词。
+  local line="${{COMP_LINE:0:COMP_POINT}}" words=""
+  local cur="${{line##*[[:space:]]}}" rest="${{line%[[:space:]]*}}"
+  local prev="${{rest##*[[:space:]]}}"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=($(compgen -W "{commands}" -- "$cur")); return
+  fi
+  case "$prev" in
+    --dept) words="{departments}" ;;
+    --tools) words="{tools} none" ;;
+    *) case "${{COMP_WORDS[1]}}" in
+         appoint|model|ceiling|nominate|recommend) words="{offices}" ;;
+         recruit) words="{departments}" ;;
+         reform) words="{modes}" ;;
+         completions) words="bash zsh fish" ;;
+         {json_cases}) words="--json" ;;
+       esac ;;
+  esac
+  COMPREPLY=($(compgen -W "$words" -- "$cur"))
+  # 冒号前的部分 bash 已视为另一个词，补全结果中去掉。
+  local colon="${{cur%"${{cur##*:}}"}}"
+  [ -n "$colon" ] && COMPREPLY=("${{COMPREPLY[@]#"$colon"}}")
+}}
+complete -F _ziyuan ziyuan
+"#,
+        json_cases = JSON_COMMANDS.join("|")
+    );
+    match shell {
+        Shell::Bash => bash,
+        // zsh 借 bashcompinit 复用同一份脚本。
+        Shell::Zsh => format!("autoload -U +X bashcompinit && bashcompinit\n{bash}"),
+        Shell::Fish => {
+            let seen =
+                |cmds: &str| format!("complete -c ziyuan -n '__fish_seen_subcommand_from {cmds}'");
+            [
+                "complete -c ziyuan -f".to_owned(),
+                format!("complete -c ziyuan -n __fish_use_subcommand -a '{commands}'"),
+                format!(
+                    "{} -a '{offices}'",
+                    seen("appoint model ceiling nominate recommend")
+                ),
+                format!("{} -a '{departments}'", seen("recruit")),
+                format!("{} -a '{modes}'", seen("reform")),
+                format!("{} -a 'bash zsh fish'", seen("completions")),
+                format!("{} -l json", seen(&json)),
+                format!(
+                    "{} -l dept -x -a '{departments}'",
+                    seen("edict post template")
+                ),
+                format!(
+                    "{} -l tools -x -a '{tools} none'",
+                    seen("edict template ceiling")
+                ),
+            ]
+            .join("\n")
+                + "\n"
+        }
+    }
+}
+
 fn no_args(args: Vec<String>, command: Command) -> Result<Command, Box<dyn Error>> {
     if args.is_empty() {
         Ok(command)
@@ -1697,6 +1920,17 @@ fn parse_capabilities(value: &str) -> Result<BTreeSet<Capability>, Box<dyn Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_completed_subcommand_is_recognised() {
+        for name in SUBCOMMANDS {
+            if let Err(e) = parse(vec![name.to_string()]) {
+                assert!(!e.to_string().contains("未知命令"), "{name}: {e}");
+            }
+        }
+        let script = completions(Shell::Bash);
+        assert!(script.contains("minister:works") && script.contains("write_file"));
+    }
 
     #[test]
     fn stream_printer_keeps_concurrent_lines_apart() {

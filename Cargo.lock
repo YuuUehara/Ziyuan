@@ -2265,6 +2265,7 @@ dependencies = [
 name = "ziyuan-cli"
 version = "0.3.0"
 dependencies = [
+ "serde_json",
  "tokio",
  "ziyuan-app",
  "ziyuan-core",
