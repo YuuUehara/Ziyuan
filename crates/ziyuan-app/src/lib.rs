@@ -7,7 +7,7 @@
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use ziyuan_core::{
@@ -88,6 +88,32 @@ pub enum RunUpdate<'a> {
     /// 一件诏令在本次运行中的结局（每件恰好一次）。
     Finished(&'a TaskReport),
 }
+
+/// 常朝（[`Session::watch`]）的进展。
+pub enum WatchUpdate<'a> {
+    /// 执行中的进展，同 [`Session::run`]。
+    Run(RunUpdate<'a>),
+    /// 办完的诏令已由都察院自动复核。
+    Censured {
+        task: TaskId,
+        verdict: CensorVerdict,
+    },
+    /// 提示（不中断常朝）：未能自动复核、国库告罄待加额等。
+    Notice(String),
+    /// 史官记：待评定的回奏积压过多。
+    Neglect(String),
+}
+
+/// 常朝的设定。
+pub struct WatchOptions {
+    /// 两次查看队列的间隔。
+    pub poll: std::time::Duration,
+    /// 办完的诏令是否自动请都察院复核（`root` 为核验引用所据的项目目录）。
+    pub censor: Option<PathBuf>,
+}
+
+/// 待评定的回奏达到此数时，史官记万历故事。
+pub const NEGLECT_THRESHOLD: usize = 10;
 
 /// 一个已打开的朝廷：事件簿与由它重放出的当前状态。
 pub struct Session<S: EventStore> {
@@ -1563,6 +1589,89 @@ impl<S: EventStore> Session<S> {
             self.run(&tasks, scheduler, cancel, &mut on_update).await?;
             previous = tasks;
         }
+    }
+
+    /// 常朝：反复执行可执行的诏令（其他进程经 `post`、`edict --queue` 入队或批红的也算），
+    /// 直到 `cancel` 触发。办完的诏令（子诏令除外，由汇总的原诏令代表）可自动请都察院复核；
+    /// 采纳与落盘仍须皇帝亲自处置。国库告罄、御史空缺只提示，不中断。复核会阻塞到模型返回。
+    pub async fn watch(
+        &mut self,
+        scheduler: &Scheduler,
+        backend: &dyn WorkerBackend,
+        cancel: &CancelToken,
+        options: &WatchOptions,
+        mut on_update: impl FnMut(WatchUpdate<'_>),
+    ) -> Result<(), AppError> {
+        let (mut broke, mut no_censor, mut neglected) = (false, false, false);
+        while !cancel.is_cancelled() {
+            let mut done = Vec::new();
+            let ran = self
+                .run_open(scheduler, cancel, |update| {
+                    if let RunUpdate::Finished(report) = &update
+                        && matches!(report.outcome, Outcome::Completed(_))
+                    {
+                        done.push(report.edict.id);
+                    }
+                    on_update(WatchUpdate::Run(update));
+                })
+                .await;
+            match ran {
+                Ok(()) => broke = false,
+                Err(AppError::Governance(e @ GovernanceError::TreasuryExhausted(_))) => {
+                    if !broke {
+                        on_update(WatchUpdate::Notice(format!("{e}；待加额后续办")));
+                    }
+                    broke = true;
+                }
+                Err(e) => return Err(e),
+            }
+            if let Some(root) = &options.censor {
+                for task in done {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if self.court.task(task).is_some_and(|t| t.parent.is_some()) {
+                        continue;
+                    }
+                    if self.court.censor().is_none() {
+                        if !no_censor {
+                            on_update(WatchUpdate::Notice(
+                                "左都御史空缺，办完的诏令不自动复核".into(),
+                            ));
+                        }
+                        no_censor = true;
+                        continue;
+                    }
+                    no_censor = false;
+                    match self.censor(task, root, backend) {
+                        Ok(verdict) => on_update(WatchUpdate::Censured { task, verdict }),
+                        Err(e) => on_update(WatchUpdate::Notice(format!(
+                            "诏令 #{} 未能自动复核：{e}",
+                            task.0
+                        ))),
+                    }
+                }
+            }
+            let waiting = self
+                .court
+                .tasks()
+                .filter(|t| matches!(t.status, TaskStatus::Completed { .. }))
+                .filter(|t| t.review.is_none() && t.parent.is_none())
+                .count();
+            if waiting >= NEGLECT_THRESHOLD && !neglected {
+                on_update(WatchUpdate::Neglect(format!(
+                    "常朝不辍，百官回奏已有 {waiting} 件留中不发（`ziyuan review` 评定）。\n\
+                     ——万历中年以后，帝深居不出，章奏多留中不报，阁臣请见经年不得，\
+                     史称「三十年不上朝」；而六部照常办事，国事日非。"
+                )));
+            }
+            neglected = waiting >= NEGLECT_THRESHOLD;
+            tokio::select! {
+                _ = tokio::time::sleep(options.poll) => {}
+                _ = cancel.cancelled() => {}
+            }
+        }
+        Ok(())
     }
 
     /// 由 `propose` 基于当前状态生成事件，校验后写入。事件簿若已被其他进程更新，
@@ -3961,6 +4070,74 @@ mod tests {
             ]);
             Ok("改毕".into())
         }
+    }
+
+    /// 常朝一轮，见史官记即退朝；返回复核与提示。
+    async fn watch_once<S: EventStore>(
+        session: &mut Session<S>,
+        scheduler: &Scheduler,
+        options: &WatchOptions,
+    ) -> Vec<String> {
+        let cancel = CancelToken::new();
+        let mut seen = Vec::new();
+        let run = session.watch(
+            scheduler,
+            &DemoBackend,
+            &cancel,
+            options,
+            |update| match update {
+                WatchUpdate::Run(_) => {}
+                WatchUpdate::Censured { task, .. } => seen.push(format!("复核#{}", task.0)),
+                WatchUpdate::Notice(n) => seen.push(n),
+                WatchUpdate::Neglect(n) => {
+                    seen.push(n);
+                    cancel.cancel();
+                }
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("常朝应在史官记后退朝")
+            .unwrap();
+        seen
+    }
+
+    #[tokio::test]
+    async fn watch_runs_the_queue_censors_and_notes_a_neglectful_emperor() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        for i in 0..NEGLECT_THRESHOLD {
+            session
+                .issue(Department::Works, format!("第{i}件"), Seal::default())
+                .unwrap();
+        }
+        let scheduler = scheduler(ziyuan_runtime::DemoBackend);
+        let options = WatchOptions {
+            poll: Duration::from_millis(10),
+            censor: Some(std::env::temp_dir()),
+        };
+        // 一轮常朝：御史空缺只提示一次；十件都办完、无人评定，史官记万历故事后退朝。
+        let seen = watch_once(&mut session, &scheduler, &options).await;
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(
+            seen[0].contains("左都御史空缺") && seen[1].contains("10 件留中"),
+            "{seen:?}"
+        );
+        assert!(session.court().open_tasks().is_empty());
+
+        // 任命御史后，新入队的一件办完即自动复核。
+        let censor = session
+            .recruit(Some("御史".into()), Department::Justice)
+            .unwrap();
+        session.appoint(censor, Office::Censor).unwrap();
+        let task = session
+            .issue(Department::Works, "再一件".into(), Seal::default())
+            .unwrap()
+            .id;
+        let seen = watch_once(&mut session, &scheduler, &options).await;
+        assert_eq!(seen[0], format!("复核#{}", task.0), "{seen:?}");
+        assert!(seen[1].contains("11 件留中"), "{seen:?}");
+        assert!(session.court().task(task).unwrap().censure.is_some());
     }
 
     #[tokio::test]

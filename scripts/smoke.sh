@@ -213,4 +213,15 @@ NID="$("$BIN" officials | sed -n 's/^#\([0-9]*\) .*工部尚书.*/\1/p')"
 { "$BIN" edict --json x 2>&1 || true; } | has '只支持'
 "$BIN" completions bash | has 'complete -F _ziyuan ziyuan'
 "$BIN" completions fish | has 'minister:works'
+# 常朝：驿传随到随办，办完自动复核；Ctrl-C 退朝
+"$BIN" run --watch --poll 1 > "$DEMO/watch.out" 2>&1 &
+WATCH=$!
+sleep 1
+WID="$("$BIN" post --station 冒烟 常朝试办 | sed -n 's/^驿传：诏令 #\([0-9]*\) .*/\1/p')"
+[ -n "$WID" ]
+for _ in $(seq 40); do grep -q "诏令 #$WID 都察院自动复核" "$DEMO/watch.out" && break; sleep 0.5; done
+kill -INT "$WATCH"
+wait "$WATCH"
+has "诏令 #$WID 都察院自动复核" < "$DEMO/watch.out"
+{ "$BIN" run --poll 3 2>&1 || true; } | has '只用于常朝'
 echo 'ZiYuan smoke test PASS'

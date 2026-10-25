@@ -9,9 +9,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
-    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, demotion_note, describe_event,
-    describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diffs,
-    seal_note, skipped_note,
+    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, WatchOptions, WatchUpdate,
+    demotion_note, describe_event, describe_record, duzhi_report, estimate_cost, kaocheng_grade,
+    kaocheng_report, render_diffs, seal_note, skipped_note,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -38,6 +38,8 @@ const HELP: &str = concat!(
                                        下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
+  ziyuan run --watch [--poll 5] [--no-censor]
+                                       常朝：常驻执行，驿传与入队的诏令随到随办，办完自动请都察院复核；Ctrl-C 退朝
   ziyuan tasks                         查看诏令及其状态
   ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]
                                        启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）
@@ -169,7 +171,8 @@ enum Command {
     },
     /// 翰林院撤去自定的模板。
     RemoveTemplate(String),
-    Run(Limits),
+    /// `watch` 为常朝的设定（`None` 只执行当前队列）。
+    Run(Limits, Option<WatchOptions>),
     Tasks,
     Serve {
         port: u16,
@@ -383,7 +386,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         },
         "edict" => parse_edict(args)?,
         "template" => parse_template(args)?,
-        "run" => Command::Run(parse_limits(args)?),
+        "run" => parse_run(args)?,
         "tasks" => no_args(args, Command::Tasks)?,
         "tui" => no_args(args, Command::Tui)?,
         "serve" => {
@@ -718,7 +721,11 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
             drop(executor);
         }
-        Command::Run(limits) => {
+        Command::Run(limits, Some(options)) => {
+            let _executor = lock_executor()?;
+            hold_court(session, worker_backend()?, limits, &options)?;
+        }
+        Command::Run(limits, None) => {
             let _executor = lock_executor()?;
             let court = session.court();
             let tasks = court.runnable_tasks();
@@ -1343,7 +1350,7 @@ fn lock_executor() -> Result<ExecutorLock, Box<dyn Error>> {
     EventLog::new(&env::current_dir()?)
         .try_lock_executor()?
         .ok_or_else(|| {
-            format!("{EXECUTOR_BUSY}。可用 `edict --queue` 入队，待其结束后 `ziyuan run`。").into()
+            format!("{EXECUTOR_BUSY}。可用 `edict --queue` 入队：常朝（`run --watch`）中随到随办，否则待其结束后 `ziyuan run`。").into()
         })
 }
 
@@ -1686,21 +1693,99 @@ fn task_id(args: &[String], usage: &str) -> Result<TaskId, Box<dyn Error>> {
     }
 }
 
-fn parse_limits(args: Vec<String>) -> Result<Limits, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan run [--jobs <并发数>] [--timeout <秒>]（均须为正整数）";
+fn parse_run(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    const USAGE: &str = "用法: ziyuan run [--jobs <并发数>] [--timeout <秒>] \
+                         [--watch [--poll <秒>] [--no-censor]]（数值均须为正整数）";
     let mut limits = DEFAULT_LIMITS;
-    for pair in args.chunks(2) {
-        let [flag, value] = pair else {
-            return Err(USAGE.into());
-        };
-        let value = value.parse::<u64>().ok().filter(|v| *v > 0).ok_or(USAGE)?;
+    let (mut watch, mut poll, mut censor) = (false, None, true);
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
         match flag.as_str() {
-            "--jobs" => limits.max_concurrent = value as usize,
-            "--timeout" => limits.timeout = Duration::from_secs(value),
+            "--watch" => watch = true,
+            "--no-censor" => censor = false,
+            "--jobs" | "--timeout" | "--poll" => {
+                let value = rest
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|v| *v > 0)
+                    .ok_or(USAGE)?;
+                match flag.as_str() {
+                    "--jobs" => limits.max_concurrent = value as usize,
+                    "--timeout" => limits.timeout = Duration::from_secs(value),
+                    _ => poll = Some(Duration::from_secs(value)),
+                }
+            }
             _ => return Err(USAGE.into()),
         }
     }
-    Ok(limits)
+    if !watch {
+        if poll.is_some() || !censor {
+            return Err("--poll 与 --no-censor 只用于常朝（--watch）".into());
+        }
+        return Ok(Command::Run(limits, None));
+    }
+    let options = WatchOptions {
+        poll: poll.unwrap_or(Duration::from_secs(5)),
+        censor: if censor {
+            Some(env::current_dir()?)
+        } else {
+            None
+        },
+    };
+    Ok(Command::Run(limits, Some(options)))
+}
+
+/// 常朝：常驻执行，直到 Ctrl-C 退朝（执行中的诏令撤销，排队的保留）。
+fn hold_court(
+    session: &mut Session<EventLog>,
+    backend: Arc<dyn WorkerBackend>,
+    limits: Limits,
+    options: &WatchOptions,
+) -> Result<(), Box<dyn Error>> {
+    let scheduler = Scheduler::new(backend.clone(), limits);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let censor = if options.censor.is_some() {
+        "办完自动请都察院复核"
+    } else {
+        "不自动复核"
+    };
+    println!(
+        "常朝开始：每 {} 秒查看一次队列，{censor}；采纳与落盘仍须亲裁。Ctrl-C 退朝。",
+        options.poll.as_secs()
+    );
+    let result = runtime.block_on(async {
+        let cancel = CancelToken::new();
+        let on_interrupt = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("退朝：撤销执行中的诏令，排队中的保留。");
+                on_interrupt.cancel();
+            }
+        });
+        let mut stream = StreamPrinter::new(io::stderr());
+        let on_update = |update: WatchUpdate<'_>| match update {
+            WatchUpdate::Run(RunUpdate::Assigned(_)) => {}
+            WatchUpdate::Run(RunUpdate::Text { task, text }) => stream.text(task, text),
+            WatchUpdate::Run(RunUpdate::Finished(report)) => {
+                stream.finish(report.edict.id);
+                print_report(report);
+            }
+            WatchUpdate::Censured { task, verdict } => {
+                println!("诏令 #{} 都察院自动复核：{}", task.0, verdict.label());
+            }
+            WatchUpdate::Notice(note) => eprintln!("{note}"),
+            WatchUpdate::Neglect(note) => println!("史官记：{note}"),
+        };
+        session
+            .watch(&scheduler, backend.as_ref(), &cancel, options, on_update)
+            .await
+    });
+    // 撤销后，阻塞中的模型请求可能仍未返回；不等待它们。
+    runtime.shutdown_background();
+    result?;
+    Ok(())
 }
 
 /// `edict --template` 的模板名，以及哪些项由命令行显式给出（其余取模板的）。
