@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, demotion_note,
-    describe_event, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff,
+    describe_event, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diffs,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -597,14 +597,26 @@ async fn cancel(
     .await
 }
 
-/// 准奏：把呈报的改动写入项目。
+/// 准奏：把呈报的改动写入项目；`skip` 为逐段驳回的段号。
 async fn apply_changes(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let root = app.0.config.root.clone();
+    let skipped = match body.get("skip") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(list) => list
+            .as_array()
+            .and_then(|l| {
+                l.iter()
+                    .map(|n| n.as_u64().and_then(|n| u32::try_from(n).ok()))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| ApiError::bad("skip 须为段号数组"))?,
+    };
     app.mutate(move |s| {
-        s.apply_changes(TaskId(id), &root)?;
+        s.apply_changes(TaskId(id), &root, skipped)?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -1161,10 +1173,11 @@ fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                         ChangeState::Applied => "applied",
                         ChangeState::Discarded => "discarded",
                     },
-                    "files": c.files.iter().map(|f| json!({
+                    "skipped": c.skipped,
+                    "files": c.files.iter().zip(render_diffs(&c.files)).map(|(f, diff)| json!({
                         "path": f.path,
                         "created": f.before.is_none(),
-                        "diff": render_diff(f),
+                        "diff": diff,
                     })).collect::<Vec<_>>(),
                 })),
                 "worker": worker.and_then(name),

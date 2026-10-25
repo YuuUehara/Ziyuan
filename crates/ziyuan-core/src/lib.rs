@@ -691,6 +691,134 @@ pub struct FileChange {
     pub after: String,
 }
 
+/// 统一 diff 中一段改动：`start` 为原文起始行号（从 1 起），`lines` 为（标记, 行）——
+/// `' '` 上下文、`'-'` 删除、`'+'` 新增；行不含换行符。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    pub start: usize,
+    pub lines: Vec<(char, String)>,
+}
+
+/// 每段前后保留的上下文行数；相隔不超过两倍上下文的改动并为一段。
+const HUNK_CONTEXT: usize = 3;
+
+impl FileChange {
+    /// 逐行比较（行含换行符，以保留行尾）：(标记, 原文行号, 行)。
+    fn ops(&self) -> Vec<(char, usize, &str)> {
+        let old: Vec<&str> = self
+            .before
+            .as_deref()
+            .map_or(Vec::new(), |b| b.split_inclusive('\n').collect());
+        let new: Vec<&str> = self.after.split_inclusive('\n').collect();
+        let (n, m) = (old.len(), new.len());
+        let mut ops = Vec::with_capacity(n.max(m));
+        if n.saturating_mul(m) > 4_000_000 {
+            // 太大时不求最小差异：整段删去、整段新增。
+            ops.extend(old.iter().enumerate().map(|(i, l)| ('-', i, *l)));
+            ops.extend(new.iter().map(|l| ('+', n, *l)));
+            return ops;
+        }
+        // 最长公共子序列：lcs[i][j] 为 old[i..] 与 new[j..] 的公共行数。
+        let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if old[i] == new[j] {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < m {
+            if i < n && j < m && old[i] == new[j] {
+                ops.push((' ', i, old[i]));
+                (i, j) = (i + 1, j + 1);
+            } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
+                ops.push(('-', i, old[i]));
+                i += 1;
+            } else {
+                ops.push(('+', i, new[j]));
+                j += 1;
+            }
+        }
+        ops
+    }
+
+    /// 各改动行（`ops` 的下标）所属的段号（从 0 起），与 [`hunks`](Self::hunks) 一致。
+    fn hunk_of(ops: &[(char, usize, &str)]) -> Vec<Option<usize>> {
+        let mut owner = vec![None; ops.len()];
+        let mut current: Option<(usize, usize)> = None; // (段号, 上一改动行)
+        for (k, op) in ops.iter().enumerate() {
+            if op.0 == ' ' {
+                continue;
+            }
+            let hunk = match current {
+                Some((h, last)) if k - last - 1 <= 2 * HUNK_CONTEXT => h,
+                Some((h, _)) => h + 1,
+                None => 0,
+            };
+            owner[k] = Some(hunk);
+            current = Some((hunk, k));
+        }
+        owner
+    }
+
+    /// 按段切分的差异，供逐段准奏。新建文件只有一段。
+    pub fn hunks(&self) -> Vec<Hunk> {
+        let ops = self.ops();
+        let owner = Self::hunk_of(&ops);
+        let mut hunks: Vec<(usize, usize, usize)> = Vec::new(); // (段号, 首改动行, 末改动行)
+        for (k, h) in owner.iter().enumerate() {
+            match (h, hunks.last_mut()) {
+                (Some(h), Some(last)) if last.0 == *h => last.2 = k,
+                (Some(h), _) => hunks.push((*h, k, k)),
+                (None, _) => {}
+            }
+        }
+        hunks
+            .into_iter()
+            .map(|(_, first, last)| {
+                let from = first.saturating_sub(HUNK_CONTEXT);
+                let to = (last + HUNK_CONTEXT).min(ops.len() - 1);
+                Hunk {
+                    start: ops[from].1 + 1,
+                    lines: ops[from..=to]
+                        .iter()
+                        .map(|(mark, _, text)| {
+                            let text = text.strip_suffix('\n').unwrap_or(text);
+                            (*mark, text.strip_suffix('\r').unwrap_or(text).to_owned())
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// 只采纳 `keep(段号)` 为真的段（段号从 0 起）后的文件内容；`None` 表示文件不存在
+    /// （新建文件被整段驳回）。全部采纳即 `after`，全部驳回即 `before`。
+    pub fn select(&self, keep: impl Fn(usize) -> bool) -> Option<String> {
+        let ops = self.ops();
+        let owner = Self::hunk_of(&ops);
+        let mut out = String::new();
+        let mut any_new = false;
+        for ((mark, _, text), hunk) in ops.iter().zip(owner) {
+            let kept = hunk.is_some_and(&keep);
+            match mark {
+                ' ' => out.push_str(text),
+                '-' if !kept => out.push_str(text),
+                '+' if kept => {
+                    any_new = true;
+                    out.push_str(text);
+                }
+                _ => {}
+            }
+        }
+        let created = any_new || !ops.iter().any(|op| op.0 == '+');
+        (self.before.is_some() || created).then_some(out)
+    }
+}
+
 /// 分办出去的一件子诏令：沿用原诏令的部门与玉玺，由指定官员承办。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subtask {
@@ -822,9 +950,11 @@ pub enum CourtEvent {
         task: TaskId,
         changes: Vec<FileChange>,
     },
-    /// 皇帝准奏：改动已写入项目。
+    /// 皇帝准奏：改动已写入项目。`skipped` 为逐段准奏时驳回的段号（从 1 起，跨文件连续
+    /// 编号，见 [`FileChange::hunks`]），空即全部准奏。
     ChangesApplied {
         task: TaskId,
+        skipped: Vec<u32>,
     },
     /// 皇帝驳回改动：不写入项目。
     ChangesDiscarded {
@@ -922,6 +1052,52 @@ pub enum CourtEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hunks_select_keeps_line_endings_and_new_files_can_be_dropped() {
+        // CRLF、末行无换行：取舍后逐字节保留；相隔 7 行的两处为两段，相隔 6 行并为一段。
+        let before: String = (1..=12).map(|i| format!("l{i}\r\n")).collect::<String>() + "end";
+        let change = FileChange {
+            path: "a".into(),
+            before: Some(before.clone()),
+            after: before.replace("l1\r\n", "L1\r\n").replace("end", "END"),
+        };
+        let hunks = change.hunks();
+        assert_eq!(hunks.len(), 2, "{hunks:?}");
+        assert_eq!(
+            hunks[0].lines[..2],
+            [('-', "l1".into()), ('+', "L1".into())]
+        );
+        assert_eq!(hunks[1].start, 10);
+        assert_eq!(
+            change.select(|h| h == 1).unwrap(),
+            before.replace("end", "END")
+        );
+        assert_eq!(change.select(|_| true).unwrap(), change.after);
+        assert_eq!(change.select(|_| false).unwrap(), before);
+        let near = FileChange {
+            after: before
+                .replace("l1\r\n", "L1\r\n")
+                .replace("l8\r\n", "L8\r\n"),
+            ..change
+        };
+        assert_eq!(near.hunks().len(), 1);
+
+        let created = FileChange {
+            path: "b".into(),
+            before: None,
+            after: "x\ny".into(),
+        };
+        assert_eq!(created.hunks().len(), 1);
+        assert_eq!(created.select(|_| false), None);
+        assert_eq!(created.select(|_| true).as_deref(), Some("x\ny"));
+        let empty = FileChange {
+            after: String::new(),
+            ..created
+        };
+        assert!(empty.hunks().is_empty());
+        assert_eq!(empty.select(|_| false).as_deref(), Some(""));
+    }
 
     fn seal(tools: &[Capability], scope: &[&str]) -> Seal {
         Seal {

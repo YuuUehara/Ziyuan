@@ -88,6 +88,25 @@ pub fn sealed_tools(
     Ok(Sealed { tools, sandbox })
 }
 
+/// 审计所记的工具参数：`write_file` 的全文已在奏本中，只记行数与字节数。
+pub fn audit_args(tool: &str, args_json: &str) -> String {
+    if tool != "write_file" {
+        return args_json.to_owned();
+    }
+    let Ok(mut args) = serde_json::from_str::<Value>(args_json) else {
+        return args_json.to_owned();
+    };
+    if let Some(content) = args.get("content").and_then(|c| c.as_str()) {
+        let summary = format!(
+            "〔{} 行，{} 字节，全文见奏本〕",
+            content.lines().count(),
+            content.len()
+        );
+        args["content"] = summary.into();
+    }
+    args.to_string()
+}
+
 /// 把皇帝准奏的改动写入项目。先逐一核对：路径仍在项目内且不属禁区，文件内容与呈报时的原文
 /// 一致（新建文件则仍不存在）；有任何一处不符则一处也不写。
 pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError> {

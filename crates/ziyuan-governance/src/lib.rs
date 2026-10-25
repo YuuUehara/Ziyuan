@@ -84,6 +84,8 @@ pub enum GovernanceError {
     Template(String),
     /// 廷推、廷杖不合规矩。
     Court(String),
+    /// 逐段准奏的段号不合规矩。
+    Changes(String),
     /// 廷议须在诏令待办时进行。
     CannotDebate(TaskId),
     /// 廷议须有 2–6 位在任官员，发言者须为现任官员。
@@ -184,6 +186,7 @@ impl fmt::Display for GovernanceError {
             Self::Military(why) => write!(f, "兵部不准：{why}"),
             Self::Template(why) => write!(f, "翰林院不准：{why}"),
             Self::Court(why) => write!(f, "{why}"),
+            Self::Changes(why) => write!(f, "逐段准奏不成：{why}"),
             Self::InvalidBudget => f.write_str("度支须为正数（tokens）"),
             Self::TreasuryExhausted(limit) => write!(
                 f,
@@ -446,6 +449,8 @@ pub struct Censure {
 pub struct Changes {
     pub files: Vec<FileChange>,
     pub state: ChangeState,
+    /// 逐段准奏时驳回的段号（从 1 起，跨文件连续编号）。
+    pub skipped: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -754,6 +759,7 @@ impl Court {
                 self.tasks.get_mut(task).expect("已确认存在").changes = Some(Changes {
                     files: changes.clone(),
                     state: ChangeState::Proposed,
+                    skipped: Vec::new(),
                 });
             }
             CourtEvent::EdictSplit {
@@ -921,15 +927,17 @@ impl Court {
                     usage: *usage,
                 });
             }
-            CourtEvent::ChangesApplied { task } | CourtEvent::ChangesDiscarded { task } => {
-                self.propose_changes_decision(*task, true)?;
-                let applied = matches!(event, CourtEvent::ChangesApplied { .. });
+            CourtEvent::ChangesApplied { task, skipped } => {
+                self.propose_application(*task, skipped.clone())?;
                 let changes = self.tasks.get_mut(task).and_then(|t| t.changes.as_mut());
-                changes.expect("已确认有待决改动").state = if applied {
-                    ChangeState::Applied
-                } else {
-                    ChangeState::Discarded
-                };
+                let changes = changes.expect("已确认有待决改动");
+                changes.state = ChangeState::Applied;
+                changes.skipped = skipped.clone();
+            }
+            CourtEvent::ChangesDiscarded { task } => {
+                self.propose_changes_decision(*task, false)?;
+                let changes = self.tasks.get_mut(task).and_then(|t| t.changes.as_mut());
+                changes.expect("已确认有待决改动").state = ChangeState::Discarded;
             }
             CourtEvent::TaskFailed { task, reason } => {
                 let worker = match self.open_task(*task)? {
@@ -1890,12 +1898,41 @@ impl Court {
         }
         match &entry.changes {
             Some(c) if c.state == ChangeState::Proposed => Ok(if apply {
-                CourtEvent::ChangesApplied { task }
+                CourtEvent::ChangesApplied {
+                    task,
+                    skipped: Vec::new(),
+                }
             } else {
                 CourtEvent::ChangesDiscarded { task }
             }),
             _ => Err(GovernanceError::NoPendingChanges(task)),
         }
+    }
+
+    /// 逐段准奏：驳回 `skipped` 中的段（从 1 起，跨文件连续编号），其余写入项目。
+    /// 段号须在范围内；不能全部驳回（那是驳回改动）。
+    pub fn propose_application(
+        &self,
+        task: TaskId,
+        mut skipped: Vec<u32>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        self.propose_changes_decision(task, true)?;
+        let files = &self.tasks[&task]
+            .changes
+            .as_ref()
+            .expect("已确认有待决改动")
+            .files;
+        let total: usize = files.iter().map(|f| f.hunks().len()).sum();
+        skipped.sort_unstable();
+        skipped.dedup();
+        let bad = |why: String| Err(GovernanceError::Changes(why));
+        if let Some(n) = skipped.iter().find(|&&n| n == 0 || n as usize > total) {
+            return bad(format!("没有第 {n} 段：改动共 {total} 段"));
+        }
+        if !skipped.is_empty() && skipped.len() == total {
+            return bad("各段都驳回了，请直接驳回改动".into());
+        }
+        Ok(CourtEvent::ChangesApplied { task, skipped })
     }
 
     /// 现任左都御史。

@@ -158,7 +158,14 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
                 .collect();
             format!("v1\tCHANGES\t{}\t{}", task.0, entries.join(","))
         }
-        ChangesApplied { task } => format!("v1\tAPPLIED\t{}", task.0),
+        // 逐段准奏时附驳回的段号（逗号分隔）；全部准奏不附，与 v0.3 一致。
+        ChangesApplied { task, skipped } if skipped.is_empty() => {
+            format!("v1\tAPPLIED\t{}", task.0)
+        }
+        ChangesApplied { task, skipped } => {
+            let skipped: Vec<_> = skipped.iter().map(u32::to_string).collect();
+            format!("v1\tAPPLIED\t{}\t{}", task.0, skipped.join(","))
+        }
         // 子诏令为 `ID:承办者:内容hex`，以逗号分隔。
         EdictSplit {
             task,
@@ -590,6 +597,12 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         },
         "APPLIED" => ChangesApplied {
             task: TaskId(id(2)?),
+            skipped: match parts.len() {
+                3 => Vec::new(),
+                _ => split_list(field(3)?)
+                    .map(|n| n.parse().map_err(|_| format!("段号无效: {n}")))
+                    .collect::<Result<_, _>>()?,
+            },
         },
         "SPLIT" => EdictSplit {
             task: TaskId(id(2)?),
@@ -735,9 +748,10 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         | OfficialDismissed { .. }
         | OfficialPurged { .. }
         | EdictApproved { .. }
-        | ChangesApplied { .. }
         | ChangesDiscarded { .. }
         | TaskCancelled { .. } => 3,
+        ChangesApplied { skipped, .. } if skipped.is_empty() => 3,
+        ChangesApplied { .. } => 4,
         ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
         ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
         CourierDelivered { .. } => 4,
@@ -953,7 +967,14 @@ mod tests {
                     },
                 ],
             },
-            CourtEvent::ChangesApplied { task },
+            CourtEvent::ChangesApplied {
+                task,
+                skipped: Vec::new(),
+            },
+            CourtEvent::ChangesApplied {
+                task,
+                skipped: vec![2, 5],
+            },
             CourtEvent::EdictSplit {
                 task,
                 subtasks: vec![

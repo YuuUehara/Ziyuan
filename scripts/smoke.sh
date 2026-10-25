@@ -204,4 +204,6 @@ NID="$("$BIN" officials | sed -n 's/^#\([0-9]*\) .*工部尚书.*/\1/p')"
 [ -n "$NID" ]
 { "$BIN" cane "$NID" 2>&1 || true; } | has '弹劾'
 { "$BIN" pardon "$NID" 2>&1 || true; } | has '降级'
+# 逐段准奏：段号须为数字
+{ "$BIN" apply 1 --skip x 2>&1 || true; } | has '段号必须是数字'
 echo 'ZiYuan smoke test PASS'

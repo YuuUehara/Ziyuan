@@ -224,7 +224,9 @@
   pre.diff { margin: 4px 0; padding: 6px 8px; background: #fff; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; max-height: 280px; overflow: auto; white-space: pre; }
   pre.diff .add { color: #1d6b3a; background: #e8f6ec; display: block; }
   pre.diff .del { color: #8c2620; background: #fdf1ef; display: block; }
-  pre.diff .hunk { color: var(--muted); display: block; }
+  pre.diff .hunk { color: var(--muted); display: block; margin-top: 4px; }
+  pre.diff .pick { margin-left: 12px; font-family: system-ui, sans-serif; color: var(--ink); cursor: pointer; }
+  pre.diff .pick input { vertical-align: -2px; }
   pre.diff .ctx { display: block; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
   .stat.exhausted { border-color: #e9b4ae; color: #ffd5cf; }
@@ -623,11 +625,21 @@ function taskHtml(t) {
   if (t.changes) {
     const c = t.changes;
     const stateLabel = { proposed: "待准奏", applied: "已落盘", discarded: "已驳回" }[c.state];
-    const files = c.files.map((f) => `<details ${c.state === "proposed" ? "open" : ""}>
+    const pending = c.state === "proposed";
+    // 段头「@@ 第 n 段 …」：待准奏时附勾选框（默认准），驳回过的段标出。
+    const hunkLine = (l) => {
+      const n = Number((l.match(/第 (\d+) 段/) || [])[1]);
+      const box = pending && n ? `<label class="pick"><input type="checkbox" checked data-keep id="hunk-${t.id}-${n}" class="hunk-${t.id}" data-n="${n}"> 准此段</label>` : "";
+      const off = c.skipped.includes(n) ? ` <span class="badge failed">此段驳回</span>` : "";
+      return `<span class="hunk">${esc(l)}${box}${off}</span>`;
+    };
+    const files = c.files.map((f) => `<details ${pending ? "open" : ""}>
       <summary>${esc(f.path)}${f.created ? "（新建）" : ""}</summary>
-      <pre class="diff">${f.diff.split("\n").filter((l, i) => i > 1 && l).map((l) =>
-        `<span class="${{ "+": "add", "-": "del", "@": "hunk" }[l[0]] || "ctx"}">${esc(l)}</span>`).join("")}</pre></details>`).join("");
-    body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件，${stateLabel}${files}</div>`;
+      <pre class="diff">${f.diff.split("\n").filter((l, i) => i > 1 && l).map((l) => l[0] === "@" ? hunkLine(l) :
+        `<span class="${{ "+": "add", "-": "del" }[l[0]] || "ctx"}">${esc(l)}</span>`).join("")}</pre></details>`).join("");
+    const hunks = c.files.reduce((n, f) => n + (f.diff.match(/^@@ /gm) || []).length, 0);
+    const note = c.skipped.length ? `（驳回第 ${c.skipped.join("、")} 段）` : "";
+    body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件 ${hunks} 段，${stateLabel}${note}${pending && hunks > 1 ? `<span class="hint">　可逐段取舍：去掉勾选的段不落盘</span>` : ""}${files}</div>`;
     if (c.state === "proposed" && t.status === "completed") {
       body += `<div class="review-row"><span style="flex:1"></span>
         <button class="small gold" data-apply="${t.id}">准奏落盘</button>
@@ -960,7 +972,9 @@ document.addEventListener("click", (event) => {
     el.textContent = "御史复核中…";
     act(api(`/tasks/${d.censor}/censor`, {})).then((r) => r && toast(`诏令 #${d.censor} 都察院${r.label}`));
   } else if (d.apply) {
-    if (confirm(`把诏令 #${d.apply} 的改动写入项目？`)) act(api(`/tasks/${d.apply}/changes/apply`, {}), "已准奏，改动已落盘");
+    const skip = [...document.querySelectorAll(`.hunk-${d.apply}`)].filter((b) => !b.checked).map((b) => Number(b.dataset.n));
+    const what = skip.length ? `（驳回第 ${skip.join("、")} 段，其余落盘）` : "";
+    if (confirm(`把诏令 #${d.apply} 的改动写入项目${what}？`)) act(api(`/tasks/${d.apply}/changes/apply`, { skip }), "已准奏，改动已落盘" + what);
   } else if (d.discard) {
     act(api(`/tasks/${d.discard}/changes/discard`, {}), "已驳回改动");
   } else if (d.approve) {

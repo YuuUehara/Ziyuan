@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ziyuan_app::{
     ABOLITION_NOTE, AppError, EXECUTOR_BUSY, RunUpdate, Session, describe_event, describe_record,
-    duzhi_report, estimate_cost, kaocheng_report, render_diff, seal_note,
+    duzhi_report, estimate_cost, kaocheng_report, render_diffs, seal_note, skipped_note,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, GovernanceMode, Office, Persona, Seal, Speech,
@@ -143,6 +143,8 @@ enum InputKind {
     Edict,
     Recruit,
     Review(TaskId, Verdict),
+    /// 逐段准奏：输入要驳回的段号。
+    Skip(TaskId),
 }
 
 #[derive(Clone, Copy)]
@@ -469,9 +471,16 @@ impl App {
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
-                    |s| s.apply_changes(task, &root),
+                    |s| s.apply_changes(task, &root, Vec::new()),
                     |_| format!("诏令 #{} 准奏，改动已写入项目", task.0),
                 );
+            }
+            KeyCode::Char('W') => {
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::Skip(task),
+                    text: String::new(),
+                    department: 0,
+                })
             }
             KeyCode::Char('u') => {
                 self.mutate(
@@ -648,6 +657,28 @@ impl App {
                 self.mutate(
                     |s| s.review(task, verdict, text),
                     |_| format!("诏令 #{} 评定为{}", task.0, verdict.label()),
+                );
+            }
+            InputKind::Skip(task) => {
+                let parsed: Result<Vec<u32>, _> = text
+                    .split([',', '，', ' ', '、'])
+                    .filter(|n| !n.is_empty())
+                    .map(str::parse)
+                    .collect();
+                let Ok(skipped) = parsed else {
+                    self.error("段号须是数字，以逗号分隔");
+                    return;
+                };
+                let root = self.config.root.clone();
+                self.mutate(
+                    |s| s.apply_changes(task, &root, skipped.clone()),
+                    |_| {
+                        format!(
+                            "诏令 #{} 准奏，改动已写入项目{}",
+                            task.0,
+                            skipped_note(&skipped)
+                        )
+                    },
                 );
             }
         }
@@ -1370,17 +1401,21 @@ impl App {
         }
         if let Some(changes) = &task.changes {
             let state = match changes.state {
-                ChangeState::Proposed => "待准奏（w 准奏落盘，u 驳回）",
+                ChangeState::Proposed => "待准奏（w 全部落盘，W 逐段驳回，u 驳回）",
                 ChangeState::Applied => "已落盘",
                 ChangeState::Discarded => "已驳回",
             };
             lines.push(Line::default());
             lines.push(Line::from(vec![
                 Span::styled("工部奏本　", Style::new().fg(GOLD).bold()),
-                Span::raw(format!("改动 {} 个文件，{state}", changes.files.len())),
+                Span::raw(format!(
+                    "改动 {} 个文件，{state}{}",
+                    changes.files.len(),
+                    skipped_note(&changes.skipped)
+                )),
             ]));
-            for file in &changes.files {
-                for line in render_diff(file).lines() {
+            for diff in render_diffs(&changes.files) {
+                for line in diff.lines() {
                     let style = match line.chars().next() {
                         Some('+') if !line.starts_with("+++") => Style::new().fg(Color::Green),
                         Some('-') if !line.starts_with("---") => Style::new().fg(Color::Red),
@@ -1605,7 +1640,7 @@ impl App {
                 ("a/d", "采纳/驳回"),
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
-                ("w/u", "准奏/驳回改动"),
+                ("w/W/u", "准奏/逐段/驳回改动"),
                 ("f", "分办"),
                 ("v", "廷议"),
                 ("i", "复核"),
@@ -1663,9 +1698,12 @@ impl App {
                         "备注（可空）：",
                         false,
                     ),
+                    InputKind::Skip(_) => ("逐段准奏", "驳回第几段（如 1,3）：", false),
                 };
                 let title = match kind {
-                    InputKind::Review(task, _) => format!("{title} · 诏令 #{}", task.0),
+                    InputKind::Review(task, _) | InputKind::Skip(task) => {
+                        format!("{title} · 诏令 #{}", task.0)
+                    }
                     _ => title.to_owned(),
                 };
                 let popup = centered(area, 64, if with_department { 6 } else { 5 });

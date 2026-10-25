@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::{
     ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, TaskReport, demotion_note, describe_event,
-    describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diff,
-    seal_note,
+    describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report, render_diffs,
+    seal_note, skipped_note,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -63,7 +63,8 @@ const HELP: &str = concat!(
   ziyuan approve <诏令ID|all>           内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
   ziyuan diff <诏令ID>                  查看工部呈报的改动（统一 diff）
-  ziyuan apply <诏令ID>                 准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）
+  ziyuan apply <诏令ID> [--skip 1,3]    准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）；
+                                       --skip 逐段驳回 diff 中所列段号，其余落盘
   ziyuan discard <诏令ID>               驳回呈报的改动，不写入
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
@@ -230,7 +231,9 @@ enum Command {
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
     /// 准奏（`true`）或驳回改动。
-    Decide(TaskId, bool),
+    /// 准奏（驳回其中若干段）。
+    Apply(TaskId, Vec<u32>),
+    Discard(TaskId),
     Recommend(Office),
     History,
 }
@@ -440,8 +443,21 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             ))),
             _ => return Err("用法: ziyuan censor <诏令ID|all>".into()),
         },
-        "apply" => Command::Decide(task_id(&args, "ziyuan apply <诏令ID>")?, true),
-        "discard" => Command::Decide(task_id(&args, "ziyuan discard <诏令ID>")?, false),
+        "apply" => {
+            const USAGE: &str = "用法: ziyuan apply <诏令ID> [--skip <段号,…>]";
+            match args.as_slice() {
+                [id] => Command::Apply(task_id(std::slice::from_ref(id), USAGE)?, Vec::new()),
+                [id, flag, list] if flag == "--skip" => Command::Apply(
+                    task_id(std::slice::from_ref(id), USAGE)?,
+                    list.split([',', '，'])
+                        .filter(|n| !n.trim().is_empty())
+                        .map(|n| n.trim().parse().map_err(|_| format!("段号必须是数字：{n}")))
+                        .collect::<Result<_, _>>()?,
+                ),
+                _ => return Err(USAGE.into()),
+            }
+        }
+        "discard" => Command::Discard(task_id(&args, "ziyuan discard <诏令ID>")?),
         "review" => {
             if args.len() < 2 {
                 return Err("用法: ziyuan review <诏令ID> <accept|reject> [备注]".into());
@@ -755,18 +771,29 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 return Ok(());
             };
             println!("诏令 #{} 呈报改动{}：", task.0, changes_note(entry));
-            for file in &changes.files {
-                print!("{}", render_diff(file));
+            print!("{}", render_diffs(&changes.files).concat());
+            if changes.state == ChangeState::Proposed {
+                println!(
+                    "逐段准奏：`ziyuan apply {} --skip <段号,…>` 驳回所列各段，其余落盘。",
+                    task.0
+                );
             }
         }
-        Command::Decide(task, apply) => {
-            if apply {
-                session.apply_changes(task, &env::current_dir()?)?;
-                println!("诏令已颁：准奏，诏令 #{} 的改动已写入项目。", task.0);
-            } else {
-                session.discard_changes(task)?;
-                println!("诏令已颁：驳回诏令 #{} 的改动，未写入。", task.0);
-            }
+        Command::Apply(task, skipped) => {
+            session.apply_changes(task, &env::current_dir()?, skipped)?;
+            let skipped = session
+                .court()
+                .task(task)
+                .and_then(|t| t.changes.as_ref())
+                .map_or(String::new(), |c| skipped_note(&c.skipped));
+            println!(
+                "诏令已颁：准奏，诏令 #{} 的改动已写入项目{skipped}。",
+                task.0
+            );
+        }
+        Command::Discard(task) => {
+            session.discard_changes(task)?;
+            println!("诏令已颁：驳回诏令 #{} 的改动，未写入。", task.0);
         }
         Command::Cancel(task) => {
             session.cancel(task)?;
@@ -1377,7 +1404,12 @@ fn changes_note(task: &Task) -> String {
         ChangeState::Applied => "已落盘",
         ChangeState::Discarded => "已驳回",
     };
-    format!("；改动 {} 个文件{state}", changes.files.len())
+    let hunks: usize = changes.files.iter().map(|f| f.hunks().len()).sum();
+    format!(
+        "；改动 {} 个文件 {hunks} 段{state}{}",
+        changes.files.len(),
+        skipped_note(&changes.skipped)
+    )
 }
 
 /// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。

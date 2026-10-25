@@ -545,7 +545,7 @@ impl<S: EventStore> Session<S> {
             user.push_str(&format!("- {line}\n"));
         }
         if let Some(changes) = &entry.changes {
-            let diff: String = changes.files.iter().map(render_diff).collect();
+            let diff: String = render_diffs(&changes.files).concat();
             user.push_str(&format!("\n呈报改动：\n{}\n", truncate(&diff, 6000)));
         }
         let by_evidence = if evidence.verified() {
@@ -950,16 +950,41 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
-    /// 准奏：把诏令呈报的改动写入 `root` 下的项目，再记入事件簿。写入前逐一核对文件
-    /// 自呈报以来未被改动，否则一处也不写、不留记录。
-    pub fn apply_changes(&mut self, task: TaskId, root: &Path) -> Result<(), AppError> {
+    /// 准奏：把诏令呈报的改动写入 `root` 下的项目，再记入事件簿。`skipped` 为逐段准奏时
+    /// 驳回的段号（见 [`render_diffs`]），空即全部准奏。写入前逐一核对文件自呈报以来
+    /// 未被改动，否则一处也不写、不留记录。
+    pub fn apply_changes(
+        &mut self,
+        task: TaskId,
+        root: &Path,
+        skipped: Vec<u32>,
+    ) -> Result<(), AppError> {
         self.reload()?;
-        self.court.propose_changes_decision(task, true)?;
+        let event = self.court.propose_application(task, skipped)?;
+        let CourtEvent::ChangesApplied { skipped, .. } = &event else {
+            unreachable!("准奏只产生 ChangesApplied");
+        };
         let files = &self.court.task(task).expect("已确认存在");
         let files = &files.changes.as_ref().expect("已确认有待决改动").files;
-        ziyuan_runtime::tools::apply_changes(root, files)
+        // 逐段取舍后的内容；与原文相同（整处驳回）的不写。
+        let mut first = 0;
+        let mut selected = Vec::new();
+        for file in files {
+            let base = first;
+            first += file.hunks().len();
+            let after = file.select(|h| !skipped.contains(&((base + h + 1) as u32)));
+            if after.as_ref() == file.before.as_ref() {
+                continue;
+            }
+            selected.push(FileChange {
+                path: file.path.clone(),
+                before: file.before.clone(),
+                after: after.unwrap_or_default(),
+            });
+        }
+        ziyuan_runtime::tools::apply_changes(root, &selected)
             .map_err(|e| AppError::Apply(e.to_string()))?;
-        self.commit(|court| Ok(vec![court.propose_changes_decision(task, true)?]))?;
+        self.commit(|_| Ok(vec![event.clone()]))?;
         Ok(())
     }
 
@@ -1444,7 +1469,7 @@ impl<S: EventStore> Session<S> {
                             Some(TaskStatus::Assigned(_)) => vec![CourtEvent::ToolInvoked {
                                 task,
                                 tool: tool.clone(),
-                                args_json: args_json.clone(),
+                                args_json: ziyuan_runtime::tools::audit_args(&tool, &args_json),
                                 ok,
                             }],
                             _ => Vec::new(),
@@ -1652,65 +1677,36 @@ fn parse_draft(reply: &str) -> Option<AgentId> {
     digits.parse().ok().map(AgentId)
 }
 
-/// 一处改动的统一 diff（每段前后各留 3 行上下文）。
-pub fn render_diff(change: &FileChange) -> String {
-    const CONTEXT: usize = 3;
-    let old: Vec<&str> = change
-        .before
-        .as_deref()
-        .map_or(Vec::new(), |b| b.lines().collect());
-    let new: Vec<&str> = change.after.lines().collect();
-    // (标记, 原文行号, 内容)：' ' 不变，'-' 删除，'+' 新增。
-    let mut ops: Vec<(char, usize, &str)> = Vec::new();
-    if old.len().saturating_mul(new.len()) > 4_000_000 {
-        // 太大时不求最小差异：整段删去、整段新增。
-        ops.extend(old.iter().enumerate().map(|(i, l)| ('-', i, *l)));
-        ops.extend(new.iter().map(|l| ('+', old.len(), *l)));
-    } else {
-        // 最长公共子序列：lcs[i][j] 为 old[i..] 与 new[j..] 的公共行数。
-        let (n, m) = (old.len(), new.len());
-        let mut lcs = vec![vec![0u32; m + 1]; n + 1];
-        for i in (0..n).rev() {
-            for j in (0..m).rev() {
-                lcs[i][j] = if old[i] == new[j] {
-                    lcs[i + 1][j + 1] + 1
-                } else {
-                    lcs[i + 1][j].max(lcs[i][j + 1])
-                };
+/// 各处改动的统一 diff（每段前后各留 3 行上下文），一处一份。段号跨文件连续编号、从 1 起，
+/// 即逐段准奏所用的段号。
+pub fn render_diffs(files: &[FileChange]) -> Vec<String> {
+    let mut number = 0;
+    files
+        .iter()
+        .map(|change| {
+            let mut out = match &change.before {
+                Some(_) => format!("--- a/{0}\n+++ b/{0}\n", change.path),
+                None => format!("--- /dev/null\n+++ b/{}\n", change.path),
+            };
+            for hunk in change.hunks() {
+                number += 1;
+                out.push_str(&format!("@@ 第 {number} 段 · 原第 {} 行 @@\n", hunk.start));
+                for (mark, text) in hunk.lines {
+                    out.push_str(&format!("{mark}{text}\n"));
+                }
             }
-        }
-        let (mut i, mut j) = (0, 0);
-        while i < n || j < m {
-            if i < n && j < m && old[i] == new[j] {
-                ops.push((' ', i, old[i]));
-                (i, j) = (i + 1, j + 1);
-            } else if i < n && (j == m || lcs[i + 1][j] >= lcs[i][j + 1]) {
-                ops.push(('-', i, old[i]));
-                i += 1;
-            } else {
-                ops.push(('+', i, new[j]));
-                j += 1;
-            }
-        }
+            out
+        })
+        .collect()
+}
+
+/// 准奏时驳回了哪些段（全部准奏为空串）。
+pub fn skipped_note(skipped: &[u32]) -> String {
+    if skipped.is_empty() {
+        return String::new();
     }
-    let changed: Vec<usize> = (0..ops.len()).filter(|&k| ops[k].0 != ' ').collect();
-    let shown = |k: usize| changed.iter().any(|&c| c.abs_diff(k) <= CONTEXT);
-    let mut out = match &change.before {
-        Some(_) => format!("--- a/{0}\n+++ b/{0}\n", change.path),
-        None => format!("--- /dev/null\n+++ b/{}\n", change.path),
-    };
-    let mut previous = None;
-    for (k, (mark, line, text)) in ops.iter().enumerate() {
-        if !shown(k) {
-            continue;
-        }
-        if previous != k.checked_sub(1) || previous.is_none() {
-            out.push_str(&format!("@@ 原第 {} 行 @@\n", line + 1));
-        }
-        out.push_str(&format!("{mark}{text}\n"));
-        previous = Some(k);
-    }
-    out
+    let list: Vec<_> = skipped.iter().map(u32::to_string).collect();
+    format!("（驳回第 {} 段）", list.join("、"))
 }
 
 /// 修道期间司礼监代批回奏的批语。
@@ -2486,7 +2482,9 @@ pub fn describe_event(event: &CourtEvent) -> String {
             let paths: Vec<_> = changes.iter().map(|c| c.path.as_str()).collect();
             format!("诏令 #{} 呈报改动：{}", task.0, paths.join("、"))
         }
-        CourtEvent::ChangesApplied { task } => format!("诏令 #{} 改动准奏落盘", task.0),
+        CourtEvent::ChangesApplied { task, skipped } => {
+            format!("诏令 #{} 改动准奏落盘{}", task.0, skipped_note(skipped))
+        }
         CourtEvent::CourtDebated { task, speeches } => {
             let mut speakers: Vec<String> = Vec::new();
             for s in speeches {
@@ -3942,6 +3940,113 @@ mod tests {
         }
     }
 
+    /// 改写 a.txt 相隔甚远的两处（两段），并新建 b.txt（一段）。
+    struct TwoFiles(String);
+    impl WorkerBackend for TwoFiles {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let after = self.0.replace("l2\n", "L2\n").replace("l18\n", "L18\n");
+            let args = serde_json::json!({ "path": "a.txt", "content": after });
+            hooks.tool_invoked("write_file", &args.to_string(), true);
+            hooks.changes_proposed(vec![
+                FileChange {
+                    path: "a.txt".into(),
+                    before: Some(self.0.clone()),
+                    after,
+                },
+                FileChange {
+                    path: "b.txt".into(),
+                    before: None,
+                    after: "b\n".into(),
+                },
+            ]);
+            Ok("改毕".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn hunks_are_numbered_across_files_and_can_be_rejected_one_by_one() {
+        let root = std::env::temp_dir().join(format!("ziyuan-app-hunks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let original: String = (1..=20).map(|i| format!("l{i}\n")).collect();
+        std::fs::write(root.join("a.txt"), &original).unwrap();
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let write = Seal {
+            capabilities: [Capability::WriteFile].into(),
+            scope: vec![".".into()],
+        };
+        let task = session
+            .issue(Department::Works, "改两处".into(), write)
+            .unwrap()
+            .id;
+        run_all(&mut session, &scheduler(TwoFiles(original.clone()))).await;
+
+        // 审计只记摘要，全文只在奏本里。
+        let audit = session
+            .history()
+            .iter()
+            .find_map(|e| match e {
+                CourtEvent::ToolInvoked { args_json, .. } => Some(args_json.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            audit.contains("20 行") && audit.contains("全文见奏本") && !audit.contains("L18"),
+            "{audit}"
+        );
+        let files = session
+            .court()
+            .task(task)
+            .unwrap()
+            .changes
+            .clone()
+            .unwrap()
+            .files;
+        let diffs = render_diffs(&files);
+        assert!(
+            diffs[0].contains("@@ 第 1 段 · 原第 1 行 @@\n l1\n-l2\n+L2\n"),
+            "{}",
+            diffs[0]
+        );
+        assert!(
+            diffs[0].contains("@@ 第 2 段 · 原第 15 行 @@"),
+            "{}",
+            diffs[0]
+        );
+        assert!(
+            diffs[1].contains("@@ 第 3 段 · 原第 1 行 @@\n+b\n"),
+            "{}",
+            diffs[1]
+        );
+
+        let err = |skipped: Vec<u32>, session: &mut Session<&mut MemoryEventLog>| {
+            session
+                .apply_changes(task, &root, skipped)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(err(vec![4], &mut session).contains("没有第 4 段"));
+        assert!(err(vec![3, 1, 2], &mut session).contains("请直接驳回"));
+        // 驳回第 1 段（a.txt 前一处）与第 3 段（新建 b.txt）：只写入 a.txt 后一处。
+        session.apply_changes(task, &root, vec![3, 1, 3]).unwrap();
+        let expected = original.replace("l18\n", "L18\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            expected
+        );
+        assert!(!root.join("b.txt").exists());
+        let changes = session.court().task(task).unwrap().changes.clone().unwrap();
+        assert_eq!(changes.skipped, [1, 3]);
+        let last = session.history().last().unwrap().clone();
+        assert!(
+            describe_event(&last).contains("驳回第 1、3 段"),
+            "{}",
+            describe_event(&last)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn works_changes_are_proposed_then_applied_or_discarded_by_the_emperor() {
         let root = std::env::temp_dir().join(format!("ziyuan-app-changes-{}", std::process::id()));
@@ -3987,20 +4092,20 @@ mod tests {
         );
         let changes = session.court().task(edit).unwrap().changes.clone().unwrap();
         assert_eq!(changes.state, ziyuan_governance::ChangeState::Proposed);
-        let diff = render_diff(&changes.files[0]);
+        let diff = render_diffs(&changes.files).remove(0);
         assert!(
             diff.contains("-old\n+new\n") && diff.contains("--- a/README.md"),
             "{diff}"
         );
         assert!(diff.ends_with("+new\n keep\n"), "{diff}");
 
-        session.apply_changes(edit, &root).unwrap();
+        session.apply_changes(edit, &root, Vec::new()).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.join("README.md")).unwrap(),
             "new\nkeep\n"
         );
         assert!(matches!(
-            session.apply_changes(edit, &root),
+            session.apply_changes(edit, &root, Vec::new()),
             Err(AppError::Governance(GovernanceError::NoPendingChanges(_)))
         ));
         session.discard_changes(create).unwrap();
