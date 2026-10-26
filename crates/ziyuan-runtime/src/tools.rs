@@ -649,6 +649,7 @@ mod tests {
         Seal {
             capabilities: capabilities.iter().copied().collect(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
+            mcp: Default::default(),
         }
     }
 
@@ -659,6 +660,7 @@ mod tests {
         let seal = Seal {
             capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
             scope: vec!["CHANGELOG.md".into()],
+            mcp: Default::default(),
         };
         let sealed = sealed_tools(&project, &seal, None).unwrap();
         let write = sealed

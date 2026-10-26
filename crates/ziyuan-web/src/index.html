@@ -579,7 +579,7 @@ const statusLabel = { pending: "待办", assigned: "执行中", completed: "已�
 function taskHtml(t) {
   const open = t.status === "pending" || t.status === "assigned";
   const seal = t.seal.default ? "" :
-    `<span class="badge seal" title="玉玺">玉玺 · ${esc(t.seal.tools.join("、") || "无工具")} · ${esc(t.seal.scope.join("、"))}</span>`;
+    `<span class="badge seal" title="玉玺">玉玺 · ${esc(t.seal.tools.join("、") || "无工具")} · ${esc(t.seal.scope.join("、"))}${t.seal.mcp.length ? ` · 外藩 ${esc(t.seal.mcp.join("、"))}` : ""}</span>`;
   const review = t.review ? `<span class="badge ${t.review.verdict}">${esc(t.review.label)}${t.review.note ? "：" + esc(t.review.note) : ""}</span>` : "";
   const meta = [
     t.worker ? `承办：${esc(t.worker)}` : "",

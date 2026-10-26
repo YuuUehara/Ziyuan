@@ -186,6 +186,10 @@ impl WorkerBackend for AgentBackend {
         if !job.records.is_empty() {
             sealed.tools.push(tools::record_search(job.records.clone()));
         }
+        // 外藩工具：按玉玺授权启动所需的 MCP 服务，本件办完（`sealed` 析构）即关。
+        sealed
+            .tools
+            .extend(mcp::sealed_tools(&self.root, &edict.seal.mcp)?);
         let nonce = guard::nonce();
         let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
             "你可以用 write_file 改写授权范围内的文件，但改动只暂存，回奏后由皇帝审阅 diff 决定是否落盘；\
@@ -243,4 +247,5 @@ impl WorkerBackend for AgentBackend {
 
 pub mod agent_loop;
 pub mod guard;
+pub mod mcp;
 pub mod tools;

@@ -35,7 +35,7 @@ const HELP: &str = concat!(
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职、品级、所用模型及任务完成数
   ziyuan recruit [姓名] <部门>          招募新官（不给姓名则随机取名；须另行 appoint 任职）
-  ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具>] [--queue] <内容>
+  ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具>] [--mcp <授权>] [--queue] <内容>
                                        下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
@@ -53,7 +53,7 @@ const HELP: &str = concat!(
   ziyuan purge <官员ID>                 革职：削去仕籍，永不叙用
   ziyuan abolish                       一键朱元璋：罢中书省，株连百官（全部在任官员革职削籍）
   ziyuan model <官职> <模型|default>     为官职指定承办模型（同一服务地址与 Key）
-  ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] | default
+  ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] [--mcp <授权>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
   ziyuan split <诏令ID> [官员ID:子诏令]...
                                        多官协作：尚书（模型）把待办诏令拆给本部官员分办，或皇帝御定；
@@ -91,6 +91,7 @@ const HELP: &str = concat!(
   ziyuan cane <官员ID>                   廷杖：屡遭弹劾（两次以上）者降一级留用，收回 write_file、run_tests，三件获采纳即复
   ziyuan pardon <官员ID>                 宽宥受杖者，复其品级与玉玺
   ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
+  ziyuan mcp                            外藩名册：.ziyuan/mcp.json 登记的 MCP 服务及其工具
   ziyuan changelog [--version 0.5.0] [--since v0.4.0]
                                        礼部修 CHANGELOG：据提交与实录起草，只可写 CHANGELOG.md，须准奏落盘（只入队）
   ziyuan github pull [--label ziyuan] [--dept works]
@@ -124,6 +125,8 @@ const HELP: &str = concat!(
   --scope <路径>   可查阅的项目路径（目录或文件，可重复）；默认整个项目
   --tools <工具>   read_file、search_code、write_file、run_tests 的逗号列表，或 none；
                    默认 read_file,search_code（只读）
+  --mcp <授权>     外藩 MCP 工具（.ziyuan/mcp.json 登记的服务）：服务、服务/工具 或 * 的逗号列表；
+                   默认不授。外部工具不受 --scope 约束，只授信得过的服务
   write_file、run_tests 只能授予工部：改动只暂存，诏令完成后呈报，须 `ziyuan apply` 准奏才落盘；
   run_tests 在项目的临时副本（含暂存改动）中运行 ZIYUAN_TEST_COMMAND，不传 API Key 等环境变量。
   无论玉玺如何，.ziyuan、.git、.jj 与 .env* 均不可读写。
@@ -176,6 +179,8 @@ enum Command {
     },
     /// 翰林院：列出模板。
     Templates,
+    /// 外藩名册。
+    Mcp,
     /// 翰林院存模板。
     SaveTemplate {
         name: String,
@@ -333,6 +338,7 @@ const SUBCOMMANDS: &[&str] = &[
     "acquit",
     "github",
     "changelog",
+    "mcp",
     "budget",
     "split",
     "debate",
@@ -598,6 +604,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             }
             Command::Debate(task, members, rounds)
         }
+        "mcp" => no_args(args, Command::Mcp)?,
         "changelog" => {
             const USAGE: &str = "用法: ziyuan changelog [--version <版本>] [--since <提交或tag>]";
             let (mut version, mut since) = ("Unreleased".to_owned(), None);
@@ -803,6 +810,9 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                     ))?;
                     if !choice.tools {
                         seal.capabilities = defaults.seal.capabilities;
+                    }
+                    if !choice.mcp {
+                        seal.mcp = defaults.seal.mcp;
                     }
                     if !choice.scope {
                         seal.scope = defaults.seal.scope;
@@ -1284,6 +1294,28 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::GitHub(action) => github(session, action)?,
+        Command::Mcp => {
+            let servers =
+                ziyuan_runtime::mcp::survey(&env::current_dir()?).map_err(|e| e.to_string())?;
+            if servers.is_empty() {
+                println!(
+                    "外藩名册为空：在 {} 登记 MCP 服务，下诏时以 `--mcp <服务>` 授权。",
+                    ziyuan_runtime::mcp::CONFIG
+                );
+            }
+            for (name, tools) in servers {
+                match tools {
+                    Ok(tools) => {
+                        println!("外藩「{name}」：{} 件工具", tools.len());
+                        for t in tools {
+                            let line = t.description.lines().next().unwrap_or_default();
+                            println!("  {name}/{}  {line}", t.name);
+                        }
+                    }
+                    Err(e) => println!("外藩「{name}」：未能朝贡（{e}）"),
+                }
+            }
+        }
         Command::Changelog { version, since } => {
             let (range, commits) = changelog_commits(since)?;
             let edict = session.draft_changelog(&version, &commits)?;
@@ -2276,23 +2308,24 @@ struct TemplateChoice {
     name: String,
     department: bool,
     tools: bool,
+    mcp: bool,
     scope: bool,
 }
 
 fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--queue] <诏令内容>";
+    const USAGE: &str = "用法: ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] [--queue] <诏令内容>";
     let mut department = None;
     let mut queue = false;
     let mut seal = Seal::default();
     let mut scope = Vec::new();
-    let (mut template, mut tools_given) = (None, false);
+    let (mut template, mut tools_given, mut mcp_given) = (None, false, false);
     while let Some(flag) = args.first().cloned() {
         match flag.as_str() {
             "--queue" => {
                 args.remove(0);
                 queue = true;
             }
-            "--dept" | "--scope" | "--tools" | "--template" => {
+            "--dept" | "--scope" | "--tools" | "--template" | "--mcp" => {
                 if args.len() < 2 {
                     return Err(USAGE.into());
                 }
@@ -2302,6 +2335,10 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                     "--dept" => department = Some(value.parse::<Department>()?),
                     "--scope" => scope.push(value),
                     "--template" => template = Some(value),
+                    "--mcp" => {
+                        seal.mcp = parse_mcp(&value);
+                        mcp_given = true;
+                    }
                     _ => {
                         seal.capabilities = parse_capabilities(&value)?;
                         tools_given = true;
@@ -2315,6 +2352,7 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         name,
         department: department.is_some(),
         tools: tools_given,
+        mcp: mcp_given,
         scope: !scope.is_empty(),
     });
     if args.is_empty() && template.is_none() {
@@ -2351,7 +2389,7 @@ fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
 /// `template`（列出）、`template save <名> [--dept] [--scope]... [--tools] --criteria <甲；乙> <内容>`、
 /// `template rm <名>`。
 fn parse_template(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan template | template save <名> [--dept works] [--scope <路径>]... [--tools <工具,…>|none] --criteria <甲；乙> <内容> | template rm <名>";
+    const USAGE: &str = "用法: ziyuan template | template save <名> [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] --criteria <甲；乙> <内容> | template rm <名>";
     match args.first().map(String::as_str) {
         None => return Ok(Command::Templates),
         Some("rm") if args.len() == 2 => return Ok(Command::RemoveTemplate(args.remove(1))),
@@ -2370,7 +2408,7 @@ fn parse_template(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     while let Some(flag) = args.first().cloned() {
         if !matches!(
             flag.as_str(),
-            "--dept" | "--scope" | "--tools" | "--criteria"
+            "--dept" | "--scope" | "--tools" | "--mcp" | "--criteria"
         ) {
             break;
         }
@@ -2383,6 +2421,7 @@ fn parse_template(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             "--dept" => template.department = value.parse()?,
             "--scope" => scope.push(value),
             "--tools" => template.seal.capabilities = parse_capabilities(&value)?,
+            "--mcp" => template.seal.mcp = parse_mcp(&value),
             _ => {
                 template.criteria = value
                     .split(['；', ';'])
@@ -2446,8 +2485,7 @@ fn parse_post(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
 
 /// `ceiling <官职> default`，或 `--scope`/`--tools`（与诏令玉玺同义；未给出的一项不设限）。
 fn parse_ceiling(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str =
-        "用法: ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具,…>|none] | default";
+    const USAGE: &str = "用法: ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>|none] | default";
     if args.is_empty() {
         return Err(USAGE.into());
     }
@@ -2455,12 +2493,17 @@ fn parse_ceiling(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     if args == ["default"] {
         return Ok(Command::Ceiling(office, None));
     }
-    let mut seal = Seal::default();
+    // 未给 --mcp 时外藩不设限（`*`），诏令仍须逐件授权。
+    let mut seal = Seal {
+        mcp: ["*".to_owned()].into(),
+        ..Seal::default()
+    };
     let mut scope = Vec::new();
     for pair in args.chunks(2) {
         match pair {
             [flag, value] if flag == "--scope" => scope.push(value.clone()),
             [flag, value] if flag == "--tools" => seal.capabilities = parse_capabilities(value)?,
+            [flag, value] if flag == "--mcp" => seal.mcp = parse_mcp(value),
             _ => return Err(USAGE.into()),
         }
     }
@@ -2471,6 +2514,19 @@ fn parse_ceiling(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         seal.scope = scope;
     }
     Ok(Command::Ceiling(office, Some(seal)))
+}
+
+/// 外藩授权：`none` 为不授；否则为逗号分隔的 `服务`、`服务/工具` 或 `*`（合法性由治理层校验）。
+fn parse_mcp(value: &str) -> BTreeSet<String> {
+    if value == "none" {
+        return BTreeSet::new();
+    }
+    value
+        .split([',', '，'])
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `none` 表示不授予任何工具；否则为逗号分隔的工具名。

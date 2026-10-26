@@ -353,6 +353,7 @@ pub fn builtin_templates() -> Vec<(&'static str, Template)> {
     let seal = |tools: &[Capability]| Seal {
         capabilities: tools.iter().copied().collect(),
         scope: vec![".".into()],
+        mcp: Default::default(),
     };
     let template = |text: &str, tools: &[Capability], criteria: &[&str]| Template {
         department: Department::Works,
@@ -1408,8 +1409,9 @@ impl Court {
                 .within(ceiling)
                 .ok_or(GovernanceError::SealExceedsCeiling(office))?,
         };
-        // 廷杖降级留用期间，收回工部动土之权。
+        // 廷杖降级留用期间，收回工部动土之权与外藩工具。
         if self.demotion(agent) > 0 {
+            seal.mcp.clear();
             seal.capabilities.retain(|c| !c.is_works_only());
         }
         Ok(seal)
@@ -2531,6 +2533,11 @@ fn validate_seal(seal: &Seal) -> Result<(), GovernanceError> {
     if seal.scope.is_empty() {
         return Err(GovernanceError::InvalidScope(String::new()));
     }
+    if let Some(bad) = seal.mcp.iter().find(|m| !ziyuan_core::valid_mcp_grant(m)) {
+        return Err(GovernanceError::Court(format!(
+            "外藩授权不合法：{bad}（须为 *、服务 或 服务/工具，由字母、数字、-、_、. 组成）"
+        )));
+    }
     for path in &seal.scope {
         let escapes = Path::new(path)
             .components()
@@ -3137,6 +3144,7 @@ mod tests {
                 ]
                 .into(),
                 scope: vec![".".into()],
+                mcp: Default::default(),
             },
         };
         let seal = court.effective_seal(clerk, &works).unwrap();
@@ -3443,6 +3451,7 @@ mod tests {
         let seal = |scope: &[&str]| Seal {
             capabilities: Default::default(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
+            mcp: Default::default(),
         };
         let issue = |scope: &[&str]| court.new_edict(Department::Works, "查".into(), seal(scope));
         assert!(issue(&["."]).is_ok());

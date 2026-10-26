@@ -656,6 +656,7 @@ mod tests {
             seal: Seal {
                 capabilities: [Capability::SearchCode].into(),
                 scope: vec![".".into()],
+                mcp: Default::default(),
             },
         };
         // 官职指定了另一个模型：请求应发给该模型，沿用同一服务地址与 Key。

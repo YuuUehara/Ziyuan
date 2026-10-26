@@ -353,18 +353,31 @@ fn split_criteria(joined: &str) -> Vec<String> {
     joined.split('\n').map(str::to_owned).collect()
 }
 
+/// 玉玺编码为「工具列表\t范围列表」；MCP 授权以 `mcp:` 前缀并入工具列表（v0.4 及更早没有）。
 fn encode_seal(seal: &Seal) -> String {
-    let tools: Vec<_> = seal.capabilities.iter().map(|c| c.code()).collect();
+    let mut tools: Vec<String> = seal
+        .capabilities
+        .iter()
+        .map(|c| c.code().to_owned())
+        .collect();
+    tools.extend(seal.mcp.iter().map(|m| format!("mcp:{m}")));
     let scope: Vec<_> = seal.scope.iter().map(|p| to_hex(p)).collect();
     format!("{}\t{}", tools.join(","), scope.join(","))
 }
 
 fn decode_seal(tools: &str, scope: &str) -> Result<Seal, String> {
+    let (mcp, tools): (Vec<&str>, Vec<&str>) =
+        split_list(tools).partition(|t| t.starts_with("mcp:"));
     Ok(Seal {
-        capabilities: split_list(tools)
+        capabilities: tools
+            .into_iter()
             .map(|c| c.parse::<Capability>().map_err(|e| e.to_string()))
             .collect::<Result<_, _>>()?,
         scope: split_list(scope).map(from_hex).collect::<Result<_, _>>()?,
+        mcp: mcp
+            .into_iter()
+            .map(|m| m["mcp:".len()..].to_owned())
+            .collect(),
     })
 }
 
@@ -885,6 +898,7 @@ mod tests {
                 seal: Seal {
                     capabilities: [Capability::SearchCode].into(),
                     scope: vec!["crates/紫垣,a".into(), "README.md".into()],
+                    mcp: ["gh/search".to_owned(), "docs".to_owned()].into(),
                 },
             }),
             CourtEvent::EdictIssued(Edict {
@@ -894,6 +908,7 @@ mod tests {
                 seal: Seal {
                     capabilities: Default::default(),
                     scope: vec![".".into()],
+                    mcp: Default::default(),
                 },
             }),
             CourtEvent::TaskAssigned {
@@ -919,6 +934,7 @@ mod tests {
                 ceiling: Some(Seal {
                     capabilities: [Capability::ReadFile].into(),
                     scope: vec!["crates/紫垣".into()],
+                    mcp: Default::default(),
                 }),
             },
             CourtEvent::OfficeCeilingSet {
@@ -1006,6 +1022,7 @@ mod tests {
                     seal: Seal {
                         capabilities: [Capability::WriteFile, Capability::RunTests].into(),
                         scope: vec!["crates/a b".into(), "README.md".into()],
+                        mcp: Default::default(),
                     },
                     criteria: vec!["测试通过".into(), "不改行为".into()],
                 },

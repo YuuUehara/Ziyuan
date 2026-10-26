@@ -356,6 +356,24 @@ ziyuan apply 3 && ziyuan github pr 3    # 准奏落盘后，把改动在远端�
 - **草稿 PR**：只开已准奏落盘的改动（逐段驳回的不含），经 GitHub API 在远端以默认分支最新提交为底建分支 `ziyuan/task-<ID>` 与一次提交，不碰本地版本库。先逐个核对远端原文与呈报时一致，不一致则不开。
 - **凭据**只在 `ziyuan-github` 中读取与使用，不进入朝廷事件簿、执行后端或任何模型提示，报错信息也不含令牌。回报的网址记入事件簿（`CourierReplied`）。
 
+### 外藩朝贡：MCP 工具
+
+```bash
+cat > .ziyuan/mcp.json <<'JSON'
+{ "servers": { "docs": { "command": "npx", "args": ["-y", "some-mcp-server"], "env": { "TOKEN": "${DOCS_TOKEN}" } } } }
+JSON
+ziyuan mcp                                          # 列出各服务的工具
+ziyuan edict --mcp docs/search "查文档里关于事件簿的说明"   # 只授 docs 的 search
+ziyuan edict --mcp docs "…"                          # 授 docs 的全部工具；* 授全部服务
+ziyuan ceiling clerk:works --mcp none                # 官职上限：工部郎中一律不得用外藩
+```
+
+- 名册在 `.ziyuan/mcp.json`（官员读写不到），目前只支持 stdio 服务。每次承办按玉玺启动所授的服务，办完即关；服务以项目根目录为工作目录，只继承 `PATH`、`HOME` 等少数变量与名册中写明的变量（`${VAR}` 取自当前环境），模型的 API Key 不会交给它。
+- **默认不授**：玉玺的 `mcp` 为空就一件外藩工具也没有，也不启动任何服务。授权记入事件簿，受官职上限约束（`ceiling --mcp`，未给时不设限），廷杖降级期间收回。工具名形如 `docs__search`。
+- 每次调用照常记入起居注（`history --kind tool`），输出照常包在外来文书边界中、经锦衣卫检查。
+- **外部工具做什么由服务决定，不受 `--scope` 约束**：只授信得过的服务。服务反向发来的请求（如 `roots/list`、采样）一概回绝。
+- Web 的诏令卡片在玉玺徽章上显示外藩授权；Web 下诏表单暂不能授 MCP，请用 CLI。
+
 ### 人格与廷议
 
 每位官员有一种性格（刚直、持重、锐进、圆融、精细、宏阔）和一种文风（简劲、典雅、平实、条陈），由官员 ID 决定，`ziyuan officials` 可见，旧朝廷同样适用。人格写进该官员承办、票拟、拆分、复核时的提示词，只影响措辞与论证方式。
@@ -550,7 +568,7 @@ v0.4 让朝廷办得稳、花得明白；v0.5 的重点是**从演示走向日�
 6. ~~**兵部对接 GitHub**~~ 已完成：`ziyuan github pull` 让带标签的 issue/PR 与成员的 `/ziyuan` 评论入队，`github reply` 把已评定的回奏写回评论，`github pr` 把准奏的改动开为草稿 PR；凭据只在 `ziyuan-github` 中使用。
 7. ~~**礼部修 CHANGELOG**~~ 已完成：`ziyuan changelog [--version] [--since]` 据提交与实录下一件礼部诏令，写权限只限 `CHANGELOG.md`，准奏后落盘。
 8. ~~**CI 与安装**~~ 已完成：CI 跑 fmt、clippy、测试与 smoke，查最低版本 1.89，覆盖 macOS 与 Windows；推送标签即发 Release 并附四个平台的预编译二进制；`cargo install --git` 可装。
-9. **外藩朝贡：接入 MCP 工具**（视进度）：外部 MCP 服务的工具按玉玺单独授权、受查阅范围与审计约束，默认不授。
+9. ~~**外藩朝贡：接入 MCP 工具**~~ 已完成（范围调整）：`.ziyuan/mcp.json` 登记 stdio 服务，`--mcp` 按服务或逐件授权，受官职上限与审计约束，默认不授。外部工具无法受查阅范围约束，已在文档写明。
 
 OpenAI 真实账号实测仍待有条件时补做。
 

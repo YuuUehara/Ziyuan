@@ -1091,6 +1091,7 @@ impl<S: EventStore> Session<S> {
         let seal = Seal {
             capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
             scope: vec![CHANGELOG.into()],
+            mcp: Default::default(),
         };
         self.issue(Department::Rites, text, seal)
     }
@@ -3696,6 +3697,7 @@ mod tests {
         let ceiling = Seal {
             capabilities: [Capability::SearchCode].into(),
             scope: vec!["src".into()],
+            mcp: Default::default(),
         };
         session.set_office_model(clerk, Some("pro".into())).unwrap();
         session
@@ -4898,6 +4900,7 @@ mod tests {
         let seal = |tools: &[Capability], scope: &str| Seal {
             capabilities: tools.iter().copied().collect(),
             scope: vec![scope.into()],
+            mcp: Default::default(),
         };
         let (read, write, tests) = (
             Capability::ReadFile,
@@ -5181,6 +5184,7 @@ mod tests {
         let write = Seal {
             capabilities: [Capability::WriteFile].into(),
             scope: vec![".".into()],
+            mcp: Default::default(),
         };
         let task = session
             .issue(Department::Works, "改两处".into(), write)
@@ -5264,6 +5268,7 @@ mod tests {
         let write = Seal {
             capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
             scope: vec![".".into()],
+            mcp: Default::default(),
         };
         // 动土木之权唯工部可授。
         assert!(matches!(
@@ -5521,6 +5526,7 @@ mod tests {
         let seal = Seal {
             capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
             scope: vec![".".into()],
+            mcp: Default::default(),
         };
         let parent = session
             .issue(Department::Works, "查全库".into(), seal)

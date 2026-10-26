@@ -738,7 +738,11 @@ async fn office_ceiling(
     let ceiling = if body["clear"].as_bool() == Some(true) {
         None
     } else {
-        let mut seal = Seal::default();
+        // 与 CLI 一致：Web 不设外藩上限（`*`），诏令仍须逐件授权。
+        let mut seal = Seal {
+            mcp: ["*".to_owned()].into(),
+            ..Seal::default()
+        };
         if let Some(tools) = body.get("tools").and_then(Value::as_array) {
             seal.capabilities = tools
                 .iter()
@@ -1214,6 +1218,7 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                     "default": t.edict.seal == Seal::default(),
                     "tools": t.edict.seal.capabilities.iter().map(|c| c.code()).collect::<Vec<_>>(),
                     "scope": t.edict.seal.scope,
+                    "mcp": t.edict.seal.mcp,
                 },
                 "status": kind,
                 "needs_approval": court.needs_approval(t),
@@ -1340,6 +1345,7 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
             "text": t.text,
             "tools": t.seal.capabilities.iter().map(|c| c.code()).collect::<Vec<_>>(),
             "scope": t.seal.scope,
+            "mcp": t.seal.mcp,
             "criteria": t.criteria,
         })).collect::<Vec<_>>(),
         // 最近一次殿试。
@@ -1560,7 +1566,7 @@ mod tests {
             .find(|o| o["code"] == "clerk:works")
             .unwrap();
         assert_eq!(clerk["model"], "deepseek-v4-pro");
-        assert_eq!(clerk["ceiling"], "工具：search_code；范围：src");
+        assert_eq!(clerk["ceiling"], "工具：search_code；范围：src；外藩：*");
         let official = state["officials"]
             .as_array()
             .unwrap()

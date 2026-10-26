@@ -24,7 +24,10 @@ impl fmt::Display for ParseError {
             Self::UnknownVerdict(s) => write!(f, "未知评定: {s}（可用：accept/reject）"),
             Self::UnknownThreat(s) => write!(f, "未知可疑类别: {s}"),
             Self::UnknownCapability(s) => {
-                write!(f, "未知工具权限: {s}（可用：read_file/search_code）")
+                write!(
+                    f,
+                    "未知工具权限: {s}（可用：read_file、search_code、write_file、run_tests）"
+                )
             }
         }
     }
@@ -628,6 +631,42 @@ pub struct Seal {
     pub capabilities: BTreeSet<Capability>,
     /// 可查阅的范围：相对项目根目录的目录或文件，`.` 表示整个项目。至少一项。
     pub scope: Vec<String>,
+    /// 外藩朝贡：授予的外部 MCP 工具，`服务` 授该服务的全部工具，`服务/工具` 只授一件，
+    /// `*` 授全部服务。默认不授。外部工具不受查阅范围约束（见 `ziyuan-runtime::mcp`）。
+    pub mcp: BTreeSet<String>,
+}
+
+/// MCP 授权是否合法：`*`、`服务` 或 `服务/工具`，各段为字母、数字、`-`、`_`、`.`。
+pub fn valid_mcp_grant(grant: &str) -> bool {
+    let part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
+    match grant.split_once('/') {
+        _ if grant == "*" => true,
+        Some((server, tool)) => part(server) && part(tool),
+        None => part(grant),
+    }
+}
+
+/// 授权 `outer` 是否涵盖授权 `inner`。
+fn mcp_grant_includes(outer: &str, inner: &str) -> bool {
+    match inner.split_once('/') {
+        _ if inner == "*" => outer == "*",
+        Some((server, tool)) => mcp_grant_covers(outer, server, Some(tool)),
+        None => mcp_grant_covers(outer, inner, None),
+    }
+}
+
+/// 授权 `grant` 是否涵盖服务 `server` 的工具 `tool`（`tool` 为 `None` 时问的是整个服务）。
+pub fn mcp_grant_covers(grant: &str, server: &str, tool: Option<&str>) -> bool {
+    match grant.split_once('/') {
+        _ if grant == "*" => true,
+        Some((s, t)) => s == server && tool == Some(t),
+        None => grant == server,
+    }
 }
 impl Default for Seal {
     /// 全部只读工具，整个项目。
@@ -635,6 +674,7 @@ impl Default for Seal {
         Self {
             capabilities: Capability::READ_ONLY.into(),
             scope: vec![".".into()],
+            mcp: BTreeSet::new(),
         }
     }
 }
@@ -662,6 +702,16 @@ impl Seal {
                 }
             }
         }
+        // MCP 授权：被上限某项涵盖的保留；否则收窄为上限中被它涵盖的那几项。
+        let mut mcp = BTreeSet::new();
+        for grant in &self.mcp {
+            if ceiling.mcp.iter().any(|c| mcp_grant_includes(c, grant)) {
+                mcp.insert(grant.clone());
+            } else {
+                let narrower = ceiling.mcp.iter().filter(|c| mcp_grant_includes(grant, c));
+                mcp.extend(narrower.cloned());
+            }
+        }
         (!scope.is_empty()).then(|| Seal {
             capabilities: self
                 .capabilities
@@ -669,6 +719,7 @@ impl Seal {
                 .copied()
                 .collect(),
             scope,
+            mcp,
         })
     }
 }
@@ -680,7 +731,12 @@ impl fmt::Display for Seal {
         } else {
             tools.join("、")
         };
-        write!(f, "工具：{tools}；范围：{}", self.scope.join("、"))
+        write!(f, "工具：{tools}；范围：{}", self.scope.join("、"))?;
+        if !self.mcp.is_empty() {
+            let mcp: Vec<_> = self.mcp.iter().map(String::as_str).collect();
+            write!(f, "；外藩：{}", mcp.join("、"))?;
+        }
+        Ok(())
     }
 }
 
@@ -1159,6 +1215,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_grants_are_narrowed_by_the_ceiling() {
+        let seal = |mcp: &[&str]| Seal {
+            mcp: mcp.iter().map(|m| (*m).to_owned()).collect(),
+            ..Seal::default()
+        };
+        let mcp = |s: Option<Seal>| s.unwrap().mcp.into_iter().collect::<Vec<_>>();
+        // 上限只许 gh 的 search：整服务授权收窄为这一件，他服务的去掉。
+        let ceiling = seal(&["gh/search", "docs"]);
+        assert_eq!(mcp(seal(&["gh", "web"]).within(&ceiling)), ["gh/search"]);
+        assert_eq!(mcp(seal(&["*"]).within(&ceiling)), ["docs", "gh/search"]);
+        assert_eq!(mcp(seal(&["docs/read"]).within(&ceiling)), ["docs/read"]);
+        assert_eq!(
+            mcp(seal(&["gh", "web"]).within(&seal(&["*"]))),
+            ["gh", "web"]
+        );
+        assert!(mcp(seal(&["gh"]).within(&seal(&[]))).is_empty());
+        assert!(valid_mcp_grant("my-srv/tool_1") && valid_mcp_grant("*"));
+        assert!(!valid_mcp_grant("a/b/c") && !valid_mcp_grant("a b") && !valid_mcp_grant("/x"));
+        assert_eq!(
+            seal(&["gh/search"]).to_string(),
+            "工具：read_file、search_code；范围：.；外藩：gh/search"
+        );
+    }
+
+    #[test]
     fn records_are_found_by_shared_words_and_chinese_bigrams() {
         let record = |id, edict: &str, summary: &str| Record {
             task: TaskId(id),
@@ -1237,6 +1318,7 @@ mod tests {
         Seal {
             capabilities: tools.iter().copied().collect(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
+            mcp: Default::default(),
         }
     }
 
