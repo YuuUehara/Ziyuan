@@ -1,0 +1,76 @@
+name: Release
+
+# 推送 v* 标签（如 v0.5.0）时，建 GitHub Release 并附各平台预编译的 ziyuan。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 标签须与 Cargo.toml 的版本一致
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "标签 $GITHUB_REF_NAME 与 Cargo.toml 的版本 $version 不符" >&2
+            exit 1
+          fi
+      - name: 建 Release（有 CHANGELOG.md 时取本版一节作说明）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ -f CHANGELOG.md ] && grep -q "^## $version" CHANGELOG.md; then
+            awk -v v="## $version" '$0 ~ "^## " { on = index($0, v) == 1; if (!on && seen) exit; seen = seen || on; next } on' CHANGELOG.md > notes.md
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+
+  build:
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p ziyuan-cli --target ${{ matrix.target }}
+      - name: 打包并上传
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="ziyuan-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          if [ "${{ runner.os }}" = Windows ]; then
+            cp "target/${{ matrix.target }}/release/ziyuan.exe" "$name/"
+            7z a "$name.zip" "$name" > /dev/null
+            asset="$name.zip"
+          else
+            cp "target/${{ matrix.target }}/release/ziyuan" "$name/"
+            tar czf "$name.tar.gz" "$name"
+            asset="$name.tar.gz"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$asset"

@@ -1,5 +1,7 @@
 # 紫垣 ZiYuan
 
+[![CI](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml)
+
 > **实验性 Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
 
 **当前版本 v0.3.0。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
@@ -32,6 +34,17 @@ crates/
 
 docs/                 架构决策与扩展路线
 ```
+
+## 安装
+
+```bash
+cargo install --git https://github.com/YuuUehara/Ziyuan ziyuan-cli --locked   # 安装 `ziyuan` 到 ~/.cargo/bin
+cargo install --path crates/ziyuan-cli --locked                               # 或在本仓库中
+```
+
+发版（推送 `v*` 标签）时，GitHub Actions 会在 Release 上附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
+
+CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译，并在 macOS 上跑测试、在 Windows 上编译。Windows 只验证过能编译，测试尚未在 Windows 上跑过。
 
 ## 快速开始
 
@@ -536,7 +549,7 @@ v0.4 让朝廷办得稳、花得明白；v0.5 的重点是**从演示走向日�
 5. ~~**刑部复勘**~~ 已完成：`ziyuan recheck` 请刑部官员（模型）复勘检出，「维持」或「误报」记入事件簿；皇帝 `ziyuan acquit` 平反后不再妨碍代批。Web 密报框可复勘、逐处平反。
 6. ~~**兵部对接 GitHub**~~ 已完成：`ziyuan github pull` 让带标签的 issue/PR 与成员的 `/ziyuan` 评论入队，`github reply` 把已评定的回奏写回评论，`github pr` 把准奏的改动开为草稿 PR；凭据只在 `ziyuan-github` 中使用。
 7. ~~**礼部修 CHANGELOG**~~ 已完成：`ziyuan changelog [--version] [--since]` 据提交与实录下一件礼部诏令，写权限只限 `CHANGELOG.md`，准奏后落盘。
-8. **CI 与安装**：GitHub Actions 跑 fmt、clippy、测试与 smoke；发版时附各平台预编译二进制，支持 `cargo install`。
+8. ~~**CI 与安装**~~ 已完成：CI 跑 fmt、clippy、测试与 smoke，查最低版本 1.89，覆盖 macOS 与 Windows；推送标签即发 Release 并附四个平台的预编译二进制；`cargo install --git` 可装。
 9. **外藩朝贡：接入 MCP 工具**（视进度）：外部 MCP 服务的工具按玉玺单独授权、受查阅范围与审计约束，默认不授。
 
 OpenAI 真实账号实测仍待有条件时补做。
