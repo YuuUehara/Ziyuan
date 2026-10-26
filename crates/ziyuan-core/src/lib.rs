@@ -358,6 +358,9 @@ impl BudgetScope {
 }
 
 /// 礼部回奏体例：回奏须分这三段，各段以标题开头（如「结论：」「## 依据」）。
+/// 礼部修 CHANGELOG 时唯一可写的文件。
+pub const CHANGELOG: &str = "CHANGELOG.md";
+
 pub const REPORT_SECTIONS: [&str; 3] = ["结论", "依据", "未办之事"];
 
 /// 回奏缺少的体例段落（按 [`REPORT_SECTIONS`] 的顺序）；合乎体例时为空。

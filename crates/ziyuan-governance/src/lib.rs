@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
 use ziyuan_core::{
-    Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Nomination, Office, Record, Seal, Speech, Subtask,
+    Agent, AgentId, BudgetScope, CHANGELOG, Capability, CensorVerdict, CourtEvent, Department,
+    Edict, Evidence, FileChange, GovernanceMode, Nomination, Office, Record, Seal, Speech, Subtask,
     TaskId, Template, Threat, TokenUsage, Verdict,
 };
 
@@ -168,7 +168,11 @@ impl fmt::Display for GovernanceError {
                 office.label()
             ),
             Self::WorksOnly(capability) => {
-                write!(f, "{} 只能授予工部诏令", capability.code())
+                write!(
+                    f,
+                    "{} 只能授予工部诏令（礼部修 CHANGELOG 时可授 write_file，范围须只是 {CHANGELOG}）",
+                    capability.code()
+                )
             }
             Self::NoPendingChanges(id) => write!(f, "诏令 #{} 没有待决的改动", id.0),
             Self::NotCensor(id) => write!(f, "官员 #{} 不是现任左都御史", id.0),
@@ -2510,8 +2514,13 @@ fn check_criteria(criteria: &[String]) -> Result<(), GovernanceError> {
 }
 
 fn validate_edict_seal(department: Department, seal: &Seal) -> Result<(), GovernanceError> {
+    // 礼部修 CHANGELOG：可授 write_file，但范围只限 CHANGELOG.md 一个文件，且不能跑测试。
+    let changelog = department == Department::Rites && seal.scope == [CHANGELOG];
     if department != Department::Works
-        && let Some(&c) = seal.capabilities.iter().find(|c| c.is_works_only())
+        && let Some(&c) = seal
+            .capabilities
+            .iter()
+            .find(|c| c.is_works_only() && !(changelog && **c == Capability::WriteFile))
     {
         return Err(GovernanceError::WorksOnly(c));
     }

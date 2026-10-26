@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use ziyuan_core::{Capability, FileChange, Record, Seal, search_records};
+use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
@@ -232,10 +232,14 @@ impl Sandbox {
         let root = root.canonicalize()?;
         let mut entries = Vec::new();
         for path in scope {
-            let resolved = root
-                .join(path)
-                .canonicalize()
-                .map_err(|e| format!("查阅范围 {path} 无法访问: {e}"))?;
+            // 范围须已存在；唯礼部要新建的 CHANGELOG.md 可尚不存在（按其最近的已存在祖先解析）。
+            let resolved = match root.join(path).canonicalize() {
+                Ok(resolved) => resolved,
+                Err(e) if e.kind() == io::ErrorKind::NotFound && path == CHANGELOG => {
+                    contained(&root, path)?
+                }
+                Err(e) => return Err(format!("查阅范围 {path} 无法访问: {e}").into()),
+            };
             if !resolved.starts_with(&root) || is_denied(&root, &resolved) {
                 return Err(format!("查阅范围越出项目或属于禁区: {path}").into());
             }
@@ -646,6 +650,61 @@ mod tests {
             capabilities: capabilities.iter().copied().collect(),
             scope: scope.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn a_missing_file_scope_can_be_created_but_nothing_else_written() {
+        let root = workspace("changelog");
+        let project = root.join("project");
+        let seal = Seal {
+            capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+            scope: vec!["CHANGELOG.md".into()],
+        };
+        let sealed = sealed_tools(&project, &seal, None).unwrap();
+        let write = sealed
+            .tools
+            .iter()
+            .find(|t| t.spec().name == "write_file")
+            .unwrap();
+        let read = sealed
+            .tools
+            .iter()
+            .find(|t| t.spec().name == "read_file")
+            .unwrap();
+        assert!(
+            read.execute(r#"{"path":"CHANGELOG.md"}"#).is_err(),
+            "尚不存在"
+        );
+        write
+            .execute(r##"{"path":"CHANGELOG.md","content":"# Changelog\n"}"##)
+            .unwrap();
+        assert!(
+            write
+                .execute(r#"{"path":"src/main.rs","content":"x"}"#)
+                .is_err()
+        );
+        assert!(
+            write
+                .execute(r#"{"path":"CHANGELOG.md.bak","content":"x"}"#)
+                .is_err()
+        );
+        let changes = sealed.changes();
+        assert_eq!(
+            (
+                changes.len(),
+                changes[0].path.as_str(),
+                changes[0].before.clone()
+            ),
+            (1, "CHANGELOG.md", None)
+        );
+        assert!(!project.join("CHANGELOG.md").exists(), "只暂存，不落盘");
+        // 只有 CHANGELOG.md 可以尚不存在。
+        let other = Seal {
+            scope: vec!["NEWS.md".into()],
+            ..seal.clone()
+        };
+        assert!(sealed_tools(&project, &other, None).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn tool(root: &Path, seal: &Seal, name: &str) -> Box<dyn Tool> {

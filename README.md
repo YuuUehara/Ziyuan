@@ -270,6 +270,18 @@ ziyuan crown 4                     # 钦点状元，史官记传胪
 - **殿试**：彩蛋。答卷与状元都记入事件簿，每科只能点一次；状元记入履历。Web 在百官页右侧「礼部」，TUI 在百官页按 `e` 应试。
 - 应试与殿试的用量计入度支。发版时撰写 CHANGELOG 推迟到后续版本。
 
+### 礼部修 CHANGELOG
+
+```bash
+ziyuan recruit 礼官 rites && ziyuan appoint <ID> minister:rites   # 礼部须有人
+ziyuan changelog --version 0.5.0          # 默认取最近的 tag 以来的提交；--since 可改
+ziyuan run && ziyuan diff 3 && ziyuan apply 3
+```
+
+- `changelog` 用 `git log` 取提交摘要（不含合并提交，至多 200 条），连同最近 20 件翰林院实录写进一件礼部诏令，只入队。
+- 这是 `write_file` 唯一可授给工部以外的情形：玉玺只有 `read_file` 与 `write_file`，范围只限 `CHANGELOG.md`（可尚不存在），不能跑测试。改动照常暂存、呈报，须皇帝准奏才落盘，可逐段驳回。
+- 实测 `deepseek-v4-flash`：读原文后在总标题下插入新一节，分「新增」「改进」「修复」，旧内容不动，约 4500 tokens。
+
 ### 翰林院：诏令模板
 
 ```bash
@@ -523,7 +535,7 @@ v0.4 让朝廷办得稳、花得明白；v0.5 的重点是**从演示走向日�
 4. ~~**翰林院修史**~~ 已完成：已结诏令的回奏与评定归档为实录，承办官员可用只读工具 `search_records` 查前例，票拟与廷推附上相关实录；`ziyuan records [检索词]` 可查（支持 `--json`）。
 5. ~~**刑部复勘**~~ 已完成：`ziyuan recheck` 请刑部官员（模型）复勘检出，「维持」或「误报」记入事件簿；皇帝 `ziyuan acquit` 平反后不再妨碍代批。Web 密报框可复勘、逐处平反。
 6. ~~**兵部对接 GitHub**~~ 已完成：`ziyuan github pull` 让带标签的 issue/PR 与成员的 `/ziyuan` 评论入队，`github reply` 把已评定的回奏写回评论，`github pr` 把准奏的改动开为草稿 PR；凭据只在 `ziyuan-github` 中使用。
-7. **礼部修 CHANGELOG**：发版时由礼部官员据事件簿与提交记录起草 CHANGELOG，写权限只限该文件，皇帝准奏后落盘（v0.4 推迟的一项）。
+7. ~~**礼部修 CHANGELOG**~~ 已完成：`ziyuan changelog [--version] [--since]` 据提交与实录下一件礼部诏令，写权限只限 `CHANGELOG.md`，准奏后落盘。
 8. **CI 与安装**：GitHub Actions 跑 fmt、clippy、测试与 smoke；发版时附各平台预编译二进制，支持 `cargo install`。
 9. **外藩朝贡：接入 MCP 工具**（视进度）：外部 MCP 服务的工具按玉玺单独授权、受查阅范围与审计约束，默认不授。
 

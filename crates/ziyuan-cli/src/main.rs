@@ -91,6 +91,8 @@ const HELP: &str = concat!(
   ziyuan cane <官员ID>                   廷杖：屡遭弹劾（两次以上）者降一级留用，收回 write_file、run_tests，三件获采纳即复
   ziyuan pardon <官员ID>                 宽宥受杖者，复其品级与玉玺
   ziyuan flags [诏令ID]                  刑部与锦衣卫的密报：外来文书中的劫持指令、回奏中的越权与索取机密
+  ziyuan changelog [--version 0.5.0] [--since v0.4.0]
+                                       礼部修 CHANGELOG：据提交与实录起草，只可写 CHANGELOG.md，须准奏落盘（只入队）
   ziyuan github pull [--label ziyuan] [--dept works]
                                        兵部驿站·GitHub：带标签的 issue/PR 及成员的 `/ziyuan` 评论入队（去重）
   ziyuan github reply <诏令ID|all>      已评定、无未平反密报的回奏写回 issue/PR 评论
@@ -222,6 +224,11 @@ enum Command {
     Flags(Option<TaskId>),
     /// 兵部驿站 · GitHub。
     GitHub(GitHubAction),
+    /// 礼部修 CHANGELOG：版本名、起点（`None` 为最近的 tag）。
+    Changelog {
+        version: String,
+        since: Option<String>,
+    },
     /// 刑部复勘；`None` 表示全部有待复勘检出的诏令。
     Recheck(Option<TaskId>),
     /// 平反：序号从 0 起；`None` 为刑部判为误报的各处，`Some(空)` 为全部未平反的。
@@ -325,6 +332,7 @@ const SUBCOMMANDS: &[&str] = &[
     "recheck",
     "acquit",
     "github",
+    "changelog",
     "budget",
     "split",
     "debate",
@@ -589,6 +597,20 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 }
             }
             Command::Debate(task, members, rounds)
+        }
+        "changelog" => {
+            const USAGE: &str = "用法: ziyuan changelog [--version <版本>] [--since <提交或tag>]";
+            let (mut version, mut since) = ("Unreleased".to_owned(), None);
+            let mut rest = args.iter();
+            while let Some(flag) = rest.next() {
+                let value = rest.next().ok_or(USAGE)?;
+                match flag.as_str() {
+                    "--version" => version = value.clone(),
+                    "--since" => since = Some(value.clone()),
+                    _ => return Err(USAGE.into()),
+                }
+            }
+            Command::Changelog { version, since }
         }
         "github" => {
             const USAGE: &str = "用法: ziyuan github pull [--label ziyuan] [--dept works] | reply <诏令ID|all> | pr <诏令ID>";
@@ -1262,6 +1284,27 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::GitHub(action) => github(session, action)?,
+        Command::Changelog { version, since } => {
+            let (range, commits) = changelog_commits(since)?;
+            let edict = session.draft_changelog(&version, &commits)?;
+            println!(
+                "诏令 #{} 已入队：礼部修 CHANGELOG「{version}」，收提交 {} 条（{range}）。玉玺只授 read_file、write_file，范围只限 {}。",
+                edict.id.0,
+                commits.len(),
+                ziyuan_core::CHANGELOG
+            );
+            if session
+                .court()
+                .needs_approval(session.court().task(edict.id).expect("刚入队"))
+            {
+                println!("待批红：`ziyuan approve {}`。", edict.id.0);
+            }
+            println!(
+                "执行 `ziyuan run` 后，`ziyuan diff {0}` 审阅，`ziyuan apply {0}` 准奏落盘。",
+                edict.id.0
+            );
+            println!("{}", ziyuan_app::CHANGELOG_NOTE);
+        }
         Command::Recheck(only) => {
             let tasks: Vec<TaskId> = match only {
                 Some(task) => vec![task],
@@ -1560,6 +1603,39 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
     }
     Ok(())
+}
+
+/// 礼部修 CHANGELOG 所据的提交（`git log`，新者在前，至多 200 条，不含合并提交）及所取范围。
+/// 未给起点时取最近的 tag 以来；没有 tag 则取全部。
+fn changelog_commits(since: Option<String>) -> Result<(String, Vec<String>), Box<dyn Error>> {
+    let git = |args: &[&str]| -> Result<String, Box<dyn Error>> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .output()
+            .map_err(|e| format!("无法运行 git：{e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("git {} 失败：{}", args.join(" "), err.trim()).into());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let since = match since {
+        Some(since) => Some(since),
+        None => git(&["describe", "--tags", "--abbrev=0"])
+            .ok()
+            .map(|t| t.trim().to_owned()),
+    };
+    let range = since.map_or("HEAD".to_owned(), |s| format!("{s}..HEAD"));
+    let log = git(&["log", "--no-merges", "-n", "200", "--format=%h %s", &range])?;
+    let commits: Vec<String> = log
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    if commits.is_empty() {
+        return Err(format!("{range} 没有可记的提交").into());
+    }
+    Ok((range, commits))
 }
 
 /// 兵部驿站 · GitHub。凭据只在 `ziyuan_github` 中使用，不经朝廷与模型。

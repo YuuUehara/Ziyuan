@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use ziyuan_core::{
-    Agent, AgentId, BudgetScope, CensorVerdict, CourtEvent, Department, Edict, Evidence,
-    FileChange, GovernanceMode, Nomination, Office, Persona, Price, Record, Seal, Speech, TaskId,
-    Template, Threat, TokenUsage, Verdict, search_records,
+    Agent, AgentId, BudgetScope, CHANGELOG, Capability, CensorVerdict, CourtEvent, Department,
+    Edict, Evidence, FileChange, GovernanceMode, Nomination, Office, Persona, Price, Record, Seal,
+    Speech, TaskId, Template, Threat, TokenUsage, Verdict, search_records,
 };
 use ziyuan_governance::names::NameGenerator;
 use ziyuan_governance::{
@@ -1074,6 +1074,25 @@ impl<S: EventStore> Session<S> {
             Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
             _ => unreachable!("issue 只产生 EdictIssued"),
         }
+    }
+
+    /// 礼部修 CHANGELOG：下一件礼部诏令（只入队），据 `commits`（提交摘要，新者在前）与翰林院实录
+    /// 起草 `version` 一节。玉玺只授 read_file 与 write_file，范围只限 CHANGELOG.md；改动照常呈报，
+    /// 须皇帝准奏才落盘。
+    pub fn draft_changelog(
+        &mut self,
+        version: &str,
+        commits: &[String],
+    ) -> Result<Edict, AppError> {
+        if commits.is_empty() {
+            return Err(GovernanceError::Court("礼部不准：没有可记的提交".into()).into());
+        }
+        let text = changelog_text(&self.court, version, commits);
+        let seal = Seal {
+            capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+            scope: vec![CHANGELOG.into()],
+        };
+        self.issue(Department::Rites, text, seal)
     }
 
     /// 翰林院存模板（同名覆盖）。
@@ -2745,6 +2764,31 @@ pub fn exam_papers(root: &Path) -> Result<Vec<ExamPaper>, AppError> {
 }
 
 /// 截取前 `max` 个字符，超出时注明。
+/// 礼部修 CHANGELOG 时的史官记。
+pub const CHANGELOG_NOTE: &str =
+    "史官记：洪武二年诏修《元史》，次年成书——前朝之事本朝修之，本版之事礼部记之。";
+
+/// 礼部修 CHANGELOG 的诏令内容：体例、版本、提交摘要与最近的实录（至多 20 件）。
+pub fn changelog_text(court: &Court, version: &str, commits: &[String]) -> String {
+    let mut text = format!(
+        "礼部修 CHANGELOG：在 {CHANGELOG} 顶部（若有总标题，则在其下）新增「## {version}」一节，\
+         依下列提交与实录，分「新增」「改进」「修复」等小节，每条一行、写给使用者看，不写内部细节，\
+         不要编造提交中没有的事。保留文件原有内容不动；文件不存在则新建，首行为「# Changelog」。\
+         先用 read_file 读原文，再以 write_file 整体写回。\n\n提交（新者在前）：\n"
+    );
+    for c in commits.iter().take(200) {
+        text.push_str(&format!("- {}\n", truncate(c.trim(), 200)));
+    }
+    let records = court.records();
+    if !records.is_empty() {
+        text.push_str("\n翰林院实录（最近的已结诏令，供参考）：\n");
+        for r in records.iter().rev().take(20) {
+            text.push_str(&format!("- {}\n", precedent(r)));
+        }
+    }
+    text
+}
+
 /// 逐段取舍后实际写入的文件：`skipped` 为驳回的段号（从 1 起，跨文件连续编号）；
 /// 取舍后与原文相同（整处驳回）的不列。
 pub fn selected_files(files: &[FileChange], skipped: &[u32]) -> Vec<FileChange> {
@@ -4844,6 +4888,70 @@ mod tests {
             history
                 .iter()
                 .any(|l| l.contains("回奏送回来处（https://github.com/o/r/issues/3#c1）"))
+        );
+    }
+
+    #[test]
+    fn rites_may_write_only_the_changelog() {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let seal = |tools: &[Capability], scope: &str| Seal {
+            capabilities: tools.iter().copied().collect(),
+            scope: vec![scope.into()],
+        };
+        let (read, write, tests) = (
+            Capability::ReadFile,
+            Capability::WriteFile,
+            Capability::RunTests,
+        );
+        let refused = |s: &mut Session<_>, dept, seal: Seal| {
+            matches!(
+                s.court().new_edict(dept, "x".into(), seal),
+                Err(GovernanceError::WorksOnly(_))
+            )
+        };
+        assert!(refused(
+            &mut session,
+            Department::Rites,
+            seal(&[read, write], ".")
+        ));
+        assert!(refused(
+            &mut session,
+            Department::Rites,
+            seal(&[write, tests], CHANGELOG)
+        ));
+        assert!(refused(
+            &mut session,
+            Department::Revenue,
+            seal(&[write], CHANGELOG)
+        ));
+        assert!(!refused(
+            &mut session,
+            Department::Rites,
+            seal(&[read, write], CHANGELOG)
+        ));
+
+        assert!(session.draft_changelog("0.5.0", &[]).is_err());
+        // 礼部无人：不能下诏。
+        let commits = [
+            "abc123 feat: 实录".to_owned(),
+            "def456 fix: 除零".to_owned(),
+        ];
+        assert!(session.draft_changelog("0.5.0", &commits).is_err());
+        let rites = session.recruit(None, Department::Rites).unwrap();
+        session
+            .appoint(rites, Office::Minister(Department::Rites))
+            .unwrap();
+        let edict = session.draft_changelog("0.5.0", &commits).unwrap();
+        assert_eq!(edict.department, Department::Rites);
+        assert_eq!(edict.seal, seal(&[read, write], CHANGELOG));
+        assert!(
+            edict.text.contains("新增「## 0.5.0」一节")
+                && edict
+                    .text
+                    .contains("- abc123 feat: 实录\n- def456 fix: 除零\n"),
+            "{}",
+            edict.text
         );
     }
 
