@@ -69,8 +69,10 @@ const HELP: &str = concat!(
   ziyuan approve <诏令ID|all>           内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
   ziyuan appoint <官员ID> <官职>         任命（如 first-secretary / minister:works）
   ziyuan diff <诏令ID>                  查看工部呈报的改动（统一 diff）
-  ziyuan apply <诏令ID> [--skip 1,3]    准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）；
-                                       --skip 逐段驳回 diff 中所列段号，其余落盘
+  ziyuan apply <诏令ID> [--skip 1,3] [--commit]
+                                       准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）；
+                                       --skip 逐段驳回 diff 中所列段号，其余落盘；
+                                       --commit 落盘后只把这些文件记为一个 jj（或 git）提交
   ziyuan discard <诏令ID>               驳回呈报的改动，不写入
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
@@ -273,7 +275,8 @@ enum Command {
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
     /// 准奏（驳回其中若干段）。
-    Apply(TaskId, Vec<u32>),
+    /// 准奏：逐段驳回的段号；`true` 落盘后记为一个 jj/git 提交。
+    Apply(TaskId, Vec<u32>, bool),
     Discard(TaskId),
     Recommend(Office),
     History(HistoryFilter),
@@ -882,15 +885,22 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             _ => return Err("用法: ziyuan censor <诏令ID|all>".into()),
         },
         "apply" => {
-            const USAGE: &str = "用法: ziyuan apply <诏令ID> [--skip <段号,…>]";
+            const USAGE: &str = "用法: ziyuan apply <诏令ID> [--skip <段号,…>] [--commit]";
+            let commit = args.iter().any(|a| a == "--commit");
+            args.retain(|a| a != "--commit");
             match args.as_slice() {
-                [id] => Command::Apply(task_id(std::slice::from_ref(id), USAGE)?, Vec::new()),
+                [id] => Command::Apply(
+                    task_id(std::slice::from_ref(id), USAGE)?,
+                    Vec::new(),
+                    commit,
+                ),
                 [id, flag, list] if flag == "--skip" => Command::Apply(
                     task_id(std::slice::from_ref(id), USAGE)?,
                     list.split([',', '，'])
                         .filter(|n| !n.trim().is_empty())
                         .map(|n| n.trim().parse().map_err(|_| format!("段号必须是数字：{n}")))
                         .collect::<Result<_, _>>()?,
+                    commit,
                 ),
                 _ => return Err(USAGE.into()),
             }
@@ -1196,8 +1206,9 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 );
             }
         }
-        Command::Apply(task, skipped) => {
-            session.apply_changes(task, &env::current_dir()?, skipped)?;
+        Command::Apply(task, skipped, commit) => {
+            let root = env::current_dir()?;
+            session.apply_changes(task, &root, skipped)?;
             let skipped = session
                 .court()
                 .task(task)
@@ -1207,6 +1218,15 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 "诏令已颁：准奏，诏令 #{} 的改动已写入项目{skipped}。",
                 task.0
             );
+            if commit {
+                let made = session
+                    .commit_applied(task, &root)
+                    .map_err(|e| format!("改动已落盘，但未能提交：{e}"))?;
+                println!(
+                    "已记为 {} 提交 {}（只含本诏令落盘的文件）。",
+                    made.vcs, made.id
+                );
+            }
         }
         Command::Discard(task) => {
             session.discard_changes(task)?;
@@ -2155,6 +2175,7 @@ fn completions(shell: Shell) -> String {
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
+         apply) words="--skip --commit" ;;
          {json_cases}) words="--json" ;;
        esac ;;
   esac
@@ -2184,6 +2205,8 @@ complete -F _ziyuan ziyuan
                 format!("{} -a '{departments}'", seen("recruit")),
                 format!("{} -a '{modes}'", seen("reform")),
                 format!("{} -a 'bash zsh fish'", seen("completions")),
+                format!("{} -l skip -x", seen("apply")),
+                format!("{} -l commit", seen("apply")),
                 format!("{} -l json", seen(&json)),
                 format!(
                     "{} -l dept -x -a '{departments}'",

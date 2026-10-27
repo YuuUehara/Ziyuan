@@ -291,11 +291,13 @@ impl GitHub {
     /// 以默认分支最新提交为底，在远端新建分支 `branch`、一次提交写入 `files` 的 `after`，
     /// 再开草稿 PR，返回 PR 网址。先核对每个文件的远端原文与 `before` 一致（新建的须不存在），
     /// 不一致则不开，以免 PR 悄悄冲掉远端的改动。
+    /// `message` 为 PR 里那个提交的说明（与本地提交的相同，便于对应）。
     pub fn draft_pull_request(
         &self,
         branch: &str,
         title: &str,
         body: &str,
+        message: &str,
         files: &[FileChange],
     ) -> Result<String, Error> {
         if files.is_empty() {
@@ -344,7 +346,7 @@ impl GitHub {
         let made = self.call(
             "POST",
             "/git/commits",
-            Some(json!({ "message": title, "tree": new_tree, "parents": [parent] })),
+            Some(json!({ "message": message, "tree": new_tree, "parents": [parent] })),
         )?;
         let sha = made["sha"].as_str().ok_or("GitHub 未返回新提交")?;
         self.call(
@@ -481,7 +483,7 @@ mod tests {
         let (url, seen) = mock(replies);
         let hub = GitHub::new(url, "o/r", "ghp_secret".into()).unwrap();
         let err = hub
-            .draft_pull_request("ziyuan/task-1", "t", "b", &[change(Some("old\n"))])
+            .draft_pull_request("ziyuan/task-1", "t", "b", "m", &[change(Some("old\n"))])
             .unwrap_err();
         assert!(err.to_string().contains("与呈报时的原文不同"), "{err}");
         assert!(!err.to_string().contains("ghp_secret"));
@@ -505,7 +507,13 @@ mod tests {
         let (url, seen) = mock(replies);
         let hub = GitHub::new(url, "o/r", "ghp_secret".into()).unwrap();
         let pr = hub
-            .draft_pull_request("ziyuan/task-1", "标题", "正文", &[change(Some("old\n"))])
+            .draft_pull_request(
+                "ziyuan/task-1",
+                "标题",
+                "正文",
+                "说明\n\nZiyuan-Edict: 1\n",
+                &[change(Some("old\n"))],
+            )
             .unwrap();
         assert_eq!(pr, "https://github.com/o/r/pull/9");
         let seen = seen.lock().unwrap();
@@ -514,6 +522,7 @@ mod tests {
         assert_eq!(body(4)["base_tree"], "t0");
         assert_eq!(body(4)["tree"][0]["content"], "new\n");
         assert_eq!(body(5)["parents"], json!(["c0"]));
+        assert_eq!(body(5)["message"], "说明\n\nZiyuan-Edict: 1\n");
         assert_eq!(body(6)["ref"], "refs/heads/ziyuan/task-1");
         assert_eq!(seen[7].0, "POST /repos/o/r/pulls");
         assert_eq!(
@@ -536,6 +545,6 @@ mod tests {
             before: None,
             after: "hi".into(),
         };
-        assert!(hub.draft_pull_request("b", "t", "", &[new]).is_err());
+        assert!(hub.draft_pull_request("b", "t", "", "m", &[new]).is_err());
     }
 }

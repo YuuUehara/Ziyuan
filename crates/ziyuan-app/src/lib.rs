@@ -7,6 +7,8 @@
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
 mod courier;
 pub use courier::{PullReport, changelog_commits};
+mod vcs;
+pub use vcs::{VcsCommit, commit_files, commit_message};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -5404,6 +5406,24 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let original: String = (1..=20).map(|i| format!("l{i}\n")).collect();
         std::fs::write(root.join("a.txt"), &original).unwrap();
+        // 落盘后进 git：工作区里另有一处无关的改动。
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "紫垣测试"]);
+        git(&["config", "user.email", "test@ziyuan.invalid"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("c.txt"), "c\n").unwrap();
+        git(&["add", "a.txt", "c.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("c.txt"), "皇帝自己改的\n").unwrap();
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
         let write = Seal {
@@ -5479,6 +5499,26 @@ mod tests {
             describe_event(&last).contains("驳回第 1、3 段"),
             "{}",
             describe_event(&last)
+        );
+
+        // 只提交本诏令落盘的 a.txt；c.txt 的改动留在工作区。
+        let made = session.commit_applied(task, &root).unwrap();
+        assert_eq!(made.vcs, "git");
+        assert_eq!(
+            git(&["show", "--name-only", "--format=", "HEAD"]),
+            "a.txt\n"
+        );
+        assert_eq!(git(&["status", "--porcelain"]), " M c.txt\n");
+        let message = git(&["log", "-1", "--format=%B"]);
+        assert!(
+            message.starts_with("紫垣诏令 #1：改两处\n")
+                && message.contains("经皇帝准奏：1 个文件，驳回第 1、3 段")
+                && message.contains("Ziyuan-Edict: 1"),
+            "{message}"
+        );
+        assert!(
+            made.id
+                .starts_with(git(&["rev-parse", "--short=12", "HEAD"]).trim())
         );
         std::fs::remove_dir_all(root).unwrap();
     }

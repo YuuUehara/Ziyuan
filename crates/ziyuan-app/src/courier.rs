@@ -1,6 +1,6 @@
 //! 兵部驿站的外界往来：GitHub 入队与回报、礼部修 CHANGELOG 所据的 `git log`。
 //! CLI 与 Web 共用；GitHub 凭据只在 [`GitHub`] 中，不进事件簿与任何模型提示。
-use crate::{AppError, Session, reply_text, selected_files};
+use crate::{AppError, Session, commit_message, reply_text, selected_files};
 use std::path::Path;
 use ziyuan_core::{Department, Edict, TaskId};
 use ziyuan_github::{GitHub, intake, parse_station};
@@ -104,23 +104,22 @@ impl<S: EventStore> Session<S> {
         let entry = self.court().task(task).expect("已校验");
         let changes = entry.changes.as_ref().expect("已校验有准奏的改动");
         let files = selected_files(&changes.files, &changes.skipped);
-        let first: String = entry
-            .edict
-            .text
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(60)
-            .collect();
-        let title = format!("紫垣诏令 #{}：{first}", task.0);
+        // 标题即提交说明的首行；本地以 `apply --commit` 提交过的，两者说明相同。
+        let message = commit_message(self.court(), entry);
+        let title = message.lines().next().unwrap_or_default().to_owned();
         let body = format!(
             "Refs #{number}\n\n由紫垣开出的草稿 PR：改动已经皇帝准奏，共 {} 个文件。\n\n{}",
             files.len(),
             reply_text(self.court(), entry)
         );
         let url = hub
-            .draft_pull_request(&format!("ziyuan/task-{}", task.0), &title, &body, &files)
+            .draft_pull_request(
+                &format!("ziyuan/task-{}", task.0),
+                &title,
+                &body,
+                &message,
+                &files,
+            )
             .map_err(external)?;
         self.record_reply(task, true, url.clone())?;
         Ok(url)

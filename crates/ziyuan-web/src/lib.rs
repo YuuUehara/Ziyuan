@@ -735,7 +735,7 @@ async fn cancel(
     .await
 }
 
-/// 准奏：把呈报的改动写入项目；`skip` 为逐段驳回的段号。
+/// 准奏：把呈报的改动写入项目；`skip` 为逐段驳回的段号，`commit` 为真时落盘后记为一个 jj/git 提交。
 async fn apply_changes(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
@@ -753,9 +753,17 @@ async fn apply_changes(
             })
             .ok_or_else(|| ApiError::bad("skip 须为段号数组"))?,
     };
+    let commit = body.get("commit").and_then(Value::as_bool).unwrap_or(false);
     app.mutate(move |s| {
         s.apply_changes(TaskId(id), &root, skipped)?;
-        Ok(json!({ "ok": true }))
+        if !commit {
+            return Ok(json!({ "ok": true }));
+        }
+        // 已落盘、已记入事件簿：提交失败只报告，不当作准奏失败。
+        Ok(match s.commit_applied(TaskId(id), &root) {
+            Ok(made) => json!({ "ok": true, "vcs": made.vcs, "commit": made.id }),
+            Err(e) => json!({ "ok": true, "commit_error": e.to_string() }),
+        })
     })
     .await
 }

@@ -511,6 +511,27 @@ impl App {
                     |_| format!("诏令 #{} 准奏，改动已写入项目", task.0),
                 );
             }
+            KeyCode::Char('m') => {
+                let root = self.config.root.clone();
+                // 落盘成功后提交；提交失败只报告，改动仍已落盘。
+                if self
+                    .mutate(
+                        |s| s.apply_changes(task, &root, Vec::new()),
+                        |_| String::new(),
+                    )
+                    .is_some()
+                {
+                    match self.session.commit_applied(task, &root) {
+                        Ok(made) => self.info(format!(
+                            "诏令 #{} 准奏，改动已写入项目，记为 {} 提交 {}",
+                            task.0, made.vcs, made.id
+                        )),
+                        Err(e) => {
+                            self.error(format!("诏令 #{} 已准奏落盘，但未能提交：{e}", task.0))
+                        }
+                    }
+                }
+            }
             KeyCode::Char('W') => {
                 self.modal = Some(Modal::Input {
                     kind: InputKind::Skip(task),
@@ -1490,7 +1511,7 @@ impl App {
         }
         if let Some(changes) = &task.changes {
             let state = match changes.state {
-                ChangeState::Proposed => "待准奏（w 全部落盘，W 逐段驳回，u 驳回）",
+                ChangeState::Proposed => "待准奏（w 全部落盘，m 落盘并提交，W 逐段驳回，u 驳回）",
                 ChangeState::Applied => "已落盘",
                 ChangeState::Discarded => "已驳回",
             };

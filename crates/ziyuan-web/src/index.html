@@ -708,6 +708,7 @@ function taskHtml(t) {
     if (c.state === "proposed" && t.status === "completed") {
       body += `<div class="review-row"><span style="flex:1"></span>
         <button class="small gold" data-apply="${t.id}">准奏落盘</button>
+        <button class="small" data-apply="${t.id}" data-commit="1" title="落盘后只把这些文件记为一个 jj（或 git）提交">准奏并提交</button>
         <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
     }
   }
@@ -1099,7 +1100,14 @@ document.addEventListener("click", (event) => {
   } else if (d.apply) {
     const skip = [...document.querySelectorAll(`.hunk-${d.apply}`)].filter((b) => !b.checked).map((b) => Number(b.dataset.n));
     const what = skip.length ? `（驳回第 ${skip.join("、")} 段，其余落盘）` : "";
-    if (confirm(`把诏令 #${d.apply} 的改动写入项目${what}？`)) act(api(`/tasks/${d.apply}/changes/apply`, { skip }), "已准奏，改动已落盘" + what);
+    const commit = d.commit === "1";
+    if (confirm(`把诏令 #${d.apply} 的改动写入项目${what}${commit ? "，并记为一个提交" : ""}？`)) {
+      act(api(`/tasks/${d.apply}/changes/apply`, { skip, commit })).then((r) => {
+        if (!r) return;
+        if (r.commit_error) toast(`已准奏落盘${what}，但未能提交：${r.commit_error}`, true);
+        else toast(`已准奏，改动已落盘${what}` + (r.commit ? `，记为 ${r.vcs} 提交 ${r.commit}` : ""));
+      });
+    }
   } else if (d.discard) {
     act(api(`/tasks/${d.discard}/changes/discard`, {}), "已驳回改动");
   } else if (d.approve) {

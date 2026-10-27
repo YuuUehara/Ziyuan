@@ -85,6 +85,8 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 `Scheduler` 基于 Tokio：信号量限制并发，每件任务在阻塞线程池中执行；许可随执行线程释放，因此超时后仍在收尾的线程也计入并发数。取消是协作式的：超时或 `CancelToken` 触发时调度器立即给出结局，并通过 `ExecutionHooks::is_cancelled` 通知后端；`agent_loop` 在每轮模型调用前与执行工具前检查，`OpenAiCompatible` 在流式响应的每一行检查并中止请求。撤销时尚未开始的任务报告为 `NotStarted`，保持未结束。CLI 退出时不等待仍阻塞的 HTTP 请求。
 
+准奏进版本库：`ziyuan_app::vcs`。`Session::commit_applied` 对已 `Applied` 的改动取 `selected_files` 的路径，以 `commit_message`（首行「紫垣诏令 #n：…」，附承办者、驳回段号与 `Ziyuan-Edict: n` 尾注）调 `commit_files`：`jj root` 成功则 `jj commit -m … -- file:"路径"…`（只把这些文件分出，余下留在新的工作副本），否则 `git add` 后 `git commit --only`。提交不入事件簿。`GitHub::draft_pull_request` 以同一 `commit_message` 作 PR 中提交的说明，标题取其首行。
+
 会典（快照）：`Court` 及其引用的 core 类型实现 serde 的 `Serialize`/`Deserialize`（core 仍不做 IO）。`EventStore::load_snapshot(tag)` / `save_snapshot(tag, events, write)` 存取不透明的状态；`EventLog` 写 `.ziyuan/huidian`（首行 `ZIYUAN-HUIDIAN 1 <tag> <事件数> <字节数> <摘要>`，其后是状态），读时核对 tag、事件簿长度、止处为行首，以及事件簿开头与止处之前各 4 KB 的 FNV-1a 摘要，对上了就把游标设到止处，随后的 `load_since` 只解码其后的行。`Session::open` 以 `huidian_tag()`（版本号）读会典并解析（`read_huidian` 从缓冲区解析：axum 开了 serde_json 的 `raw_value`，流式解析慢近一倍），用不得则从头回放并重修；`revise_huidian` 在新增 `HUIDIAN_EVERY.max(上部/10)` 条后于打开或提交时流式写出。`Session` 只记事件条数与最近一条时辰；`history()` 首次调用时才读整本事件簿（`OnceLock`，之后随提交与重载追加），起居注经它取用。复核（`check_evidence`、`tool_calls`）经 `Session::task_events` 只取该件诏令的 `TaskAssigned` 与 `ToolInvoked`：整本事件簿已在手就从中筛，否则 `EventStore::load_where(len, keep)` 逐条解码、只留选中的，且不动增量读取的游标。史官记经 `take_chronicle` 交前端显示，不入事件簿。
 
 `ziyuan-runtime::agent_loop` 提供独立的 `ModelProvider`, `Tool`, `ModelTurn`, `Message` 等抽象，并实现最小 Tool Calling 循环。一轮内的全部工具调用先于其输出写入消息（与 Chat API 的顺序一致）；任一调用未注册则整轮拒绝，不执行任何工具。
