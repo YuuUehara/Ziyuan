@@ -385,6 +385,7 @@ mod tests {
     /// 是否可见）、fail（出错）。会先发一条通知、一个反向请求，考验客户端。
     const FAKE: &str = r#"
 import json, os, sys
+sys.stdin.reconfigure(encoding="utf-8")  # MCP 规定 UTF-8；Windows 上管道默认按本地代码页解码
 def send(m): print(json.dumps(m), flush=True)
 for line in sys.stdin:
     m = json.loads(line)
@@ -446,6 +447,7 @@ for line in sys.stdin:
         assert!(missing.to_string().contains("没有登记"), "{missing}");
         let missing = sealed_tools(&root, &grants(&["fake/rm"])).err().unwrap();
         assert!(missing.to_string().contains("没有工具 rm"), "{missing}");
+        drop(tools);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -462,6 +464,8 @@ for line in sys.stdin:
         );
         assert_eq!(fields[1], "-");
         assert_eq!(Path::new(fields[2]).canonicalize().unwrap(), root);
+        // 先停服务：Windows 上删不掉仍是某进程工作目录的目录。
+        drop(tools);
         std::fs::remove_dir_all(root).unwrap();
     }
 
