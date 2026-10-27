@@ -45,6 +45,7 @@ const HELP: &str = concat!(
   ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]
                                        启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）
   ziyuan tui                           启动紫禁城终端界面
+  ziyuan migrate                       检查事件簿：本版能否读，至少要哪个版本才能打开
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan retreat                       修道怠政（昏君模式）：批红、评定由司礼监代批，记入事件簿
@@ -198,6 +199,8 @@ enum Command {
         rotate: bool,
     },
     Tui,
+    /// 检查事件簿：本版能否读、至少要哪个版本才能打开。
+    Migrate,
     Cancel(TaskId),
     Reform(GovernanceMode),
     /// `true` 修道，`false` 回朝。
@@ -309,6 +312,7 @@ const SUBCOMMANDS: &[&str] = &[
     "run",
     "tasks",
     "tui",
+    "migrate",
     "serve",
     "cancel",
     "retreat",
@@ -412,8 +416,42 @@ fn run() -> Result<(), Box<dyn Error>> {
             Session::found(log)?;
             println!("紫垣已建立。当前制度：丞相制。请执行 `ziyuan court`。");
         }
+        // 不经 Session：事件簿读不了时也要能指出是哪一行。
+        Command::Migrate => migrate(&log)?,
         command => execute(&mut Session::open(log)?, command)?,
     }
+    Ok(())
+}
+
+fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
+    let report = log.inspect()?;
+    let version = env!("CARGO_PKG_VERSION");
+    println!(
+        "事件簿 .ziyuan/court.log：{} 条事件，格式 v1。",
+        report.events
+    );
+    if let Some(problem) = report.problem {
+        return Err(format!("{problem}").into());
+    }
+    let since = report.readable_since;
+    match &report.first_needing {
+        None => println!("本版 v{version} 可读；v0.1 起的各版本都能打开。"),
+        Some((line, kind)) => {
+            let older = match since - 1 {
+                // v0.4 起遇到不认识的内容会提示升级，更早的版本只报解码失败。
+                4.. => "会报「由更新版本的紫垣写入」或解码失败",
+                _ => "会报解码失败",
+            };
+            println!(
+                "本版 v{version} 可读；至少要 v0.{since}.0 才能打开（第 {line} 行 {kind} 起），v0.{}.x 及更早的版本{older}。",
+                since - 1
+            );
+        }
+    }
+    if report.torn_tail {
+        println!("末尾有一行未写完（中断的写入），下次写入前自动截掉。");
+    }
+    println!("无需迁移。史官记：祖宗成法不可轻改。");
     Ok(())
 }
 
@@ -451,6 +489,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "run" => parse_run(args)?,
         "tasks" => no_args(args, Command::Tasks)?,
         "tui" => no_args(args, Command::Tui)?,
+        "migrate" => no_args(args, Command::Migrate)?,
         "serve" => {
             const USAGE: &str = "用法: ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]";
             let (mut port, mut bind, mut rotate) =
@@ -727,7 +766,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
 
 fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<dyn Error>> {
     match command {
-        Command::Help | Command::Init | Command::Completions(_) => {
+        Command::Help | Command::Init | Command::Migrate | Command::Completions(_) => {
             unreachable!("在 run 中处理")
         }
         Command::Court => {

@@ -34,7 +34,8 @@ impl fmt::Display for StorageError {
             Self::Corrupt { line, reason } => write!(f, "日志第 {line} 行: {reason}"),
             Self::Newer { line, what } => write!(
                 f,
-                "事件簿第 {line} 行（{what}）由更新版本的紫垣写入，请升级 ziyuan 后再打开"
+                "事件簿第 {line} 行（{what}）由更新版本的紫垣写入，本版 v{} 读不了，请升级 ziyuan 后再打开",
+                env!("CARGO_PKG_VERSION")
             ),
             Self::Conflict { expected, actual } => write!(
                 f,
@@ -323,6 +324,69 @@ fn committed_len(data: &[u8]) -> usize {
     data.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1)
 }
 
+/// [`EventLog::inspect`] 的结果（`ziyuan migrate` 所用）。
+#[derive(Debug)]
+pub struct LogReport {
+    /// 完整的事件行数（不含末尾未写完的残行）。
+    pub events: usize,
+    /// 末尾有未写完的残行（下次追加前截掉）。
+    pub torn_tail: bool,
+    /// 打开整本事件簿至少要 `0.x.0` 的 `x`；空事件簿为 1。
+    pub readable_since: u32,
+    /// 最先要求 `readable_since` 的一行：行号与事件类型（小写）。
+    pub first_needing: Option<(usize, String)>,
+    /// 本版读不了的第一行（损坏或由更新版本写入）；有则其后不再检查。
+    pub problem: Option<StorageError>,
+}
+
+impl EventLog {
+    /// 逐行检查事件簿：本版能否读、至少要哪个发布版本才能打开。只读，不取执行者锁。
+    pub fn inspect(&self) -> Result<LogReport, StorageError> {
+        let mut file = File::open(&self.path)?;
+        file.lock_shared()?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        let committed = committed_len(&data);
+        let mut report = LogReport {
+            events: 0,
+            torn_tail: committed < data.len(),
+            readable_since: 1,
+            first_needing: None,
+            problem: None,
+        };
+        for (idx, line) in data[..committed]
+            .split_inclusive(|&b| b == b'\n')
+            .enumerate()
+        {
+            let number = idx + 1;
+            report.events = number;
+            let since = std::str::from_utf8(&line[..line.len() - 1])
+                .map_err(|e| codec::DecodeError::Malformed(e.to_string()))
+                .and_then(|text| Ok((codec::readable_since(text)?, text)));
+            match since {
+                Ok((minor, text)) if minor > report.readable_since => {
+                    report.readable_since = minor;
+                    let kind = text.split('\t').nth(1).unwrap_or_default().to_lowercase();
+                    report.first_needing = Some((number, kind));
+                }
+                Ok(_) => {}
+                Err(codec::DecodeError::Newer(what)) => {
+                    report.problem = Some(StorageError::Newer { line: number, what });
+                    break;
+                }
+                Err(codec::DecodeError::Malformed(reason)) => {
+                    report.problem = Some(StorageError::Corrupt {
+                        line: number,
+                        reason,
+                    });
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
 /// 内存事件簿：用于测试，或嵌入时不需要持久化的场景。
 #[derive(Clone, Debug, Default)]
 pub struct MemoryEventLog {
@@ -462,6 +526,45 @@ mod tests {
         ));
         assert_eq!(a.load_since(1).unwrap(), [long.clone(), long]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inspect_reports_the_oldest_release_that_can_open_the_log() {
+        let root = temp_root("inspect");
+        let log = EventLog::new(&root);
+        let path = root.join(".ziyuan/court.log");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // v0.1 写下的事件簿：v0.1 即可打开。
+        fs::write(
+            &path,
+            "v1\tFOUNDED\tchancellor\nv1\tEDICT\t1\tworks\te69fa5\n",
+        )
+        .unwrap();
+        let r = log.inspect().unwrap();
+        assert_eq!((r.events, r.readable_since, r.first_needing), (2, 1, None));
+        // 第 3 行复核（v0.3 起）、第 4 行授外藩的诏令（v0.5 起）、末尾残行。
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"v1\tRETREAT\t1\nv1\tEDICT\t2\tworks\t78\tmcp:docs\t2e\nv1\tAPPRO")
+            .unwrap();
+        let r = log.inspect().unwrap();
+        assert_eq!((r.events, r.torn_tail), (4, true));
+        assert_eq!(
+            (r.readable_since, r.first_needing),
+            (5, Some((4, "edict".into())))
+        );
+        assert!(r.problem.is_none());
+        // 更新版本写入的一行：指出行号，其后不查。
+        fs::write(
+            &path,
+            "v1\tFOUNDED\tchancellor\nv1\tCOURT_BANQUET\t1\nv1\tRETREAT\t1\n",
+        )
+        .unwrap();
+        let r = log.inspect().unwrap();
+        assert!(
+            matches!(r.problem, Some(StorageError::Newer { line: 2, .. })),
+            "{r:?}"
+        );
+        assert_eq!((r.events, r.readable_since), (2, 1));
     }
 
     #[test]

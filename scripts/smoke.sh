@@ -23,6 +23,10 @@ grep -q '新工' <<< "$ROUTE"
 ROUTE="$("$BIN" edict --dept works '直接承办')"
 if grep -q '丞相' <<< "$ROUTE"; then exit 1; fi
 grep -q '四叔来看你了' <<< "$("$BIN" reform cabinet)"
+# 本版写下的事件簿带时辰（v0.5 起可读），无需迁移。
+MIGRATE="$("$BIN" migrate)"
+grep -q '至少要 v0.5.0' <<< "$MIGRATE"
+grep -q '祖宗成法不可轻改' <<< "$MIGRATE"
 if "$BIN" edict --dept works '尚未设首辅' > /dev/null 2>&1; then
   echo '首辅空缺时应拒绝派工' >&2
   exit 1

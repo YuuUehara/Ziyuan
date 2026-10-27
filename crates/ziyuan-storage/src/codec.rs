@@ -884,9 +884,100 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
     Ok(event)
 }
 
+/// 能读这一行的最早发布版本（`0.x.0` 的 `x`）。逐一用 v0.1–v0.5 发布时的解码器试读得出，
+/// 样本见 `compat.tsv`。此后每新增事件类型、字段或代码，都要在这里与样本中记上新版本；
+/// 这里不用通配，新增事件类型时编译器会提醒。
+pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
+    use CourtEvent::*;
+    let event = decode_event(line)?;
+    // 外藩授权（`mcp:`）自 v0.5 可读，写权限与跑测试自 v0.3。
+    let seal = |seal: &Seal, base: u32| {
+        let write = seal
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::WriteFile | Capability::RunTests));
+        if !seal.mcp.is_empty() {
+            5
+        } else if write {
+            base.max(3)
+        } else {
+            base
+        }
+    };
+    Ok(match &event {
+        Founded(_)
+        | AgentRegistered(_)
+        | OfficialDismissed { .. }
+        | InstitutionReformed(_)
+        | TaskCompleted { .. } => 1,
+        OfficialAppointed { office, .. } => match office {
+            Office::ViceChancellor | Office::SecondGrandSecretary | Office::ViceMinister(_) => 2,
+            Office::Censor => 3,
+            _ => 1,
+        },
+        // 不带玉玺字段的旧式诏令 v0.1 即可读；带玉玺的自 v0.2。
+        EdictIssued(e) => seal(&e.seal, if line.split('\t').count() == 5 { 1 } else { 2 }),
+        ModelUsage { trace: Some(_), .. } => 5,
+        ChangesApplied { skipped, .. } if !skipped.is_empty() => 4,
+        OfficeCeilingSet {
+            ceiling: Some(s), ..
+        } => seal(s, 3),
+        TemplateSaved { template, .. } => seal(&template.seal, 4),
+        EdictApproved { .. }
+        | TaskAssigned { model: None, .. }
+        | ToolInvoked { .. }
+        | TaskFailed { .. }
+        | TaskCancelled { .. }
+        | OfficialPurged { .. }
+        | TaskReviewed { .. }
+        | ModelUsage { .. } => 2,
+        TaskAssigned { .. }
+        | OfficeModelSet { .. }
+        | OfficeCeilingSet { .. }
+        | EmperorRetreat(_)
+        | EdictDrafted { .. }
+        | EdictSplit { .. }
+        | CourtDebated { .. }
+        | ChangesProposed { .. }
+        | ChangesApplied { .. }
+        | ChangesDiscarded { .. }
+        | CensorReported { .. } => 3,
+        BudgetSet { .. }
+        | SuspicionRaised { .. }
+        | ExamTaken { .. }
+        | PalaceExamHeld { .. }
+        | ZhuangyuanNamed { .. }
+        | CourierDelivered { .. }
+        | EdictExpedited { .. }
+        | CourtNominated { .. }
+        | OfficialCaned { .. }
+        | OfficialPardoned { .. }
+        | TemplateRemoved { .. }
+        | TemplateApplied { .. } => 4,
+        Clock(_) | SuspicionReviewed { .. } | SuspicionAcquitted { .. } | CourierReplied { .. } => {
+            5
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readable_since_matches_what_released_decoders_could_read() {
+        let mut seen = std::collections::BTreeSet::new();
+        for row in include_str!("compat.tsv").lines() {
+            if row.starts_with('#') {
+                continue;
+            }
+            let (version, line) = row.split_once('\t').unwrap();
+            let minor: u32 = version.strip_prefix("0.").unwrap().parse().unwrap();
+            // 旧版写下的每种样本，本版都读得回来。
+            assert_eq!(readable_since(line).unwrap(), minor, "{line}");
+            seen.insert(line.split('\t').nth(1).unwrap().to_owned());
+        }
+        assert_eq!(seen.len(), 42, "每种事件类型至少一条样本");
+    }
     #[test]
     fn event_round_trip_chinese_and_tabs() {
         let task = TaskId(42);
