@@ -895,13 +895,6 @@ pub struct Record {
     pub verdict: String,
 }
 
-impl Record {
-    /// 检索用的全文。
-    fn haystack(&self) -> String {
-        format!("{}\n{}\n{}", self.edict, self.summary, self.verdict)
-    }
-}
-
 /// 检索词：ASCII 词（小写，≥2 字符）与中文等其他字符的相邻二字组。
 fn search_terms(text: &str) -> std::collections::BTreeSet<String> {
     let mut terms = std::collections::BTreeSet::new();
@@ -939,6 +932,45 @@ fn search_terms(text: &str) -> std::collections::BTreeSet<String> {
     terms
 }
 
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// 中文等其他字符（相邻者组成二字组）。
+fn is_run_char(c: char) -> bool {
+    c.is_alphanumeric() && !c.is_ascii_alphanumeric()
+}
+
+/// `text` 中某个完整的 ASCII 词（不分大小写）等于 `word`（已小写）。
+fn has_word(text: &str, word: &str) -> bool {
+    let (t, w) = (text.as_bytes(), word.as_bytes());
+    t.windows(w.len()).enumerate().any(|(i, window)| {
+        window.eq_ignore_ascii_case(w)
+            && (i == 0 || !is_word_byte(t[i - 1]))
+            && t.get(i + w.len()).is_none_or(|&b| !is_word_byte(b))
+    })
+}
+
+/// `text` 中 `c` 单独成串（前后都不是中文等字符）。
+fn has_single(text: &str, c: char) -> bool {
+    text.match_indices(c).any(|(i, m)| {
+        !text[..i].chars().next_back().is_some_and(is_run_char)
+            && !text[i + m.len()..].chars().next().is_some_and(is_run_char)
+    })
+}
+
+/// 实录含有的检索词 `term`（取自 [`search_terms`]）。与对原文求 `search_terms` 再查集合等价，
+/// 但不为每件实录建词表：二字组的两字都是中文等字符，原文含此子串即含此词。
+fn record_has(record: &Record, term: &str) -> bool {
+    let fields = [&*record.edict, &*record.summary, &*record.verdict];
+    let mut chars = term.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => fields.iter().any(|t| has_single(t, c)),
+        (Some(c), Some(_)) if !c.is_ascii() => fields.iter().any(|t| t.contains(term)),
+        _ => fields.iter().any(|t| has_word(t, term)),
+    }
+}
+
 /// 列出实录：`query` 为空时全部（新者在前），否则按检索词至多 20 件。
 pub fn find_records<'a>(records: &'a [Record], query: &str) -> Vec<&'a Record> {
     if query.trim().is_empty() {
@@ -949,14 +981,12 @@ pub fn find_records<'a>(records: &'a [Record], query: &str) -> Vec<&'a Record> {
 }
 
 /// 按与 `query` 共有的检索词数检索实录，得分高者在前（同分时新者在前），至多 `limit` 件。
+/// 直接在原文中查各检索词，不为每件实录建词表。
 pub fn search_records<'a>(records: &'a [Record], query: &str, limit: usize) -> Vec<&'a Record> {
     let wanted = search_terms(query);
     let mut scored: Vec<(usize, &Record)> = records
         .iter()
-        .map(|r| {
-            let have = search_terms(&r.haystack());
-            (wanted.intersection(&have).count(), r)
-        })
+        .map(|r| (wanted.iter().filter(|t| record_has(r, t)).count(), r))
         .filter(|(score, _)| *score > 0)
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.task.cmp(&a.1.task)));
@@ -1266,6 +1296,8 @@ mod tests {
             record(1, "检查除零", "div 未处理除数为零"),
             record(2, "整理 README", "补了目录"),
             record(3, "再查除零", "Div 已改为返回 0"),
+            record(4, "查 lock_order 与锁", "Mutex 锁"),
+            record(5, "查死锁", "divide 与 lock_order2"),
         ];
         let ids = |q| {
             search_records(&records, q, 5)
@@ -1278,6 +1310,11 @@ mod tests {
         assert_eq!(ids("readme"), [2]);
         assert!(ids("数据库").is_empty());
         assert_eq!(search_records(&records, "除零", 1).len(), 1);
+        // 英文按整词：div 不中 divide，lock_order 不中 lock_order2。
+        assert_eq!(ids("LOCK_ORDER"), [4]);
+        assert_eq!(ids("div"), [3, 1]);
+        // 单字只中单独成串的：「锁」中 4，不中「死锁」里的锁。
+        assert_eq!(ids("锁"), [4]);
     }
 
     #[test]
