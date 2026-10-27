@@ -418,7 +418,70 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         // 不经 Session：事件簿读不了时也要能指出是哪一行。
         Command::Migrate => migrate(&log)?,
+        // 前端各自打开并缓存会话；这里不开会话（放掉的内存分配器也不还给系统），只看朝廷是否已建立。
+        command @ (Command::Serve { .. } | Command::Tui) => {
+            let founded = env::current_dir()?
+                .join(".ziyuan/court.log")
+                .metadata()
+                .is_ok_and(|m| m.len() > 0);
+            if !founded {
+                return Err(ziyuan_app::AppError::NotFounded.into());
+            }
+            frontend(command)?;
+        }
         command => execute(&mut Session::open(log)?, command)?,
+    }
+    Ok(())
+}
+
+/// 奉天门（Web）与紫禁城（TUI）：常驻进程，自己打开会话。
+fn frontend(command: Command) -> Result<(), Box<dyn Error>> {
+    match command {
+        Command::Serve { port, bind, rotate } => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let root = env::current_dir()?;
+            let config = ziyuan_web::Config {
+                token: ziyuan_web::load_or_create_token(&root, rotate)?,
+                root,
+                backend: worker_backend()?,
+                limits: DEFAULT_LIMITS,
+                github: ziyuan_github::GitHub::from_env()?.map(Arc::new),
+            };
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind((bind, port)).await?;
+                let addr = listener.local_addr()?;
+                // 监听全部地址时，地址栏要填本机在网络中的地址。
+                let host = match bind.is_unspecified() {
+                    true => format!("<本机地址>:{}", addr.port()),
+                    false => addr.to_string(),
+                };
+                println!("奉天门已开：http://{host}/?token={}", config.token);
+                println!("令牌存于 .ziyuan/web-token，重启不变；`--new-token` 重新生成。令牌即皇帝身份，请勿外传。");
+                if !bind.is_loopback() {
+                    println!(
+                        "注意：正在监听 {addr}，其他机器可以访问。HTTP 为明文，令牌可能被窃听；\
+                         请只在可信网络中使用，或置于 HTTPS 反向代理、SSH 隧道之后。"
+                    );
+                }
+                ziyuan_web::serve(listener, config).await
+            })?;
+        }
+        Command::Tui => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let config = ziyuan_tui::Config {
+                root: env::current_dir()?,
+                backend: worker_backend()?,
+                limits: DEFAULT_LIMITS,
+            };
+            runtime.block_on(ziyuan_tui::run(config))?;
+            // 阻塞中的模型请求可能仍未返回；不等待它们。
+            runtime.shutdown_background();
+        }
+        _ => unreachable!("run 只把 serve 与 tui 交到这里"),
     }
     Ok(())
 }
@@ -766,7 +829,12 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
 
 fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<dyn Error>> {
     match command {
-        Command::Help | Command::Init | Command::Migrate | Command::Completions(_) => {
+        Command::Help
+        | Command::Init
+        | Command::Migrate
+        | Command::Serve { .. }
+        | Command::Tui
+        | Command::Completions(_) => {
             unreachable!("在 run 中处理")
         }
         Command::Court => {
@@ -921,50 +989,6 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             } else {
                 run_tasks(session, None, worker_backend()?, limits)?;
             }
-        }
-        Command::Serve { port, bind, rotate } => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            let root = env::current_dir()?;
-            let config = ziyuan_web::Config {
-                token: ziyuan_web::load_or_create_token(&root, rotate)?,
-                root,
-                backend: worker_backend()?,
-                limits: DEFAULT_LIMITS,
-                github: ziyuan_github::GitHub::from_env()?.map(Arc::new),
-            };
-            runtime.block_on(async {
-                let listener = tokio::net::TcpListener::bind((bind, port)).await?;
-                let addr = listener.local_addr()?;
-                // 监听全部地址时，地址栏要填本机在网络中的地址。
-                let host = match bind.is_unspecified() {
-                    true => format!("<本机地址>:{}", addr.port()),
-                    false => addr.to_string(),
-                };
-                println!("奉天门已开：http://{host}/?token={}", config.token);
-                println!("令牌存于 .ziyuan/web-token，重启不变；`--new-token` 重新生成。令牌即皇帝身份，请勿外传。");
-                if !bind.is_loopback() {
-                    println!(
-                        "注意：正在监听 {addr}，其他机器可以访问。HTTP 为明文，令牌可能被窃听；\
-                         请只在可信网络中使用，或置于 HTTPS 反向代理、SSH 隧道之后。"
-                    );
-                }
-                ziyuan_web::serve(listener, config).await
-            })?;
-        }
-        Command::Tui => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            let config = ziyuan_tui::Config {
-                root: env::current_dir()?,
-                backend: worker_backend()?,
-                limits: DEFAULT_LIMITS,
-            };
-            runtime.block_on(ziyuan_tui::run(config))?;
-            // 阻塞中的模型请求可能仍未返回；不等待它们。
-            runtime.shutdown_background();
         }
         Command::Tasks => {
             let court = session.court();

@@ -4,6 +4,7 @@ pub mod names;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
+use std::sync::Arc;
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, CHANGELOG, Capability, CensorVerdict, CourtEvent, Department,
     Edict, Evidence, FileChange, GovernanceMode, Nomination, Office, Record, Seal, Speech, Subtask,
@@ -518,7 +519,8 @@ pub enum TaskStatus {
     Assigned(AgentId),
     Completed {
         worker: AgentId,
-        summary: String,
+        /// 与事件簿中的 `TaskCompleted` 共用一份。
+        summary: Arc<str>,
     },
     /// `worker` 为失败时的承办官员；指派前（如路由失败）为 `None`。
     Failed {
@@ -683,7 +685,7 @@ impl Court {
                 self.tasks.insert(
                     edict.id,
                     Task {
-                        edict: edict.clone(),
+                        edict: (**edict).clone(),
                         status: TaskStatus::Pending,
                         tool_calls: 0,
                         tool_failures: 0,
@@ -893,8 +895,8 @@ impl Court {
                 });
             }
             CourtEvent::TemplateSaved { name, template } => {
-                self.propose_template(name.clone(), template.clone())?;
-                self.templates.insert(name.clone(), template.clone());
+                self.propose_template(name.clone(), (**template).clone())?;
+                self.templates.insert(name.clone(), (**template).clone());
             }
             CourtEvent::TemplateRemoved { name } => {
                 self.propose_template_removal(name.clone())?;
@@ -1791,7 +1793,10 @@ impl Court {
         }
         validate_edict_seal(template.department, &template.seal)?;
         check_criteria(&template.criteria)?;
-        Ok(CourtEvent::TemplateSaved { name, template })
+        Ok(CourtEvent::TemplateSaved {
+            name,
+            template: Box::new(template),
+        })
     }
 
     /// 撤去自定的模板；内置模板不能撤去。
@@ -2863,7 +2868,7 @@ mod tests {
             .new_edict(Department::Works, "查".into(), Seal::default())
             .unwrap();
         let id = edict.id;
-        apply(vec![CourtEvent::EdictIssued(edict)], &mut court);
+        apply(vec![CourtEvent::EdictIssued(Box::new(edict))], &mut court);
         assert!(court.runnable_tasks().is_empty());
         assert_eq!(court.open_tasks(), [id]);
         // 票拟只能拟派本部在任官员；拟派尚书后，派工改给尚书（路线注明票拟），不再按旧例给郎中。
@@ -2966,7 +2971,7 @@ mod tests {
             seal: Seal::default(),
         };
         apply(vec![
-            CourtEvent::EdictIssued(edict),
+            CourtEvent::EdictIssued(Box::new(edict)),
             CourtEvent::TaskAssigned {
                 task: TaskId(1),
                 worker: AgentId(4),
@@ -3096,12 +3101,12 @@ mod tests {
                 }
             };
             for e in [
-                CourtEvent::EdictIssued(Edict {
+                CourtEvent::EdictIssued(Box::new(Edict {
                     id: task,
                     department: Department::Works,
                     text: "办".into(),
                     seal: Seal::default(),
-                }),
+                })),
                 CourtEvent::TaskAssigned {
                     task,
                     worker: AgentId(4),
@@ -3206,7 +3211,7 @@ mod tests {
         let edict = court
             .new_edict(Department::Works, "查全库".into(), Seal::default())
             .unwrap();
-        apply(&mut court, CourtEvent::EdictIssued(edict));
+        apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
         let none = TokenUsage::default();
         let split = |court: &Court, task: u64, plan: &[(u64, &str)]| {
             let plan = plan
@@ -3291,7 +3296,7 @@ mod tests {
             .new_edict(Department::Works, "再查".into(), Seal::default())
             .unwrap();
         let id = edict.id;
-        apply(&mut court, CourtEvent::EdictIssued(edict));
+        apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
         let event = split(&court, id.0, &[(4, "甲"), (7, "乙")]).unwrap();
         apply(&mut court, event);
         // （改制后 #1 本身也须批红。）
@@ -3347,12 +3352,12 @@ mod tests {
         let mut handle = |worker: u64, ok: bool, verdict: Option<Verdict>, bad_tools: u32| {
             let task = TaskId(next);
             next += 1;
-            events.push(CourtEvent::EdictIssued(Edict {
+            events.push(CourtEvent::EdictIssued(Box::new(Edict {
                 id: task,
                 department: Department::Works,
                 text: "查".into(),
                 seal: Seal::default(),
-            }));
+            })));
             events.push(CourtEvent::TaskAssigned {
                 task,
                 worker: AgentId(worker),
@@ -3466,24 +3471,24 @@ mod tests {
         assert!(issue(&[]).is_err());
         // 回放同样拒绝：手写的日志也不能绕过。
         let mut events = founding_events(1);
-        events.push(CourtEvent::EdictIssued(Edict {
+        events.push(CourtEvent::EdictIssued(Box::new(Edict {
             id: TaskId(1),
             department: Department::Works,
             text: "查".into(),
             seal: seal(&["/"]),
-        }));
+        })));
         assert!(Court::replay(&events).is_err());
     }
     #[test]
     fn task_lifecycle_is_enforced_on_replay() {
         let task = TaskId(1);
         let mut base = founding_events(1);
-        base.push(CourtEvent::EdictIssued(Edict {
+        base.push(CourtEvent::EdictIssued(Box::new(Edict {
             id: task,
             department: Department::Works,
             text: "查".into(),
             seal: Seal::default(),
-        }));
+        })));
         let with = |extra: &[CourtEvent]| {
             let mut events = base.clone();
             events.extend_from_slice(extra);
@@ -3566,7 +3571,7 @@ mod tests {
             .unwrap();
         assert_eq!(court.route(&edict).unwrap().worker, AgentId(4));
         let completed = [
-            CourtEvent::EdictIssued(edict.clone()),
+            CourtEvent::EdictIssued(Box::new(edict.clone())),
             CourtEvent::TaskCompleted {
                 task: edict.id,
                 worker: AgentId(4),

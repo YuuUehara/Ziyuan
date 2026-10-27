@@ -549,7 +549,7 @@ impl<S: EventStore> Session<S> {
             .and_then(|id| court.agent(id))
             .map_or("?".to_owned(), |a| format!("#{} {}", a.id.0, a.name));
         let summary = match &entry.status {
-            TaskStatus::Completed { summary, .. } => summary.as_str(),
+            TaskStatus::Completed { summary, .. } => summary,
             _ => "",
         };
         let system = format!(
@@ -1074,10 +1074,10 @@ impl<S: EventStore> Session<S> {
         let committed = self.commit(|court| {
             let edict = court.new_edict(department, text.clone(), seal.clone())?;
             court.route(&edict)?;
-            Ok(vec![CourtEvent::EdictIssued(edict)])
+            Ok(vec![CourtEvent::EdictIssued(Box::new(edict))])
         })?;
         match committed.into_iter().next() {
-            Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
+            Some(CourtEvent::EdictIssued(edict)) => Ok(*edict),
             _ => unreachable!("issue 只产生 EdictIssued"),
         }
     }
@@ -1130,13 +1130,13 @@ impl<S: EventStore> Session<S> {
         let committed = self.commit(|court| {
             let edict = court.new_edict(department, text.clone(), seal.clone())?;
             court.route(&edict)?;
-            let issued = CourtEvent::EdictIssued(edict.clone());
+            let issued = CourtEvent::EdictIssued(Box::new(edict.clone()));
             let mut next = court.clone();
             next.apply(&issued)?;
             Ok(vec![issued, next.propose_template_use(edict.id, name)?])
         })?;
         match committed.into_iter().next() {
-            Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
+            Some(CourtEvent::EdictIssued(edict)) => Ok(*edict),
             _ => unreachable!("issue_templated 先记 EdictIssued"),
         }
     }
@@ -1153,7 +1153,7 @@ impl<S: EventStore> Session<S> {
         let committed = self.commit(|court| {
             let edict = court.new_edict(department, text.clone(), Seal::default())?;
             court.route(&edict)?;
-            let issued = CourtEvent::EdictIssued(edict.clone());
+            let issued = CourtEvent::EdictIssued(Box::new(edict.clone()));
             // 驿传与加急基于入队后的状态校验。
             let mut next = court.clone();
             next.apply(&issued)?;
@@ -1173,7 +1173,7 @@ impl<S: EventStore> Session<S> {
             Ok(events)
         })?;
         match committed.into_iter().next() {
-            Some(CourtEvent::EdictIssued(edict)) => Ok(edict),
+            Some(CourtEvent::EdictIssued(edict)) => Ok(*edict),
             _ => unreachable!("post 先记 EdictIssued"),
         }
     }
@@ -1755,7 +1755,7 @@ impl<S: EventStore> Session<S> {
                                 let mut events = vec![CourtEvent::TaskCompleted {
                                     task,
                                     worker: *worker,
-                                    summary: summary.clone(),
+                                    summary: summary.as_str().into(),
                                 }];
                                 // 刑部勘问回奏：有无劫持、索取机密、越权的文字。
                                 let findings = guard::scan(summary, &Threat::ALL);
@@ -2011,8 +2011,10 @@ pub fn history_entries(
             at = Some(*t);
             continue;
         }
-        let kind = ziyuan_storage::event_kind(event);
-        let keep = filter.kind.as_ref().is_none_or(|k| *k == kind)
+        let keep = filter
+            .kind
+            .as_ref()
+            .is_none_or(|k| *k == ziyuan_storage::event_kind(event))
             && filter.task.is_none_or(|t| event_tasks(event).contains(&t))
             && filter
                 .agent
@@ -2020,7 +2022,7 @@ pub fn history_entries(
             && filter.since.is_none_or(|s| at.is_some_and(|t| t >= s))
             && filter.until.is_none_or(|u| at.is_some_and(|t| t <= u));
         if keep {
-            matched.push((i, at, kind));
+            matched.push((i, at));
         }
     }
     let skip = filter
@@ -2029,10 +2031,10 @@ pub fn history_entries(
     Ok(matched
         .into_iter()
         .skip(skip)
-        .map(|(i, at, kind)| HistoryEntry {
+        .map(|(i, at)| HistoryEntry {
             seq: i + 1,
             at,
-            kind,
+            kind: ziyuan_storage::event_kind(&history[i]),
             text: describe_event(&history[i]),
         })
         .collect())
@@ -2913,7 +2915,7 @@ fn tool_calls(history: &[CourtEvent], task: TaskId) -> Vec<(String, String, bool
 /// 呈报待决的改动按改动后的内容核对。测试：最近一次 `run_tests` 的成败。
 fn check_evidence(root: &Path, task: &Task, history: &[CourtEvent]) -> (Evidence, Vec<String>) {
     let summary = match &task.status {
-        TaskStatus::Completed { summary, .. } => summary.as_str(),
+        TaskStatus::Completed { summary, .. } => summary,
         _ => "",
     };
     let staged = |path: &str| {

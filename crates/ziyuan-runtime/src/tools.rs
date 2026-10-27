@@ -611,7 +611,7 @@ mod tests {
             edict: edict.into(),
             worker: ziyuan_core::AgentId(4),
             handler: "陈工".into(),
-            summary: "回奏".repeat(400),
+            summary: "回奏".repeat(400).into(),
             verdict: "采纳：好".into(),
         };
         let tool = record_search(Arc::new(vec![record(1, "检查除零"), record(2, "整理文档")]));

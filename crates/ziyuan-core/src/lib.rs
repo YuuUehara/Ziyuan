@@ -2,6 +2,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// 字符串到领域类型的解析错误（CLI 参数、事件簿字段）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -888,8 +889,8 @@ pub struct Record {
     /// 承办官员及其姓名（已削籍者为空）。
     pub worker: AgentId,
     pub handler: String,
-    /// 回奏全文。
-    pub summary: String,
+    /// 回奏全文（与朝廷状态共用一份）。
+    pub summary: Arc<str>,
     /// 皇帝评定与都察院复核，如「采纳：好」「御史弹劾」；尚无则为「待评定」。
     pub verdict: String,
 }
@@ -1036,7 +1037,8 @@ pub enum CourtEvent {
         tokens: Option<u64>,
     },
     /// 诏令入队；此后依次可有 `TaskAssigned`、若干 `ToolInvoked`，并以完成/失败/撤销之一结束。
-    EdictIssued(Edict),
+    /// 装箱：诏令较大，而事件簿中大多是工具调用、用量等小事件；不装箱则每条事件都按最大的占内存。
+    EdictIssued(Box<Edict>),
     /// 内阁票拟：拟定承办者并附票拟意见。`model`/`usage` 为首辅票拟所用模型与用量；
     /// 皇帝改票时 `model` 为 `None`、`usage` 为零。可多次票拟，以最后一次为准。
     EdictDrafted {
@@ -1082,7 +1084,8 @@ pub enum CourtEvent {
     TaskCompleted {
         task: TaskId,
         worker: AgentId,
-        summary: String,
+        /// 回奏全文；与朝廷状态中的同一件共用一份（`Arc`），长期运行时不重复占内存。
+        summary: Arc<str>,
     },
     TaskFailed {
         task: TaskId,
@@ -1192,7 +1195,7 @@ pub enum CourtEvent {
     /// 翰林院存一份诏令模板（同名的覆盖，包括覆盖内置模板）。
     TemplateSaved {
         name: String,
-        template: Template,
+        template: Box<Template>,
     },
     /// 翰林院撤去自定的模板（同名的内置模板随之恢复）。
     TemplateRemoved {

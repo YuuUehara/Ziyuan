@@ -1023,7 +1023,7 @@ pub fn chronicle_json(r: &ziyuan_core::Record) -> Value {
         "edict": r.edict,
         "worker": r.worker.0,
         "handler": r.handler,
-        "summary": r.summary,
+        "summary": &*r.summary,
         "verdict": r.verdict,
     })
 }
@@ -1430,9 +1430,9 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                 TaskStatus::Pending => ("pending", None, None),
                 TaskStatus::Assigned(w) => ("assigned", Some(*w), None),
                 TaskStatus::Completed { worker, summary } => {
-                    ("completed", Some(*worker), Some(summary.clone()))
+                    ("completed", Some(*worker), Some(&**summary))
                 }
-                TaskStatus::Failed { worker, reason } => ("failed", *worker, Some(reason.clone())),
+                TaskStatus::Failed { worker, reason } => ("failed", *worker, Some(reason.as_str())),
                 TaskStatus::Cancelled => ("cancelled", None, None),
             };
             json!({

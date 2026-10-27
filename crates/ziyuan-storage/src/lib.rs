@@ -1,7 +1,7 @@
 //! 紫垣事件簿：事件存储接口与实现。文件实现为 append-only 文本日志（v1 格式），未来可换成 SQLite。
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use ziyuan_core::CourtEvent;
@@ -162,22 +162,39 @@ impl EventLog {
         Ok(last[0] == b'\n')
     }
 
-    /// 在已加锁的 `file` 上读取游标之后（不适用则从头）的已提交内容，返回起点游标、
-    /// 新内容、其后残行的长度，以及游标是否因文件被替换而作废。
-    fn read_tail(&self, file: &mut File) -> io::Result<(Cursor, Vec<u8>, usize, bool)> {
-        let mut cursor = *self.cursor.lock().expect("锁未中毒");
-        let replaced = !Self::usable(file, cursor)?;
+    /// 在已加锁的 `file` 上逐行读取游标之后（不适用则从头）的已提交内容，每行（不含换行符）
+    /// 连同其序号（从 0 起）交给 `line`。边读边交，不把整段内容留在内存里：
+    /// 事件簿有几百 MB 时，一次读完再解码会让内存峰值翻倍。
+    fn read_tail(
+        &self,
+        file: &mut File,
+        mut line: impl FnMut(usize, &[u8]) -> Result<(), StorageError>,
+    ) -> Result<Tail, StorageError> {
+        let mut start = *self.cursor.lock().expect("锁未中毒");
+        let replaced = !Self::usable(file, start)?;
         if replaced {
-            cursor = Cursor::default();
+            start = Cursor::default();
         }
-        cursor.file = identity(file)?;
-        file.seek(SeekFrom::Start(cursor.bytes))?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        let committed = committed_len(&data);
-        let torn = data.len() - committed;
-        data.truncate(committed);
-        Ok((cursor, data, torn, replaced))
+        start.file = identity(file)?;
+        file.seek(SeekFrom::Start(start.bytes))?;
+        let mut reader = io::BufReader::with_capacity(1 << 16, &mut *file);
+        let mut end = start;
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            let n = reader.read_until(b'\n', &mut buf)?;
+            if n == 0 || buf.last() != Some(&b'\n') {
+                return Ok(Tail {
+                    start,
+                    end,
+                    torn: n > 0,
+                    replaced,
+                });
+            }
+            line(end.events, &buf[..n - 1])?;
+            end.events += 1;
+            end.bytes += n as u64;
+        }
     }
 
     fn set_cursor(&self, cursor: Cursor) {
@@ -200,6 +217,14 @@ impl EventLog {
             Err(TryLockError::Error(e)) => Err(e.into()),
         }
     }
+}
+
+/// [`EventLog::read_tail`] 读到的范围：起止游标、末尾有无残行、游标是否因文件被替换而作废。
+struct Tail {
+    start: Cursor,
+    end: Cursor,
+    torn: bool,
+    replaced: bool,
 }
 
 /// 持有期间本进程是唯一的执行者；drop 时释放。
@@ -233,27 +258,21 @@ impl EventStore for EventLog {
             Err(e) => return Err(e.into()),
         };
         file.lock_shared()?;
-        let (start, data, _, replaced) = self.read_tail(&mut file)?;
         // 游标超前于调用者（如本进程刚追加过）则从头读，跳过调用者已有的。
-        let (start, data) = if start.events > known {
+        let cursor = *self.cursor.lock().expect("锁未中毒");
+        if cursor.events > known && Self::usable(&mut file, cursor)? {
             self.set_cursor(Cursor::default());
-            let (start, data, _, _) = self.read_tail(&mut file)?;
-            (start, data)
-        } else {
-            (start, data)
-        };
+        }
         let mut events = Vec::new();
-        for (idx, line) in data.split_inclusive(|&b| b == b'\n').enumerate() {
-            let number = start.events + idx;
+        let tail = self.read_tail(&mut file, |number, line| {
+            if number < known {
+                return Ok(());
+            }
             let corrupt = |reason| StorageError::Corrupt {
                 line: number + 1,
                 reason,
             };
-            if number < known {
-                continue;
-            }
-            let text =
-                std::str::from_utf8(&line[..line.len() - 1]).map_err(|e| corrupt(e.to_string()))?;
+            let text = std::str::from_utf8(line).map_err(|e| corrupt(e.to_string()))?;
             events.push(codec::decode_event(text).map_err(|e| match e {
                 codec::DecodeError::Newer(what) => StorageError::Newer {
                     line: number + 1,
@@ -261,15 +280,12 @@ impl EventStore for EventLog {
                 },
                 codec::DecodeError::Malformed(reason) => corrupt(reason),
             })?);
-        }
-        let total = start.events + data.iter().filter(|&&b| b == b'\n').count();
-        self.set_cursor(Cursor {
-            events: total,
-            bytes: start.bytes + data.len() as u64,
-            file: start.file,
-        });
+            Ok(())
+        })?;
+        self.set_cursor(tail.end);
+        let total = tail.end.events;
         // 文件已被替换：调用者已有的前 `known` 条不再可信，让其从头读取。
-        if total < known || (replaced && known > 0) {
+        if total < known || (tail.replaced && known > 0) {
             return Err(StorageError::Conflict {
                 expected: known,
                 actual: total,
@@ -288,18 +304,13 @@ impl EventStore for EventLog {
             .append(true)
             .open(&self.path)?;
         file.lock()?;
-        let (start, data, torn, _) = self.read_tail(&mut file)?;
-        let committed = start.bytes + data.len() as u64;
-        let actual = start.events + data.iter().filter(|&&b| b == b'\n').count();
-        self.set_cursor(Cursor {
-            events: actual,
-            bytes: committed,
-            file: start.file,
-        });
+        let tail = self.read_tail(&mut file, |_, _| Ok(()))?;
+        let (committed, actual, start) = (tail.end.bytes, tail.end.events, tail.start);
+        self.set_cursor(tail.end);
         if actual != expected {
             return Err(StorageError::Conflict { expected, actual });
         }
-        if torn > 0 {
+        if tail.torn {
             file.set_len(committed)?;
         }
         let mut content = String::new();
@@ -316,11 +327,6 @@ impl EventStore for EventLog {
         });
         Ok(())
     }
-}
-
-/// 截至最后一个换行符的字节数：其后的内容是未完成的写入。
-fn committed_len(data: &[u8]) -> usize {
-    data.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1)
 }
 
 /// [`EventLog::inspect`] 的结果（`ziyuan migrate` 所用）。
@@ -341,25 +347,28 @@ pub struct LogReport {
 impl EventLog {
     /// 逐行检查事件簿：本版能否读、至少要哪个发布版本才能打开。只读，不取执行者锁。
     pub fn inspect(&self) -> Result<LogReport, StorageError> {
-        let mut file = File::open(&self.path)?;
+        let file = File::open(&self.path)?;
         file.lock_shared()?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        let committed = committed_len(&data);
         let mut report = LogReport {
             events: 0,
-            torn_tail: committed < data.len(),
+            torn_tail: false,
             readable_since: 1,
             first_needing: None,
             problem: None,
         };
-        for (idx, line) in data[..committed]
-            .split_inclusive(|&b| b == b'\n')
-            .enumerate()
-        {
-            let number = idx + 1;
+        // 逐行读，不把整本事件簿读进内存。
+        let mut reader = io::BufReader::with_capacity(1 << 16, file);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line)?;
+            if n == 0 || line.last() != Some(&b'\n') {
+                report.torn_tail = n > 0;
+                break;
+            }
+            let number = report.events + 1;
             report.events = number;
-            let since = std::str::from_utf8(&line[..line.len() - 1])
+            let since = std::str::from_utf8(&line[..n - 1])
                 .map_err(|e| codec::DecodeError::Malformed(e.to_string()))
                 .and_then(|text| Ok((codec::readable_since(text)?, text)));
             match since {

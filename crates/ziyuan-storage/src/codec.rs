@@ -560,7 +560,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
                 .parse::<GovernanceMode>()
                 .map_err(|e| e.to_string())?,
         ),
-        "EDICT" => EdictIssued(Edict {
+        "EDICT" => EdictIssued(Box::new(Edict {
             id: TaskId(id(2)?),
             department: field(3)?.parse::<Department>().map_err(|e| e.to_string())?,
             text: from_hex(field(4)?)?,
@@ -570,7 +570,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             } else {
                 decode_seal(field(5)?, field(6)?)?
             },
-        }),
+        })),
         "MODEL" => OfficeModelSet {
             office: field(2)?.parse::<Office>().map_err(|e| e.to_string())?,
             model: match parts.len() {
@@ -604,7 +604,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         "COMPLETED" => TaskCompleted {
             task: TaskId(id(2)?),
             worker: AgentId(id(3)?),
-            summary: from_hex(field(4)?)?,
+            summary: from_hex(field(4)?)?.into(),
         },
         // v0.2 及更早的日志没有模型字段。
         "ASSIGNED" => TaskAssigned {
@@ -728,12 +728,12 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         },
         "TEMPLATE" => TemplateSaved {
             name: from_hex(field(2)?)?,
-            template: Template {
+            template: Box::new(Template {
                 department: field(3)?.parse::<Department>().map_err(|e| e.to_string())?,
                 text: from_hex(field(4)?)?,
                 seal: decode_seal(field(5)?, field(6)?)?,
                 criteria: split_criteria(&from_hex(field(7)?)?),
-            },
+            }),
         },
         "UNTEMPLATE" => TemplateRemoved {
             name: from_hex(field(2)?)?,
@@ -1036,7 +1036,7 @@ mod tests {
     fn event_round_trip_chinese_and_tabs() {
         let task = TaskId(42);
         let events = [
-            CourtEvent::EdictIssued(Edict {
+            CourtEvent::EdictIssued(Box::new(Edict {
                 id: task,
                 department: Department::Works,
                 text: "检查\tRust\n测试".into(),
@@ -1045,8 +1045,8 @@ mod tests {
                     scope: vec!["crates/紫垣,a".into(), "README.md".into()],
                     mcp: ["gh/search".to_owned(), "docs".to_owned()].into(),
                 },
-            }),
-            CourtEvent::EdictIssued(Edict {
+            })),
+            CourtEvent::EdictIssued(Box::new(Edict {
                 id: TaskId(43),
                 department: Department::Works,
                 text: "无工具".into(),
@@ -1055,7 +1055,7 @@ mod tests {
                     scope: vec![".".into()],
                     mcp: Default::default(),
                 },
-            }),
+            })),
             CourtEvent::TaskAssigned {
                 task,
                 worker: AgentId(7),
@@ -1161,7 +1161,7 @@ mod tests {
             CourtEvent::EdictExpedited { task },
             CourtEvent::TemplateSaved {
                 name: "补\t测试".into(),
-                template: Template {
+                template: Box::new(Template {
                     department: Department::Works,
                     text: "补测试\n两行".into(),
                     seal: Seal {
@@ -1170,7 +1170,7 @@ mod tests {
                         mcp: Default::default(),
                     },
                     criteria: vec!["测试通过".into(), "不改行为".into()],
-                },
+                }),
             },
             CourtEvent::TemplateRemoved {
                 name: "补\t测试".into(),
@@ -1400,7 +1400,7 @@ mod tests {
         assert!(
             matches!(
                 decode_event("v1\tCOMPLETED\t1\t4\t4142").unwrap(),
-                CourtEvent::TaskCompleted { summary, .. } if summary == "AB"
+                CourtEvent::TaskCompleted { summary, .. } if &*summary == "AB"
             ),
             "大写 hex 也可读"
         );
