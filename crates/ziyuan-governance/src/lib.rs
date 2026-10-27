@@ -1,6 +1,7 @@
 //! 治理引擎。职权由代码校验，不由 Agent 的角色提示词决定。
 pub mod names;
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path};
@@ -218,7 +219,7 @@ impl std::error::Error for GovernanceError {}
 
 /// 由事件重放得到的朝廷状态。字段私有：唯一的修改途径是 [`Court::apply`]，
 /// 它与 `propose_*` 共用同一套规则，因此回放永远不会接受提议阶段会拒绝的事件。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Court {
     mode: GovernanceMode,
     agents: BTreeMap<AgentId, Agent>,
@@ -252,7 +253,7 @@ pub struct Court {
 }
 
 /// 一位官员的廷杖记录。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Caning {
     /// 受杖次数（历来累计）。
     pub times: u32,
@@ -271,7 +272,7 @@ impl Caning {
 }
 
 /// 一次科举应试（见 `CourtEvent::ExamTaken`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExamRecord {
     pub agent: AgentId,
     pub exam: String,
@@ -289,14 +290,14 @@ impl ExamRecord {
 }
 
 /// 一次殿试：皇帝的题目、各官员的答卷与钦点的状元。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PalaceExam {
     pub question: String,
     pub answers: Vec<Speech>,
     pub zhuangyuan: Option<AgentId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub edict: Edict,
     pub status: TaskStatus,
@@ -343,7 +344,7 @@ pub struct Task {
 }
 
 /// 诏令所用的模板（见 `CourtEvent::TemplateApplied`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateUse {
     pub name: String,
     pub criteria: Vec<String>,
@@ -404,7 +405,7 @@ pub fn builtin_templates() -> Vec<(&'static str, Template)> {
 }
 
 /// 一处检出（见 `CourtEvent::SuspicionRaised`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Suspicion {
     pub source: String,
     pub threat: Threat,
@@ -416,7 +417,7 @@ pub struct Suspicion {
 }
 
 /// 刑部复勘的意见（用量已计入 `Task::usage`）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuspicionReview {
     pub reviewer: AgentId,
     /// 维持原检；否则判为误报。
@@ -457,7 +458,7 @@ impl Suspicion {
 }
 
 /// 分办方案。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Split {
     pub subtasks: Vec<TaskId>,
     /// 尚书的拆分说明，或「御定分办」。
@@ -468,7 +469,7 @@ pub struct Split {
 }
 
 /// 都察院复核的结果。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Censure {
     pub censor: AgentId,
     pub verdict: CensorVerdict,
@@ -480,7 +481,7 @@ pub struct Censure {
 }
 
 /// 呈报的文件改动及皇帝的处置。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changes {
     pub files: Vec<FileChange>,
     pub state: ChangeState,
@@ -488,7 +489,7 @@ pub struct Changes {
     pub skipped: Vec<u32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeState {
     /// 待皇帝落盘或驳回。
     Proposed,
@@ -499,7 +500,7 @@ pub enum ChangeState {
 }
 
 /// 内阁票拟的结果。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Draft {
     /// 拟派的承办者。
     pub worker: AgentId,
@@ -511,7 +512,7 @@ pub struct Draft {
     pub usage: TokenUsage,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     /// 已入队，尚未指派。
     Pending,

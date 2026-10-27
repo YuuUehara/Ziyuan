@@ -207,6 +207,9 @@ impl AppState {
                 _ => Session::open(EventLog::new(&root))?,
             };
             let result = f(&mut session);
+            if let Some(note) = session.take_chronicle() {
+                eprintln!("{note}");
+            }
             Ok::<_, AppError>((session, result))
         })
         .await
@@ -383,7 +386,7 @@ async fn history(
         limit: Some(limit + 1),
     };
     let mut entries = app
-        .with_session(move |s| Ok(history_entries(s.history(), &filter)))
+        .with_session(move |s| Ok(history_entries(s.history()?, &filter)))
         .await?
         .map_err(ApiError::bad)?;
     let truncated = entries.len() > limit;

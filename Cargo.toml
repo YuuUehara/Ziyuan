@@ -32,6 +32,8 @@ ziyuan-tui = { path = "crates/ziyuan-tui" }
 axum = "0.8"
 ratatui = "0.30"
 futures-util = { version = "0.3", default-features = false }
+# 会典（快照）：朝廷状态的序列化。
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 # 已随 ureq（rustls）进入依赖树；ChatGPT 登录用它取随机数、算 SHA-256、验 ID token 签名。
 ring = "0.17"

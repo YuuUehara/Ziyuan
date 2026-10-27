@@ -2253,6 +2253,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 name = "ziyuan-app"
 version = "0.5.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tokio",
  "ziyuan-core",
@@ -2282,6 +2283,9 @@ dependencies = [
 [[package]]
 name = "ziyuan-core"
 version = "0.5.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "ziyuan-github"
@@ -2296,6 +2300,7 @@ dependencies = [
 name = "ziyuan-governance"
 version = "0.5.0"
 dependencies = [
+ "serde",
  "ziyuan-core",
 ]
 

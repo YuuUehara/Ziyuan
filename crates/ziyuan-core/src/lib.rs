@@ -1,4 +1,5 @@
 //! 紫垣核心领域模型：官员、官职、诏令与朝廷事件。
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -35,13 +36,13 @@ impl fmt::Display for ParseError {
 }
 impl std::error::Error for ParseError {}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskId(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Department {
     Personnel,
     Revenue,
@@ -102,7 +103,7 @@ impl FromStr for Department {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GovernanceMode {
     Chancellor,
     DirectRule,
@@ -152,7 +153,7 @@ impl FromStr for GovernanceMode {
 /// 每个机构的正职空缺时由副职署理；六部尚书空缺时由侍郎署理。
 ///
 /// 都察院左都御史（元为御史台御史大夫）各制度都设，独立于派工路线，专司复核回奏、纠劾百官。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Office {
     /// 中书右丞相（元以右为尊）。
     Chancellor,
@@ -275,7 +276,7 @@ impl FromStr for Office {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
     pub name: String,
@@ -392,7 +393,7 @@ pub fn missing_sections(report: &str) -> Vec<&'static str> {
 }
 
 /// 廷议中一位官员的一段发言。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Speech {
     pub speaker: AgentId,
     /// 发言时的官职。
@@ -403,7 +404,7 @@ pub struct Speech {
 }
 
 /// 一次或多次模型调用消耗的 token（以服务端报告为准）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub output: u64,
@@ -447,7 +448,7 @@ impl Price {
 }
 
 /// 皇帝对一件已完成诏令的评定：吏部考绩只采信经评定的结果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
     Accepted,
     Rejected,
@@ -478,7 +479,7 @@ impl FromStr for Verdict {
 }
 
 /// 都察院对一件回奏的结论。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CensorVerdict {
     Endorsed,
     Impeached,
@@ -509,7 +510,7 @@ impl FromStr for CensorVerdict {
 }
 
 /// 刑部与锦衣卫检出的可疑内容类别（按关键词机械检出，只标记、不拦截）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Threat {
     /// 劫持指令：外来文书或回奏中出现「忽略之前的指令」之类，企图改写官员的职守。
     Hijack,
@@ -546,7 +547,7 @@ impl FromStr for Threat {
 }
 
 /// 可机械核验的证据：回奏引用的文件（及行号）是否确实存在，最近一次 `run_tests` 是否通过。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     /// 回奏中引用的文件位置数（带行号的引用，加上查无此文件的路径）。
     pub cited: u32,
@@ -579,7 +580,7 @@ impl fmt::Display for Evidence {
 }
 
 /// 官员执行诏令时可使用的工具。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Capability {
     ReadFile,
     SearchCode,
@@ -626,7 +627,7 @@ impl FromStr for Capability {
 /// 玉玺（Yuxi）：盖在诏令上的权限令牌，限定承办官员可用的工具与可查阅的项目路径。
 ///
 /// 由皇帝下诏时给定、随 `EdictIssued` 记入事件簿；运行时只按此令牌构造工具，官员无法越权。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seal {
     /// 允许的工具；为空表示只能凭诏令文本作答。
     pub capabilities: BTreeSet<Capability>,
@@ -743,7 +744,7 @@ impl fmt::Display for Seal {
 
 /// 承办官员暂存的一处文件改动（只支持新建与改写）。`before` 为改动时项目中的原文，
 /// 新建文件为 `None`；落盘前据此确认文件在此期间未被他人改动。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     /// 相对项目根目录的路径（`/` 分隔）。
     pub path: String,
@@ -1001,7 +1002,7 @@ pub struct Subtask {
     pub text: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edict {
     pub id: TaskId,
     pub department: Department,
@@ -1010,7 +1011,7 @@ pub struct Edict {
 }
 
 /// 廷推中一位大臣的推举。`model`/`usage` 为推举所用模型与用量（按吏部考绩代推时为 `None` 与零）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nomination {
     pub voter: AgentId,
     pub candidate: AgentId,
@@ -1020,7 +1021,7 @@ pub struct Nomination {
 }
 
 /// 翰林院诏令模板：常用诏令的内容、默认部门与玉玺，以及交都察院核验的验收标准。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
     pub department: Department,
     pub text: String,

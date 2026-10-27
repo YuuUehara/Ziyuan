@@ -11,10 +11,11 @@ ziyuan-governance.workspace = true
 ziyuan-github.workspace = true
 ziyuan-runtime.workspace = true
 ziyuan-storage.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "time"] }
 
 [dev-dependencies]
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 
 [lints]

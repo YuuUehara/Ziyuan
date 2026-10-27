@@ -409,11 +409,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let command = parse(args)?;
     let log = EventLog::new(&env::current_dir()?);
     if json {
-        let session = Session::open(log)?;
+        let mut session = Session::open(log)?;
         println!(
             "{}",
             serde_json::to_string_pretty(&json_output(&session, &command)?)?
         );
+        chronicle(&mut session);
         return Ok(());
     }
     match command {
@@ -438,7 +439,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
             frontend(command)?;
         }
-        command => execute(&mut Session::open(log)?, command)?,
+        command => {
+            let mut session = Session::open(log)?;
+            let result = execute(&mut session, command);
+            chronicle(&mut session);
+            result?
+        }
     }
     Ok(())
 }
@@ -547,6 +553,13 @@ fn open_browser(url: &str) {
         .spawn();
 }
 
+/// 史官对修会典的记述（写到 stderr，不混入 `--json` 与管道里的输出）。
+fn chronicle(session: &mut Session<EventLog>) {
+    if let Some(note) = session.take_chronicle() {
+        eprintln!("{note}");
+    }
+}
+
 fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
     let report = log.inspect()?;
     let version = env!("CARGO_PKG_VERSION");
@@ -574,6 +587,18 @@ fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
     }
     if report.torn_tail {
         println!("末尾有一行未写完（中断的写入），下次写入前自动截掉。");
+    }
+    match log.snapshot_header() {
+        Some((events, tag)) if tag == format!("v{version}") => println!(
+            "《大明会典》.ziyuan/huidian：收前 {events} 条事件，打开时从此接着回放。会典只是缓存，可随时删去。"
+        ),
+        Some((events, tag)) => println!(
+            "《大明会典》.ziyuan/huidian：{tag} 所修（收前 {events} 条），本版不沿用，下次打开时重修。"
+        ),
+        None => println!(
+            "尚无《大明会典》：每满 {} 条事件修一部，打开时从会典接着回放。",
+            ziyuan_app::HUIDIAN_EVERY
+        ),
     }
     println!("无需迁移。史官记：祖宗成法不可轻改。");
     Ok(())
@@ -1763,7 +1788,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
         Command::History(filter) => {
             let offset = tz_offset();
-            for entry in history_entries(session.history(), &filter)? {
+            for entry in history_entries(session.history()?, &filter)? {
                 let at = entry.at.map_or("—".repeat(16), |t| format_time(t, offset));
                 println!("{:>3}: {at}  {}", entry.seq, entry.text);
             }
@@ -2065,7 +2090,7 @@ fn json_output(
         Command::Tasks => state()?["tasks"].take(),
         Command::History(filter) => {
             let offset = tz_offset();
-            history_entries(session.history(), filter)?
+            history_entries(session.history()?, filter)?
                 .into_iter()
                 .map(|e| {
                     serde_json::json!({

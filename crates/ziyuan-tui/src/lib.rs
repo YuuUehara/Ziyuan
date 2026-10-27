@@ -230,7 +230,8 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config) -> Result<(Self, UnboundedReceiver<Message>), AppError> {
-        let session = Session::open(EventLog::new(&config.root))?;
+        let mut session = Session::open(EventLog::new(&config.root))?;
+        let chronicle = session.take_chronicle();
         let (sender, receiver) = unbounded_channel();
         let selected_task = session.court().tasks().last().map(|t| t.edict.id);
         let app = Self {
@@ -244,7 +245,7 @@ impl App {
             selected_event: None,
             detail_scroll: 0,
             modal: None,
-            status: None,
+            status: chronicle.map(|note| (note, false)),
             run: None,
             live: HashMap::new(),
             debating: HashMap::new(),
@@ -1680,7 +1681,11 @@ impl App {
             limit: Some(HISTORY_LIMIT),
             ..HistoryFilter::default()
         };
-        history_entries(self.session.history(), &filter).unwrap_or_default()
+        self.session
+            .history()
+            .ok()
+            .and_then(|h| history_entries(h, &filter).ok())
+            .unwrap_or_default()
     }
 
     fn draw_history(&self, frame: &mut Frame, area: Rect) {

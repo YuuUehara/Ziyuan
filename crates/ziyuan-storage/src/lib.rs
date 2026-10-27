@@ -74,6 +74,18 @@ pub trait EventStore {
         }
         Ok(events.split_off(known))
     }
+    /// 前 `upto` 条事件中 `keep` 选中的，按写入顺序。只为查几条事件时用：逐条解码、
+    /// 只留选中的，不把整本事件簿留在内存里，也不动增量读取的位置。
+    fn load_where(
+        &self,
+        upto: usize,
+        keep: &dyn Fn(&CourtEvent) -> bool,
+    ) -> Result<Vec<CourtEvent>, StorageError> {
+        let mut events = self.load()?;
+        events.truncate(upto);
+        events.retain(|e| keep(e));
+        Ok(events)
+    }
     /// 仅当事件簿中恰好有 `expected` 条事件时追加 `events`（乐观并发），否则返回
     /// [`StorageError::Conflict`] 且不写入。调用者负责先校验事件（见 `ziyuan-app`）。
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError>;
@@ -82,6 +94,29 @@ pub trait EventStore {
     fn stamps_time(&self) -> bool {
         false
     }
+    /// 读会典（快照）：须由同一 `tag`（调用者的状态格式，如版本号）所修，且仍是本事件簿前若干条的。
+    /// 没有会典时为 `Ok(None)`；有而用不得时返回原因，调用者应从头回放。
+    /// 读到后，随后的 [`load_since`](Self::load_since)`(snapshot.events)` 只读会典之后的事件。
+    fn load_snapshot(&self, _tag: &str) -> Result<Option<Snapshot>, String> {
+        Ok(None)
+    }
+    /// 修会典：`write` 写出的状态涵盖事件簿的前 `events` 条。只在刚读到或刚写完第 `events` 条时
+    /// 修得（否则不知其位置），修不得时返回 `Ok(false)`。会典随时可删，删了从头回放。
+    fn save_snapshot(
+        &mut self,
+        _tag: &str,
+        _events: usize,
+        _write: &dyn Fn(&mut dyn Write) -> io::Result<()>,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+}
+
+/// 会典（快照）：调用者序列化的状态，涵盖事件簿的前 `events` 条。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub events: usize,
+    pub data: Vec<u8>,
 }
 
 /// 事件类型的代码（事件簿中的类型字段，小写），如 `edict`、`tool`、`usage`。
@@ -98,6 +133,24 @@ impl<T: EventStore + ?Sized> EventStore for &mut T {
     }
     fn load_since(&self, known: usize) -> Result<Vec<CourtEvent>, StorageError> {
         (**self).load_since(known)
+    }
+    fn load_snapshot(&self, tag: &str) -> Result<Option<Snapshot>, String> {
+        (**self).load_snapshot(tag)
+    }
+    fn load_where(
+        &self,
+        upto: usize,
+        keep: &dyn Fn(&CourtEvent) -> bool,
+    ) -> Result<Vec<CourtEvent>, StorageError> {
+        (**self).load_where(upto, keep)
+    }
+    fn save_snapshot(
+        &mut self,
+        tag: &str,
+        events: usize,
+        write: &dyn Fn(&mut dyn Write) -> io::Result<()>,
+    ) -> Result<bool, StorageError> {
+        (**self).save_snapshot(tag, events, write)
     }
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError> {
         (**self).append(expected, events)
@@ -265,21 +318,9 @@ impl EventStore for EventLog {
         }
         let mut events = Vec::new();
         let tail = self.read_tail(&mut file, |number, line| {
-            if number < known {
-                return Ok(());
+            if number >= known {
+                events.push(decode_line(number, line)?);
             }
-            let corrupt = |reason| StorageError::Corrupt {
-                line: number + 1,
-                reason,
-            };
-            let text = std::str::from_utf8(line).map_err(|e| corrupt(e.to_string()))?;
-            events.push(codec::decode_event(text).map_err(|e| match e {
-                codec::DecodeError::Newer(what) => StorageError::Newer {
-                    line: number + 1,
-                    what,
-                },
-                codec::DecodeError::Malformed(reason) => corrupt(reason),
-            })?);
             Ok(())
         })?;
         self.set_cursor(tail.end);
@@ -292,6 +333,113 @@ impl EventStore for EventLog {
             });
         }
         Ok(events)
+    }
+
+    fn load_where(
+        &self,
+        upto: usize,
+        keep: &dyn Fn(&CourtEvent) -> bool,
+    ) -> Result<Vec<CourtEvent>, StorageError> {
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        file.lock_shared()?;
+        let mut reader = io::BufReader::with_capacity(1 << 16, file);
+        let (mut events, mut line) = (Vec::new(), Vec::new());
+        for number in 0..upto {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line)?;
+            if n == 0 || line.last() != Some(&b'\n') {
+                break;
+            }
+            let event = decode_line(number, &line[..n - 1])?;
+            if keep(&event) {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
+    fn load_snapshot(&self, tag: &str) -> Result<Option<Snapshot>, String> {
+        let file = match File::open(self.snapshot_path()) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("读不了会典：{e}")),
+        };
+        let mut reader = io::BufReader::with_capacity(1 << 16, file);
+        let mut header = String::new();
+        reader
+            .read_line(&mut header)
+            .map_err(|e| format!("会典首行读不出：{e}"))?;
+        let fields: Vec<&str> = header.trim_end_matches('\n').split('\t').collect();
+        let [HUIDIAN, HUIDIAN_FORMAT, made_by, events, bytes, hash] = fields.as_slice() else {
+            return Err("会典格式不认得".into());
+        };
+        if *made_by != tag {
+            return Err(format!("会典为 {made_by} 所修，本版为 {tag}"));
+        }
+        let parse = |v: &str| v.parse::<u64>().map_err(|_| "会典首行数字不对".to_owned());
+        let (events, bytes) = (parse(events)? as usize, parse(bytes)?);
+        let hash = u64::from_str_radix(hash, 16).map_err(|_| "会典首行摘要不对")?;
+        let mut file = File::open(&self.path).map_err(|e| format!("打不开事件簿：{e}"))?;
+        file.lock_shared().map_err(|e| e.to_string())?;
+        let cursor = Cursor {
+            events,
+            bytes,
+            file: identity(&file).map_err(|e| e.to_string())?,
+        };
+        let matches = events > 0
+            && Self::usable(&mut file, cursor).map_err(|e| e.to_string())?
+            && Self::fingerprint(&mut file, bytes).map_err(|e| e.to_string())? == hash;
+        if !matches {
+            return Err("会典与事件簿对不上".into());
+        }
+        // 按文件大小一次分配，免得边读边扩容时占到两倍。
+        let size = reader.get_ref().metadata().map_or(0, |m| m.len()) as usize;
+        let mut data = Vec::with_capacity(size.saturating_sub(header.len()));
+        reader
+            .read_to_end(&mut data)
+            .map_err(|e| format!("读不了会典：{e}"))?;
+        self.set_cursor(cursor);
+        Ok(Some(Snapshot { events, data }))
+    }
+
+    fn save_snapshot(
+        &mut self,
+        tag: &str,
+        events: usize,
+        write: &dyn Fn(&mut dyn Write) -> io::Result<()>,
+    ) -> Result<bool, StorageError> {
+        let cursor = *self.cursor.lock().expect("锁未中毒");
+        if events == 0 || cursor.events != events || tag.contains(['\t', '\n']) {
+            return Ok(false);
+        }
+        let mut file = File::open(&self.path)?;
+        file.lock_shared()?;
+        if !Self::usable(&mut file, cursor)? {
+            return Ok(false);
+        }
+        let hash = Self::fingerprint(&mut file, cursor.bytes)?;
+        drop(file);
+        let path = self.snapshot_path();
+        // 各进程各写各的临时文件，改名是原子的：读者只见旧会典或新会典。
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let mut out = io::BufWriter::new(File::create(&tmp)?);
+        writeln!(
+            out,
+            "{HUIDIAN}\t{HUIDIAN_FORMAT}\t{tag}\t{events}\t{}\t{hash:016x}",
+            cursor.bytes
+        )?;
+        if let Err(e) = write(&mut out) {
+            drop(out);
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+        fs::rename(&tmp, &path)?;
+        Ok(true)
     }
 
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError> {
@@ -326,6 +474,67 @@ impl EventStore for EventLog {
             file: start.file,
         });
         Ok(())
+    }
+}
+
+/// 解码第 `number` 行（从 0 起）。
+fn decode_line(number: usize, line: &[u8]) -> Result<CourtEvent, StorageError> {
+    let corrupt = |reason| StorageError::Corrupt {
+        line: number + 1,
+        reason,
+    };
+    let text = std::str::from_utf8(line).map_err(|e| corrupt(e.to_string()))?;
+    codec::decode_event(text).map_err(|e| match e {
+        codec::DecodeError::Newer(what) => StorageError::Newer {
+            line: number + 1,
+            what,
+        },
+        codec::DecodeError::Malformed(reason) => corrupt(reason),
+    })
+}
+
+/// 会典文件的首行标记与格式。
+const HUIDIAN: &str = "ZIYUAN-HUIDIAN";
+const HUIDIAN_FORMAT: &str = "1";
+/// 核对会典与事件簿时，取事件簿开头与会典止处之前各这么多字节求摘要。
+const FINGERPRINT_SPAN: u64 = 4096;
+
+impl EventLog {
+    fn snapshot_path(&self) -> PathBuf {
+        self.path.with_file_name("huidian")
+    }
+
+    /// 事件簿前 `bytes` 字节的指纹：开头与末尾各一段的 FNV-1a 摘要。开头含建朝的种子，
+    /// 换了一本事件簿便对不上；末尾一段核对会典止处之前没有被改动。
+    fn fingerprint(file: &mut File, bytes: u64) -> io::Result<u64> {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |file: &mut File, start: u64, len: u64| -> io::Result<()> {
+            let mut buf = vec![0; len as usize];
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(&mut buf)?;
+            for b in buf {
+                hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+            Ok(())
+        };
+        let span = bytes.min(FINGERPRINT_SPAN);
+        feed(file, 0, span)?;
+        feed(file, bytes - span, span)?;
+        Ok(hash)
+    }
+
+    /// 会典的状况（`ziyuan migrate` 所用）：涵盖的事件条数与所修的 `tag`；没有会典时为 `None`。
+    pub fn snapshot_header(&self) -> Option<(usize, String)> {
+        let file = File::open(self.snapshot_path()).ok()?;
+        let mut line = String::new();
+        io::BufReader::new(file).read_line(&mut line).ok()?;
+        let fields: Vec<&str> = line.trim_end().split('\t').collect();
+        match fields.as_slice() {
+            [HUIDIAN, HUIDIAN_FORMAT, tag, events, ..] => {
+                Some((events.parse().ok()?, (*tag).to_owned()))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -399,8 +608,35 @@ impl EventLog {
 #[derive(Clone, Debug, Default)]
 pub struct MemoryEventLog {
     events: Vec<CourtEvent>,
+    /// 会典：(tag, 涵盖的事件条数, 内容)。
+    snapshot: Option<(String, usize, Vec<u8>)>,
 }
 impl EventStore for MemoryEventLog {
+    fn load_snapshot(&self, tag: &str) -> Result<Option<Snapshot>, String> {
+        match &self.snapshot {
+            None => Ok(None),
+            Some((made_by, ..)) if made_by != tag => Err(format!("会典为 {made_by} 所修")),
+            Some((_, events, _)) if *events > self.events.len() => Err("会典与事件簿对不上".into()),
+            Some((_, events, data)) => Ok(Some(Snapshot {
+                events: *events,
+                data: data.clone(),
+            })),
+        }
+    }
+    fn save_snapshot(
+        &mut self,
+        tag: &str,
+        events: usize,
+        write: &dyn Fn(&mut dyn Write) -> io::Result<()>,
+    ) -> Result<bool, StorageError> {
+        if events == 0 || events > self.events.len() {
+            return Ok(false);
+        }
+        let mut data = Vec::new();
+        write(&mut data)?;
+        self.snapshot = Some((tag.to_owned(), events, data));
+        Ok(true)
+    }
     fn load(&self) -> Result<Vec<CourtEvent>, StorageError> {
         Ok(self.events.clone())
     }
@@ -448,6 +684,38 @@ mod tests {
         ));
         b.append(1, &[reform(GovernanceMode::Cabinet)]).unwrap();
         assert_eq!(a.load().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_where_keeps_matches_within_upto() {
+        let root = temp_root("where");
+        let mut log = EventLog::new(&root);
+        let tool = |task, ok| CourtEvent::ToolInvoked {
+            task: ziyuan_core::TaskId(task),
+            tool: "read_file".into(),
+            args_json: "{}".into(),
+            ok,
+        };
+        log.append(
+            0,
+            &[
+                CourtEvent::Founded(GovernanceMode::Chancellor),
+                tool(1, true),
+                tool(2, true),
+                tool(1, false),
+                tool(1, true),
+            ],
+        )
+        .unwrap();
+        let keep =
+            |e: &CourtEvent| matches!(e, CourtEvent::ToolInvoked { task, .. } if task.0 == 1);
+        // 第 5 条在 `upto` 之外，不取。
+        assert_eq!(
+            log.load_where(4, &keep).unwrap(),
+            [tool(1, true), tool(1, false)]
+        );
+        assert_eq!(MemoryEventLog::default().load_where(9, &keep).unwrap(), []);
         fs::remove_dir_all(root).unwrap();
     }
 

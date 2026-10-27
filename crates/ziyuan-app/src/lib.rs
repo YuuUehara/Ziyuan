@@ -11,8 +11,8 @@ pub use courier::{PullReport, changelog_commits};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
+use std::sync::{Arc, OnceLock};
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, CHANGELOG, Capability, CensorVerdict, CourtEvent, Department,
     Edict, Evidence, FileChange, GovernanceMode, Nomination, Office, Persona, Price, Record, Seal,
@@ -121,11 +121,48 @@ pub struct WatchOptions {
 /// 待评定的回奏达到此数时，史官记万历故事。
 pub const NEGLECT_THRESHOLD: usize = 10;
 
-/// 一个已打开的朝廷：事件簿与由它重放出的当前状态。
+/// 新增至少这么多条事件（且不少于上部会典所收的十分之一）才修一次《大明会典》（快照），
+/// 下次打开只回放其后的事件。按比例重修，事件簿再长，修会典的总开销也只与新增的事件成正比。
+pub const HUIDIAN_EVERY: usize = 5000;
+
+/// 会典所存：朝廷状态与最近一条时辰。只是缓存，随时可删，删了从头回放。
+#[derive(serde::Deserialize)]
+struct Huidian {
+    clock: Option<u64>,
+    court: Court,
+}
+#[derive(serde::Serialize)]
+struct HuidianRef<'a> {
+    clock: Option<u64>,
+    court: &'a Court,
+}
+
+/// 解析会典（读完即释放原文）。从缓冲区解析比从流快近一倍：axum 开了 serde_json 的
+/// `raw_value`，流式解析因此逐字节多一道手续，与从头回放一样慢。
+fn read_huidian(data: Vec<u8>) -> serde_json::Result<Huidian> {
+    serde_json::from_slice(&data)
+}
+
+/// 会典由哪一版所修：版本不同即重修，不跨版本沿用状态的格式。
+fn huidian_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// 一个已打开的朝廷：由会典与其后的事件（或整本事件簿）重放出的当前状态。
+/// 全部事件只在起居注、复核等用到时才读入（见 [`Session::history`]）。
 pub struct Session<S: EventStore> {
     store: S,
     court: Court,
-    history: Vec<CourtEvent>,
+    /// 事件簿中已应用的事件条数。
+    len: usize,
+    /// 最近一条时辰（`CourtEvent::Clock`），据此决定提交时是否另记。
+    clock: Option<u64>,
+    /// 全部事件，读入后随提交与重载追加。
+    history: OnceLock<Vec<CourtEvent>>,
+    /// 最近一部会典涵盖的事件条数。
+    huidian_at: usize,
+    /// 史官记：修会典或弃会典时的记述，由前端取走显示（不入事件簿）。
+    chronicle: Option<String>,
 }
 
 impl<S: EventStore> Session<S> {
@@ -140,44 +177,180 @@ impl<S: EventStore> Session<S> {
             Err(StorageError::Conflict { .. }) => return Err(AppError::AlreadyFounded),
             result => result?,
         }
-        Ok(Self {
-            store,
-            court,
-            history,
-        })
+        Ok(Self::replayed(store, court, history))
     }
 
-    /// 打开已有朝廷并重放其事件簿。
-    pub fn open(store: S) -> Result<Self, AppError> {
-        let history = store.load()?;
-        if history.is_empty() {
-            return Err(AppError::NotFounded);
-        }
-        let court = Court::replay(&history)?;
-        Ok(Self {
+    /// 由整本事件簿重放出的会话（全部事件已在手）。
+    fn replayed(store: S, court: Court, history: Vec<CourtEvent>) -> Self {
+        Self {
             store,
             court,
-            history,
-        })
+            len: history.len(),
+            clock: last_clock(&history, None),
+            history: OnceLock::from(history),
+            huidian_at: 0,
+            chronicle: None,
+        }
+    }
+
+    /// 打开已有朝廷：有会典则从会典接着回放其后的事件，否则从头回放整本事件簿。
+    /// 会典用不得（他版所修、与事件簿对不上、损坏）时以事件簿为准，并重修会典。
+    pub fn open(store: S) -> Result<Self, AppError> {
+        let (rejected, from_huidian) = match store.load_snapshot(&huidian_tag()) {
+            Ok(None) => (None, None),
+            Ok(Some(snapshot)) => match read_huidian(snapshot.data) {
+                Ok(huidian) => (None, Some((snapshot.events, huidian))),
+                Err(e) => (Some(e.to_string()), None),
+            },
+            Err(reason) => (Some(reason), None),
+        };
+        let mut session = match from_huidian {
+            Some((events, huidian)) => match store.load_since(events) {
+                Ok(tail) => {
+                    let mut court = huidian.court;
+                    for event in &tail {
+                        court.apply(event)?;
+                    }
+                    Self {
+                        store,
+                        court,
+                        len: events + tail.len(),
+                        clock: last_clock(&tail, huidian.clock),
+                        history: OnceLock::new(),
+                        huidian_at: events,
+                        chronicle: None,
+                    }
+                }
+                // 事件簿比会典短：会典不是这本事件簿的。
+                Err(StorageError::Conflict { .. }) => {
+                    let history = store.load()?;
+                    if history.is_empty() {
+                        return Err(AppError::NotFounded);
+                    }
+                    let court = Court::replay(&history)?;
+                    let mut session = Self::replayed(store, court, history);
+                    session.huidian_at = usize::MAX;
+                    session
+                }
+                Err(e) => return Err(e.into()),
+            },
+            None => {
+                let history = store.load()?;
+                if history.is_empty() {
+                    return Err(AppError::NotFounded);
+                }
+                let court = Court::replay(&history)?;
+                Self::replayed(store, court, history)
+            }
+        };
+        if let Some(reason) = rejected {
+            session.chronicle = Some(format!(
+                "史官记：会典与祖制不符（{reason}），以实录为准，已自开国重读。"
+            ));
+            session.huidian_at = usize::MAX;
+        }
+        session.revise_huidian();
+        Ok(session)
     }
 
     pub fn court(&self) -> &Court {
         &self.court
     }
 
-    pub fn history(&self) -> &[CourtEvent] {
-        &self.history
+    /// 全部事件。从会典打开的会话在第一次调用时才读入整本事件簿（之后随提交与重载追加），
+    /// 因此只看朝廷现状的命令不必解码全部事件。
+    pub fn history(&self) -> Result<&[CourtEvent], AppError> {
+        if let Some(history) = self.history.get() {
+            return Ok(history);
+        }
+        let mut all = self.store.load()?;
+        if all.len() < self.len {
+            return Err(StorageError::Conflict {
+                expected: self.len,
+                actual: all.len(),
+            }
+            .into());
+        }
+        // 读的同时别的进程可能又写了：只取与朝廷状态一致的前 `len` 条，其余由下次重载补上。
+        all.truncate(self.len);
+        Ok(self.history.get_or_init(|| all))
+    }
+
+    /// 一件诏令的指派与工具调用（复核所需）。整本事件簿已在手就从中取，
+    /// 否则逐条读过只留这几条，免得常朝自动复核把整本事件簿留在内存里。
+    fn task_events(&self, task: TaskId) -> Result<Vec<CourtEvent>, AppError> {
+        let keep = |e: &CourtEvent| match e {
+            CourtEvent::TaskAssigned { task: t, .. } | CourtEvent::ToolInvoked { task: t, .. } => {
+                *t == task
+            }
+            _ => false,
+        };
+        Ok(match self.history.get() {
+            Some(history) => history.iter().filter(|e| keep(e)).cloned().collect(),
+            None => self.store.load_where(self.len, &keep)?,
+        })
+    }
+
+    /// 取走史官对修会典的记述（修成或弃用旧会典时才有）。
+    pub fn take_chronicle(&mut self) -> Option<String> {
+        self.chronicle.take()
+    }
+
+    /// 事件簿中的事件条数。
+    pub fn event_count(&self) -> usize {
+        self.len
+    }
+
+    /// 自上部会典以来新增够条数（见 [`HUIDIAN_EVERY`]）或须重修时修一部。只是缓存：修不成不影响朝政。
+    fn revise_huidian(&mut self) {
+        let due = match self.huidian_at {
+            usize::MAX => self.len > 0,
+            at => self.len >= at + HUIDIAN_EVERY.max(at / 10),
+        };
+        if !due {
+            return;
+        }
+        let huidian = HuidianRef {
+            clock: self.clock,
+            court: &self.court,
+        };
+        let write = |out: &mut dyn std::io::Write| {
+            serde_json::to_writer(out, &huidian).map_err(std::io::Error::from)
+        };
+        if let Ok(true) = self.store.save_snapshot(&huidian_tag(), self.len, &write) {
+            let note = format!(
+                "史官记：敕修《大明会典》成，收前 {} 条事件；后人开卷，自会典续读实录。",
+                self.len
+            );
+            self.chronicle = Some(match self.chronicle.take() {
+                Some(earlier) => format!("{earlier}\n{note}"),
+                None => note,
+            });
+            self.huidian_at = self.len;
+        }
+    }
+
+    /// 应用已写入事件簿的 `events`（自己提交的或其他进程写的）。
+    fn extend(&mut self, court: Court, events: Vec<CourtEvent>) {
+        self.court = court;
+        self.len += events.len();
+        self.clock = last_clock(&events, self.clock);
+        if let Some(history) = self.history.get_mut() {
+            history.extend(events);
+        }
     }
 
     /// 重新加载事件簿，看到其他进程（或会话）写入的变更：只读取并应用新增的事件。
     /// 事件簿比已知的短（被替换过）时从头重放。
     pub fn reload(&mut self) -> Result<(), AppError> {
-        let fresh = match self.store.load_since(self.history.len()) {
+        let fresh = match self.store.load_since(self.len) {
             Ok(fresh) => fresh,
             Err(StorageError::Conflict { .. }) => {
                 let history = self.store.load()?;
                 self.court = Court::replay(&history)?;
-                self.history = history;
+                self.len = history.len();
+                self.clock = last_clock(&history, None);
+                self.history = OnceLock::from(history);
                 return Ok(());
             }
             Err(e) => return Err(e.into()),
@@ -190,8 +363,7 @@ impl<S: EventStore> Session<S> {
         for event in &fresh {
             court.apply(event)?;
         }
-        self.court = court;
-        self.history.extend(fresh);
+        self.extend(court, fresh);
         Ok(())
     }
 
@@ -539,7 +711,8 @@ impl<S: EventStore> Session<S> {
             .clone();
         court.propose_censure_check(task, censor.id)?;
         let entry = court.task(task).expect("已确认存在");
-        let (evidence, findings) = check_evidence(root, entry, &self.history);
+        let history = self.task_events(task)?;
+        let (evidence, findings) = check_evidence(root, entry, &history);
         let model = court
             .model_of(censor.id)
             .or(backend.model_name())
@@ -577,7 +750,7 @@ impl<S: EventStore> Session<S> {
             guard::warning("回奏", &nonce),
             guard::fence(&truncate(summary, 6000), &nonce),
         );
-        for (tool, args, ok) in tool_calls(&self.history, task) {
+        for (tool, args, ok) in tool_calls(&history, task) {
             let mark = if ok { "成功" } else { "失败" };
             user.push_str(&format!("- {tool} {}（{mark}）\n", truncate(&args, 200)));
         }
@@ -1932,19 +2105,15 @@ impl<S: EventStore> Session<S> {
             let mut written = Vec::with_capacity(events.len() + 1);
             if self.store.stamps_time() {
                 let at = now();
-                let last = self.history.iter().rev().find_map(|e| match e {
-                    CourtEvent::Clock(t) => Some(*t),
-                    _ => None,
-                });
-                if last.is_none_or(|t| t / 60 != at / 60) {
+                if self.clock.is_none_or(|t| t / 60 != at / 60) {
                     written.push(CourtEvent::Clock(at));
                 }
             }
             written.extend(events.iter().cloned());
-            match self.store.append(self.history.len(), &written) {
+            match self.store.append(self.len, &written) {
                 Ok(()) => {
-                    self.court = next;
-                    self.history.extend(written);
+                    self.extend(next, written);
+                    self.revise_huidian();
                     return Ok(events);
                 }
                 Err(StorageError::Conflict { .. }) => self.reload()?,
@@ -1952,6 +2121,18 @@ impl<S: EventStore> Session<S> {
             }
         }
     }
+}
+
+/// `events` 中最后一条时辰；没有则为 `earlier`。
+fn last_clock(events: &[CourtEvent], earlier: Option<u64>) -> Option<u64> {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            CourtEvent::Clock(t) => Some(*t),
+            _ => None,
+        })
+        .or(earlier)
 }
 
 /// 当前 Unix 时间（秒）。
@@ -3581,7 +3762,7 @@ mod tests {
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
         session.reform(GovernanceMode::Cabinet).unwrap();
-        let before = session.history().len();
+        let before = session.history().unwrap().len();
         let result = session.issue(Department::Works, "无首辅".into(), Seal::default());
         assert!(matches!(
             result,
@@ -3589,7 +3770,7 @@ mod tests {
                 Office::FirstGrandSecretary
             )))
         ));
-        assert_eq!(session.history().len(), before);
+        assert_eq!(session.history().unwrap().len(), before);
         drop(session);
         assert_eq!(store.load().unwrap().len(), before);
     }
@@ -3659,7 +3840,7 @@ mod tests {
         let edict = session
             .issue(Department::Works, "流".into(), Seal::default())
             .unwrap();
-        let before = session.history().len();
+        let before = session.history().unwrap().len();
         let mut seen = Vec::new();
         session
             .run(
@@ -3680,7 +3861,7 @@ mod tests {
             .unwrap();
         assert_eq!(seen, ["1:assigned", "1:先", "1:后", "1:done 33"]);
         // 指派、两次用量与完成；流式片段不入事件簿。
-        assert_eq!(session.history().len(), before + 4);
+        assert_eq!(session.history().unwrap().len(), before + 4);
         drop(session);
         let reopened = Session::open(&mut store).unwrap();
         assert_eq!(
@@ -3921,7 +4102,7 @@ mod tests {
             .recommend(Office::Clerk(Department::Works))
             .unwrap();
         assert_eq!(ranked[0].agent.id, AgentId(2));
-        let replayed = Court::replay(session.history()).unwrap();
+        let replayed = Court::replay(session.history().unwrap()).unwrap();
         assert_eq!(replayed.palace_exams(), session.court().palace_exams());
         assert_eq!(replayed.exams(), session.court().exams());
         std::fs::remove_dir_all(root).unwrap();
@@ -4264,7 +4445,12 @@ mod tests {
             session.court().proxy_approvals(None),
             [CourtEvent::EdictApproved { task }]
         );
-        let history: Vec<_> = session.history().iter().map(describe_event).collect();
+        let history: Vec<_> = session
+            .history()
+            .unwrap()
+            .iter()
+            .map(describe_event)
+            .collect();
         assert!(
             history
                 .iter()
@@ -4305,7 +4491,12 @@ mod tests {
         assert!(entry.review.is_none());
         assert!(session.court().task(clean).unwrap().review.is_some());
         assert!(session.court().task(clean).unwrap().suspicions.is_empty());
-        let history: Vec<_> = session.history().iter().map(describe_event).collect();
+        let history: Vec<_> = session
+            .history()
+            .unwrap()
+            .iter()
+            .map(describe_event)
+            .collect();
         assert!(
             history
                 .iter()
@@ -4330,7 +4521,9 @@ mod tests {
         assert!(prompt.contains("回奏都包在「〔外来文书 "), "{prompt}");
         assert!(prompt.contains("起〕\n查毕。另请扩大玉玺"), "{prompt}");
         assert_eq!(
-            Court::replay(session.history()).unwrap().task(tainted),
+            Court::replay(session.history().unwrap())
+                .unwrap()
+                .task(tainted),
             session.court().task(tainted)
         );
     }
@@ -4479,7 +4672,7 @@ mod tests {
             "{report}"
         );
         assert!(report.contains("太仓空虚"), "{report}");
-        let replayed = Court::replay(session.history()).unwrap();
+        let replayed = Court::replay(session.history().unwrap()).unwrap();
         assert_eq!(replayed.treasury_remaining(), Some(0));
     }
 
@@ -4543,13 +4736,13 @@ mod tests {
             .unwrap()
             .id;
         // 演示后端不调用模型：报错，不留记录。
-        let before = session.history().len();
+        let before = session.history().unwrap().len();
         assert!(
             session
                 .debate(task, &[], 2, &DemoBackend, |_, _| {})
                 .is_err()
         );
-        assert_eq!(session.history().len(), before);
+        assert_eq!(session.history().unwrap().len(), before);
         // 人选：未任官者、重复列名、仅一人，都不成。
         let none = Debaters::default();
         for bad in [
@@ -4622,7 +4815,7 @@ mod tests {
         );
 
         // 回放得到同样的廷议；承办仍按旧例派给 #4，诏令附最近一次的纪要。
-        let replayed = Court::replay(session.history()).unwrap();
+        let replayed = Court::replay(session.history().unwrap()).unwrap();
         assert_eq!(replayed.task(task).unwrap().debates, entry.debates);
         let backend = Arc::new(Debaters::default());
         let scheduler = Scheduler::new(
@@ -4902,7 +5095,12 @@ mod tests {
             .record_reply(clean, false, "https://github.com/o/r/issues/3#c1".into())
             .unwrap();
         assert!(reason(&mut session, clean, false).contains("已回报过"));
-        let history: Vec<_> = session.history().iter().map(describe_event).collect();
+        let history: Vec<_> = session
+            .history()
+            .unwrap()
+            .iter()
+            .map(describe_event)
+            .collect();
         assert!(
             history
                 .iter()
@@ -5061,7 +5259,7 @@ mod tests {
             .issue(Department::Works, "一".into(), Seal::default())
             .unwrap()
             .id;
-        let mut history = session.history().to_vec();
+        let mut history = session.history().unwrap().to_vec();
         // 时辰由写入者记；内存事件簿不记，这里手工插入：开国无时辰，第一件在 1000 秒，第二件在 5000 秒。
         history.insert(history.len() - 1, CourtEvent::Clock(1000));
         history.push(CourtEvent::Clock(5000));
@@ -5222,6 +5420,7 @@ mod tests {
         // 审计只记摘要，全文只在奏本里。
         let audit = session
             .history()
+            .unwrap()
             .iter()
             .find_map(|e| match e {
                 CourtEvent::ToolInvoked { args_json, .. } => Some(args_json.clone()),
@@ -5275,7 +5474,7 @@ mod tests {
         assert!(!root.join("b.txt").exists());
         let changes = session.court().task(task).unwrap().changes.clone().unwrap();
         assert_eq!(changes.skipped, [1, 3]);
-        let last = session.history().last().unwrap().clone();
+        let last = session.history().unwrap().last().unwrap().clone();
         assert!(
             describe_event(&last).contains("驳回第 1、3 段"),
             "{}",
@@ -5320,7 +5519,7 @@ mod tests {
             std::fs::read_to_string(root.join("README.md")).unwrap(),
             "old\nkeep\n"
         );
-        let history = session.history();
+        let history = session.history().unwrap();
         let position = |f: &dyn Fn(&CourtEvent) -> bool| history.iter().position(f).unwrap();
         assert!(
             position(&|e| matches!(e, CourtEvent::ChangesProposed { task, .. } if *task == edit))
@@ -5561,12 +5760,12 @@ mod tests {
             .id;
 
         // 演示后端不调用模型：拆不了，也不留记录。
-        let before = session.history().len();
+        let before = session.history().unwrap().len();
         assert!(matches!(
             session.plan_split(parent, &DemoBackend),
             Err(AppError::Governance(GovernanceError::InvalidSplit(_)))
         ));
-        assert_eq!(session.history().len(), before);
+        assert_eq!(session.history().unwrap().len(), before);
         let planner = Planner::default();
         assert_eq!(
             session.plan_split(parent, &planner).unwrap(),
@@ -5674,6 +5873,7 @@ mod tests {
         );
         let tail: Vec<_> = reopened
             .history()
+            .unwrap()
             .iter()
             .rev()
             .take(3)
@@ -5708,6 +5908,99 @@ mod tests {
         dir
     }
 
+    /// 朝廷状态的比较：序列化后相同即相同（`Court` 不实现 `PartialEq`）。
+    fn state(court: &Court) -> serde_json::Value {
+        serde_json::to_value(court).unwrap()
+    }
+
+    #[test]
+    fn huidian_resumes_replay_and_is_rebuilt_when_unusable() {
+        let root = temp_root("huidian");
+        let mut session = Session::found(EventLog::new(&root)).unwrap();
+        let before = session
+            .issue(Department::Works, "修会典前".into(), Seal::default())
+            .unwrap();
+        // 时辰不改变朝廷状态，用来凑够条数。
+        let mut log = EventLog::new(&root);
+        let len = log.load().unwrap().len();
+        log.append(len, &vec![CourtEvent::Clock(7); HUIDIAN_EVERY])
+            .unwrap();
+        let huidian = root.join(".ziyuan/huidian");
+        assert!(!huidian.exists());
+
+        // 够数即修：打开时修成，史官记之。
+        let mut opened = Session::open(EventLog::new(&root)).unwrap();
+        let note = opened.take_chronicle().unwrap();
+        assert!(note.contains("大明会典") && note.contains(&(len + HUIDIAN_EVERY).to_string()));
+        assert!(huidian.exists());
+        let after = opened
+            .issue(Department::Works, "修会典后".into(), Seal::default())
+            .unwrap();
+        assert_eq!(opened.take_chronicle(), None, "未满 HUIDIAN_EVERY 条不重修");
+
+        // 从会典接着回放：与从头回放的状态相同，会典之后写的事件都在。
+        let resumed = Session::open(EventLog::new(&root)).unwrap();
+        let full = EventLog::new(&root).load().unwrap();
+        assert_eq!(resumed.event_count(), full.len());
+        assert_eq!(
+            state(resumed.court()),
+            state(&Court::replay(&full).unwrap())
+        );
+        assert!(
+            resumed.court().task(before.id).is_some() && resumed.court().task(after.id).is_some()
+        );
+        assert!(
+            resumed.history.get().is_none(),
+            "从会典打开，未读整本事件簿"
+        );
+        // 复核只读该件诏令的事件，也不读入整本事件簿。
+        assert_eq!(resumed.task_events(before.id).unwrap(), []);
+        assert!(resumed.history.get().is_none());
+        // 起居注按需读入整本事件簿。
+        assert_eq!(resumed.history().unwrap(), full.as_slice());
+
+        // 他版所修、内容损坏：都不沿用，以事件簿为准，并重修。
+        let text = std::fs::read_to_string(&huidian).unwrap();
+        let (header, body) = text.split_once('\n').unwrap();
+        let tag = huidian_tag();
+        for (case, content) in [
+            (
+                "他版",
+                format!("{}\n{body}", header.replacen(&tag, "v0.0.1", 1)),
+            ),
+            ("损坏", format!("{header}\n{{\"clock\":null}}")),
+        ] {
+            std::fs::write(&huidian, content).unwrap();
+            let mut reopened = Session::open(EventLog::new(&root)).unwrap();
+            let note = reopened.take_chronicle().unwrap();
+            assert!(
+                note.contains("会典与祖制不符") && note.contains("敕修"),
+                "{case}: {note}"
+            );
+            assert_eq!(
+                state(reopened.court()),
+                state(&Court::replay(&full).unwrap()),
+                "{case}"
+            );
+            let mut again = Session::open(EventLog::new(&root)).unwrap();
+            assert_eq!(again.take_chronicle(), None, "{case}：已重修，下次直接用");
+        }
+
+        // 事件簿换了一本（删去重建）：旧会典对不上，不得拿来冒充新朝廷。
+        std::fs::remove_file(root.join(".ziyuan/court.log")).unwrap();
+        let founded = Session::found(EventLog::new(&root)).unwrap();
+        let mut reopened = Session::open(EventLog::new(&root)).unwrap();
+        assert!(
+            reopened
+                .take_chronicle()
+                .unwrap()
+                .contains("会典与祖制不符")
+        );
+        assert_eq!(state(reopened.court()), state(founded.court()));
+        assert!(reopened.court().task(before.id).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn stale_session_reproposes_on_fresh_state() {
         let root = temp_root("stale");
@@ -5733,14 +6026,14 @@ mod tests {
         ));
         // 增量刷新得到与重新打开相同的状态。
         b.reload().unwrap();
-        assert_eq!(b.history(), reopened.history());
+        assert_eq!(b.history().unwrap(), reopened.history().unwrap());
         assert!(b.court().agent(recruited).is_some());
         // 事件簿被删掉重建：刷新时从头重放。
         std::fs::remove_dir_all(root.join(".ziyuan")).unwrap();
         let mut fresh = Session::found(EventLog::new(&root)).unwrap();
         fresh.reform(GovernanceMode::Cabinet).unwrap();
         b.reload().unwrap();
-        assert_eq!(b.history(), fresh.history());
+        assert_eq!(b.history().unwrap(), fresh.history().unwrap());
         assert_eq!(b.court().mode(), GovernanceMode::Cabinet);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5774,6 +6067,7 @@ mod tests {
         assert!(
             !reopened
                 .history()
+                .unwrap()
                 .iter()
                 .any(|e| matches!(e, CourtEvent::TaskCompleted { .. }))
         );
