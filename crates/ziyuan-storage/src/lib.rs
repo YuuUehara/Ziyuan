@@ -728,6 +728,7 @@ mod tests {
         // 模拟写到一半时崩溃。
         let mut file = OpenOptions::new().append(true).open(&log.path).unwrap();
         file.write_all(b"v1\tREFORMED\tcab").unwrap();
+        drop(file); // Windows 删不掉仍开着的文件。
         assert_eq!(log.load().unwrap().len(), 1);
         log.append(1, &[reform(GovernanceMode::DirectRule)])
             .unwrap();
@@ -778,6 +779,7 @@ mod tests {
         // 坏行的行号按全文计。
         let mut file = OpenOptions::new().append(true).open(&a.path).unwrap();
         file.write_all(b"v1\tREFORMED\tnope\n").unwrap();
+        drop(file);
         assert!(matches!(
             a.load_since(4),
             Err(StorageError::Corrupt { line: 5, .. })
@@ -851,6 +853,7 @@ mod tests {
             .unwrap();
         let mut file = OpenOptions::new().append(true).open(&log.path).unwrap();
         file.write_all(b"v1\tCOURT_BANQUET\t1\n").unwrap();
+        drop(file);
         let err = log.load_since(1).unwrap_err();
         assert!(matches!(err, StorageError::Newer { line: 2, .. }), "{err}");
         assert!(err.to_string().contains("请升级"), "{err}");

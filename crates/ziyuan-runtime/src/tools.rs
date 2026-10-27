@@ -44,6 +44,16 @@ const TEST_ENV: &[&str] = &[
     "CARGO_HOME",
     "RUSTUP_HOME",
     "CARGO_TARGET_DIR",
+    // Windows：cmd 与 cargo 少了这些跑不起来。
+    "SystemRoot",
+    "SystemDrive",
+    "PATHEXT",
+    "ComSpec",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
 ];
 
 /// 按玉玺构造的工具，及其暂存的改动。
@@ -288,7 +298,12 @@ impl Sandbox {
     fn display(&self, path: &Path) -> String {
         match path.strip_prefix(&self.root) {
             Ok(rel) if rel.as_os_str().is_empty() => ".".into(),
-            Ok(rel) => rel.display().to_string(),
+            // 交给模型的路径一律用 `/`，与 read_file、write_file 所收的一致（Windows 上不出 `\`）。
+            Ok(rel) => rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
             Err(_) => path.display().to_string(),
         }
     }
@@ -502,6 +517,24 @@ impl Tool for RunTests {
     }
 }
 
+/// 用系统的 shell 运行测试命令：Windows 为 `cmd /C`，其余为 `sh -c`。
+fn shell(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut child = Command::new("cmd");
+        // 原样交给 cmd：按 MSVC 规则转义引号会改变 cmd 看到的命令。
+        child.arg("/C").raw_arg(command);
+        child
+    }
+    #[cfg(not(windows))]
+    {
+        let mut child = Command::new("sh");
+        child.arg("-c").arg(command);
+        child
+    }
+}
+
 impl RunTests {
     fn run_in_copy(&self, command: &str, base: &Path, copy: &Path) -> Result<String, BoxError> {
         copy_tree(&self.0.root, &self.0.root, copy)?;
@@ -514,10 +547,8 @@ impl RunTests {
         }
         let log_path = base.join("output.log");
         let log = fs::File::create(&log_path)?;
-        let mut child = Command::new("sh");
+        let mut child = shell(command);
         child
-            .arg("-c")
-            .arg(command)
             .current_dir(copy)
             .env_clear()
             .stdin(Stdio::null())
@@ -733,13 +764,17 @@ mod tests {
         );
         assert!(read.execute(r#"{"path":"target/gen.rs"}"#).is_ok());
         let outside = dir.join("secret.txt").display().to_string();
+        // 符号链接只在 Unix 上建。
         for path in [
             "../secret.txt",
             outside.as_str(),
             "link.txt",
             ".env",
             ".ziyuan/court.log",
-        ] {
+        ]
+        .into_iter()
+        .filter(|p| cfg!(unix) || *p != "link.txt")
+        {
             let args = serde_json::json!({ "path": path }).to_string();
             let err = read.execute(&args).unwrap_err().to_string();
             assert!(err.contains("拒绝访问"), "{path}: {err}");
@@ -810,7 +845,11 @@ mod tests {
         let root = dir.join("project");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&dir, root.join("src/up")).unwrap();
-        let check = "grep -q staged src/main.rs && test -f src/new/a.rs && test ! -e .env && test ! -d .ziyuan && echo 副本无误";
+        #[cfg(not(windows))]
+        let check = "grep -q staged src/main.rs && test -f src/new/a.rs && test ! -e .env && test ! -d .ziyuan && echo COPY-OK";
+        // cmd 的 echo 按本地代码页输出，标记用 ASCII。
+        #[cfg(windows)]
+        let check = r"findstr /c:staged src\main.rs >nul && if exist src\new\a.rs if not exist .env if not exist .ziyuan echo COPY-OK";
         let sealed = sealed_tools(&root, &seal(&Capability::ALL, &["src"]), Some(check)).unwrap();
         let find = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
         let (write, read, test) = (find("write_file"), find("read_file"), find("run_tests"));
@@ -836,14 +875,17 @@ mod tests {
             "src/up/secret.txt",
             "src",
             ".env",
-        ] {
+        ]
+        .into_iter()
+        .filter(|p| cfg!(unix) || *p != "src/up/secret.txt")
+        {
             let args = serde_json::json!({ "path": path, "content": "x" }).to_string();
             assert!(write.execute(&args).is_err(), "{path}");
         }
 
         let output = test.execute("{}").unwrap();
         assert!(
-            output.contains("通过（退出码 0）") && output.contains("副本无误"),
+            output.contains("通过（退出码 0）") && output.contains("COPY-OK"),
             "{output}"
         );
         let failing = sealed_tools(

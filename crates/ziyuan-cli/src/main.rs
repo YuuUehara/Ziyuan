@@ -2161,7 +2161,7 @@ fn completions(shell: Shell) -> String {
     let bash = format!(
         r#"_ziyuan() {{
   # 官职代码含冒号，而 bash 默认在冒号处分词：从 COMP_LINE 取完整的当前词。
-  local line="${{COMP_LINE:0:COMP_POINT}}" words=""
+  local line="${{COMP_LINE:0:$COMP_POINT}}" words=""
   local cur="${{line##*[[:space:]]}}" rest="${{line%[[:space:]]*}}"
   local prev="${{rest##*[[:space:]]}}"
   if [ "$COMP_CWORD" -eq 1 ]; then
@@ -2180,9 +2180,9 @@ fn completions(shell: Shell) -> String {
        esac ;;
   esac
   COMPREPLY=($(compgen -W "$words" -- "$cur"))
-  # 冒号前的部分 bash 已视为另一个词，补全结果中去掉。
+  # bash 在冒号处分词，冒号前的部分已视为另一个词，补全结果中去掉；zsh（bashcompinit）不分，原样给出。
   local colon="${{cur%"${{cur##*:}}"}}"
-  [ -n "$colon" ] && COMPREPLY=("${{COMPREPLY[@]#"$colon"}}")
+  [ -n "$colon" ] && [[ "$COMP_WORDBREAKS" == *:* ]] && COMPREPLY=("${{COMPREPLY[@]#"$colon"}}")
 }}
 complete -F _ziyuan ziyuan
 "#,

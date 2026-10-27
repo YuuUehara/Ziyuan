@@ -44,7 +44,7 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 
 发版（推送 `v*` 标签）时，GitHub Actions 会在 Release 上附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
 
-CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译，并在 macOS 上跑测试、在 Windows 上编译。Windows 只验证过能编译，测试尚未在 Windows 上跑过。
+CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译，并在 macOS 与 Windows 上跑全部测试。
 
 ## 快速开始
 
@@ -178,12 +178,13 @@ cd /path/to/your/project && ziyuan tui
 ziyuan officials --json | jq '.[] | select(.office) | .name'   # 与 Web /api/state 同构
 ziyuan history --json | jq -r '.[-1].text'                     # [{seq, text}]
 ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan
-ziyuan completions zsh > ~/.zfunc/_ziyuan        # 借 bashcompinit
+ziyuan completions zsh > ~/.ziyuan.zsh   # 借 bashcompinit；在 ~/.zshrc 的 compinit 之后加一行 source ~/.ziyuan.zsh
 ziyuan completions fish > ~/.config/fish/completions/ziyuan.fish
 ```
 
 - `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`；其他命令带 `--json` 会报错。
-- 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名；官职代码含冒号，bash 中也能正常补全。
+- 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名，以及 `apply` 的 `--skip`、`--commit`；官职代码含冒号也能正常补全。
+- 实测（2026-10）：bash 5.2、zsh 5.9、fish 3.6 中实际加载并按 Tab 补全过（官职代码、部门、子命令选项）。zsh 起初加载即报错（`${COMP_LINE:0:COMP_POINT}` 在 zsh 中被当作修饰符），且含冒号的官职代码补不出，均已修正。
 - 输出被提前关闭（如 `ziyuan history | head`）时安静退出，退出码为 0。
 
 ### 玉玺：限定官员的权限
@@ -601,7 +602,11 @@ v0.5 让朝廷能常驻、能记事、能接外界，但不少本事只有命令
 3. ~~**长期运行：快照与回放提速**~~ 已完成：按每件诏令 16 条事件（6 次工具调用与用量、约 1.6 KB 回奏）造事件簿，release 版冷启动 `ziyuan court`：1 千件 25 毫秒，1 万件（17 万条、46 MB）0.23 秒，5 万件（85 万条、230 MB）1.1 秒。其中八成是读入与解码（大头是回奏全文的 hex），回放只占两成，快照省不下多少，故不做。真正的瓶颈在前端：1 万件时 Web 每次刷新要传 26 MB、渲染 1.7 秒，起居注 0.76 秒。现在页面只列待理会的诏令与最近 50 件（「全部列出」可看全部），起居注 Web 只回最近 500 条、TUI 只列最近 1000 条；事件类型不再靠编码整条事件求得。1 万件时刷新降到 8 毫秒（页面 14 毫秒），起居注 21 毫秒。内存：回奏全文由事件簿与朝廷状态共用一份、事件枚举瘦身、逐行读取事件簿，`serve` 不再多持一份会话；5 万件时 `ziyuan court` 峰值由 500 MB 降到 312 MB，`serve` 常驻由 648 MB 降到 335 MB。实录检索不再为每件实录建词表，5 万件时由 1.4 秒降到 0.01–0.12 秒，结果不变。后来仍加了快照，并让整本事件簿按需读入：每满 5000 条事件（且不少于上部所收的十分之一）修一部《大明会典》（`.ziyuan/huidian`，存朝廷现状），打开时从会典接着回放其后的事件；整本事件簿只在看起居注时才读入，都察院复核只逐条读过、留下该件诏令的指派与工具调用。5 万件（80 万条、210 MB）时 `ziyuan court` 由 0.69 秒降到 0.33 秒，打开后常驻内存由 291 MB 降到 166 MB（读入会典时峰值 274 MB）。事件簿仍只增不改；会典只是缓存，换了版本、损坏或与事件簿对不上（开头与止处之前的内容另有摘要核对）都不沿用，史官记「会典与祖制不符，以实录为准」并重修，也可随时删去；`ziyuan migrate` 显示会典状况。
 4. ~~**准奏落盘进版本库**~~ 已完成：`ziyuan apply --commit`（Web「准奏并提交」、TUI `m`）落盘后只把本诏令写入的文件记为一个 jj 或 git 提交，说明含诏令、承办者与 `Ziyuan-Edict` 尾注；草稿 PR 用同一说明，可与本地提交对应。提交不记入事件簿，旧版本照常可读。
 5. ~~**ChatGPT 订阅接入**~~ 已完成（只用模拟服务测过）：`ziyuan login` / `logout`，`ZIYUAN_LLM_PROVIDER=chatgpt` 改走 Responses API，计入订阅额度。
-6. **真实环境实测**：GitHub 驿站在测试仓库上走通入队、回报评论与草稿 PR（须皇帝指定仓库）；CI 在 Windows 上跑全部测试；zsh 与 fish 补全实际加载验证；OpenAI 真实账号有条件时补做。
+6. **真实环境实测**（进行中）：
+   - ~~zsh 与 fish 补全~~ 已实测：修正了 zsh 加载报错与含冒号官职代码补不出的问题。
+   - ~~CI 在 Windows 上跑全部测试~~ 已改：先交叉编译到 `x86_64-pc-windows-gnu`、在 Wine 中跑通全部测试。修正了两处 Windows 上的真问题：`run_tests` 原先只用 `sh -c`（Windows 改为 `cmd /C`，并保留 `SystemRoot`、`PATHEXT` 等环境变量）；`search_code` 交给模型的路径用了 `\`（现一律为 `/`）。
+   - GitHub 驿站在测试仓库上走通入队、回报评论与草稿 PR（须皇帝指定仓库）。
+   - OpenAI / ChatGPT 订阅真实账号有条件时补做。
 7. **司礼监分权：Web 令牌分级**：除皇帝令牌外，可发只读令牌（只看朝廷、起居注与实录，不能下诏、批红、准奏），便于给旁人观政；令牌只存于 `.ziyuan`。
 8. **外藩扩容**（视进度）：支持 HTTP（Streamable HTTP）的 MCP 服务，凭据照旧只在名册中引用环境变量；`ziyuan mcp` 显示每件工具的参数说明。
 

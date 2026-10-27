@@ -5406,7 +5406,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let original: String = (1..=20).map(|i| format!("l{i}\n")).collect();
         std::fs::write(root.join("a.txt"), &original).unwrap();
-        // 落盘后进 git：工作区里另有一处无关的改动。
+        // 落盘后进 git：工作区里另有一处无关的改动。没装 git 的环境跳过提交这一段。
+        let has_git = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .current_dir(&root)
@@ -5416,14 +5420,16 @@ mod tests {
             assert!(out.status.success(), "git {args:?}: {out:?}");
             String::from_utf8(out.stdout).unwrap()
         };
-        git(&["init", "-q"]);
-        git(&["config", "user.name", "紫垣测试"]);
-        git(&["config", "user.email", "test@ziyuan.invalid"]);
-        git(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(root.join("c.txt"), "c\n").unwrap();
-        git(&["add", "a.txt", "c.txt"]);
-        git(&["commit", "-q", "-m", "init"]);
-        std::fs::write(root.join("c.txt"), "皇帝自己改的\n").unwrap();
+        if has_git {
+            git(&["init", "-q"]);
+            git(&["config", "user.name", "紫垣测试"]);
+            git(&["config", "user.email", "test@ziyuan.invalid"]);
+            git(&["config", "commit.gpgsign", "false"]);
+            std::fs::write(root.join("c.txt"), "c\n").unwrap();
+            git(&["add", "a.txt", "c.txt"]);
+            git(&["commit", "-q", "-m", "init"]);
+            std::fs::write(root.join("c.txt"), "皇帝自己改的\n").unwrap();
+        }
         let mut store = MemoryEventLog::default();
         let mut session = Session::found(&mut store).unwrap();
         let write = Seal {
@@ -5502,6 +5508,10 @@ mod tests {
         );
 
         // 只提交本诏令落盘的 a.txt；c.txt 的改动留在工作区。
+        if !has_git {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let made = session.commit_applied(task, &root).unwrap();
         assert_eq!(made.vcs, "git");
         assert_eq!(
