@@ -15,8 +15,8 @@ use ziyuan_app::{
     skipped_note, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
-    AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Record, Seal,
-    TaskId, Template, Verdict, missing_sections, search_records,
+    AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
+    Template, Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Task, TaskStatus};
 use ziyuan_llm::{OpenAiCompatible, price_for};
@@ -893,6 +893,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
                 root,
                 backend: worker_backend()?,
                 limits: DEFAULT_LIMITS,
+                github: ziyuan_github::GitHub::from_env()?.map(Arc::new),
             };
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::bind((bind, port)).await?;
@@ -1317,7 +1318,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             }
         }
         Command::Changelog { version, since } => {
-            let (range, commits) = changelog_commits(since)?;
+            let (range, commits) = ziyuan_app::changelog_commits(&env::current_dir()?, since)?;
             let edict = session.draft_changelog(&version, &commits)?;
             println!(
                 "诏令 #{} 已入队：礼部修 CHANGELOG「{version}」，收提交 {} 条（{range}）。玉玺只授 read_file、write_file，范围只限 {}。",
@@ -1591,7 +1592,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         }
         Command::Records(query) => {
             let records = session.court().records();
-            let found = found_records(&records, &query);
+            let found = ziyuan_core::find_records(&records, &query);
             if found.is_empty() {
                 println!(
                     "{}",
@@ -1637,159 +1638,45 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
     Ok(())
 }
 
-/// 礼部修 CHANGELOG 所据的提交（`git log`，新者在前，至多 200 条，不含合并提交）及所取范围。
-/// 未给起点时取最近的 tag 以来；没有 tag 则取全部。
-fn changelog_commits(since: Option<String>) -> Result<(String, Vec<String>), Box<dyn Error>> {
-    let git = |args: &[&str]| -> Result<String, Box<dyn Error>> {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .output()
-            .map_err(|e| format!("无法运行 git：{e}"))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("git {} 失败：{}", args.join(" "), err.trim()).into());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    };
-    let since = match since {
-        Some(since) => Some(since),
-        None => git(&["describe", "--tags", "--abbrev=0"])
-            .ok()
-            .map(|t| t.trim().to_owned()),
-    };
-    let range = since.map_or("HEAD".to_owned(), |s| format!("{s}..HEAD"));
-    let log = git(&["log", "--no-merges", "-n", "200", "--format=%h %s", &range])?;
-    let commits: Vec<String> = log
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(str::to_owned)
-        .collect();
-    if commits.is_empty() {
-        return Err(format!("{range} 没有可记的提交").into());
-    }
-    Ok((range, commits))
-}
-
 /// 兵部驿站 · GitHub。凭据只在 `ziyuan_github` 中使用，不经朝廷与模型。
 fn github(session: &mut Session<EventLog>, action: GitHubAction) -> Result<(), Box<dyn Error>> {
     let hub = ziyuan_github::GitHub::from_env()?
         .ok_or("未设 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN，驿站不通 GitHub")?;
     match action {
         GitHubAction::Pull { label, department } => {
-            let mut queued = 0;
-            let issues = hub.labeled(&label)?;
-            for issue in &issues {
-                let comments = hub.comments(issue.number)?;
-                for d in ziyuan_github::intake(hub.repo(), issue, &comments) {
-                    let known = session
-                        .court()
-                        .tasks()
-                        .any(|t| t.courier.as_deref() == Some(d.station.as_str()));
-                    if known {
-                        continue;
-                    }
-                    let edict = session.post(department, d.text, &d.station, false)?;
-                    queued += 1;
-                    let flagged = session
-                        .court()
-                        .task(edict.id)
-                        .map_or(0, |t| t.suspicions.len());
-                    let note = if flagged > 0 {
-                        format!("，锦衣卫密报 {flagged} 条")
-                    } else {
-                        String::new()
-                    };
-                    println!("驿传：诏令 #{} 自「{}」入队{note}。", edict.id.0, d.station);
-                }
+            let report = session.github_pull(&hub, &label, department)?;
+            for (edict, station, flags) in &report.queued {
+                let note = if *flags > 0 {
+                    format!("，锦衣卫密报 {flags} 条")
+                } else {
+                    String::new()
+                };
+                println!("驿传：诏令 #{} 自「{station}」入队{note}。", edict.id.0);
             }
             println!(
-                "GitHub {}：标签「{label}」的 issue/PR {} 件，新入队 {queued} 件（只入队，执行请 `ziyuan run`）。",
+                "GitHub {}：标签「{label}」的 issue/PR {} 件，新入队 {} 件（只入队，执行请 `ziyuan run`）。",
                 hub.repo(),
-                issues.len()
+                report.issues,
+                report.queued.len()
             );
         }
         GitHubAction::Reply(only) => {
-            let tasks: Vec<TaskId> = match only {
-                Some(task) => {
-                    session.check_reply(task, false)?;
-                    vec![task]
-                }
-                None => {
-                    let ids: Vec<TaskId> = session.court().tasks().map(|t| t.edict.id).collect();
-                    ids.into_iter()
-                        .filter(|id| session.check_reply(*id, false).is_ok())
-                        .collect()
-                }
+            let tasks = match only {
+                Some(task) => vec![task],
+                None => session.github_replyable(&hub)?,
             };
-            let mut sent = 0;
-            for task in tasks {
-                let entry = session.court().task(task).expect("已校验");
-                let station = entry.courier.clone().unwrap_or_default();
-                let Some((repo, number)) = ziyuan_github::parse_station(&station) else {
-                    if only.is_some() {
-                        return Err(format!(
-                            "诏令 #{} 来自「{station}」，不是 GitHub 驿站",
-                            task.0
-                        )
-                        .into());
-                    }
-                    continue;
-                };
-                if repo != hub.repo() {
-                    if only.is_some() {
-                        return Err(format!(
-                            "诏令 #{} 来自 {repo}，与 ZIYUAN_GITHUB_REPO 不符",
-                            task.0
-                        )
-                        .into());
-                    }
-                    continue;
-                }
-                let url = hub.comment(number, &ziyuan_app::reply_text(session.court(), entry))?;
-                session.record_reply(task, false, url.clone())?;
-                sent += 1;
-                println!("诏令 #{} 回奏已送回 #{number}：{url}", task.0);
-            }
-            if sent == 0 {
+            if tasks.is_empty() {
                 println!(
                     "没有可回报的诏令（须经 GitHub 驿传入队、已评定、无未平反的密报、尚未回报）。"
                 );
             }
+            for task in tasks {
+                let (number, url) = session.github_reply(&hub, task)?;
+                println!("诏令 #{} 回奏已送回 #{number}：{url}", task.0);
+            }
         }
         GitHubAction::PullRequest(task) => {
-            session.check_reply(task, true)?;
-            let entry = session.court().task(task).expect("已校验");
-            let station = entry.courier.clone().unwrap_or_default();
-            let number = match ziyuan_github::parse_station(&station) {
-                Some((repo, number)) if repo == hub.repo() => number,
-                _ => {
-                    return Err(format!(
-                        "诏令 #{} 来自「{station}」，不是本仓库的 GitHub 驿站",
-                        task.0
-                    )
-                    .into());
-                }
-            };
-            let changes = entry.changes.as_ref().expect("已校验有准奏的改动");
-            let files = ziyuan_app::selected_files(&changes.files, &changes.skipped);
-            let first: String = entry
-                .edict
-                .text
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(60)
-                .collect();
-            let title = format!("紫垣诏令 #{}：{first}", task.0);
-            let body = format!(
-                "Refs #{number}\n\n由紫垣 `ziyuan github pr` 开出的草稿 PR：改动已经皇帝准奏，共 {} 个文件。\n\n{}",
-                files.len(),
-                ziyuan_app::reply_text(session.court(), entry)
-            );
-            let url =
-                hub.draft_pull_request(&format!("ziyuan/task-{}", task.0), &title, &body, &files)?;
-            session.record_reply(task, true, url.clone())?;
+            let url = session.github_pull_request(&hub, task)?;
             println!("诏令 #{} 的改动已开为草稿 PR：{url}", task.0);
         }
     }
@@ -2039,19 +1926,9 @@ fn json_output(
         }
         Command::Records(query) => {
             let records = session.court().records();
-            found_records(&records, query)
+            ziyuan_core::find_records(&records, query)
                 .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "task": r.task.0,
-                        "department": r.department.code(),
-                        "edict": r.edict,
-                        "worker": r.worker.0,
-                        "handler": r.handler,
-                        "summary": r.summary,
-                        "verdict": r.verdict,
-                    })
-                })
+                .map(ziyuan_web::chronicle_json)
                 .collect()
         }
         _ => unreachable!("run 已检查 JSON_COMMANDS"),
@@ -2167,15 +2044,6 @@ fn task_id(args: &[String], usage: &str) -> Result<TaskId, Box<dyn Error>> {
     match args {
         [id] => Ok(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),
         _ => Err(format!("用法: {usage}").into()),
-    }
-}
-
-/// `ziyuan records` 列出的实录：无检索词时全部（新者在前），否则按检索词至多 20 件。
-fn found_records<'a>(records: &'a [Record], query: &str) -> Vec<&'a Record> {
-    if query.trim().is_empty() {
-        records.iter().rev().collect()
-    } else {
-        search_records(records, query, 20)
     }
 }
 

@@ -938,6 +938,15 @@ fn search_terms(text: &str) -> std::collections::BTreeSet<String> {
     terms
 }
 
+/// 列出实录：`query` 为空时全部（新者在前），否则按检索词至多 20 件。
+pub fn find_records<'a>(records: &'a [Record], query: &str) -> Vec<&'a Record> {
+    if query.trim().is_empty() {
+        records.iter().rev().collect()
+    } else {
+        search_records(records, query, 20)
+    }
+}
+
 /// 按与 `query` 共有的检索词数检索实录，得分高者在前（同分时新者在前），至多 `limit` 件。
 pub fn search_records<'a>(records: &'a [Record], query: &str, limit: usize) -> Vec<&'a Record> {
     let wanted = search_terms(query);

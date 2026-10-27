@@ -280,6 +280,9 @@
   details.history[open] summary h2::after { content: "收起"; }
   .history-list { margin: 0; padding: 12px 18px 16px 52px; max-height: 360px; overflow: auto; font-size: 13px; columns: 2; column-gap: 40px; }
   .history-list li { break-inside: avoid; margin-bottom: 3px; }
+  .records-list { margin: 10px 0 0; padding-left: 22px; max-height: 320px; overflow: auto; font-size: 13px; }
+  .records-list li { margin-bottom: 6px; }
+  #records-q { flex: 1; }
   .history-filter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 18px 0; }
   .history-filter input[type=text] { width: 9em; padding: 4px 8px; font-size: 13px; }
   .history-filter #hf-kind, .history-filter #hf-since { width: 13em; }
@@ -320,6 +323,7 @@
     <span class="stat" id="treasury-stat" hidden title="户部度支：朝廷总额的余额">度支余 <b id="treasury-left">0</b></span>
     <span class="stat" id="run-state">待命</span>
     <button class="gold" id="run-btn">执行待办诏令</button>
+    <button id="watch-btn" title="常朝：常驻执行，随到随办，办完自动请都察院复核">开常朝</button>
     <button id="stop-btn" hidden>中止执行</button>
   </div>
 </header>
@@ -345,6 +349,8 @@
           <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> write_file</label>
           <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> run_tests</label>
         </div>
+        <label for="edict-mcp">玉玺 · 外藩 MCP <span>（服务名逗号分隔，留空为不许；须在官职外藩上限内）</span></label>
+        <input type="text" id="edict-mcp" data-keep placeholder="如 docs, fetch">
         <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。外部事件（CI 等）可凭令牌 POST <code>api/courier</code> 经兵部驿站入队。</p>
         <div class="actions">
           <button type="submit" class="primary" data-run="1">下诏并执行</button>
@@ -429,6 +435,9 @@
             <input type="text" id="ceiling-scope" data-keep placeholder="上限范围，逗号分隔（空为整个项目）">
           </div>
           <div class="row">
+            <input type="text" id="ceiling-mcp" data-keep placeholder="外藩上限（空为不限，none 为不许）">
+          </div>
+          <div class="row" style="flex-wrap:wrap">
             <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> read_file</label>
             <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> search_code</label>
             <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> write_file</label>
@@ -455,6 +464,34 @@
             <button class="small shrink" id="palace-btn">殿试</button>
           </div>
           <div id="palace"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card full">
+    <h2>翰林院实录 · 礼部 · 兵部驿站 <small>检索旧案、修 CHANGELOG、收 GitHub 来件</small></h2>
+    <div class="body officials-layout">
+      <div>
+        <form class="row" id="records-form">
+          <input type="text" id="records-q" data-keep placeholder="检索实录：诏令、承办人、回奏摘要（留空为全部）">
+          <button class="small shrink" type="submit">检索</button>
+          <span class="hint shrink" id="records-count"></span>
+        </form>
+        <ol class="records-list" id="records-list"><li class="hint">办结的诏令即入实录，承办新诏前也会参照；点「检索」查看。</li></ol>
+      </div>
+      <div>
+        <h3>礼部修 CHANGELOG</h3>
+        <div class="row"><input type="text" id="changelog-version" data-keep placeholder="版本（默认 Unreleased）"></div>
+        <div class="row" style="margin-top:6px">
+          <input type="text" id="changelog-since" data-keep placeholder="起点（默认上个 tag）">
+          <button class="small shrink" id="changelog-btn" title="据 git log 下一件礼部诏令，只入队">修</button>
+        </div>
+        <h3>兵部驿站 · GitHub</h3>
+        <p class="hint" id="github-state"></p>
+        <div class="row" id="github-row" hidden>
+          <input type="text" id="github-label" data-keep placeholder="标签（默认 ziyuan）">
+          <button class="small shrink" id="github-pull">收来件</button>
         </div>
       </div>
     </div>
@@ -675,6 +712,13 @@ function taskHtml(t) {
         <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
     }
   }
+  const hub = [
+    t.replied ? `<a class="hint" href="${esc(t.replied)}" target="_blank" rel="noopener">已回报 GitHub</a>` : "",
+    t.pull_request ? `<a class="hint" href="${esc(t.pull_request)}" target="_blank" rel="noopener">草稿 PR</a>` : "",
+    t.github_reply && state.github ? `<button class="small" data-gh-reply="${t.id}" title="回奏写回来处的评论">回报 GitHub</button>` : "",
+    t.github_pr && state.github ? `<button class="small" data-gh-pr="${t.id}" title="准奏落盘的改动在远端开为草稿 PR">开草稿 PR</button>` : "",
+  ].filter(Boolean).join(" ");
+  if (hub) body += `<div class="review-row"><span style="flex:1"></span>${hub}</div>`;
   if (t.needs_approval) {
     const d = t.draft;
     const route = t.preview.route ? t.preview.route.map(esc).join(" ▸ ") : esc(t.preview.error);
@@ -729,10 +773,16 @@ function render() {
     $("treasury-left").textContent = `${fmt(s.treasury.remaining)} / ${fmt(s.treasury.limit)}`;
     $("treasury-stat").classList.toggle("exhausted", s.treasury.remaining === 0);
   }
-  $("run-state").textContent = s.running ? "执行中" : "待命";
+  $("run-state").textContent = s.watching ? "常朝中" : s.running ? "执行中" : "待命";
   $("run-state").classList.toggle("live", s.running);
   $("run-btn").disabled = s.running || open === 0;
+  $("watch-btn").hidden = s.running;
   $("stop-btn").hidden = !s.running;
+  $("stop-btn").textContent = s.watching ? "散朝" : "中止执行";
+  $("github-row").hidden = !s.github;
+  $("github-state").textContent = s.github
+    ? `已通 ${s.github}：收带标签的 issue/PR 入队；办完可在诏令上回报评论、开草稿 PR。`
+    : "未通：启动前设 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN。";
 
   const deptOptions = s.departments.map((d) => `<option value="${d.code}">${esc(d.label)}</option>`).join("");
   // 与 CLI 一致：默认工部承办。
@@ -821,6 +871,7 @@ $("edict-form").addEventListener("submit", async (event) => {
     text: $("edict-text").value.trim(),
     scope: $("edict-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
     tools,
+    mcp: $("edict-mcp").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
     template: $("edict-template").value,
   };
   const result = await act(api("/edicts", body));
@@ -873,7 +924,23 @@ $("template-remove").addEventListener("click", async () => {
   }
 });
 $("run-btn").addEventListener("click", () => act(api("/run", {}), "开始执行"));
-$("stop-btn").addEventListener("click", () => act(api("/run/stop", {}), "已下令中止"));
+$("stop-btn").addEventListener("click", () => act(api("/run/stop", {}), state.watching ? "已散朝" : "已下令中止"));
+$("watch-btn").addEventListener("click", () => act(api("/run", { watch: true }), "开常朝：随到随办，办完自动复核"));
+async function loadRecords() {
+  const q = $("records-q").value.trim();
+  const r = await act(api("/records" + (q ? "?q=" + encodeURIComponent(q) : "")));
+  if (!r) return;
+  $("records-count").textContent = q ? `${r.records.length} / ${r.total} 件` : `共 ${r.total} 件`;
+  $("records-list").innerHTML = r.records.length ? r.records.map((x) =>
+    `<li><b>#${x.task}</b> ${esc(x.handler || "已削籍")} · ${esc(x.verdict)}：${esc(x.edict)}<br><span class="hint">${esc(x.summary.length > 160 ? x.summary.slice(0, 160) + "…" : x.summary)}</span></li>`).join("")
+    : `<li class="hint">${q ? "无相符的实录" : "尚无实录"}</li>`;
+}
+$("records-form").addEventListener("submit", (event) => { event.preventDefault(); loadRecords(); });
+$("changelog-btn").addEventListener("click", () => act(api("/changelog", {
+  version: $("changelog-version").value, since: $("changelog-since").value,
+})).then((r) => r && toast(`礼部诏令 #${r.id} 已入队：${r.range}，${r.commits} 个提交`)));
+$("github-pull").addEventListener("click", () => act(api("/github/pull", { label: $("github-label").value }))
+  .then((r) => r && toast(`驿站收来件 ${r.issues} 件，入队 ${r.queued.length} 件${r.queued.length ? "：" + r.queued.map((q) => "#" + q.id).join("、") : ""}`)));
 $("recruit-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const result = await act(api("/officials", { name: $("recruit-name").value.trim() || null, department: $("recruit-dept").value }));
@@ -939,6 +1006,7 @@ $("ceiling-set").addEventListener("click", () => act(api("/offices/ceiling", {
   office: configOffice(),
   scope: $("ceiling-scope").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
   tools: TOOLS.filter((t) => $("ceiling-" + t).checked),
+  mcp: $("ceiling-mcp").value.split(/[,，]/).map((p) => p.trim()).filter(Boolean),
 }), "已设玉玺上限"));
 $("ceiling-clear").addEventListener("click", () =>
   act(api("/offices/ceiling", { office: configOffice(), clear: true }), "已取消玉玺上限"));
@@ -1051,6 +1119,12 @@ document.addEventListener("click", (event) => {
     act(api(`/officials/${d.appoint}/appoint`, { office: $("appoint-" + d.appoint).value }), "已任命").then((r) => r && chronicle(r.note));
   } else if (d.cane) {
     if (confirm(`廷杖官员 #${d.cane}？降一级留用，收回写权。`)) act(api(`/officials/${d.cane}/cane`, {})).then((r) => r && chronicle(r.note));
+  } else if (d.ghReply) {
+    el.disabled = true;
+    act(api(`/tasks/${d.ghReply}/github/reply`, {})).then((r) => r && toast(`已回报 GitHub #${r.number}`));
+  } else if (d.ghPr) {
+    el.disabled = true;
+    act(api(`/tasks/${d.ghPr}/github/pr`, {})).then((r) => r && toast(`草稿 PR 已开：${r.url}`));
   } else if (d.pardon) {
     act(api(`/officials/${d.pardon}/pardon`, {})).then((r) => r && chronicle(r.note));
   }
@@ -1086,6 +1160,7 @@ function connect() {
     preserve(render);
   });
   source.addEventListener("run_error", (event) => toast(JSON.parse(event.data).error, true));
+  source.addEventListener("notice", (event) => toast(JSON.parse(event.data).text));
 }
 
 $("login-form").addEventListener("submit", async (event) => {

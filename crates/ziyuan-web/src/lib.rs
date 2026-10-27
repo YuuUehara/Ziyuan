@@ -24,9 +24,9 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use ziyuan_app::{
-    ABOLITION_NOTE, AppError, EXECUTOR_BUSY, HistoryFilter, RunUpdate, Session, TaskReport,
-    demotion_note, duzhi_report, estimate_cost, format_time, history_entries, kaocheng_grade,
-    kaocheng_report, parse_time, render_diffs, tz_offset,
+    ABOLITION_NOTE, AppError, CHANGELOG_NOTE, EXECUTOR_BUSY, HistoryFilter, RunUpdate, Session,
+    TaskReport, WatchOptions, WatchUpdate, demotion_note, duzhi_report, estimate_cost, format_time,
+    history_entries, kaocheng_grade, kaocheng_report, parse_time, render_diffs, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Capability, Department, GovernanceMode, Office, Persona, Seal, TaskId,
@@ -45,6 +45,8 @@ pub struct Config {
     pub token: String,
     pub backend: Arc<dyn WorkerBackend>,
     pub limits: Limits,
+    /// 兵部驿站 · GitHub（`ZIYUAN_GITHUB_REPO` 未设时为 `None`）；凭据只在其中。
+    pub github: Option<Arc<ziyuan_github::GitHub>>,
 }
 
 /// 生成 32 位十六进制随机令牌。
@@ -118,6 +120,11 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/censor", post(censor))
         .route("/tasks/{id}/recheck", post(recheck))
         .route("/tasks/{id}/acquit", post(acquit))
+        .route("/records", get(records))
+        .route("/changelog", post(changelog))
+        .route("/github/pull", post(github_pull))
+        .route("/tasks/{id}/github/reply", post(github_reply))
+        .route("/tasks/{id}/github/pr", post(github_pr))
         .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/debate", post(debate))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
@@ -152,8 +159,8 @@ struct Inner {
     config: Config,
     /// (SSE 事件名, JSON 数据)。
     events: broadcast::Sender<(&'static str, String)>,
-    /// 本进程正在进行的执行；`Some` 时拒绝再次启动。
-    run: Mutex<Option<CancelToken>>,
+    /// 本进程正在进行的执行及其是否为常朝；`Some` 时拒绝再次启动。
+    run: Mutex<Option<(CancelToken, bool)>>,
     /// 空闲的会话，下一个请求取走后增量读取新事件，用完放回。
     cache: Mutex<Option<Session<EventLog>>>,
 }
@@ -165,6 +172,23 @@ impl AppState {
 
     fn running(&self) -> bool {
         self.0.run.lock().expect("锁未中毒").is_some()
+    }
+
+    fn watching(&self) -> bool {
+        self.0
+            .run
+            .lock()
+            .expect("锁未中毒")
+            .as_ref()
+            .is_some_and(|r| r.1)
+    }
+
+    fn github(&self) -> Result<Arc<ziyuan_github::GitHub>, ApiError> {
+        self.0.config.github.clone().ok_or_else(|| {
+            ApiError::bad(
+                "未设 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN，驿站不通 GitHub",
+            )
+        })
     }
 
     /// 在阻塞线程中取一个会话（缓存的增量刷新，没有则打开）执行 `f`，用完放回缓存
@@ -228,6 +252,7 @@ impl From<AppError> for ApiError {
             }
             AppError::Storage(StorageError::Conflict { .. }) => StatusCode::CONFLICT,
             AppError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::External(_) => StatusCode::BAD_GATEWAY,
         };
         Self(status, error.to_string())
     }
@@ -313,6 +338,8 @@ async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
         .with_session(move |s| Ok(court_json(s.court(), backend.as_ref())))
         .await?;
     value["running"] = json!(running);
+    value["watching"] = json!(app.watching());
+    value["github"] = json!(app.0.config.github.as_ref().map(|g| g.repo().to_owned()));
     Ok(Json(value))
 }
 
@@ -503,6 +530,7 @@ async fn issue(
             .map(|t| parse::<Capability>(t.as_str().unwrap_or_default()))
             .collect::<Result<BTreeSet<_>, _>>()?;
     }
+    seal.mcp = string_list(&body["mcp"]).into_iter().collect();
     let scope = string_list(&body["scope"]);
     if !scope.is_empty() {
         // 越出项目的路径由治理层拒绝；这里尽早指出不存在的路径。
@@ -569,7 +597,15 @@ async fn remove_template(
 }
 
 /// 在后台执行全部未结束的诏令；执行期间新入队的诏令在本轮结束后接着执行。
-async fn run(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// 执行待办诏令：`{ watch?: bool, censor?: bool }`。`watch` 为真即开常朝：常驻执行，随到随办，
+/// 办完（`censor` 不为假时）自动请都察院复核，直到 `POST /run/stop`。
+async fn run(
+    State(app): State<AppState>,
+    body: Option<Json<Value>>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let watch = body["watch"].as_bool().unwrap_or(false);
+    let censor = body["censor"].as_bool().unwrap_or(true);
     {
         let mut run = app.0.run.lock().expect("锁未中毒");
         if run.is_some() {
@@ -580,12 +616,17 @@ async fn run(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
             .map_err(|e| ApiError::internal(e.to_string()))?
             .ok_or_else(|| ApiError(StatusCode::CONFLICT, EXECUTOR_BUSY.into()))?;
         let cancel = CancelToken::new();
-        *run = Some(cancel.clone());
+        *run = Some((cancel.clone(), watch));
         let worker = app.clone();
         let token = cancel.clone();
         tokio::spawn(async move {
             let _lock = lock;
-            if let Err(error) = run_open_tasks(&worker, &token).await {
+            let result = if watch {
+                watch_open_tasks(&worker, &token, censor).await
+            } else {
+                run_open_tasks(&worker, &token).await
+            };
+            if let Err(error) = result {
                 worker.emit("run_error", json!({ "error": error.1 }));
             }
             *worker.0.run.lock().expect("锁未中毒") = None;
@@ -593,7 +634,7 @@ async fn run(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
             worker.emit("changed", json!({}));
         });
     }
-    app.emit("run", json!({ "running": true }));
+    app.emit("run", json!({ "running": true, "watching": watch }));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -604,15 +645,52 @@ async fn run_open_tasks(app: &AppState, cancel: &CancelToken) -> Result<(), ApiE
         .await
         .map_err(|e| ApiError::internal(e.to_string()))??;
     session
-        .run_open(&scheduler, cancel, |update| match update {
-            RunUpdate::Assigned(_) => app.emit("changed", json!({})),
-            RunUpdate::Text { task, text } => {
-                app.emit("text", json!({ "task": task.0, "text": text }));
-            }
-            RunUpdate::Finished(report) => {
-                app.emit("finished", report_json(report));
-                app.emit("changed", json!({}));
-            }
+        .run_open(&scheduler, cancel, |update| forward(app, update))
+        .await?;
+    Ok(())
+}
+
+fn forward(app: &AppState, update: RunUpdate<'_>) {
+    match update {
+        RunUpdate::Assigned(_) => app.emit("changed", json!({})),
+        RunUpdate::Text { task, text } => {
+            app.emit("text", json!({ "task": task.0, "text": text }));
+        }
+        RunUpdate::Finished(report) => {
+            app.emit("finished", report_json(report));
+            app.emit("changed", json!({}));
+        }
+    }
+}
+
+/// 常朝：同 CLI `run --watch`，每 5 秒查看一次队列；提示经 `notice` 事件推给页面。
+async fn watch_open_tasks(
+    app: &AppState,
+    cancel: &CancelToken,
+    censor: bool,
+) -> Result<(), ApiError> {
+    let backend = app.0.config.backend.clone();
+    let scheduler = Scheduler::new(backend.clone(), app.0.config.limits);
+    let root = app.0.config.root.clone();
+    let options = WatchOptions {
+        poll: std::time::Duration::from_secs(5),
+        censor: censor.then(|| root.clone()),
+    };
+    let mut session = tokio::task::spawn_blocking(move || Session::open(EventLog::new(&root)))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    session
+        .watch(&scheduler, backend.as_ref(), cancel, &options, |update| {
+            let notice = match update {
+                WatchUpdate::Run(update) => return forward(app, update),
+                WatchUpdate::Censured { task, verdict } => {
+                    app.emit("changed", json!({}));
+                    format!("常朝：诏令 #{} 都察院{}", task.0, verdict.label())
+                }
+                WatchUpdate::Notice(note) => format!("常朝：{note}"),
+                WatchUpdate::Neglect(note) => format!("史官记：{note}"),
+            };
+            app.emit("notice", json!({ "text": notice }));
         })
         .await?;
     Ok(())
@@ -620,7 +698,7 @@ async fn run_open_tasks(app: &AppState, cancel: &CancelToken) -> Result<(), ApiE
 
 async fn stop_run(State(app): State<AppState>) -> Json<Value> {
     let stopped = match app.0.run.lock().expect("锁未中毒").as_ref() {
-        Some(cancel) => {
+        Some((cancel, _)) => {
             cancel.cancel();
             true
         }
@@ -738,9 +816,14 @@ async fn office_ceiling(
     let ceiling = if body["clear"].as_bool() == Some(true) {
         None
     } else {
-        // 与 CLI 一致：Web 不设外藩上限（`*`），诏令仍须逐件授权。
+        // 与 CLI 一致：未给外藩上限即不设限（`*`），诏令仍须逐件授权；`["none"]` 为一律不许。
+        let mcp = string_list(&body["mcp"]);
         let mut seal = Seal {
-            mcp: ["*".to_owned()].into(),
+            mcp: match mcp.as_slice() {
+                [] => ["*".to_owned()].into(),
+                [none] if none == "none" => BTreeSet::new(),
+                _ => mcp.into_iter().collect(),
+            },
             ..Seal::default()
         };
         if let Some(tools) = body.get("tools").and_then(Value::as_array) {
@@ -896,6 +979,112 @@ async fn acquit(
     app.mutate(move |s| {
         let (done, note) = s.acquit(TaskId(id), index)?;
         Ok(json!({ "acquitted": done, "note": note }))
+    })
+    .await
+}
+
+/// 翰林院实录：`?q=` 为检索词，空则全部（新者在前）。
+async fn records(
+    State(app): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let q = query.get("q").cloned().unwrap_or_default();
+    app.with_session(move |s| {
+        let records = s.court().records();
+        let found: Vec<Value> = ziyuan_core::find_records(&records, &q)
+            .into_iter()
+            .map(chronicle_json)
+            .collect();
+        Ok(json!({ "total": records.len(), "records": found }))
+    })
+    .await
+    .map(Json)
+}
+
+/// 一件实录的 JSON（`ziyuan records --json` 同此）。
+pub fn chronicle_json(r: &ziyuan_core::Record) -> Value {
+    json!({
+        "task": r.task.0,
+        "department": r.department.code(),
+        "edict": r.edict,
+        "worker": r.worker.0,
+        "handler": r.handler,
+        "summary": r.summary,
+        "verdict": r.verdict,
+    })
+}
+
+/// 礼部修 CHANGELOG：`{ version?（默认 Unreleased）, since? }`，据 `git log` 下一件礼部诏令（只入队）。
+async fn changelog(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let version = body["version"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("Unreleased")
+        .to_owned();
+    let since = body["since"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
+    let root = app.0.config.root.clone();
+    app.mutate(move |s| {
+        let (range, commits) = ziyuan_app::changelog_commits(&root, since)?;
+        let edict = s.draft_changelog(&version, &commits)?;
+        Ok(json!({ "id": edict.id.0, "range": range, "commits": commits.len(), "note": CHANGELOG_NOTE }))
+    })
+    .await
+}
+
+/// 兵部驿站 · GitHub：带标签的 issue/PR 入队，`{ label?（默认 ziyuan）, department?（默认 works） }`。
+async fn github_pull(
+    State(app): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let hub = app.github()?;
+    let label = body["label"]
+        .as_str()
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or(ziyuan_github::DEFAULT_LABEL)
+        .to_owned();
+    let department = parse::<Department>(body["department"].as_str().unwrap_or("works"))?;
+    app.mutate(move |s| {
+        let report = s.github_pull(&hub, &label, department)?;
+        let queued: Vec<Value> = report
+            .queued
+            .iter()
+            .map(|(e, station, flags)| json!({ "id": e.id.0, "station": station, "suspicions": flags }))
+            .collect();
+        Ok(json!({ "issues": report.issues, "queued": queued }))
+    })
+    .await
+}
+
+/// 回奏写回来处的 GitHub 评论。
+async fn github_reply(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let hub = app.github()?;
+    app.mutate(move |s| {
+        let (number, url) = s.github_reply(&hub, TaskId(id))?;
+        Ok(json!({ "number": number, "url": url }))
+    })
+    .await
+}
+
+/// 准奏落盘的改动在远端开为草稿 PR。
+async fn github_pr(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let hub = app.github()?;
+    app.mutate(move |s| {
+        let url = s.github_pull_request(&hub, TaskId(id))?;
+        Ok(json!({ "url": url }))
     })
     .await
 }
@@ -1226,6 +1415,13 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
                 "budget": t.budget,
                 "urgent": t.urgent,
                 "courier": t.courier,
+                "replied": t.replied,
+                "pull_request": t.pull_request,
+                // 经 GitHub 驿传入队、此刻可回报评论 / 可开草稿 PR。
+                "github_reply": t.courier.as_deref().is_some_and(|c| c.starts_with("github:"))
+                    && court.propose_courier_reply(t.edict.id, false, "-").is_ok(),
+                "github_pr": t.courier.as_deref().is_some_and(|c| c.starts_with("github:"))
+                    && court.propose_courier_reply(t.edict.id, true, "-").is_ok(),
                 "template": t.template.as_ref().map(|u| json!({
                     "name": u.name,
                     "criteria": u.criteria,
@@ -1391,6 +1587,7 @@ mod tests {
                 max_concurrent: 2,
                 timeout: Duration::from_secs(10),
             },
+            github: None,
         };
         tokio::spawn(serve(listener, config));
         (base, root)
@@ -1888,6 +2085,98 @@ mod tests {
         let court = Session::open(EventLog::new(&root)).unwrap();
         assert_eq!(court.court().runnable_tasks(), [TaskId(2), TaskId(1)]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn court_session_records_changelog_and_github() {
+        let (base, _root) = start("watch").await;
+        let t = Some(TOKEN);
+        let edict = |text: &str| json!({ "department": "works", "text": text, "mcp": ["docs"] });
+        assert_eq!(call(&base, "/edicts", t, Some(edict("查锁"))).await.0, 200);
+        // 常朝：先办已有的，随后新下的诏令也随到随办，直到散朝。
+        assert_eq!(
+            call(&base, "/run", t, Some(json!({ "watch": true })))
+                .await
+                .0,
+            200
+        );
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(
+            (state["running"].as_bool(), state["watching"].as_bool()),
+            (Some(true), Some(true))
+        );
+        assert_eq!(state["tasks"][0]["seal"]["mcp"], json!(["docs"]));
+        assert_eq!(call(&base, "/run", t, Some(json!({}))).await.0, 409);
+        assert_eq!(
+            call(&base, "/edicts", t, Some(edict("查队列"))).await.0,
+            200
+        );
+        let mut done = 0;
+        for _ in 0..200 {
+            let (_, state) = call(&base, "/state", t, None).await;
+            done = state["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|t| t["status"] == "completed")
+                .count();
+            if done == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(done, 2, "常朝应办完后来的诏令");
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(state["watching"], true, "办完不散朝");
+        assert_eq!(call(&base, "/run/stop", t, Some(json!({}))).await.0, 200);
+        let mut state = Value::Null;
+        for _ in 0..100 {
+            state = call(&base, "/state", t, None).await.1;
+            if state["running"] == false {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            (state["running"].as_bool(), state["watching"].as_bool()),
+            (Some(false), Some(false))
+        );
+
+        // 实录：空查询全部（新者在前），检索词只取相符者。
+        let (_, all) = call(&base, "/records", t, None).await;
+        assert_eq!(all["total"], 2);
+        assert_eq!(all["records"][0]["task"], 2);
+        let (_, found) = call(&base, "/records?q=%E9%98%9F%E5%88%97", t, None).await;
+        let ids: Vec<_> = found["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["task"].clone())
+            .collect();
+        assert_eq!(ids, vec![json!(2)], "{found}");
+
+        // 非 git 目录修不了 CHANGELOG；驿站未通 GitHub 时拒绝；都不留诏令。
+        let (status, error) = call(&base, "/changelog", t, Some(json!({}))).await;
+        assert_eq!(status, 502, "{error}");
+        for path in [
+            "/github/pull",
+            "/tasks/1/github/reply",
+            "/tasks/1/github/pr",
+        ] {
+            let (status, error) = call(&base, path, t, Some(json!({}))).await;
+            assert_eq!(status, 400, "{path}");
+            assert!(
+                error["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ZIYUAN_GITHUB_REPO"),
+                "{error}"
+            );
+        }
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(state["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(state["github"], Value::Null);
+        assert_eq!(state["tasks"][0]["github_reply"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]

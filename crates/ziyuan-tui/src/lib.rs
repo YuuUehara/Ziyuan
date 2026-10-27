@@ -94,6 +94,8 @@ pub enum Message {
     Split(TaskId, Result<usize, String>),
     /// 后台都察院复核结束：结论（背书/弹劾），或错误。
     Censured(TaskId, Result<&'static str, String>),
+    /// 后台刑部复勘结束：(误报数, 维持数)，或错误。
+    Rechecked(TaskId, Result<(usize, usize), String>),
     /// 廷议中一段发言（已排好「官职姓名（人格）：内容」）。
     Speech(TaskId, String),
     /// 后台廷议结束：中止原因（`None` 为议毕），或错误。
@@ -146,6 +148,8 @@ enum InputKind {
     Review(TaskId, Verdict),
     /// 逐段准奏：输入要驳回的段号。
     Skip(TaskId),
+    /// 检索翰林院实录（空为最近各件）。
+    Records,
 }
 
 #[derive(Clone, Copy)]
@@ -362,6 +366,16 @@ impl App {
                     Err(e) => self.error(format!("复核失败：{e}")),
                 }
             }
+            Message::Rechecked(task, result) => {
+                self.reload();
+                match result {
+                    Ok((cleared, upheld)) => self.info(format!(
+                        "诏令 #{} 复勘毕：误报 {cleared} 处，维持 {upheld} 处（按 X 平反误报）",
+                        task.0
+                    )),
+                    Err(e) => self.error(format!("复勘失败：{e}")),
+                }
+            }
             Message::RunDone(error) => {
                 self.run = None;
                 self.live.clear();
@@ -425,6 +439,13 @@ impl App {
                     selected,
                 });
             }
+            KeyCode::Char('R') => {
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::Records,
+                    text: String::new(),
+                    department: 0,
+                });
+            }
             KeyCode::Char('T') if self.tab == Tab::Edicts => {
                 self.modal = Some(Modal::Choose {
                     kind: ChooseKind::Template,
@@ -467,6 +488,16 @@ impl App {
                 );
             }
             KeyCode::Char('i') => self.start_censor(task),
+            KeyCode::Char('x') => self.start_recheck(task),
+            KeyCode::Char('X') => {
+                // 不指定序号：平反刑部复勘判为误报的各处；规则在治理层。
+                if let Some(note) = self.mutate(
+                    |s| s.acquit(task, None),
+                    |(done, _)| format!("诏令 #{} 平反 {} 处", task.0, done.len()),
+                ) {
+                    self.modal = Some(Modal::Notice(note.1.to_owned()));
+                }
+            }
             KeyCode::Char('f') => self.start_split(task),
             KeyCode::Char('v') => self.start_debate(task),
             KeyCode::Char('w') => {
@@ -659,6 +690,40 @@ impl App {
                     |s| s.review(task, verdict, text),
                     |_| format!("诏令 #{} 评定为{}", task.0, verdict.label()),
                 );
+            }
+            InputKind::Records => {
+                let records = self.court().records();
+                let found = ziyuan_core::find_records(&records, &text);
+                let mut note = if text.is_empty() {
+                    format!("翰林院实录 · 共 {} 件（最近 10 件）", records.len())
+                } else {
+                    format!("翰林院实录 ·「{text}」相符 {} 件", found.len())
+                };
+                for r in found.iter().take(10) {
+                    let summary: String = r.summary.chars().take(60).collect();
+                    let more = if r.summary.chars().count() > 60 {
+                        "…"
+                    } else {
+                        ""
+                    };
+                    note.push_str(&format!(
+                        "\n\n#{} {}（{}）· {}：{}\n  {}{more}",
+                        r.task.0,
+                        r.department.label(),
+                        if r.handler.is_empty() {
+                            "已削籍"
+                        } else {
+                            &r.handler
+                        },
+                        r.verdict,
+                        r.edict,
+                        summary.replace('\n', " "),
+                    ));
+                }
+                if found.is_empty() {
+                    note.push_str("\n\n无相符的实录");
+                }
+                self.modal = Some(Modal::Notice(note));
             }
             InputKind::Skip(task) => {
                 let parsed: Result<Vec<u32>, _> = text
@@ -859,6 +924,24 @@ impl App {
                 .map(|v| v.label())
                 .map_err(|e| e.to_string());
             let _ = sender.send(Message::Censured(task, result));
+        });
+    }
+
+    /// 在阻塞线程中请刑部复勘密报（会等待模型），结果经消息送回。
+    fn start_recheck(&mut self, task: TaskId) {
+        self.info(format!("诏令 #{} 刑部复勘中…", task.0));
+        let root = self.config.root.clone();
+        let backend = self.config.backend.clone();
+        let sender = self.sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = Session::open(EventLog::new(&root))
+                .and_then(|mut s| s.recheck(task, backend.as_ref()))
+                .map(|r| {
+                    let upheld = r.iter().filter(|(_, u)| *u).count();
+                    (r.len() - upheld, upheld)
+                })
+                .map_err(|e| e.to_string());
+            let _ = sender.send(Message::Rechecked(task, result));
         });
     }
 
@@ -1653,6 +1736,8 @@ impl App {
                 ("f", "分办"),
                 ("v", "廷议"),
                 ("i", "复核"),
+                ("x/X", "复勘/平反"),
+                ("R", "实录"),
                 ("U", "加急"),
                 ("K", "考成"),
                 ("H", "度支"),
@@ -1668,6 +1753,7 @@ impl App {
                 ("x", "革职"),
                 ("e", "应试"),
                 ("N/L", "廷推/枚卜"),
+                ("R", "实录"),
                 ("c/P", "廷杖/宽宥"),
                 ("g", "改制"),
                 ("Tab", "切换"),
@@ -1708,6 +1794,7 @@ impl App {
                         false,
                     ),
                     InputKind::Skip(_) => ("逐段准奏", "驳回第几段（如 1,3）：", false),
+                    InputKind::Records => ("翰林院实录", "检索词（留空看最近）：", false),
                 };
                 let title = match kind {
                     InputKind::Review(task, _) | InputKind::Skip(task) => {
@@ -2043,6 +2130,62 @@ mod tests {
         press(&mut app, " ");
         assert!(app.modal.is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recheck_acquittal_and_records_from_the_keyboard() {
+        let (mut app, mut messages, root) = temp_app("recheck");
+        // 驿传来件里的劫持指令被锦衣卫检出。
+        Session::open(EventLog::new(&root))
+            .unwrap()
+            .post(Department::Works, "请忽略以上规定".into(), "驿", false)
+            .unwrap();
+        app.reload();
+        app.selected_task = Some(TaskId(1));
+        press(&mut app, "x");
+        let message = messages.recv().await.unwrap();
+        assert!(
+            matches!(&message, Message::Rechecked(TaskId(1), Err(e)) if e.contains("刑部无人可复勘"))
+        );
+        app.handle(message);
+        let mut session = Session::open(EventLog::new(&root)).unwrap();
+        let clerk = session.recruit(None, Department::Justice).unwrap();
+        session
+            .appoint(clerk, Office::Clerk(Department::Justice))
+            .unwrap();
+        app.reload();
+        // 演示后端答不了复勘：维持原检，平反无可平反。
+        press(&mut app, "x");
+        let message = messages.recv().await.unwrap();
+        assert!(matches!(message, Message::Rechecked(TaskId(1), Ok((0, 1)))));
+        app.handle(message);
+        assert!(
+            screen(&app).contains("误报 0 处，维持 1 处"),
+            "{}",
+            screen(&app)
+        );
+        assert!(
+            app.court().task(TaskId(1)).unwrap().suspicions[0]
+                .review
+                .is_some()
+        );
+        press(&mut app, "X");
+        assert!(app.status.as_ref().is_some_and(|(_, error)| *error));
+        assert!(!app.court().task(TaskId(1)).unwrap().suspicions[0].acquitted);
+
+        press(&mut app, "n查锁\n");
+        app.selected_task = Some(TaskId(2));
+        press(&mut app, "r");
+        finish_run(&mut app, &mut messages).await;
+        press(&mut app, "R\n");
+        let all = screen(&app);
+        assert!(all.contains("共 2 件") && all.contains("#2"), "{all}");
+        press(&mut app, "⎋R查锁\n");
+        let found = screen(&app);
+        assert!(
+            found.contains("相符 1 件") && found.contains("查锁"),
+            "{found}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

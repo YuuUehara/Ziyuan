@@ -5,6 +5,9 @@
 //!
 //! 诏令分两步：[`Session::issue`] 入队（路由不通则拒绝、不留记录），
 //! [`Session::run`] 指派并交给 [`Scheduler`] 并发执行，逐条记录进度与结局。
+mod courier;
+pub use courier::{PullReport, changelog_commits};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -33,6 +36,8 @@ pub enum AppError {
     Storage(StorageError),
     /// 落盘失败（如文件自呈报以来已被改动）；事件簿不变。
     Apply(String),
+    /// 外界（GitHub、git）出错；事件簿不变。
+    External(String),
 }
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -42,13 +47,14 @@ impl fmt::Display for AppError {
             Self::Governance(e) => e.fmt(f),
             Self::Storage(e) => e.fmt(f),
             Self::Apply(e) => write!(f, "落盘失败：{e}"),
+            Self::External(e) => f.write_str(e),
         }
     }
 }
 impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotFounded | Self::AlreadyFounded | Self::Apply(_) => None,
+            Self::NotFounded | Self::AlreadyFounded | Self::Apply(_) | Self::External(_) => None,
             Self::Governance(e) => Some(e),
             Self::Storage(e) => Some(e),
         }

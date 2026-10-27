@@ -13,6 +13,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
 ziyuan-app.workspace = true
 ziyuan-core.workspace = true
 ziyuan-governance.workspace = true
+ziyuan-github.workspace = true
 ziyuan-runtime.workspace = true
 ziyuan-storage.workspace = true
 
