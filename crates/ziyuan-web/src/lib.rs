@@ -331,11 +331,16 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ---- 读取 ----
 
-async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// 朝廷全貌；诏令只含待办理会的与最近 [`RECENT_TASKS`] 件，`?all=1` 为全部。
+async fn state(
+    State(app): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
     let running = app.running();
     let backend = app.0.config.backend.clone();
+    let recent = (query.get("all").map(String::as_str) != Some("1")).then_some(RECENT_TASKS);
     let mut value = app
-        .with_session(move |s| Ok(court_json(s.court(), backend.as_ref())))
+        .with_session(move |s| Ok(court_json(s.court(), backend.as_ref(), recent)))
         .await?;
     value["running"] = json!(running);
     value["watching"] = json!(app.watching());
@@ -343,7 +348,8 @@ async fn state(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(value))
 }
 
-/// 起居注：可按 `task`、`official`、`kind`、`since`、`until`（同 CLI：`2h`、`2026-10-25 14:30`）筛选。
+/// 起居注：可按 `task`、`official`、`kind`、`since`、`until`（同 CLI：`2h`、`2026-10-25 14:30`）筛选；
+/// 只回最近的 `limit`（默认 500）条，`truncated` 为真表示还有更早的。
 async fn history(
     State(app): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -366,28 +372,36 @@ async fn history(
             .map(|v| parse_time(v, now, offset).map_err(ApiError::bad))
             .transpose()
     };
+    let limit = id("limit")?.map_or(500, |n| n.max(1) as usize);
     let filter = HistoryFilter {
         task: id("task")?.map(TaskId),
         agent: id("official")?.map(AgentId),
         kind: get("kind").map(str::to_lowercase),
         since: time("since")?,
         until: time("until")?,
+        // 多取一条，以知是否还有更早的。
+        limit: Some(limit + 1),
     };
-    let entries = app
+    let mut entries = app
         .with_session(move |s| Ok(history_entries(s.history(), &filter)))
         .await?
         .map_err(ApiError::bad)?;
-    Ok(Json(json!(
-        entries
-            .into_iter()
-            .map(|e| json!({
+    let truncated = entries.len() > limit;
+    if truncated {
+        entries.remove(0);
+    }
+    let entries: Vec<Value> = entries
+        .into_iter()
+        .map(|e| {
+            json!({
                 "seq": e.seq,
                 "time": e.at.map(|t| format_time(t, offset)),
                 "kind": e.kind,
                 "text": e.text,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "entries": entries, "truncated": truncated })))
 }
 
 async fn recommend(
@@ -1333,7 +1347,12 @@ fn report_json(report: &TaskReport) -> Value {
 }
 
 /// 朝廷全貌（Web 的 `/api/state`，亦供 CLI `--json`）。
-pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
+/// 页面默认列出的已了结诏令件数：上万件时整页 JSON 达数十 MB，每次刷新都要秒级渲染。
+const RECENT_TASKS: usize = 50;
+
+/// 朝廷全貌。`recent` 为 `Some(n)` 时诏令只列尚待理会的（未结束、待评定、改动待准奏，
+/// 及其分办的原诏令与子诏令）与最近 `n` 件；`task_total` / `open_total` 总是全部的件数。
+pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usize>) -> Value {
     let name = |id: AgentId| court.agent(id).map(|a| a.name.clone());
     // 按各诏令实际所用模型估算花费；演示后端为 null。
     let default_model = backend.model_name();
@@ -1387,8 +1406,25 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
             })
         })
         .collect();
-    let tasks: Vec<_> = court
-        .tasks()
+    let all: Vec<&Task> = court.tasks().collect();
+    let open = |t: &Task| matches!(t.status, TaskStatus::Pending | TaskStatus::Assigned(_));
+    let pending = |t: &Task| {
+        open(t)
+            || (matches!(t.status, TaskStatus::Completed { .. }) && t.review.is_none())
+            || t.changes
+                .as_ref()
+                .is_some_and(|c| c.state == ChangeState::Proposed)
+    };
+    let first_recent = recent.map_or(0, |n| all.len().saturating_sub(n));
+    let shown: BTreeSet<TaskId> = all
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| recent.is_none() || *i >= first_recent || pending(t))
+        .flat_map(|(_, t)| t.parent.into_iter().chain([t.edict.id]))
+        .collect();
+    let tasks: Vec<_> = all
+        .iter()
+        .filter(|t| shown.contains(&t.edict.id) || t.parent.is_some_and(|p| shown.contains(&p)))
         .map(|t| {
             let (kind, worker, detail) = match &t.status {
                 TaskStatus::Pending => ("pending", None, None),
@@ -1533,6 +1569,8 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend) -> Value {
         "departments": departments,
         "offices": offices,
         "officials": officials,
+        "task_total": all.len(),
+        "open_total": all.iter().filter(|t| open(t)).count(),
         "tasks": tasks,
         "templates": court.templates().into_iter().map(|(name, t, builtin)| json!({
             "name": name,
@@ -1949,7 +1987,15 @@ mod tests {
         let edict = json!({ "department": "works", "text": "查起居注", "queue": true });
         assert_eq!(call(&base, "/edicts", t, Some(edict)).await.0, 200);
         let (_, all) = call(&base, "/history", t, None).await;
-        let all = all.as_array().unwrap();
+        assert_eq!(all["truncated"], false);
+        let all = all["entries"].as_array().unwrap();
+        // 只取最近两条：标出还有更早的，序号仍是事件簿中的序号。
+        let (_, tail) = call(&base, "/history?limit=2", t, None).await;
+        assert_eq!(tail["truncated"], true);
+        assert_eq!(
+            tail["entries"].as_array().unwrap()[..],
+            all[all.len() - 2..]
+        );
         // 时辰不单列；持久化的事件簿记了时辰，各条都有时间。
         assert!(
             all.iter()
@@ -1957,9 +2003,9 @@ mod tests {
             "{all:?}"
         );
         let (_, edicts) = call(&base, "/history?kind=edict&since=1h&task=1", t, None).await;
-        assert_eq!(edicts.as_array().unwrap().len(), 1, "{edicts}");
+        assert_eq!(edicts["entries"].as_array().unwrap().len(), 1, "{edicts}");
         let (_, none) = call(&base, "/history?until=2000-01-01", t, None).await;
-        assert!(none.as_array().unwrap().is_empty());
+        assert!(none["entries"].as_array().unwrap().is_empty());
         for bad in [
             "/history?kind=nope",
             "/history?since=yesterday",
@@ -2085,6 +2131,41 @@ mod tests {
         let court = Session::open(EventLog::new(&root)).unwrap();
         assert_eq!(court.court().runnable_tasks(), [TaskId(2), TaskId(1)]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn state_lists_pending_and_recent_tasks_unless_all() {
+        let (base, root) = start("recent").await;
+        let t = Some(TOKEN);
+        let mut session = Session::open(EventLog::new(&root)).unwrap();
+        for i in 1..=60 {
+            let id = session
+                .issue(Department::Works, format!("第 {i} 件"), Seal::default())
+                .unwrap()
+                .id;
+            // 第 3 件留待办，其余撤销（已了结）。
+            if i != 3 {
+                session.cancel(id).unwrap();
+            }
+        }
+        let ids = |state: &Value| -> Vec<u64> {
+            state["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["id"].as_u64().unwrap())
+                .collect()
+        };
+        let (_, state) = call(&base, "/state", t, None).await;
+        assert_eq!(
+            (state["task_total"].as_u64(), state["open_total"].as_u64()),
+            (Some(60), Some(1))
+        );
+        let mut expected = vec![3];
+        expected.extend(11..=60);
+        assert_eq!(ids(&state), expected, "待办的第 3 件与最近 50 件");
+        let (_, all) = call(&base, "/state?all=1", t, None).await;
+        assert_eq!(ids(&all), (1..=60).collect::<Vec<_>>());
     }
 
     #[tokio::test(flavor = "multi_thread")]

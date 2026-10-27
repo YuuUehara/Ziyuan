@@ -86,8 +86,7 @@ pub trait EventStore {
 
 /// 事件类型的代码（事件簿中的类型字段，小写），如 `edict`、`tool`、`usage`。
 pub fn event_kind(event: &CourtEvent) -> String {
-    let line = codec::encode_event(event);
-    line.split('\t').nth(1).unwrap_or_default().to_lowercase()
+    codec::kind_of(event).to_lowercase()
 }
 
 impl<T: EventStore + ?Sized> EventStore for &mut T {

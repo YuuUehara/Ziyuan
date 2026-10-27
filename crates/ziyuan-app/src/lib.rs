@@ -1970,6 +1970,8 @@ pub struct HistoryFilter {
     pub kind: Option<String>,
     pub since: Option<u64>,
     pub until: Option<u64>,
+    /// 只取相符者中最后（最新）的若干条；只为这些生成中文描述，事件簿很长时也快。
+    pub limit: Option<usize>,
 }
 
 /// 起居注的一条：`seq` 为事件簿中的序号（从 1 起，时辰不单列，故可能跳号），`at` 为所属时辰。
@@ -2003,7 +2005,7 @@ pub fn history_entries(
         Some(CourtEvent::Clock(t)) => Some(*t),
         _ => None,
     };
-    let mut entries = Vec::new();
+    let mut matched = Vec::new();
     for (i, event) in history.iter().enumerate() {
         if let CourtEvent::Clock(t) = event {
             at = Some(*t);
@@ -2018,15 +2020,22 @@ pub fn history_entries(
             && filter.since.is_none_or(|s| at.is_some_and(|t| t >= s))
             && filter.until.is_none_or(|u| at.is_some_and(|t| t <= u));
         if keep {
-            entries.push(HistoryEntry {
-                seq: i + 1,
-                at,
-                kind,
-                text: describe_event(event),
-            });
+            matched.push((i, at, kind));
         }
     }
-    Ok(entries)
+    let skip = filter
+        .limit
+        .map_or(0, |limit| matched.len().saturating_sub(limit));
+    Ok(matched
+        .into_iter()
+        .skip(skip)
+        .map(|(i, at, kind)| HistoryEntry {
+            seq: i + 1,
+            at,
+            kind,
+            text: describe_event(&history[i]),
+        })
+        .collect())
 }
 
 /// 事件涉及的诏令（分办含各子诏令）。
@@ -5078,6 +5087,16 @@ mod tests {
         );
         assert!(task[2].text.contains("trace zy-abc"), "{}", task[2].text);
         assert_eq!(task[0].seq + 2, task[1].seq, "时辰不单列，序号跳过");
+        // 只取最后两条：序号与时辰照旧。
+        let tail = entries(HistoryFilter {
+            task: Some(first),
+            limit: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(
+            tail.iter().map(|e| (e.seq, e.at)).collect::<Vec<_>>(),
+            task[1..].iter().map(|e| (e.seq, e.at)).collect::<Vec<_>>()
+        );
         let worker = entries(HistoryFilter {
             agent: Some(AgentId(4)),
             ..Default::default()

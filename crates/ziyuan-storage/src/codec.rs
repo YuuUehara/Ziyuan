@@ -884,6 +884,56 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
     Ok(event)
 }
 
+/// 事件在编码中的类型字段，不必编码整条事件（回奏全文的 hex 编码很费时）。
+/// 测试保证与 [`encode_event`] 一致。
+pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
+    use CourtEvent::*;
+    match event {
+        Founded(_) => "FOUNDED",
+        Clock(_) => "CLOCK",
+        AgentRegistered(_) => "REGISTERED",
+        OfficialAppointed { .. } => "APPOINTED",
+        OfficialDismissed { .. } => "DISMISSED",
+        OfficialPurged { .. } => "PURGED",
+        InstitutionReformed(_) => "REFORMED",
+        EmperorRetreat(_) => "RETREAT",
+        OfficeModelSet { .. } => "MODEL",
+        OfficeCeilingSet { .. } => "CEILING",
+        BudgetSet { .. } => "BUDGET",
+        EdictIssued(_) => "EDICT",
+        EdictDrafted { .. } => "DRAFTED",
+        EdictSplit { .. } => "SPLIT",
+        CourtDebated { .. } => "DEBATED",
+        EdictApproved { .. } => "APPROVED",
+        TaskAssigned { .. } => "ASSIGNED",
+        ToolInvoked { .. } => "TOOL",
+        TaskCompleted { .. } => "COMPLETED",
+        TaskFailed { .. } => "FAILED",
+        TaskCancelled { .. } => "CANCELLED",
+        ChangesProposed { .. } => "CHANGES",
+        ChangesApplied { .. } => "APPLIED",
+        ChangesDiscarded { .. } => "DISCARDED",
+        CensorReported { .. } => "CENSURED",
+        SuspicionRaised { .. } => "SUSPECT",
+        SuspicionReviewed { .. } => "RECHECKED",
+        SuspicionAcquitted { .. } => "ACQUITTED",
+        ExamTaken { .. } => "EXAM",
+        PalaceExamHeld { .. } => "PALACE",
+        ZhuangyuanNamed { .. } => "ZHUANGYUAN",
+        CourierDelivered { .. } => "COURIER",
+        CourierReplied { .. } => "REPLIED",
+        EdictExpedited { .. } => "URGENT",
+        CourtNominated { .. } => "NOMINATED",
+        OfficialCaned { .. } => "CANED",
+        OfficialPardoned { .. } => "PARDONED",
+        TemplateSaved { .. } => "TEMPLATE",
+        TemplateRemoved { .. } => "UNTEMPLATE",
+        TemplateApplied { .. } => "TEMPLATED",
+        ModelUsage { .. } => "USAGE",
+        TaskReviewed { .. } => "REVIEWED",
+    }
+}
+
 /// 能读这一行的最早发布版本（`0.x.0` 的 `x`）。逐一用 v0.1–v0.5 发布时的解码器试读得出，
 /// 样本见 `compat.tsv`。此后每新增事件类型、字段或代码，都要在这里与样本中记上新版本；
 /// 这里不用通配，新增事件类型时编译器会提醒。
@@ -974,7 +1024,11 @@ mod tests {
             let minor: u32 = version.strip_prefix("0.").unwrap().parse().unwrap();
             // 旧版写下的每种样本，本版都读得回来。
             assert_eq!(readable_since(line).unwrap(), minor, "{line}");
-            seen.insert(line.split('\t').nth(1).unwrap().to_owned());
+            let kind = line.split('\t').nth(1).unwrap();
+            let event = decode_event(line).unwrap();
+            assert_eq!(kind_of(&event), kind);
+            assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
+            seen.insert(kind.to_owned());
         }
         assert_eq!(seen.len(), 42, "每种事件类型至少一条样本");
     }

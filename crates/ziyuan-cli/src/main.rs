@@ -1942,6 +1942,7 @@ fn json_output(
         Ok(ziyuan_web::court_json(
             session.court(),
             worker_backend()?.as_ref(),
+            None,
         ))
     };
     Ok(match command {

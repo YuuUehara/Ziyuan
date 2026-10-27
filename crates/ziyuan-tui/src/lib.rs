@@ -77,6 +77,9 @@ async fn event_loop(
     Ok(())
 }
 
+/// 起居注页只列最近这么多条：事件簿有几十万条时，逐条描述会让每一帧都卡住。
+const HISTORY_LIMIT: usize = 1000;
+
 /// 界面收到的消息：终端输入，或后台执行的进度。
 pub enum Message {
     Input(Event),
@@ -1671,9 +1674,13 @@ impl App {
         );
     }
 
-    /// 起居注各条（时辰并入各条的时间，不单列）。
+    /// 起居注最近的 [`HISTORY_LIMIT`] 条（时辰并入各条的时间，不单列）；更早的用 `ziyuan history` 筛选。
     fn history(&self) -> Vec<HistoryEntry> {
-        history_entries(self.session.history(), &HistoryFilter::default()).unwrap_or_default()
+        let filter = HistoryFilter {
+            limit: Some(HISTORY_LIMIT),
+            ..HistoryFilter::default()
+        };
+        history_entries(self.session.history(), &filter).unwrap_or_default()
     }
 
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
@@ -1696,7 +1703,11 @@ impl App {
         let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(
             List::new(items)
-                .block(panel(format!("起居注（{} 条事件）", history.len())))
+                .block(panel(if history.len() < HISTORY_LIMIT {
+                    format!("起居注（{} 条事件）", history.len())
+                } else {
+                    format!("起居注（最近 {HISTORY_LIMIT} 条；更早的用 ziyuan history 筛选）")
+                }))
                 .highlight_style(Style::new().bg(Color::DarkGray)),
             area,
             &mut state,

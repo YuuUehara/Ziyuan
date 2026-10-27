@@ -278,7 +278,7 @@
   details.history:not([open]) summary h2 { border-bottom: 0; }
   details.history summary h2::after { content: "展开"; margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--muted); letter-spacing: 0; }
   details.history[open] summary h2::after { content: "收起"; }
-  .history-list { margin: 0; padding: 12px 18px 16px 52px; max-height: 360px; overflow: auto; font-size: 13px; columns: 2; column-gap: 40px; }
+  .history-list { margin: 0; padding: 12px 18px 16px 52px; max-height: 360px; overflow: auto; font-size: 13px; }
   .history-list li { break-inside: avoid; margin-bottom: 3px; }
   .records-list { margin: 10px 0 0; padding-left: 22px; max-height: 320px; overflow: auto; font-size: 13px; }
   .records-list li { margin-bottom: 6px; }
@@ -309,7 +309,6 @@
     .header-stats { margin-left: 0; }
     .officials-layout { grid-template-columns: 1fr; }
     .side { border-left: 0; padding-left: 0; }
-    .history-list { columns: 1; }
   }
 </style>
 </head>
@@ -763,8 +762,8 @@ function render() {
   renderTemplates(s);
   $("mode-label").textContent = s.mode.label + (s.retreat ? " · 西苑修道中" : "");
   $("retreat-btn").textContent = s.retreat ? "回朝亲政" : "移居西苑修道（怠政）";
-  const open = s.tasks.filter((t) => t.status === "pending" || t.status === "assigned").length;
-  $("task-count").textContent = s.tasks.length;
+  const open = s.open_total;
+  $("task-count").textContent = s.task_total;
   $("open-count").textContent = open;
   $("usage-total").textContent = fmt(s.usage.input + s.usage.output);
   $("cost-total").textContent = s.cost ? `（${s.cost}）` : "";
@@ -804,7 +803,10 @@ function render() {
   }).join("");
 
   const tasks = [...s.tasks].reverse();
-  $("task-summary").textContent = tasks.length ? `共 ${tasks.length} 件，最新在前` : "";
+  const hidden = s.task_total - tasks.length;
+  $("task-summary").innerHTML = !tasks.length ? "" : hidden > 0
+    ? `共 ${s.task_total} 件，列出待理会的与最近的 ${tasks.length} 件，最新在前 <button class="small" id="all-tasks">全部列出</button>`
+    : `共 ${s.task_total} 件，最新在前${showAll ? ` <button class="small" id="recent-tasks">只列最近</button>` : ""}`;
   $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。请在左侧下诏。</div>`;
 
   $("officials").innerHTML = s.officials.map((o) => {
@@ -835,9 +837,11 @@ function render() {
     : `<p class="hint">尚未举行殿试。</p>`;
 }
 
+// 诏令默认只列待理会的与最近 50 件；「全部列出」后改取全部。
+let showAll = false;
 async function refresh() {
   try {
-    state = await api("/state");
+    state = await api(showAll ? "/state?all=1" : "/state");
     preserve(render);
     showCriteria();
     renderOfficeConfig(state);
@@ -853,8 +857,8 @@ async function loadHistory() {
     const value = $("hf-" + key).value.trim();
     if (value) params.set(key, value);
   }
-  const entries = await api("/history" + (params.size ? "?" + params : ""));
-  $("hf-count").textContent = params.size ? `共 ${entries.length} 条` : "";
+  const { entries, truncated } = await api("/history" + (params.size ? "?" + params : ""));
+  $("hf-count").textContent = truncated ? `最近 ${entries.length} 条；更早的请缩小筛选` : params.size ? `共 ${entries.length} 条` : "";
   $("history-list").innerHTML = entries.map((e) =>
     `<li value="${e.seq}"><span class="hint">${e.time ? esc(e.time.slice(5)) : ""}</span> ${esc(e.text)}</li>`).join("");
 }
@@ -1059,6 +1063,9 @@ document.addEventListener("click", (event) => {
     if (!on || confirm("移居西苑修道？批红与评定将由司礼监代批，一一记入事件簿。")) {
       act(api("/retreat", { on }), on ? "陛下移居西苑修道" : "陛下回朝亲政").then((r) => r && chronicle(r.note));
     }
+  } else if (el.id === "all-tasks" || el.id === "recent-tasks") {
+    showAll = el.id === "all-tasks";
+    refresh();
   } else if (el.id === "chronicle-close") {
     $("chronicle").hidden = true;
   } else if (d.draft) {
