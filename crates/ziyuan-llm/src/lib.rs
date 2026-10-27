@@ -1,13 +1,18 @@
-//! 模型 Adapter：OpenAI 兼容的 Chat Completions API（OpenAI、DeepSeek、通义千问、Kimi、Ollama 等）。
+//! 模型 Adapter：OpenAI 兼容的 Chat Completions API（OpenAI、DeepSeek、通义千问、Kimi、Ollama 等），
+//! 以及用 ChatGPT 订阅额度调用的 Responses API（见 [`chatgpt`]）。
 //!
 //! 同步、流式（SSE）；文本片段经 `ExecutionHooks::text_delta` 实时报告。只实现 Tool Calling 所需的最小字段。
 use serde_json::{Value, json};
 use std::env;
 use std::io::{BufRead, BufReader};
+use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_core::{Price, TokenUsage};
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
 use ziyuan_runtime::{BoxError, ExecutionHooks, ModelCatalog, guard};
+
+pub mod chatgpt;
+mod responses;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -41,20 +46,29 @@ impl Retry {
     }
 }
 
+/// 凭据：API Key（走 Chat Completions），或 ChatGPT 订阅（走 Responses API）。
+#[derive(Clone)]
+enum Auth {
+    Key(Option<String>),
+    Plan(Arc<chatgpt::Account>),
+}
+
 pub struct OpenAiCompatible {
     base_url: String,
-    api_key: Option<String>,
+    auth: Auth,
     model: String,
     agent: ureq::Agent,
     retry: Retry,
 }
 
-/// 一次请求的失败：可否重试、服务端要求等多久、服务端的请求 ID。
+/// 一次请求的失败：可否重试、服务端要求等多久、服务端的请求 ID；
+/// `reauth` 为被拒的订阅访问令牌（401），续期后可再试一次。
 struct Failure {
     error: BoxError,
     retryable: bool,
     after: Option<Duration>,
     request_id: Option<String>,
+    reauth: Option<String>,
 }
 
 impl OpenAiCompatible {
@@ -70,11 +84,27 @@ impl OpenAiCompatible {
             .into();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
-            api_key,
+            auth: Auth::Key(api_key),
             model: model.into(),
             agent,
             retry: Retry::default(),
         }
+    }
+
+    /// 用 ChatGPT 订阅额度调用 `base_url`（通常为 [`chatgpt::API_BASE`]）的 Responses API。
+    pub fn chatgpt_plan(
+        account: Arc<chatgpt::Account>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        let mut this = Self::new(base_url, None, model);
+        this.auth = Auth::Plan(account);
+        this
+    }
+
+    /// 用的是 ChatGPT 订阅额度。
+    pub fn uses_chatgpt_plan(&self) -> bool {
+        matches!(self.auth, Auth::Plan(_))
     }
 
     pub fn with_retry(mut self, retry: Retry) -> Self {
@@ -82,13 +112,16 @@ impl OpenAiCompatible {
         self
     }
 
-    /// 读取 `ZIYUAN_LLM_MODEL`（必需）、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`。
-    /// 未设置模型时返回 `None`。
-    pub fn from_env() -> Option<Self> {
-        let model = env::var("ZIYUAN_LLM_MODEL")
+    /// 读取 `ZIYUAN_LLM_MODEL`（必需）、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`；
+    /// `ZIYUAN_LLM_PROVIDER=chatgpt` 改用 `ziyuan login` 登录的 ChatGPT 订阅（不需要 Key）。
+    /// 未设置模型时返回 `None`；选了订阅却未登录、未授权时报错。
+    pub fn from_env() -> Result<Option<Self>, BoxError> {
+        let Some(model) = env::var("ZIYUAN_LLM_MODEL").ok().filter(|m| !m.is_empty()) else {
+            return Ok(None);
+        };
+        let base_url = env::var("ZIYUAN_LLM_BASE_URL")
             .ok()
-            .filter(|m| !m.is_empty())?;
-        let base_url = env::var("ZIYUAN_LLM_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into());
+            .filter(|u| !u.is_empty());
         let api_key = env::var("ZIYUAN_LLM_API_KEY")
             .ok()
             .filter(|k| !k.is_empty());
@@ -99,7 +132,30 @@ impl OpenAiCompatible {
         {
             retry.attempts = n;
         }
-        Some(Self::new(base_url, api_key, model).with_retry(retry))
+        let this = match env::var("ZIYUAN_LLM_PROVIDER").unwrap_or_default().as_str() {
+            "" | "api" => Self::new(
+                base_url.unwrap_or_else(|| DEFAULT_BASE_URL.into()),
+                api_key,
+                model,
+            ),
+            "chatgpt" => {
+                let account = chatgpt::Account::from_env()?;
+                if !account.load()?.is_some_and(|c| c.plan_enabled()) {
+                    return Err("ZIYUAN_LLM_PROVIDER=chatgpt：尚未登录 ChatGPT 订阅，请先执行 `ziyuan login`".into());
+                }
+                Self::chatgpt_plan(
+                    Arc::new(account),
+                    base_url.unwrap_or_else(|| chatgpt::API_BASE.into()),
+                    model,
+                )
+            }
+            other => {
+                return Err(
+                    format!("ZIYUAN_LLM_PROVIDER 只能是 api 或 chatgpt，而不是 {other}").into(),
+                );
+            }
+        };
+        Ok(Some(this.with_retry(retry)))
     }
 
     pub fn model(&self) -> &str {
@@ -110,7 +166,7 @@ impl OpenAiCompatible {
     pub fn catalog(&self) -> Catalog {
         Catalog {
             base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
+            auth: self.auth.clone(),
             retry: self.retry,
         }
     }
@@ -118,20 +174,23 @@ impl OpenAiCompatible {
 
 pub struct Catalog {
     base_url: String,
-    api_key: Option<String>,
+    auth: Auth,
     retry: Retry,
 }
 
 impl ModelCatalog for Catalog {
     fn provider(&self, model: &str) -> Box<dyn ModelProvider> {
-        Box::new(
-            OpenAiCompatible::new(self.base_url.clone(), self.api_key.clone(), model)
-                .with_retry(self.retry),
-        )
+        let mut provider = OpenAiCompatible::new(self.base_url.clone(), None, model);
+        provider.auth = self.auth.clone();
+        Box::new(provider.with_retry(self.retry))
     }
 
+    /// 订阅额度不按 token 计价，不估算花费。
     fn price(&self, model: &str) -> Option<Price> {
-        price_for(model)
+        match self.auth {
+            Auth::Key(_) => price_for(model),
+            Auth::Plan(_) => None,
+        }
     }
 }
 
@@ -180,29 +239,47 @@ impl ModelProvider for OpenAiCompatible {
         tools: &[ToolSpec],
         hooks: &dyn ExecutionHooks,
     ) -> Result<ModelTurn, BoxError> {
-        let mut body = json!({
-            "model": self.model,
-            "messages": encode_messages(messages),
-            "stream": true,
-            // 让流的最后一块携带 usage；不支持的服务会忽略。
-            "stream_options": {"include_usage": true},
-        });
-        if !tools.is_empty() {
-            body["tools"] = encode_tools(tools)?;
+        let body = match self.auth {
+            Auth::Key(_) => {
+                let mut body = json!({
+                    "model": self.model,
+                    "messages": encode_messages(messages),
+                    "stream": true,
+                    // 让流的最后一块携带 usage；不支持的服务会忽略。
+                    "stream_options": {"include_usage": true},
+                });
+                if !tools.is_empty() {
+                    body["tools"] = encode_tools(tools)?;
+                }
+                // 度支将尽：输出至多用完余额。
+                if let Some(room) = hooks.max_output().filter(|&room| room < MAX_TOKENS_CAP) {
+                    body[output_cap_field(&self.base_url)] = json!(room.max(1));
+                }
+                body
+            }
+            // 订阅额度不收输出上限：度支只能在调用前核算（agent_loop 的余量检查）与事后记账。
+            Auth::Plan(_) => responses::body(&self.model, messages, tools)?,
         }
-        // 度支将尽：输出至多用完余额。
-        if let Some(room) = hooks.max_output().filter(|&room| room < MAX_TOKENS_CAP) {
-            body[output_cap_field(&self.base_url)] = json!(room.max(1));
-        }
-        let body = body.to_string();
+        .to_string();
         let trace = format!("zy-{}", &guard::nonce()[..12]);
         hooks.model_trace(&trace);
         let mut retry = 0;
+        let mut reauthed = false;
         loop {
             let failure = match self.attempt(&body, &trace, hooks) {
                 Ok(turn) => return Ok(turn),
                 Err(failure) => failure,
             };
+            // 订阅访问令牌被拒：续期后再试一次，不计入重试。
+            if let (Auth::Plan(account), Some(stale), false) =
+                (&self.auth, &failure.reauth, reauthed)
+            {
+                reauthed = true;
+                account
+                    .refresh(Some(stale.as_str()))
+                    .map_err(|e| format!("{e}（trace {trace}）"))?;
+                continue;
+            }
             if !failure.retryable || retry >= self.retry.attempts || hooks.is_cancelled() {
                 let server = failure
                     .request_id
@@ -242,14 +319,22 @@ impl OpenAiCompatible {
             retryable,
             after: None,
             request_id: None,
+            reauth: None,
+        };
+        let (path, token) = match &self.auth {
+            Auth::Key(key) => ("chat/completions", key.clone()),
+            Auth::Plan(account) => (
+                "responses",
+                Some(account.access_token().map_err(|e| fail(e, false))?),
+            ),
         };
         let mut request = self
             .agent
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/{path}", self.base_url))
             .header("Content-Type", "application/json")
             .header("X-Client-Request-Id", trace);
-        if let Some(key) = &self.api_key {
-            request = request.header("Authorization", format!("Bearer {key}"));
+        if let Some(token) = &token {
+            request = request.header("Authorization", format!("Bearer {token}"));
         }
         // 连接失败、超时等网络错误可以重试。
         let response = request
@@ -274,17 +359,33 @@ impl OpenAiCompatible {
             retryable,
             after,
             request_id: request_id.clone(),
+            reauth: None,
         };
         if !status.is_success() {
             let text = body.read_to_string().unwrap_or_default();
             let snippet: String = text.chars().take(500).collect();
-            let retryable = status.as_u16() == 429 || status.is_server_error();
-            return Err(failed(
-                format!("模型 API 返回 {status}: {snippet}").into(),
-                retryable,
-            ));
+            let mut retryable = status.as_u16() == 429 || status.is_server_error();
+            let mut error = format!("模型 API 返回 {status}: {snippet}");
+            if let Auth::Plan(_) = self.auth {
+                let (plan_retryable, note) = responses::plan_error(status.as_u16(), &text);
+                retryable = plan_retryable;
+                if let Some(note) = note {
+                    error = format!("{note}（{status}）");
+                }
+                if status.as_u16() == 401 {
+                    return Err(Failure {
+                        reauth: token,
+                        ..failed(error.into(), false)
+                    });
+                }
+            }
+            return Err(failed(error.into(), retryable));
         }
         // 以下已开始接收答复（可能已流式显示了文字），出错不再重试。
+        if let Auth::Plan(_) = self.auth {
+            return responses::read_events(BufReader::new(body.into_reader()), hooks)
+                .map_err(|e| failed(e, false));
+        }
         if !is_stream {
             // 不支持流式的服务会忽略 `stream`，直接返回完整 JSON。
             let parsed = body

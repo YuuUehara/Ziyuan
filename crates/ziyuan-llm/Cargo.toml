@@ -9,6 +9,7 @@ license.workspace = true
 ziyuan-core.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+ring.workspace = true
 ziyuan-runtime.workspace = true
 
 [lints]

@@ -89,6 +89,8 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 `ziyuan-llm::OpenAiCompatible` 对接 OpenAI 兼容的 `/chat/completions`（同步，`stream: true`；SSE 中的文本经 `ExecutionHooks::text_delta` 实时上报，工具调用按 `index` 拼接；服务若忽略 `stream` 而返回普通 JSON 也能处理），由 `ZIYUAN_LLM_MODEL` / `ZIYUAN_LLM_BASE_URL` / `ZIYUAN_LLM_API_KEY` 配置。
 
+ChatGPT 订阅：`ZIYUAN_LLM_PROVIDER=chatgpt` 时凭据为 `Auth::Plan(Arc<chatgpt::Account>)`，请求改发 `/responses`（`responses::body`：系统消息并入 `instructions`，工具归入 namespace `ziyuan`，`store:false`、`stream:true`，不传输出上限），流由 `responses::read_events` 解析，只认 `response.completed` 为成功；错误码经 `plan_error` 译为中文。401 时 `Account::refresh(Some(旧令牌))` 续期后重发一次。`chatgpt::Account` 管 OAuth（授权码 + PKCE、首次以 `dynamic_agent_client` 注册、`ext_agent_host_id` 持久化、ring 校验 ID token 的 RS256 签名），凭据存于用户配置目录（`ZIYUAN_CONFIG_DIR`），续期持 `chatgpt.lock` 文件锁。`Catalog::price` 在订阅模式下返回 `None`。
+
 `ziyuan-runtime::tools::read_only_tools(root)` 提供 `read_file`（64 KiB 截断）与 `search_code`（字面量、最多 50 条）。路径先 canonicalize 再检查是否在根目录内，因此 `..`、绝对路径与指向外部的符号链接都被拒绝；搜索跳过 `.git`、`.jj`、`.ziyuan`、`target`。
 
 此 Loop **还不是生产级别**：未实现 API retry policy、token budget、并行工具、工具输入 JSON Schema 验证、沙箱、模型响应结构检验、prompt injection 隔离、trace IDs、上下文压缩。

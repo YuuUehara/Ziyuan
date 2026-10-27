@@ -46,6 +46,8 @@ const HELP: &str = concat!(
                                        启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）
   ziyuan tui                           启动紫禁城终端界面
   ziyuan migrate                       检查事件簿：本版能否读，至少要哪个版本才能打开
+  ziyuan login [--models]              用 ChatGPT 订阅额度调用模型：浏览器登录；--models 列出可选模型
+  ziyuan logout                        退出 ChatGPT 订阅登录（撤销令牌）
   ziyuan cancel <诏令ID>                撤销未结束的诏令
   ziyuan reform <chancellor|direct|cabinet>
   ziyuan retreat                       修道怠政（昏君模式）：批红、评定由司礼监代批，记入事件簿
@@ -201,6 +203,9 @@ enum Command {
     Tui,
     /// 检查事件簿：本版能否读、至少要哪个版本才能打开。
     Migrate,
+    /// 登录 ChatGPT 订阅；`true` 只列出可选模型。
+    Login(bool),
+    Logout,
     Cancel(TaskId),
     Reform(GovernanceMode),
     /// `true` 修道，`false` 回朝。
@@ -313,6 +318,8 @@ const SUBCOMMANDS: &[&str] = &[
     "tasks",
     "tui",
     "migrate",
+    "login",
+    "logout",
     "serve",
     "cancel",
     "retreat",
@@ -418,6 +425,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         // 不经 Session：事件簿读不了时也要能指出是哪一行。
         Command::Migrate => migrate(&log)?,
+        Command::Login(models) => login(models).map_err(|e| e as Box<dyn Error>)?,
+        Command::Logout => logout().map_err(|e| e as Box<dyn Error>)?,
         // 前端各自打开并缓存会话；这里不开会话（放掉的内存分配器也不还给系统），只看朝廷是否已建立。
         command @ (Command::Serve { .. } | Command::Tui) => {
             let founded = env::current_dir()?
@@ -484,6 +493,58 @@ fn frontend(command: Command) -> Result<(), Box<dyn Error>> {
         _ => unreachable!("run 只把 serve 与 tui 交到这里"),
     }
     Ok(())
+}
+
+/// 登录 ChatGPT 订阅（凭据存于用户配置目录，不在项目里）。
+fn login(models_only: bool) -> Result<(), ziyuan_runtime::BoxError> {
+    use ziyuan_llm::chatgpt::{API_BASE, Account, USAGE_URL};
+    let account = Account::from_env()?;
+    if !models_only {
+        let (creds, first) = account.login(|url| {
+            println!("请在浏览器中登录 ChatGPT 并授权紫垣：\n{url}");
+            open_browser(url);
+        })?;
+        println!("已登录 ChatGPT：{}", creds.email);
+        if first {
+            println!("已用 ChatGPT 订阅：紫垣的模型调用计入你的订阅额度。管理用量：{USAGE_URL}");
+        }
+    }
+    let base = env::var("ZIYUAN_LLM_BASE_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| API_BASE.into());
+    println!("可选模型（设 ZIYUAN_LLM_PROVIDER=chatgpt 与 ZIYUAN_LLM_MODEL=<模型>）：");
+    for (slug, name) in account.models(&base)? {
+        println!("  {slug:<24}{name}");
+    }
+    Ok(())
+}
+
+fn logout() -> Result<(), ziyuan_runtime::BoxError> {
+    if ziyuan_llm::chatgpt::Account::from_env()?.logout()? {
+        println!("已退出 ChatGPT 订阅登录。");
+    } else {
+        println!("已清空本机令牌；授权服务未确认撤销，可在 ChatGPT 设置中断开紫垣。");
+    }
+    Ok(())
+}
+
+/// 尽力打开浏览器；失败时用户照打印的地址自行打开。
+fn open_browser(url: &str) {
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let _ = command
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
@@ -553,6 +614,12 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "tasks" => no_args(args, Command::Tasks)?,
         "tui" => no_args(args, Command::Tui)?,
         "migrate" => no_args(args, Command::Migrate)?,
+        "login" => match args.as_slice() {
+            [] => Command::Login(false),
+            [flag] if flag == "--models" => Command::Login(true),
+            _ => return Err("用法: ziyuan login [--models]".into()),
+        },
+        "logout" => no_args(args, Command::Logout)?,
         "serve" => {
             const USAGE: &str = "用法: ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]";
             let (mut port, mut bind, mut rotate) =
@@ -832,6 +899,8 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
         Command::Help
         | Command::Init
         | Command::Migrate
+        | Command::Login(_)
+        | Command::Logout
         | Command::Serve { .. }
         | Command::Tui
         | Command::Completions(_) => {
@@ -1467,10 +1536,12 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             println!("{note}");
         }
         Command::Budget(None) => {
-            let default = OpenAiCompatible::from_env().map(|m| m.model().to_owned());
+            let model = env_model();
+            let default = model.as_ref().map(|m| m.model().to_owned());
+            let price = |m: &str| plan_free(model.as_ref()).then(|| price_for(m)).flatten();
             println!(
                 "{}",
-                duzhi_report(session.court(), default.as_deref(), price_for)
+                duzhi_report(session.court(), default.as_deref(), price)
             );
         }
         Command::Budget(Some((scope, tokens))) => {
@@ -1905,12 +1976,26 @@ fn print_report(report: &TaskReport) {
 /// 显示用的承办模型（与 [`worker_backend`] 的选择一致）：演示后端不调用模型。
 /// 按各诏令实际所用模型估算的花费（单价见 `ziyuan_llm::price_for`）；查不到单价时为空。
 fn cost_note<'a>(tasks: impl IntoIterator<Item = &'a Task>) -> String {
-    let default = OpenAiCompatible::from_env().map(|m| m.model().to_owned());
+    let model = env_model();
+    if !plan_free(model.as_ref()) {
+        return String::new();
+    }
+    let default = model.map(|m| m.model().to_owned());
     estimate_cost(tasks, default.as_deref(), price_for).map_or(String::new(), |c| format!("，{c}"))
 }
 
+/// 环境变量所配的模型；配置有误（如选了订阅却未登录）时视为未配，执行时再报错。
+fn env_model() -> Option<OpenAiCompatible> {
+    OpenAiCompatible::from_env().ok().flatten()
+}
+
+/// 按 token 计价（未用 ChatGPT 订阅额度）。
+fn plan_free(model: Option<&OpenAiCompatible>) -> bool {
+    !model.is_some_and(OpenAiCompatible::uses_chatgpt_plan)
+}
+
 fn model_label() -> String {
-    OpenAiCompatible::from_env().map_or("演示（未接模型）".into(), |m| m.model().to_owned())
+    env_model().map_or("演示（未接模型）".into(), |m| m.model().to_owned())
 }
 
 /// 呈报改动的状态，如「；改动 2 个文件待准奏」；没有改动时为空。
@@ -1933,11 +2018,16 @@ fn changes_note(task: &Task) -> String {
 
 /// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。
 fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
-    let Some(model) = OpenAiCompatible::from_env() else {
+    let Some(model) = OpenAiCompatible::from_env().map_err(|e| e as Box<dyn Error>)? else {
         return Ok(Arc::new(DemoBackend));
     };
+    let plan = if model.uses_chatgpt_plan() {
+        "，计入 ChatGPT 订阅额度"
+    } else {
+        ""
+    };
     eprintln!(
-        "执行后端：{}（工具与查阅范围由各诏令的玉玺决定）",
+        "执行后端：{}{plan}（工具与查阅范围由各诏令的玉玺决定）",
         model.model()
     );
     let catalog = Box::new(model.catalog());
