@@ -581,6 +581,26 @@ pub(crate) fn execute(
                         for t in tools {
                             let line = t.description.lines().next().unwrap_or_default();
                             println!("  {name}/{}  {line}", t.name);
+                            let schema = &t.input_schema;
+                            let required: Vec<_> = schema["required"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|r| r.as_str())
+                                .collect();
+                            for (param, spec) in
+                                schema["properties"].as_object().into_iter().flatten()
+                            {
+                                let kind = spec["type"].as_str().unwrap_or("任意");
+                                let must = if required.contains(&param.as_str()) {
+                                    "，必填"
+                                } else {
+                                    ""
+                                };
+                                let doc = spec["description"].as_str().unwrap_or_default();
+                                let doc = doc.lines().next().unwrap_or_default();
+                                println!("      {param}（{kind}{must}）{doc}");
+                            }
                         }
                     }
                     Err(e) => println!("外藩「{name}」：未能朝贡（{e}）"),

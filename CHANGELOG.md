@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 新增
+
+- 外藩扩容：`.ziyuan/mcp.json` 可用 `url` 登记 Streamable HTTP 的 MCP 服务，请求头中的 `${VAR}` 取自环境；明文 http 只许本机地址。`ziyuan mcp` 列出每件工具的参数说明。
+
 ## 0.6.0
 
 v0.6 补齐与落实：各前端用得上，长期跑得动，真实环境验得过。

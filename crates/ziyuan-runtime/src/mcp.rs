@@ -1,20 +1,26 @@
-//! 外藩朝贡：外部 MCP 服务（stdio）的工具，按玉玺的 `mcp` 授权逐件交给承办官员。
+//! 外藩朝贡：外部 MCP 服务的工具，按玉玺的 `mcp` 授权逐件交给承办官员。
 //!
-//! 服务在 `<项目>/.ziyuan/mcp.json` 中登记（官员读不到 `.ziyuan`，改不了名册）：
+//! 服务在 `<项目>/.ziyuan/mcp.json` 中登记（官员读不到 `.ziyuan`，改不了名册），
+//! 本地服务走 stdio，远端服务走 Streamable HTTP：
 //!
 //! ```json
-//! { "servers": { "docs": { "command": "node", "args": ["server.js"], "env": { "TOKEN": "${DOCS_TOKEN}" } } } }
+//! { "servers": {
+//!     "docs": { "command": "node", "args": ["server.js"], "env": { "TOKEN": "${DOCS_TOKEN}" } },
+//!     "wiki": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer ${WIKI_TOKEN}" } }
+//! } }
 //! ```
 //!
-//! 每次承办按需启动所授的服务，办完即关。子进程以项目根目录为工作目录，只继承少数无害的
-//! 环境变量与名册中写明的变量（`${VAR}` 取自本进程环境），因此模型 API Key 不会交给外藩。
+//! 每次承办按需连上所授的服务，办完即断。stdio 子进程以项目根目录为工作目录，只继承少数无害的
+//! 环境变量与名册中写明的变量；HTTP 服务只收到名册中写明的请求头。`${VAR}` 取自本进程环境，
+//! 因此凭据不落在名册里，模型 API Key 也不会交给外藩。HTTP 服务须用 https（本机地址可用 http），
+//! 以免凭据明文过网。
 //! 外部工具做什么由服务自己决定，**不受玉玺查阅范围约束**；朝廷能做的是：默认不授、逐件授权、
 //! 每次调用照常审计（`ToolInvoked`），输出照常作为外来文书包上边界、经锦衣卫检查。
 use crate::BoxError;
 use crate::agent_loop::{Tool, ToolSpec};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -42,10 +48,34 @@ const PROTOCOL: &str = "2025-06-18";
 
 /// 名册中的一个服务。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServerConfig {
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: BTreeMap<String, String>,
+pub enum ServerConfig {
+    /// 本地子进程，经标准输入输出交谈。
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+    /// 远端服务（Streamable HTTP）。
+    Http {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
+}
+
+/// https 一律可用；http 只许本机地址。
+fn allowed_url(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// 读名册；没有名册时为空。
@@ -64,39 +94,106 @@ pub fn load_config(root: &Path) -> Result<BTreeMap<String, ServerConfig>, BoxErr
             .filter_map(|s| s.as_str().map(str::to_owned))
             .collect()
     };
+    let table = |v: &Value| -> BTreeMap<String, String> {
+        v.as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+            .collect()
+    };
     let mut servers = BTreeMap::new();
     for (name, server) in parsed["servers"].as_object().into_iter().flatten() {
         if !ziyuan_core::valid_mcp_grant(name) || name.contains('/') || name == "*" {
             return Err(format!("{CONFIG}：服务名不合法：{name}").into());
         }
-        let command = server["command"]
-            .as_str()
-            .filter(|c| !c.trim().is_empty())
-            .ok_or_else(|| format!("{CONFIG}：服务 {name} 缺少 command"))?;
-        let env = server["env"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
-            .collect();
-        servers.insert(
-            name.clone(),
-            ServerConfig {
+        let text = |key: &str| server[key].as_str().filter(|c| !c.trim().is_empty());
+        let config = match (text("command"), text("url")) {
+            (Some(command), None) => ServerConfig::Stdio {
                 command: command.to_owned(),
                 args: strings(&server["args"]),
-                env,
+                env: table(&server["env"]),
             },
-        );
+            (None, Some(url)) if allowed_url(url) => ServerConfig::Http {
+                url: url.to_owned(),
+                headers: table(&server["headers"]),
+            },
+            (None, Some(url)) => {
+                return Err(format!(
+                    "{CONFIG}：服务 {name} 的 url 须为 https（本机地址可用 http）：{url}"
+                )
+                .into());
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!("{CONFIG}：服务 {name} 的 command 与 url 只能择一").into());
+            }
+            (None, None) => {
+                return Err(format!("{CONFIG}：服务 {name} 缺少 command 或 url").into());
+            }
+        };
+        servers.insert(name.clone(), config);
     }
     Ok(servers)
 }
 
-/// `${VAR}` 取自本进程环境（未设为空）；其余原样。
+/// 其中的 `${VAR}` 换成本进程环境中的值（未设为空），其余原样，如 `Bearer ${TOKEN}`。
 fn expand(value: &str) -> String {
-    match value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
-        Some(var) => std::env::var(var).unwrap_or_default(),
-        None => value.to_owned(),
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let Some(len) = rest[start + 2..].find('}') else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(&std::env::var(&rest[start + 2..start + 2 + len]).unwrap_or_default());
+        rest = &rest[start + 3 + len..];
     }
+    out.push_str(rest);
+    out
+}
+
+/// 启动 stdio 子进程：工作目录为项目根，环境只给无害的几项与名册写明的变量。
+fn spawn(
+    root: &Path,
+    name: &str,
+    program: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> Result<Transport, BoxError> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(root)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for key in SERVER_ENV {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    for (key, value) in env {
+        command.env(key, expand(value));
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("外藩 {name} 启动失败（{program}）：{e}"))?;
+    let stdin = child.stdin.take().expect("已设 piped");
+    let stdout = child.stdout.take().expect("已设 piped");
+    let (tx, lines) = channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    Ok(Transport::Stdio {
+        child,
+        stdin,
+        lines,
+    })
 }
 
 /// 外藩服务的一件工具。
@@ -107,63 +204,117 @@ pub struct RemoteTool {
     pub input_schema: Value,
 }
 
-/// 一个已连上的外藩服务；`Drop` 时结束子进程。
+/// 一个已连上的外藩服务；`Drop` 时结束子进程，或请远端结束会话。
 pub struct Server {
     name: String,
-    child: Child,
-    stdin: ChildStdin,
-    lines: Receiver<String>,
+    transport: Transport,
     next_id: u64,
+}
+
+enum Transport {
+    Stdio {
+        child: Child,
+        stdin: ChildStdin,
+        lines: Receiver<String>,
+    },
+    Http {
+        agent: ureq::Agent,
+        url: String,
+        headers: Vec<(String, String)>,
+        /// 服务在握手时给的会话 ID，之后每个请求都带上。
+        session: Option<String>,
+        /// 握手议定的协议版本，之后每个请求都带上。
+        protocol: Option<String>,
+    },
+}
+
+/// 外藩发来的一条消息该怎么处置。
+enum Incoming {
+    /// 本请求的回复。
+    Reply(Result<Value, String>),
+    /// 外藩反向发来的请求（ID），一概回绝。
+    Request(Value),
+    /// 通知或别的回复，略过。
+    Skip,
+}
+
+fn classify(message: &Value, id: u64) -> Incoming {
+    if message.get("method").is_some() {
+        return match message.get("id") {
+            Some(their_id) => Incoming::Request(their_id.clone()),
+            None => Incoming::Skip,
+        };
+    }
+    if message["id"] != json!(id) {
+        return Incoming::Skip;
+    }
+    match message.get("error") {
+        Some(error) => Incoming::Reply(Err(error["message"]
+            .as_str()
+            .unwrap_or("未知错误")
+            .to_owned())),
+        None => Incoming::Reply(Ok(message["result"].clone())),
+    }
+}
+
+fn refusal(their_id: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": their_id,
+        "error": { "code": -32601, "message": "紫垣不受外藩反向请求" } })
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match &mut self.transport {
+            Transport::Stdio { child, .. } => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Transport::Http {
+                agent,
+                url,
+                headers,
+                session: Some(session),
+                ..
+            } => {
+                let mut request = agent
+                    .delete(url.as_str())
+                    .header("Mcp-Session-Id", &*session);
+                for (key, value) in headers.iter() {
+                    request = request.header(key, value);
+                }
+                let _ = request.call();
+            }
+            Transport::Http { .. } => {}
+        }
     }
 }
 
 impl Server {
-    /// 启动服务并握手。
+    /// 连上服务（stdio 则启动子进程）并握手。
     pub fn connect(root: &Path, name: &str, config: &ServerConfig) -> Result<Self, BoxError> {
-        let mut command = Command::new(&config.command);
-        command
-            .args(&config.args)
-            .current_dir(root)
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        for key in SERVER_ENV {
-            if let Ok(value) = std::env::var(key) {
-                command.env(key, value);
-            }
-        }
-        for (key, value) in &config.env {
-            command.env(key, expand(value));
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("外藩 {name} 启动失败（{}）：{e}", config.command))?;
-        let stdin = child.stdin.take().expect("已设 piped");
-        let stdout = child.stdout.take().expect("已设 piped");
-        let (tx, lines) = channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        let transport = match config {
+            ServerConfig::Stdio { command, args, env } => spawn(root, name, command, args, env)?,
+            ServerConfig::Http { url, headers } => Transport::Http {
+                agent: ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .timeout_global(Some(TIMEOUT))
+                    .build()
+                    .into(),
+                url: url.clone(),
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), expand(v)))
+                    .collect(),
+                session: None,
+                protocol: None,
+            },
+        };
         let mut server = Self {
             name: name.to_owned(),
-            child,
-            stdin,
-            lines,
+            transport,
             next_id: 0,
         };
-        server.request(
+        let result = server.request(
             "initialize",
             json!({
                 "protocolVersion": PROTOCOL,
@@ -171,23 +322,90 @@ impl Server {
                 "clientInfo": { "name": "ziyuan", "version": env!("CARGO_PKG_VERSION") },
             }),
         )?;
-        server.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
+        if let Transport::Http { protocol, .. } = &mut server.transport {
+            *protocol = Some(
+                result["protocolVersion"]
+                    .as_str()
+                    .unwrap_or(PROTOCOL)
+                    .to_owned(),
+            );
+        }
+        server.notify(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
         Ok(server)
     }
 
-    fn send(&mut self, message: &Value) -> Result<(), BoxError> {
-        writeln!(self.stdin, "{message}")
-            .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("外藩 {} 已断开：{e}", self.name).into())
+    /// 发一条不需回复的消息（通知，或对反向请求的回绝）。
+    fn notify(&mut self, message: &Value) -> Result<(), BoxError> {
+        match &mut self.transport {
+            Transport::Stdio { stdin, .. } => writeln!(stdin, "{message}")
+                .and_then(|()| stdin.flush())
+                .map_err(|e| format!("外藩 {} 已断开：{e}", self.name).into()),
+            Transport::Http { .. } => {
+                let response = self.post(message)?;
+                let status = response.status().as_u16();
+                if (200..300).contains(&status) {
+                    Ok(())
+                } else {
+                    Err(format!("外藩 {} 回绝（HTTP {status}）", self.name).into())
+                }
+            }
+        }
+    }
+
+    /// HTTP：POST 一条 JSON-RPC 消息，带上名册中的请求头、会话 ID 与协议版本。
+    fn post(&self, message: &Value) -> Result<ureq::http::Response<ureq::Body>, BoxError> {
+        let Transport::Http {
+            agent,
+            url,
+            headers,
+            session,
+            protocol,
+        } = &self.transport
+        else {
+            unreachable!("只在 HTTP 外藩上调用");
+        };
+        let mut request = agent
+            .post(url.as_str())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        if let Some(protocol) = protocol {
+            request = request.header("MCP-Protocol-Version", protocol);
+        }
+        request
+            .send(message.to_string())
+            .map_err(|e| format!("外藩 {} 连不上：{e}", self.name).into())
     }
 
     /// 发一个 JSON-RPC 请求，等到同一 ID 的回复。服务发来的通知略过，它反向发来的请求一概回绝。
     fn request(&mut self, method: &str, params: Value) -> Result<Value, BoxError> {
         self.next_id += 1;
         let id = self.next_id;
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let reply = match self.transport {
+            Transport::Stdio { .. } => self.request_stdio(&message, id, method)?,
+            Transport::Http { .. } => self.request_http(&message, id, method)?,
+        };
+        reply.map_err(|text| format!("外藩 {} 回绝（{method}）：{text}", self.name).into())
+    }
+
+    fn request_stdio(
+        &mut self,
+        message: &Value,
+        id: u64,
+        method: &str,
+    ) -> Result<Result<Value, String>, BoxError> {
+        self.notify(message)?;
         loop {
-            let line = match self.lines.recv_timeout(TIMEOUT) {
+            let Transport::Stdio { lines, .. } = &self.transport else {
+                unreachable!("只在 stdio 外藩上调用");
+            };
+            let line = match lines.recv_timeout(TIMEOUT) {
                 Ok(line) => line,
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(format!("外藩 {} 逾时未回（{method}）", self.name).into());
@@ -196,25 +414,84 @@ impl Server {
                     return Err(format!("外藩 {} 已断开（{method}）", self.name).into());
                 }
             };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            let Ok(incoming) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if message.get("method").is_some() {
-                if let Some(their_id) = message.get("id") {
-                    let refusal = json!({ "jsonrpc": "2.0", "id": their_id,
-                        "error": { "code": -32601, "message": "紫垣不受外藩反向请求" } });
-                    self.send(&refusal)?;
-                }
+            match classify(&incoming, id) {
+                Incoming::Reply(reply) => return Ok(reply),
+                Incoming::Request(their_id) => self.notify(&refusal(their_id))?,
+                Incoming::Skip => {}
+            }
+        }
+    }
+
+    /// HTTP：回复或是一条 JSON，或是一段 SSE 流（逐条处理，直到本请求的回复）。
+    fn request_http(
+        &mut self,
+        message: &Value,
+        id: u64,
+        method: &str,
+    ) -> Result<Result<Value, String>, BoxError> {
+        let response = self.post(message)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let mut body = String::new();
+            let _ = response
+                .into_body()
+                .into_reader()
+                .take(500)
+                .read_to_string(&mut body);
+            return Err(
+                format!("外藩 {} 回绝（{method}，HTTP {status}）：{body}", self.name).into(),
+            );
+        }
+        if let (Some(value), Transport::Http { session, .. }) = (
+            response.headers().get("mcp-session-id"),
+            &mut self.transport,
+        ) {
+            *session = value.to_str().ok().map(str::to_owned);
+        }
+        let event_stream = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
+        let mut reader = BufReader::new(response.into_body().into_reader());
+        if !event_stream {
+            let mut text = String::new();
+            reader.read_to_string(&mut text)?;
+            let incoming: Value = serde_json::from_str(&text)
+                .map_err(|e| format!("外藩 {} 的回复不是 JSON（{method}）：{e}", self.name))?;
+            return match classify(&incoming, id) {
+                Incoming::Reply(reply) => Ok(reply),
+                _ => Err(format!("外藩 {} 答非所问（{method}）", self.name).into()),
+            };
+        }
+        let mut data = String::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(format!("外藩 {} 未回复就断开了（{method}）", self.name).into());
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if let Some(value) = line.strip_prefix("data:") {
+                data.push_str(value.strip_prefix(' ').unwrap_or(value));
+                data.push('\n');
                 continue;
             }
-            if message["id"] != json!(id) {
+            if !line.is_empty() || data.is_empty() {
+                continue; // event:、id: 等字段与注释略过；空行为一条事件的结尾。
+            }
+            let event = std::mem::take(&mut data);
+            let Ok(incoming) = serde_json::from_str::<Value>(&event) else {
                 continue;
+            };
+            match classify(&incoming, id) {
+                Incoming::Reply(reply) => return Ok(reply),
+                Incoming::Request(their_id) => self.notify(&refusal(their_id))?,
+                Incoming::Skip => {}
             }
-            if let Some(error) = message.get("error") {
-                let text = error["message"].as_str().unwrap_or("未知错误");
-                return Err(format!("外藩 {} 回绝（{method}）：{text}", self.name).into());
-            }
-            return Ok(message["result"].clone());
         }
     }
 
@@ -469,6 +746,85 @@ for line in sys.stdin:
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// 最小的 Streamable HTTP 服务：initialize 回 JSON 并发会话 ID；tools/list 回一段 SSE 流
+    /// （先发通知与反向请求）；tools/call 的 echo 回显 text 与收到的 Authorization、会话 ID。
+    /// 不带会话 ID 的后续请求回 400。启动后先在标准输出打印端口。
+    const FAKE_HTTP: &str = r#"
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, status, body=b"", kind="application/json", headers=()):
+        self.send_response(status)
+        self.send_header("Content-Type", kind)
+        for k, v in headers: self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+    def do_DELETE(self): self.reply(200)
+    def do_POST(self):
+        m = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if "method" not in m or "id" not in m: return self.reply(202)
+        if m["method"] == "initialize":
+            r = {"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": "2025-06-18", "capabilities": {}}}
+            return self.reply(200, json.dumps(r).encode(), headers=[("Mcp-Session-Id", "s-1")])
+        if self.headers.get("Mcp-Session-Id") != "s-1": return self.reply(400, b"no session")
+        if m["method"] == "tools/list":
+            tools = [{"name": "echo", "description": "回显", "inputSchema": {"type": "object"}}]
+            events = [{"jsonrpc": "2.0", "method": "notifications/progress", "params": {}},
+                      {"jsonrpc": "2.0", "id": "r", "method": "sampling/createMessage"},
+                      {"jsonrpc": "2.0", "id": m["id"], "result": {"tools": tools}}]
+            body = "".join("event: message\ndata: " + json.dumps(e) + "\n\n" for e in events)
+            return self.reply(200, body.encode(), "text/event-stream")
+        a = m["params"]["arguments"]
+        text = a.get("text", "") + "|" + self.headers.get("Authorization", "-") + "|" + self.headers.get("MCP-Protocol-Version", "-")
+        r = {"jsonrpc": "2.0", "id": m["id"], "result": {"content": [{"type": "text", "text": text}]}}
+        self.reply(200, json.dumps(r).encode())
+s = HTTPServer(("127.0.0.1", 0), H)
+print(s.server_address[1], flush=True)
+s.serve_forever()
+"#;
+
+    #[test]
+    fn http_servers_speak_streamable_http() {
+        let Some(root) = project("http") else { return };
+        std::fs::write(root.join("fake_http.py"), FAKE_HTTP).unwrap();
+        /// 测试失败 panic 时也结束服务，免得它占着输出管道让测试挂住。
+        struct Kill(Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Kill(
+            Command::new("python3")
+                .args(["-I", "fake_http.py"])
+                .current_dir(&root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut port = String::new();
+        BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut port)
+            .unwrap();
+        // 请求头中的 `${VAR}` 取自环境：用 PATH 代替，避免改动测试进程的环境变量。
+        let config = json!({ "servers": { "wiki": {
+            "url": format!("http://127.0.0.1:{}/mcp", port.trim()),
+            "headers": { "Authorization": "Bearer ${PATH}" },
+        }}});
+        std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
+        let tools = sealed_tools(&root, &grants(&["wiki"])).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].spec().name, "wiki__echo");
+        let out = tools[0].execute(r#"{"text":"你好"}"#).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        assert_eq!(out, format!("你好|Bearer {path}|2025-06-18"));
+        drop((tools, child));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn config_errors_are_reported() {
         let root = std::env::temp_dir().join(format!("ziyuan-mcp-bad-{}", std::process::id()));
@@ -483,6 +839,25 @@ for line in sys.stdin:
                 .to_string()
                 .contains("缺少 command")
         );
+        // HTTP 服务：明文 http 只许本机地址；command 与 url 只能择一。
+        for (url, ok) in [
+            ("https://mcp.example.com/mcp", true),
+            ("http://127.0.0.1:9/mcp", true),
+            ("http://localhost/mcp", true),
+            ("http://[::1]:9/mcp", true),
+            ("http://example.com/mcp", false),
+            ("http://127.0.0.1.evil.com/mcp", false),
+            ("ftp://x", false),
+        ] {
+            let config = json!({ "servers": { "w": { "url": url } } });
+            std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
+            assert_eq!(load_config(&root).is_ok(), ok, "{url}");
+        }
+        let both = json!({ "servers": { "w": { "url": "https://x", "command": "y" } } });
+        std::fs::write(root.join(CONFIG), both.to_string()).unwrap();
+        assert!(load_config(&root).unwrap_err().to_string().contains("择一"));
+        assert_eq!(expand("plain"), "plain");
+        assert_eq!(expand("${ZIYUAN_TEST_UNSET_VAR}x"), "x");
         assert_eq!(tool_name("my.srv", "do it"), "my_srv__do_it");
         std::fs::remove_dir_all(root).unwrap();
     }
