@@ -293,7 +293,12 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
         })),
         "modes": GovernanceMode::ALL.iter().map(|m| json!({ "code": m.code(), "label": m.label() })).collect::<Vec<_>>(),
         "departments": departments,
-        "vacancies": ziyuan_app::vacancy_notes(court),
+        "vacancies": ziyuan_app::vacancies(court).iter().map(|v| json!({
+            "office": v.office.code(),
+            "office_label": v.office.label(),
+            "impact": v.impact,
+            "candidate": v.candidate.as_ref().map(|(id, name)| json!({ "id": id.0, "name": name })),
+        })).collect::<Vec<_>>(),
         "offices": offices,
         "officials": officials,
         "task_total": all.len(),

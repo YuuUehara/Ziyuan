@@ -84,6 +84,58 @@ fn recruits_without_a_name_get_a_fresh_random_one() {
     );
 }
 
+#[test]
+fn vacancies_recommend_only_idle_officials_of_the_right_speciality() {
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let offices = |s: &Session<_>| {
+        vacancies(s.court())
+            .iter()
+            .map(|v| v.office)
+            .collect::<Vec<_>>()
+    };
+    // 开国只缺左都御史；十人都在任，无人可荐。
+    let [censor] = vacancies(session.court()).try_into().unwrap();
+    assert_eq!((censor.office, &censor.candidate), (Office::Censor, &None));
+    assert!(
+        censor.to_string().contains("ziyuan recruit <专长>"),
+        "{censor}"
+    );
+
+    // 罢免刑部尚书：刑部出缺，荐的就是这位闲居的旧臣。
+    session.dismiss(AgentId(10)).unwrap();
+    assert_eq!(
+        offices(&session),
+        [Office::Minister(Department::Justice), Office::Censor]
+    );
+    let justice = &vacancies(session.court())[0];
+    assert_eq!(justice.candidate.as_ref().map(|c| c.0), Some(AgentId(10)));
+    assert!(
+        justice
+            .to_string()
+            .ends_with("ziyuan appoint 10 minister:justice"),
+        "{justice}"
+    );
+
+    // 革职者不荐；专长不符的闲居者（罢免的工部郎中 #4）也不荐刑部，但可荐御史。
+    session.purge(AgentId(10)).unwrap();
+    session.dismiss(AgentId(4)).unwrap();
+    let [justice, censor] = vacancies(session.court()).try_into().unwrap();
+    assert_eq!(justice.candidate, None);
+    assert!(
+        justice.to_string().contains("ziyuan recruit justice"),
+        "{justice}"
+    );
+    assert_eq!(censor.candidate.map(|c| c.0), Some(AgentId(4)));
+
+    // 新招的刑部官员即可补缺；照荐任命后缺位消失。
+    let recruit = session.recruit(None, Department::Justice).unwrap();
+    let justice = &vacancies(session.court())[0];
+    assert_eq!(justice.candidate.as_ref().map(|c| c.0), Some(recruit));
+    session.appoint(recruit, justice.office).unwrap();
+    assert_eq!(offices(&session), [Office::Censor]);
+}
+
 #[tokio::test]
 async fn retreating_emperor_lets_the_eunuchs_approve_and_review() {
     let mut store = MemoryEventLog::default();

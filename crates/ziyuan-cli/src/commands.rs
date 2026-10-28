@@ -65,7 +65,7 @@ pub(crate) fn execute(
                     GovernanceMode::Cabinet => "内阁（首辅，次辅署理）",
                 }
             );
-            let vacancies = ziyuan_app::vacancy_notes(court);
+            let vacancies = ziyuan_app::vacancies(court);
             if !vacancies.is_empty() {
                 println!("朝堂缺位：");
                 for note in vacancies {

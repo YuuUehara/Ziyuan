@@ -105,7 +105,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!(
                 "紫垣已建立。当前制度：丞相制；丞相一人，六部各有尚书，吏部、工部另有郎中。请执行 `ziyuan court`。"
             );
-            for note in ziyuan_app::vacancy_notes(session.court()) {
+            for note in ziyuan_app::vacancies(session.court()) {
                 println!("  - {note}");
             }
         }

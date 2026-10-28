@@ -478,5 +478,7 @@ fn officials_tab_names_vacancies_and_their_impact() {
         shown.contains("中书左丞相俱缺：一切诏令都无法派工"),
         "{shown}"
     );
+    // 罢去的丞相闲居在朝，吏部即荐他补缺。
+    assert!(shown.contains("吏部荐 #1 "), "{shown}");
     std::fs::remove_dir_all(root).unwrap();
 }

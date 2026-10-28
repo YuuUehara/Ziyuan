@@ -29,7 +29,7 @@ pub use edicts::{
 pub use exam::{ExamPaper, exam_papers};
 pub use history::{HistoryEntry, HistoryFilter, describe_event, history_entries};
 pub use huidian::HUIDIAN_EVERY;
-pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note, vacancy_notes};
+pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note, vacancies};
 pub use reports::{describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report};
 pub use run::{EXECUTOR_BUSY, NEGLECT_THRESHOLD, RunUpdate, TaskReport, WatchOptions, WatchUpdate};
 pub use time::{format_time, parse_time, tz_offset};

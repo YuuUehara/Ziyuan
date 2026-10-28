@@ -15,9 +15,44 @@ use crate::reports::describe_record;
 use crate::session::random_seed;
 use crate::{AppError, Session, truncate};
 
-/// 朝堂缺位及其影响，各附补缺的命令。没有缺位时为空。CLI、Web、TUI 共用。
-pub fn vacancy_notes(court: &Court) -> Vec<String> {
-    let mut notes = Vec::new();
+/// 朝堂的一处缺位：补缺的官职、缺位的影响与吏部荐举的人选。荐举只是建议，任命须皇帝确认。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vacancy {
+    /// 补缺即任此官职。
+    pub office: Office,
+    /// 缺位及其影响，一句话。
+    pub impact: String,
+    /// 闲居（未任官、未革职、不在降级期）且专长相符者中考绩最优的一位；无人可荐为 `None`。
+    pub candidate: Option<(AgentId, String)>,
+}
+
+impl std::fmt::Display for Vacancy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let office = self.office.code();
+        match &self.candidate {
+            Some((id, name)) => write!(
+                f,
+                "{}。吏部荐 #{} {name}：ziyuan appoint {} {office}",
+                self.impact, id.0, id.0
+            ),
+            None => {
+                let speciality = match self.office {
+                    Office::Minister(d) | Office::ViceMinister(d) | Office::Clerk(d) => d.code(),
+                    _ => "<专长>",
+                };
+                write!(
+                    f,
+                    "{}。无人可荐：先 ziyuan recruit {speciality}，再 ziyuan appoint <官员ID> {office}",
+                    self.impact
+                )
+            }
+        }
+    }
+}
+
+/// 朝堂缺位及其影响，各附荐举的人选。没有缺位时为空。CLI、Web、TUI 共用。
+pub fn vacancies(court: &Court) -> Vec<Vacancy> {
+    let mut found = Vec::new();
     let coordinator = match court.mode() {
         GovernanceMode::Chancellor => Some((Office::Chancellor, Office::ViceChancellor)),
         GovernanceMode::Cabinet => {
@@ -28,11 +63,13 @@ pub fn vacancy_notes(court: &Court) -> Vec<String> {
     if let Some((head, deputy)) = coordinator
         && court.head_or_deputy(head, deputy).is_none()
     {
-        notes.push(format!(
-            "{}、{}俱缺：一切诏令都无法派工。补缺：ziyuan appoint <官员ID> {}",
-            head.label(),
-            deputy.label(),
-            head.code()
+        found.push((
+            head,
+            format!(
+                "{}、{}俱缺：一切诏令都无法派工",
+                head.label(),
+                deputy.label()
+            ),
         ));
     }
     for department in Department::ALL {
@@ -49,21 +86,33 @@ pub fn vacancy_notes(court: &Court) -> Vec<String> {
             Department::Rites => "，也不能修 CHANGELOG",
             _ => "",
         };
-        notes.push(format!(
-            "{0}尚书、{0}侍郎俱缺：{0}诏令无法承接{extra}。补缺：ziyuan appoint <官员ID> {2}（无人可任先 ziyuan recruit {1}）",
-            department.label(),
-            department.code(),
-            head.code()
+        found.push((
+            head,
+            format!(
+                "{0}尚书、{0}侍郎俱缺：{0}诏令无法承接{extra}",
+                department.label()
+            ),
         ));
     }
     if court.censor().is_none() {
-        notes.push(
-            "左都御史空缺：都察院不能复核回奏，常朝办完也不自动复核（设了则每件多花复核的 token）。\
-             补缺：ziyuan appoint <官员ID> censor"
+        found.push((
+            Office::Censor,
+            "左都御史空缺：都察院不能复核回奏，常朝办完也不自动复核（设了则每件多花复核的 token）"
                 .into(),
-        );
+        ));
     }
-    notes
+    found
+        .into_iter()
+        .map(|(office, impact)| Vacancy {
+            office,
+            impact,
+            candidate: court.recommend(office).ok().and_then(|list| {
+                list.into_iter()
+                    .find(|c| c.current.is_none() && court.demotion(c.agent.id) == 0)
+                    .map(|c| (c.agent.id, c.agent.name.clone()))
+            }),
+        })
+        .collect()
 }
 
 /// 修道或回朝时的史官记述。

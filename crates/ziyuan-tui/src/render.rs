@@ -12,7 +12,7 @@ use ziyuan_app::{
     render_diffs, seal_note, skipped_note, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
-    AgentId, BudgetScope, CensorVerdict, Department, Persona, Seal, Speech, Verdict,
+    AgentId, BudgetScope, CensorVerdict, Department, Office, Persona, Seal, Speech, Verdict,
     missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
@@ -510,11 +510,17 @@ impl App {
     pub(crate) fn draw_officials(&self, frame: &mut Frame, area: Rect) {
         let court = self.court();
         // 各部的缺位已见于派工路线；另列中枢与都察院的缺位及其影响。
-        let vacancies: Vec<String> = ziyuan_app::vacancy_notes(court)
+        let vacancies: Vec<String> = ziyuan_app::vacancies(court)
             .into_iter()
-            .filter(|n| !n.contains("尚书、"))
-            // 只留缺位与影响的头一句，一行放得下；补缺的按键见底栏。
-            .map(|n| n.split(['（', '。']).next().unwrap_or(&n).to_owned())
+            .filter(|v| !matches!(v.office, Office::Minister(_)))
+            // 只留缺位与影响的头一句，附吏部荐举的人选，一行放得下。
+            .map(|v| {
+                let head = v.impact.split('（').next().unwrap_or(&v.impact).to_owned();
+                match v.candidate {
+                    Some((id, name)) => format!("{head}；吏部荐 #{} {name}", id.0),
+                    None => format!("{head}；无人可荐"),
+                }
+            })
             .collect();
         let [table_area, routes_area] = Layout::vertical([
             Constraint::Min(5),

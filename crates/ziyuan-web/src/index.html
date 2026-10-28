@@ -820,10 +820,16 @@ function render() {
       : `<span class="vacancy">${esc(d.vacancy)}</span>`;
     return `<div class="route"><span class="dept">${esc(d.label)}</span><div class="chain">${chain}</div></div>`;
   }).join("");
-  // 缺位及其影响；补缺的命令换成页面上的做法。
+  // 缺位及其影响，附吏部荐举的人选；任命须皇帝点按确认。
   $("vacancies").hidden = !s.vacancies.length;
-  $("vacancies").innerHTML = `<h3>朝堂缺位</h3><ul>${s.vacancies.map((v) => `<li>${esc(v.split("。补缺：")[0])}。</li>`).join("")}</ul>` +
-    (s.viewer ? "" : `<p class="hint">在下方百官表招募、任命即可补缺。</p>`);
+  $("vacancies").innerHTML = `<h3>朝堂缺位</h3><ul>${s.vacancies.map((v) => {
+    const c = v.candidate;
+    const pick = c
+      ? `吏部荐 #${c.id} ${esc(c.name)}${s.viewer ? "" : ` <button class="small" data-fill-id="${c.id}" data-fill-office="${esc(v.office)}" data-fill-label="${esc(v.office_label)}" data-fill-name="${esc(c.name)}">任命</button>`}`
+      : "无人可荐，须先招募";
+    return `<li>${esc(v.impact)}。${pick}</li>`;
+  }).join("")}</ul>` +
+    (s.viewer ? "" : `<p class="hint">荐举只是建议；也可在下方百官表招募、任命。</p>`);
 
   const tasks = [...s.tasks].reverse();
   const hidden = s.task_total - tasks.length;
@@ -1152,6 +1158,10 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.cancel}/cancel`, {}), `诏令 #${d.cancel} 已撤销`);
   } else if (d.dismiss) {
     act(api(`/officials/${d.dismiss}/dismiss`, {}), "已罢免（身份与履历保留）");
+  } else if (d.fillId) {
+    if (confirm(`任命 #${d.fillId} ${d.fillName} 为${d.fillLabel}？`)) {
+      act(api(`/officials/${d.fillId}/appoint`, { office: d.fillOffice }), "已任命").then((r) => r && chronicle(r.note));
+    }
   } else if (d.appoint) {
     act(api(`/officials/${d.appoint}/appoint`, { office: $("appoint-" + d.appoint).value }), "已任命").then((r) => r && chronicle(r.note));
   } else if (d.cane) {
