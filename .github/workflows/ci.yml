@@ -41,11 +41,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 两者都跑全部测试（Windows 上 run_tests 经 cmd /C，符号链接相关的用例只在 Unix 上跑）。
+          # 两者都跑全部测试，某个 crate 失败也跑完其余的（Windows 上 run_tests 经 cmd /C，符号链接相关的用例只在 Unix 上跑）。
           - os: macos-latest
-            command: cargo test --workspace --locked
+            command: cargo test --workspace --locked --no-fail-fast
           - os: windows-latest
-            command: cargo test --workspace --locked
+            command: cargo test --workspace --locked --no-fail-fast
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

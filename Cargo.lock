@@ -2350,6 +2350,7 @@ version = "0.5.0"
 dependencies = [
  "axum",
  "futures-util",
+ "ring",
  "serde_json",
  "tokio",
  "ureq",

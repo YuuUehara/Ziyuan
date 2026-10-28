@@ -18,7 +18,7 @@ use futures_util::stream::{self, Stream};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
-use std::io::{self, Read};
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -51,8 +51,11 @@ pub struct Config {
 
 /// 生成 32 位十六进制随机令牌。
 pub fn random_token() -> io::Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
     let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| io::Error::other("系统随机数不可用"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
