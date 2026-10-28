@@ -23,6 +23,8 @@ use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_record
 const MAX_READ_BYTES: usize = 64 * 1024;
 /// 单次 `search_code` 最多返回的匹配行数。
 const MAX_MATCHES: usize = 50;
+/// 单次 `list_files` 最多列出的文件数。
+const MAX_LISTED: usize = 300;
 /// 永远不可查阅的目录：朝廷事件簿与版本库元数据。
 const DENIED_DIRS: &[&str] = &[".ziyuan", ".git", ".jj"];
 /// 搜索时跳过（但可直接读取）的目录：构建产物。测试副本也不复制它们。
@@ -83,18 +85,19 @@ pub fn sealed_tools(
     test_command: Option<&str>,
 ) -> Result<Sealed, BoxError> {
     let sandbox = Arc::new(Sandbox::new(root, &seal.scope, test_command)?);
-    let tools = seal
-        .capabilities
-        .iter()
-        .map(|capability| -> Box<dyn Tool> {
-            match capability {
-                Capability::ReadFile => Box::new(ReadFile(sandbox.clone())),
-                Capability::SearchCode => Box::new(SearchCode(sandbox.clone())),
-                Capability::WriteFile => Box::new(WriteFile(sandbox.clone())),
-                Capability::RunTests => Box::new(RunTests(sandbox.clone())),
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    for capability in &seal.capabilities {
+        match capability {
+            // 能读文件就能看目录：`list_files` 随 `read_file` 授予，不另设权限，玉玺编码不变。
+            Capability::ReadFile => {
+                tools.push(Box::new(ReadFile(sandbox.clone())));
+                tools.push(Box::new(ListFiles(sandbox.clone())));
             }
-        })
-        .collect();
+            Capability::SearchCode => tools.push(Box::new(SearchCode(sandbox.clone()))),
+            Capability::WriteFile => tools.push(Box::new(WriteFile(sandbox.clone()))),
+            Capability::RunTests => tools.push(Box::new(RunTests(sandbox.clone()))),
+        }
+    }
     Ok(Sealed { tools, sandbox })
 }
 
@@ -338,6 +341,27 @@ impl Sandbox {
         Ok(false)
     }
 
+    /// 列出 `path` 下的文件（相对路径），跳过构建产物与禁区，不进入符号链接。
+    fn list(&self, path: &Path, out: &mut BTreeMap<String, u64>) -> io::Result<()> {
+        if !path.is_dir() {
+            out.insert(self.display(path), fs::metadata(path)?.len());
+            return Ok(());
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let (file_type, name) = (entry.file_type()?, entry.file_name());
+            if is_denied(&self.root, &entry.path()) {
+                continue;
+            }
+            if file_type.is_dir() && !SKIPPED_DIRS.iter().any(|d| name == *d) {
+                self.list(&entry.path(), out)?;
+            } else if file_type.is_file() {
+                out.insert(self.display(&entry.path()), entry.metadata()?.len());
+            }
+        }
+        Ok(())
+    }
+
     fn search_file(&self, path: &Path, query: &str, out: &mut Vec<String>) -> bool {
         // 禁区文件与非 UTF-8（二进制）文件直接跳过。
         if is_denied(&self.root, path) {
@@ -396,6 +420,64 @@ impl Tool for ReadFile {
         } else {
             Ok(text.into_owned())
         }
+    }
+}
+
+struct ListFiles(Arc<Sandbox>);
+
+impl Tool for ListFiles {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "list_files".into(),
+            description: format!(
+                "列出授权范围（{}）内某目录下的全部文件（递归，含本次 write_file 暂存的新文件），返回 `路径（字节数）`，最多 {MAX_LISTED} 个；不给 path 则列整个授权范围。跳过 target、node_modules。",
+                self.0.scope_label()
+            ),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的目录路径；省略则列整个授权范围"}},"additionalProperties":false}"#.into(),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args: Value = serde_json::from_str(args_json)?;
+        let dirs = match args.get("path").and_then(Value::as_str) {
+            Some(p) if !p.trim().is_empty() && p.trim() != "." => vec![self.0.resolve(p)?],
+            _ => self.0.scope.clone(),
+        };
+        let mut files = BTreeMap::new();
+        for dir in &dirs {
+            self.0.list(dir, &mut files)?;
+        }
+        // 暂存而尚未落盘的新文件也列出，免得官员以为自己写的文件不存在。
+        let prefixes: Vec<String> = dirs.iter().map(|d| self.0.display(d)).collect();
+        let staged = self.0.staged.lock().expect("暂存区锁未中毒");
+        let mut lines: Vec<String> = Vec::new();
+        for (path, change) in staged.iter() {
+            let under = prefixes
+                .iter()
+                .any(|p| p == "." || path == p || path.starts_with(&format!("{p}/")));
+            if under && !files.contains_key(path) {
+                lines.push(format!("{path}（暂存新建，{} 字节）", change.after.len()));
+            }
+        }
+        drop(staged);
+        let total = files.len() + lines.len();
+        lines.extend(
+            files
+                .iter()
+                .map(|(path, size)| format!("{path}（{size} 字节）")),
+        );
+        lines.sort();
+        if lines.is_empty() {
+            return Ok("无文件".into());
+        }
+        lines.truncate(MAX_LISTED);
+        let mut out = lines.join("\n");
+        if total > MAX_LISTED {
+            out.push_str(&format!(
+                "\n[已截断：共 {total} 个，仅显示前 {MAX_LISTED} 个；可指定子目录]"
+            ));
+        }
+        Ok(out)
     }
 }
 
@@ -796,6 +878,45 @@ mod tests {
     }
 
     #[test]
+    fn list_files_shows_scope_and_staged_files_but_not_denied_or_build_output() {
+        let dir = workspace("list");
+        let root = dir.join("project");
+        let sealed = sealed_tools(
+            &root,
+            &seal(&[Capability::ReadFile, Capability::WriteFile], &["."]),
+            None,
+        )
+        .unwrap();
+        let find = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+        let list = find("list_files");
+        assert_eq!(
+            list.execute("{}").unwrap(),
+            "docs/a.md（11 字节）\nsrc/main.rs（35 字节）"
+        );
+        // 暂存的新文件也列出，并注明尚未落盘。
+        find("write_file")
+            .execute(r#"{"path":"src/new.rs","content":"x"}"#)
+            .unwrap();
+        assert_eq!(
+            list.execute(r#"{"path":"src"}"#).unwrap(),
+            "src/main.rs（35 字节）\nsrc/new.rs（暂存新建，1 字节）"
+        );
+        for path in [".ziyuan", "..", "target/../../secret.txt"] {
+            let args = serde_json::json!({ "path": path }).to_string();
+            assert!(list.execute(&args).is_err(), "{path}");
+        }
+        // 范围之外的目录不可列。
+        let narrow = tool(
+            &root,
+            &seal(&[Capability::ReadFile], &["src"]),
+            "list_files",
+        );
+        assert_eq!(narrow.execute("{}").unwrap(), "src/main.rs（35 字节）");
+        assert!(narrow.execute(r#"{"path":"docs"}"#).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn seal_limits_tools_and_scope() {
         let dir = workspace("seal");
         let root = dir.join("project");
@@ -803,7 +924,7 @@ mod tests {
             .unwrap()
             .tools;
         let names: Vec<_> = only_read.iter().map(|t| t.spec().name).collect();
-        assert_eq!(names, ["read_file"]);
+        assert_eq!(names, ["read_file", "list_files"]);
         assert!(only_read[0].execute(r#"{"path":"src/main.rs"}"#).is_ok());
         let err = only_read[0]
             .execute(r#"{"path":"docs/a.md"}"#)

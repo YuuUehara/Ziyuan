@@ -1,7 +1,9 @@
 //! 都察院与刑部：复核回奏、复勘密报与平反。
 
 use std::path::Path;
-use ziyuan_core::{CensorVerdict, CourtEvent, Evidence, Office, Persona, TaskId, TokenUsage};
+use ziyuan_core::{
+    Capability, CensorVerdict, CourtEvent, Evidence, Office, Persona, TaskId, TokenUsage,
+};
 use ziyuan_governance::{ChangeState, GovernanceError, Suspicion, Task, TaskStatus};
 use ziyuan_runtime::{BoxError, WorkerBackend, guard};
 use ziyuan_storage::EventStore;
@@ -247,8 +249,20 @@ impl<S: EventStore> Session<S> {
              依据诏令、回奏、工具调用记录与证据核验，判断回奏是否属实、是否办成了诏令所命之事。\n\
              回复第一行必须是「背书」或「弹劾」二字之一，其后用不超过 150 字说明理由。\n\
              证据核验由程序完成、确凿可信：查无实据的引用要分辨是捏造，还是官员如实说明其不存在；\
-             测试未通过而回奏称已办成者，应予弹劾。\n{}{}",
+             测试未通过而回奏称已办成者，应予弹劾。\n{}{}{}",
             censor.name,
+            // 实测中御史曾把「改动只暂存、未落盘」当作与 write_file 成功相矛盾。
+            if entry
+                .edict
+                .seal
+                .capabilities
+                .contains(&Capability::WriteFile)
+            {
+                "write_file 只把改动暂存在内存中（run_tests 在叠加暂存改动的副本上跑），须皇帝准奏才写入项目；\
+                 记录中 write_file 成功，即是暂存成功，回奏称「改动未落盘」「仅暂存」属实，不是矛盾，不得据此弹劾。\n"
+            } else {
+                ""
+            },
             if entry.template.is_some() {
                 "本诏令按翰林院模板验收：第二行起逐条写「第 n 条：达成／未达成——理由」（每条不超过 60 字），\
                  任何一条未达成或无从查证，应予弹劾。\n"
@@ -293,7 +307,15 @@ impl<S: EventStore> Session<S> {
         }
         if let Some(changes) = &entry.changes {
             let diff: String = render_diffs(&changes.files).concat();
-            user.push_str(&format!("\n呈报改动：\n{}\n", truncate(&diff, 6000)));
+            let state = match changes.state {
+                ChangeState::Proposed => "暂存待准奏，尚未写入项目",
+                ChangeState::Applied => "已准奏落盘",
+                ChangeState::Discarded => "已驳回，未写入",
+            };
+            user.push_str(&format!(
+                "\n呈报改动（{state}）：\n{}\n",
+                truncate(&diff, 6000)
+            ));
         }
         let by_evidence = if evidence.verified() {
             CensorVerdict::Endorsed
