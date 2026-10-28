@@ -13,7 +13,7 @@ cd /path/to/your/project && ziyuan init
 ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
 ```
 
-**实测情况（2026-10）：** 已用 DeepSeek `deepseek-flash`（默认思考模式）与 `deepseek-v4-pro` 端到端实测：多轮工具调用、流式输出、玉玺越权拦截、超时与 Ctrl-C 撤销均正常。思考模式的思维链（`reasoning_content`）不显示，但会按 DeepSeek 要求在后续请求中回传。
+**实测情况（2026-10）：** 已用 DeepSeek `deepseek-flash`（默认思考模式）与 `deepseek-v4-pro` 端到端实测：多轮工具调用、流式输出、玉玺越权拦截、超时与 Ctrl-C 撤销均正常；v0.7.0 又跑通了工部改代码的全程（改动暂存并跑测试 → 都察院背书 → `apply --commit` 落盘提交 → 评定），一件约 1.4 万 tokens。思考模式的思维链（`reasoning_content`）不显示，但会按 DeepSeek 要求在后续请求中回传。
 
 **Ollama（本地模型，2026-10 实测）：** 在 4 核 CPU、8 GB 内存的机器上用 Ollama 0.40 的 OpenAI 兼容接口实测 `qwen2.5:1.5b`、`qwen2.5:3b` 与 `qwen3:1.7b`（思考模式）。不设 `ZIYUAN_LLM_API_KEY` 即可：
 
