@@ -1,6 +1,6 @@
 # 紫垣使用指南
 
-README 的「快速开始」之后，各项功能的详细用法都在这里。截图取自 v0.6，用演示朝廷与模拟模型生成。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
+README 的「快速开始」之后，各项功能的详细用法都在这里。截图取自 v0.7，用演示朝廷与模拟模型生成。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
 
 ## 接入真实模型
 
@@ -185,7 +185,7 @@ ziyuan recommend minister:works       # 按履历排列可任工部尚书者
 ## 都察院：复核回奏与证据核验
 
 ```bash
-ziyuan recruit justice && ziyuan appoint 7 censor   # 左都御史（元称御史台御史大夫），各制度都设
+ziyuan recruit justice && ziyuan appoint <ID> censor   # 左都御史（元称御史台御史大夫），各制度都设
 ziyuan model censor deepseek-v4-pro                 # 御史可配强模型
 ziyuan censor 3                                     # 或 ziyuan censor all
 ```
@@ -248,12 +248,12 @@ ziyuan crown 4                     # 钦点状元，史官记传胪
 - **科举**：考题放在 `.ziyuan/exam/*.txt`，先写题目，最后一行写「要点：甲；乙」。官员用自己的模型作答（单轮、无工具），判分由代码按要点命中，不靠模型自评。成绩记入履历（「科举及格 x/y」），计入荐举排序；任命仍由皇帝决定。
 - **回奏体例**：承办官员的回奏须分「结论」「依据」「未办之事」三段（行首标题）。缺段的发回重写一次，仍不合则照收，并在 `tasks`、Web 卡片、TUI 详情中标「体例不合」。
 - **殿试**：彩蛋。答卷与状元都记入事件簿，每科只能点一次；状元记入履历。Web 在百官页右侧「礼部」，TUI 在百官页按 `e` 应试。
-- 应试与殿试的用量计入度支。发版时撰写 CHANGELOG 推迟到后续版本。
+- 应试与殿试的用量计入度支。
 
 ## 礼部修 CHANGELOG
 
 ```bash
-ziyuan recruit 礼官 rites && ziyuan appoint <ID> minister:rites   # 礼部须有人
+# 开国已设礼部尚书；若已罢免，先 recruit 并 appoint <ID> minister:rites
 ziyuan changelog --version 0.5.0          # 默认取最近的 tag 以来的提交；--since 可改
 ziyuan run && ziyuan diff 3 && ziyuan apply 3
 ```
@@ -344,7 +344,7 @@ ziyuan ceiling clerk:works --mcp none                # 官职上限：工部郎�
 - **默认不授**：玉玺的 `mcp` 为空就一件外藩工具也没有，也不启动任何服务。授权记入事件簿，受官职上限约束（`ceiling --mcp`，未给时不设限），廷杖降级期间收回。工具名形如 `docs__search`。
 - 每次调用照常记入起居注（`history --kind tool`），输出照常包在外来文书边界中、经锦衣卫检查。
 - **外部工具做什么由服务决定，不受 `--scope` 约束**：只授信得过的服务。服务反向发来的请求（如 `roots/list`、采样）一概回绝。
-- Web 的诏令卡片在玉玺徽章上显示外藩授权；Web 下诏表单暂不能授 MCP，请用 CLI。
+- Web 的诏令卡片在玉玺徽章上显示外藩授权；下诏表单的「玉玺 · 外藩 MCP」一栏可授。
 
 ## 人格、字号与廷议
 
@@ -387,7 +387,7 @@ ziyuan run --jobs 2 --timeout 120                       # 并发执行全部未�
 - 多个终端可同时使用同一朝廷：入队、撤销、任免随时可做；但同一时刻只有一个进程执行诏令（`run` 或不带 `--queue` 的 `edict`），其他进程会立即被拒绝。
 - 撤销正在另一进程中执行的诏令时，执行不会被打断，但其结果作废、不再记录。
 - 取消是协作式的：流式响应每收到一段就检查一次，因此超时或撤销会中止正在生成的回答；等待首段响应期间无法打断。超时/撤销的结论立即记录，不等待请求返回。
-- 每次模型调用的 token 用量（以服务端报告为准）记为 `ModelUsage` 事件，失败、超时的诏令同样计入。回奏后显示本件用量；`tasks`、`examine`（按官员）与 `court`（合计）也会显示。不估算费用。
+- 每次模型调用的 token 用量（以服务端报告为准）记为 `ModelUsage` 事件，失败、超时的诏令同样计入。回奏后显示本件用量；`tasks`、`examine`（按官员）与 `court`（合计）也会显示，并附花费估算（见上文「花费估算」）。
 - 模型的回答以流式实时写到 stderr，每行以 `#诏令ID│` 开头，并发执行时各件诏令互不混行；最终回奏仍写到 stdout。流式片段不写入事件簿。
 
 ## 起居注：按诏令、官员、类型、时间查

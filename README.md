@@ -50,7 +50,7 @@ CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clipp
 
 ## 快速开始
 
-要求：Rust 1.89 或更新的稳定版工具链（Rust 2024 edition；事件簿文件锁需要 1.89）。第三方依赖为 `ureq`、`serde_json`、`tokio`，以及 Web 界面的 `axum`、`futures-util`。
+要求：Rust 1.89 或更新的稳定版工具链（Rust 2024 edition；事件簿文件锁需要 1.89）。主要第三方依赖：`ureq`、`serde`/`serde_json`、`tokio`，Web 界面的 `axum`、`futures-util`，终端界面的 `ratatui`，ChatGPT 订阅登录校验签名的 `ring`。
 
 ```bash
 cargo fmt --all -- --check
@@ -66,7 +66,7 @@ cd /tmp/ziyuan-demo
 /path/to/ziyuan/target/debug/ziyuan court
 /path/to/ziyuan/target/debug/ziyuan officials
 /path/to/ziyuan/target/debug/ziyuan recruit "新工" works
-/path/to/ziyuan/target/debug/ziyuan appoint 7 clerk:works
+/path/to/ziyuan/target/debug/ziyuan appoint 11 clerk:works   # 开国已有 #1–#10，新人为 #11
 /path/to/ziyuan/target/debug/ziyuan edict --dept works "检查 Rust 项目中的 unsafe 代码"
 
 # 朱元璋式：撤销丞相，六部直接承接任务
@@ -93,6 +93,7 @@ cd /tmp/ziyuan-demo
 
 - 正职空缺时由副职署理（丞相 → 左丞相，首辅 → 次辅，尚书 → 侍郎），路线中注明「署理」；正副俱缺则拒绝派工。
 - 改制会撤销旧制度协调机构（中书省/内阁）的全部官职，防止旧身份在改制后继续自动保有最高权力；六部官员保留，品级随制度变化。新制度需要明确任命协调者。
+- 开国时（#1–#10）设丞相一人，吏部、工部各有尚书与郎中，户、礼、兵、刑四部各有尚书（本部无郎中时尚书亲办），六部诏令都能承接；左都御史不设（设了常朝会自动复核、多花 token）。`init` 与 `court` 会列出缺位的官职及其影响（如左都御史空缺则无人复核），并给出补缺命令。
 - 官员姓名在开国与 `recruit`（不给姓名时）随机生成：百余个常见单姓与复姓，配以士大夫取名常用字，单名双名皆有，不与在册官员重名。姓名记入事件簿，重放不变。
 - `officials`、Web 与 TUI 显示每位官员的官职、品级与所用模型（`ZIYUAN_LLM_MODEL`；未设置时为演示后端）。
 
