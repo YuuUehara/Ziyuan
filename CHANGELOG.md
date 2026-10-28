@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.0
+
+v0.6 补齐与落实：各前端用得上，长期跑得动，真实环境验得过。
+
 ### 新增
 
 - ChatGPT 订阅接入：`ziyuan login` / `logout`，`ZIYUAN_LLM_PROVIDER=chatgpt` 改走 Responses API，计入订阅额度。
@@ -23,6 +27,10 @@
 
 - Windows：`run_tests` 改用 `cmd /C`；`search_code` 返回的路径统一用 `/`；截断事件簿残行不再报拒绝访问；Web 令牌改用系统随机数生成（原先读 `/dev/urandom`，`ziyuan serve` 在 Windows 上无法启动）。
 - zsh 补全：修正加载报错与含冒号的官职代码补不出。
+
+### 兼容性
+
+- v0.6 没有新增事件类型，v0.5 可读 v0.6 写下的事件簿；会典（`.ziyuan/huidian`）只是缓存，旧版忽略它，删去也无妨。
 
 ## 0.5.0
 
