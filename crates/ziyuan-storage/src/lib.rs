@@ -446,10 +446,13 @@ impl EventStore for EventLog {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // 不用 append 模式：Windows 上追加句柄没有截断残行所需的写权限（set_len 报拒绝访问）。
+        // 持独占锁后定位到已提交的末尾再写，效果相同。
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
-            .append(true)
+            .write(true)
             .open(&self.path)?;
         file.lock()?;
         let tail = self.read_tail(&mut file, |_, _| Ok(()))?;
@@ -461,6 +464,7 @@ impl EventStore for EventLog {
         if tail.torn {
             file.set_len(committed)?;
         }
+        file.seek(SeekFrom::Start(committed))?;
         let mut content = String::new();
         for event in events {
             content.push_str(&codec::encode_event(event));
