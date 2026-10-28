@@ -10,6 +10,7 @@ pub(crate) const HELP: &str = concat!(
 
 用法：
   ziyuan init                          初始化朝廷（在当前目录建立 .ziyuan/）
+  ziyuan version                       显示版本号（亦可 --version、-V）
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职、品级、所用模型及任务完成数
   ziyuan recruit [姓名] <部门>         招募新官（不给姓名则随机取名；须另行 appoint 任职）
@@ -129,6 +130,7 @@ pub(crate) const HELP: &str = concat!(
   ZIYUAN_MAX_STEPS     单件诏令最多的模型调用步数（默认 12）；用尽后官员不带工具据已查阅的内容回奏
   ZIYUAN_LLM_PROVIDER  设为 chatgpt 时改用 ChatGPT 订阅（先 `ziyuan login`），走 Responses API
   ZIYUAN_TZ            起居注显示与筛选时间所用的时区，如 +08:00（默认 UTC）
+  ZIYUAN_CONFIG_DIR    用户配置目录（存 ChatGPT 订阅凭据；默认 $XDG_CONFIG_HOME/ziyuan 或 ~/.config/ziyuan）
   ZIYUAN_GITHUB_REPO   兵部驿站·GitHub 的仓库（owner/repo）；与 ZIYUAN_GITHUB_TOKEN 一同设置后可用 github 子命令
   ZIYUAN_GITHUB_TOKEN  GitHub 令牌（只在 ziyuan-github 中使用，不交给模型）
 
@@ -157,6 +159,7 @@ pub(crate) enum Shell {
 /// 全部子命令（补全用；测试保证每个都能被 `parse` 识别）。
 pub(crate) const SUBCOMMANDS: &[&str] = &[
     "help",
+    "version",
     "init",
     "court",
     "officials",

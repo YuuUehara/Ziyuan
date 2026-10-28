@@ -26,6 +26,16 @@ jobs:
       # smoke.sh 先跑 cargo test --workspace，再以演示后端走一遍 CLI。
       - run: bash scripts/smoke.sh
 
+  audit:
+    name: 依赖审计
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
   msrv:
     name: 最低 Rust 版本（1.89）
     runs-on: ubuntu-latest

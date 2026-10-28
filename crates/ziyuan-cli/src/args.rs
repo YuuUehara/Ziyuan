@@ -17,6 +17,7 @@ use crate::help::Shell;
 
 pub(crate) enum Command {
     Help,
+    Version,
     Init,
     Court,
     Officials,
@@ -162,7 +163,8 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     }
     let name = args.remove(0);
     let command = match name.as_str() {
-        "help" | "--help" => Command::Help,
+        "help" | "--help" | "-h" => Command::Help,
+        "version" | "--version" | "-V" => no_args(args, Command::Version)?,
         "init" => no_args(args, Command::Init)?,
         "court" => no_args(args, Command::Court)?,
         "officials" => no_args(args, Command::Officials)?,

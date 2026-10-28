@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 新增
+
+- `ziyuan --version`（亦可 `version`、`-V`）。
+- [SECURITY.md](SECURITY.md)：各道边界能挡什么、挡不住什么，以及报告漏洞的渠道。
+
+### 改进
+
+- 契约测试以黑盒方式核对稳定性约定：`--json` 的冻结字段、退出码、帮助列出的子命令与环境变量。
+- 稳定性约定单列「实验性」：ChatGPT 订阅与 HTTP 外藩只用模拟服务测过，1.0 起不承诺兼容。
+- 帮助补列 `ZIYUAN_CONFIG_DIR`；CI 增加 `cargo audit` 依赖审计。
+
 ## 0.8.0
 
 朝堂缺位时吏部荐举人选，由皇帝确认任命。

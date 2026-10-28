@@ -25,6 +25,7 @@ pub(crate) fn execute(
 ) -> Result<(), Box<dyn Error>> {
     match command {
         Command::Help
+        | Command::Version
         | Command::Init
         | Command::Migrate
         | Command::Login(_)

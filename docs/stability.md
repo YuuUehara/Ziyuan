@@ -16,6 +16,13 @@
 | 环境变量 | `ZIYUAN_LLM_MODEL`、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`、`ZIYUAN_LLM_PROVIDER`、`ZIYUAN_LLM_PRICE`、`ZIYUAN_LLM_RETRIES`、`ZIYUAN_MAX_STEPS`、`ZIYUAN_TEST_COMMAND`、`ZIYUAN_TZ`、`ZIYUAN_GITHUB_REPO`、`ZIYUAN_GITHUB_TOKEN`、`ZIYUAN_CONFIG_DIR`。 |
 | Web 驿站 `POST /api/courier` | 凭令牌（`Authorization: Bearer`）投递 `{ text, department?, station?, urgent? }`，只入队。 |
 
+## 实验性
+
+下列功能可用，但只用模拟服务测过，1.0 起不承诺兼容：行为、参数与凭据格式都可能调整，变化写进 CHANGELOG。用真实服务实测通过后转为冻结。
+
+- **ChatGPT 订阅**：`ZIYUAN_LLM_PROVIDER=chatgpt`、`ziyuan login` / `logout` 及其凭据（变量名本身冻结，`chatgpt` 这一取值的行为不冻结）。
+- **HTTP 外藩**：`.ziyuan/mcp.json` 中以 `url` 登记的 Streamable HTTP 服务（以 `command` 登记的本地服务已冻结）。
+
 ## 不在冻结范围内
 
 - **库 crate 的 Rust API**：`ziyuan-core`、`ziyuan-app` 等十个 crate 是 `ziyuan` 命令行的内部实现，版本号随整体走，但不按 semver 承诺 API。

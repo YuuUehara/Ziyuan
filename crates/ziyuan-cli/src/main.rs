@@ -99,6 +99,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     match command {
         Command::Help => println!("{HELP}"),
+        Command::Version => println!("ziyuan {}", env!("CARGO_PKG_VERSION")),
         Command::Completions(shell) => print!("{}", completions(shell)),
         Command::Init => {
             let session = Session::found(log)?;
