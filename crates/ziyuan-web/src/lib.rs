@@ -511,7 +511,7 @@ async fn courier(
     let station = body["station"].as_str().unwrap_or("驿站").to_owned();
     let urgent = body["urgent"].as_bool().unwrap_or(false);
     app.mutate(move |s| {
-        let edict = s.post(department, text, &station, urgent)?;
+        let edict = s.post(department, text, Seal::default(), &station, urgent)?;
         let task = s.court().task(edict.id).expect("刚入队");
         Ok(json!({
             "id": edict.id.0,
@@ -1077,7 +1077,7 @@ async fn github_pull(
         .to_owned();
     let department = parse::<Department>(body["department"].as_str().unwrap_or("works"))?;
     app.mutate(move |s| {
-        let report = s.github_pull(&hub, &label, department)?;
+        let report = s.github_pull(&hub, &label, department, &Seal::default())?;
         let queued: Vec<Value> = report
             .queued
             .iter()

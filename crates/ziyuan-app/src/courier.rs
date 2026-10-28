@@ -2,7 +2,7 @@
 //! CLI 与 Web 共用；GitHub 凭据只在 [`GitHub`] 中，不进事件簿与任何模型提示。
 use crate::{AppError, Session, commit_message, reply_text, selected_files};
 use std::path::Path;
-use ziyuan_core::{Department, Edict, TaskId};
+use ziyuan_core::{Department, Edict, Seal, TaskId};
 use ziyuan_github::{GitHub, intake, parse_station};
 use ziyuan_storage::EventStore;
 
@@ -18,12 +18,14 @@ pub struct PullReport {
 }
 
 impl<S: EventStore> Session<S> {
-    /// 带 `label` 的 issue/PR 及成员的 `/ziyuan` 评论入队（交给 `department`）；已入队的不再入队。
+    /// 带 `label` 的 issue/PR 及成员的 `/ziyuan` 评论入队（交给 `department`，盖 `seal`）；
+    /// 已入队的不再入队。要让来件能开草稿 PR，须皇帝在此授工部写权。
     pub fn github_pull(
         &mut self,
         hub: &GitHub,
         label: &str,
         department: Department,
+        seal: &Seal,
     ) -> Result<PullReport, AppError> {
         let issues = hub.labeled(label).map_err(external)?;
         let mut queued = Vec::new();
@@ -38,7 +40,7 @@ impl<S: EventStore> Session<S> {
                 if known {
                     continue;
                 }
-                let edict = self.post(department, d.text, &d.station, false)?;
+                let edict = self.post(department, d.text, seal.clone(), &d.station, false)?;
                 let flags = self
                     .court()
                     .task(edict.id)

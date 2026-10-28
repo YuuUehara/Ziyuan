@@ -364,7 +364,8 @@ ziyuan urgent 7                                          # 已在队列的诏令
 ```bash
 export ZIYUAN_GITHUB_REPO=owner/repo
 export ZIYUAN_GITHUB_TOKEN=...          # 或 GITHUB_TOKEN；需 issues 与 contents、pull requests 写权限
-ziyuan github pull                      # 标签 ziyuan 的 issue/PR 入队（--label、--dept 可改）
+ziyuan github pull                      # 标签 ziyuan 的 issue/PR 入队（--label、--dept 可改），默认只读
+ziyuan github pull --tools read_file,write_file   # 授工部写权入队，办完准奏后才能开草稿 PR
 ziyuan run && ziyuan review 3 accept
 ziyuan github reply all                 # 已评定的回奏写回 issue/PR 评论
 ziyuan apply 3 && ziyuan github pr 3    # 准奏落盘后，把改动在远端开为草稿 PR
@@ -372,6 +373,7 @@ ziyuan apply 3 && ziyuan github pr 3    # 准奏落盘后，把改动在远端�
 
 - **入队**：带标签的未关闭 issue/PR 各入队一件；其下仓库所有者、成员或协作者以 `/ziyuan` 开头的评论各另入队一件（外人的评论不收）。驿站名形如 `github:owner/repo#12`（评论加 `/c<评论ID>`），重复 `pull` 不会重复入队。入队后与其他驿传诏令一样：锦衣卫入队即查，默认只读玉玺，内阁制下须批红。
 - **回奏写回**：只送出皇帝已评定（含司礼监代批）且没有未平反密报的回奏，每件只送一次；评论含承办者、评定、都察院复核与回奏全文。
+- **入队的玉玺**：默认只读，承办官员只能查、不能改，自然也开不了草稿 PR。要让来件改代码，须皇帝在 `pull` 时以 `--tools`（可加 `--scope`）授权，这一批入队的诏令都盖此玉玺；写权仍唯工部可授，改动仍须准奏才落盘。Web 的「收 GitHub 来件」仍只入队只读诏令。
 - **草稿 PR**：只开已准奏落盘的改动（逐段驳回的不含），经 GitHub API 在远端以默认分支最新提交为底建分支 `ziyuan/task-<ID>` 与一次提交，不碰本地版本库。先逐个核对远端原文与呈报时一致，不一致则不开。
 - **凭据**只在 `ziyuan-github` 中读取与使用，不进入朝廷事件簿、执行后端或任何模型提示，报错信息也不含令牌。回报的网址记入事件簿（`CourierReplied`）。
 
@@ -605,7 +607,7 @@ v0.5 让朝廷能常驻、能记事、能接外界，但不少本事只有命令
 6. **真实环境实测**（进行中）：
    - ~~zsh 与 fish 补全~~ 已实测：修正了 zsh 加载报错与含冒号官职代码补不出的问题。
    - ~~CI 在 Windows 上跑全部测试~~ 已改：先交叉编译到 `x86_64-pc-windows-gnu`、在 Wine 中跑通全部测试。修正了两处 Windows 上的真问题：`run_tests` 原先只用 `sh -c`（Windows 改为 `cmd /C`，并保留 `SystemRoot`、`PATHEXT` 等环境变量）；`search_code` 交给模型的路径用了 `\`（现一律为 `/`）。
-   - GitHub 驿站在测试仓库上走通入队、回报评论与草稿 PR（须皇帝指定仓库）。
+   - ~~GitHub 驿站~~ 已在私有测试仓库上实测：issue 与成员 `/ziyuan` 评论入队（普通评论与紫垣自己的回帖不入队、重复拉取不重复入队），评定后回报评论，准奏后开草稿 PR（PR 中提交的说明与本地 `apply --commit` 的相同）。实测发现驿传诏令只有只读玉玺、永远开不了 PR，已加 `github pull --tools`；回奏正文改为如实写明改动状态与 PR 链接。
    - OpenAI / ChatGPT 订阅真实账号有条件时补做。
 7. **司礼监分权：Web 令牌分级**：除皇帝令牌外，可发只读令牌（只看朝廷、起居注与实录，不能下诏、批红、准奏），便于给旁人观政；令牌只存于 `.ziyuan`。
 8. **外藩扩容**（视进度）：支持 HTTP（Streamable HTTP）的 MCP 服务，凭据照旧只在名册中引用环境变量；`ziyuan mcp` 显示每件工具的参数说明。

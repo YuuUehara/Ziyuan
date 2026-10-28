@@ -99,8 +99,9 @@ const HELP: &str = concat!(
   ziyuan mcp                            外藩名册：.ziyuan/mcp.json 登记的 MCP 服务及其工具
   ziyuan changelog [--version 0.5.0] [--since v0.4.0]
                                        礼部修 CHANGELOG：据提交与实录起草，只可写 CHANGELOG.md，须准奏落盘（只入队）
-  ziyuan github pull [--label ziyuan] [--dept works]
-                                       兵部驿站·GitHub：带标签的 issue/PR 及成员的 `/ziyuan` 评论入队（去重）
+  ziyuan github pull [--label ziyuan] [--dept works] [--tools <工具,…>] [--scope <路径>]...
+                                       兵部驿站·GitHub：带标签的 issue/PR 及成员的 `/ziyuan` 评论入队（去重）；
+                                       默认只读，--tools 可授工部写权（如 read_file,write_file），之后方能 `github pr`
   ziyuan github reply <诏令ID|all>      已评定、无未平反密报的回奏写回 issue/PR 评论
   ziyuan github pr <诏令ID>             准奏的改动在远端开为草稿 PR（先核对远端原文；不碰本地版本库）
   ziyuan recheck <诏令ID|all>            刑部复勘：刑部官员（模型）逐处判断检出是真有其事还是误报，只是意见
@@ -295,10 +296,11 @@ enum Shell {
 
 #[derive(Debug, PartialEq, Eq)]
 enum GitHubAction {
-    /// 带标签的 issue / PR 及成员的 `/ziyuan` 评论入队（交给 `department`）。
+    /// 带标签的 issue / PR 及成员的 `/ziyuan` 评论入队（交给 `department`，盖 `seal`）。
     Pull {
         label: String,
         department: Department,
+        seal: Seal,
     },
     /// 回奏写回评论；`None` 为全部可回报的。
     Reply(Option<TaskId>),
@@ -817,7 +819,7 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Command::Changelog { version, since }
         }
         "github" => {
-            const USAGE: &str = "用法: ziyuan github pull [--label ziyuan] [--dept works] | reply <诏令ID|all> | pr <诏令ID>";
+            const USAGE: &str = "用法: ziyuan github pull [--label ziyuan] [--dept works] [--tools <工具,…>] [--scope <路径>]... | reply <诏令ID|all> | pr <诏令ID>";
             let id = |s: &str| -> Result<TaskId, Box<dyn Error>> {
                 Ok(TaskId(s.parse().map_err(|_| "诏令 ID 必须是数字")?))
             };
@@ -825,16 +827,26 @@ fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 Some("pull") => {
                     let (mut label, mut department) =
                         (ziyuan_github::DEFAULT_LABEL.to_owned(), Department::Works);
+                    let (mut seal, mut scope) = (Seal::default(), Vec::new());
                     let mut rest = args[1..].iter();
                     while let Some(flag) = rest.next() {
                         let value = rest.next().ok_or(USAGE)?;
                         match flag.as_str() {
                             "--label" => label = value.clone(),
                             "--dept" => department = value.parse()?,
+                            "--tools" => seal.capabilities = parse_capabilities(value)?,
+                            "--scope" => scope.push(value.clone()),
                             _ => return Err(USAGE.into()),
                         }
                     }
-                    Command::GitHub(GitHubAction::Pull { label, department })
+                    if !scope.is_empty() {
+                        seal.scope = scope;
+                    }
+                    Command::GitHub(GitHubAction::Pull {
+                        label,
+                        department,
+                        seal,
+                    })
                 }
                 Some("reply") => match &args[1..] {
                     [all] if all == "all" => Command::GitHub(GitHubAction::Reply(None)),
@@ -1349,7 +1361,7 @@ fn execute(session: &mut Session<EventLog>, command: Command) -> Result<(), Box<
             urgent,
             text,
         } => {
-            let edict = session.post(department, text, &station, urgent)?;
+            let edict = session.post(department, text, Seal::default(), &station, urgent)?;
             let task = session.court().task(edict.id).expect("刚入队");
             let speed = if urgent { "，八百里加急" } else { "" };
             println!(
@@ -1822,8 +1834,12 @@ fn github(session: &mut Session<EventLog>, action: GitHubAction) -> Result<(), B
     let hub = ziyuan_github::GitHub::from_env()?
         .ok_or("未设 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN，驿站不通 GitHub")?;
     match action {
-        GitHubAction::Pull { label, department } => {
-            let report = session.github_pull(&hub, &label, department)?;
+        GitHubAction::Pull {
+            label,
+            department,
+            seal,
+        } => {
+            let report = session.github_pull(&hub, &label, department, &seal)?;
             for (edict, station, flags) in &report.queued {
                 let note = if *flags > 0 {
                     format!("，锦衣卫密报 {flags} 条")
@@ -2214,7 +2230,7 @@ complete -F _ziyuan ziyuan
                 ),
                 format!(
                     "{} -l tools -x -a '{tools} none'",
-                    seen("edict template ceiling")
+                    seen("edict template ceiling github")
                 ),
             ]
             .join("\n")
