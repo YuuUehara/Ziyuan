@@ -90,6 +90,8 @@ impl Court {
             nomination_usage: TokenUsage::default(),
             nomination_votes: BTreeMap::new(),
             canings: BTreeMap::new(),
+            courtesy_names: BTreeMap::new(),
+            art_names: BTreeMap::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -110,6 +112,23 @@ impl Court {
                 }
                 self.next_agent_id = self.next_agent_id.max(agent.id.0 + 1);
                 self.agents.insert(agent.id, agent.clone());
+            }
+            CourtEvent::AgentRenamed {
+                agent,
+                name,
+                courtesy,
+                art,
+            } => {
+                self.propose_rename(*agent, name.clone(), courtesy.clone(), art.clone())?;
+                if let (Some(name), Some(a)) = (name, self.agents.get_mut(agent)) {
+                    a.name = name.clone();
+                }
+                if let Some(c) = courtesy {
+                    self.courtesy_names.insert(*agent, c.clone());
+                }
+                if let Some(h) = art {
+                    self.art_names.insert(*agent, h.clone());
+                }
             }
             CourtEvent::OfficialAppointed { agent, office } => {
                 self.propose_appointment(*agent, *office)?;

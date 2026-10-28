@@ -294,6 +294,52 @@ impl Court {
         }))
     }
 
+    /// 改名、改字或改号（`None` 的一项不变）。姓名至多 12 字，字、号至多 6 字，都须单行、
+    /// 不含空白；至少要改一项，且与现在的不同。革职的官员也可改（史书照旧记其事）。
+    pub fn propose_rename(
+        &self,
+        agent: AgentId,
+        name: Option<String>,
+        courtesy: Option<String>,
+        art: Option<String>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let current = self
+            .agents
+            .get(&agent)
+            .ok_or(GovernanceError::UnknownAgent(agent))?;
+        let check = |value: &Option<String>, what: &str, limit: usize, now: String| {
+            let Some(value) = value else { return Ok(false) };
+            if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(GovernanceError::InvalidName(format!(
+                    "{what}不能为空，也不能含空白"
+                )));
+            }
+            if value.chars().count() > limit {
+                return Err(GovernanceError::InvalidName(format!(
+                    "{what}至多 {limit} 个字"
+                )));
+            }
+            Ok(*value != now)
+        };
+        let changed = [
+            check(&name, "姓名", 12, current.name.clone())?,
+            check(&courtesy, "字", 6, self.courtesy_name(agent))?,
+            check(&art, "号", 6, self.art_name(agent))?,
+        ];
+        if !changed.contains(&true) {
+            return Err(GovernanceError::InvalidName(format!(
+                "{}的姓名字号并无改易",
+                current.name
+            )));
+        }
+        Ok(CourtEvent::AgentRenamed {
+            agent,
+            name,
+            courtesy,
+            art,
+        })
+    }
+
     /// 皇帝的任命：当前 MVP 只有 CLI 皇帝可以调用此入口。
     pub fn propose_appointment(
         &self,

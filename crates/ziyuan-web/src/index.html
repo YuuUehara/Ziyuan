@@ -106,7 +106,7 @@
 
   label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
   label:first-child { margin-top: 0; }
-  input[type=text], select, textarea {
+  input[type=text], input[type=number], input[type=password], select, textarea {
     width: 100%;
     font: inherit;
     color: var(--ink);
@@ -148,8 +148,9 @@
   .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
   .modes button { padding: 9px 6px; font-family: var(--serif); font-size: 15px; }
   .modes button.current { background: var(--lacquer); color: var(--gold-soft); border-color: var(--lacquer-dark); cursor: default; }
-  .routes { display: grid; gap: 7px; }
-  .route { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 8px; }
+  /* 各部等高：有路线折行时，其余各部同高，纵向居中，不再参差。 */
+  .routes { display: grid; gap: 7px; grid-auto-rows: 1fr; }
+  .route { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px; }
   .route .dept { font-family: var(--serif); color: var(--lacquer); font-weight: 600; }
   .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
   .chip {
@@ -247,6 +248,7 @@
   .debate .who { font-weight: 600; color: #4b2a63; }
   .debate.live { border-style: dashed; }
   .persona { color: var(--muted); font-size: 12px; }
+  button.rename { padding: 0 6px; font-size: 11px; margin-left: 4px; vertical-align: 1px; }
   .flags { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; border: 1px solid #c0392b; background: #fdf1ef; }
   .flags ul { margin: 4px 0 0; padding-left: 18px; }
   .flags .hint { font-size: 12px; }
@@ -830,7 +832,7 @@ function render() {
       : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.filter((of) => !of.department || of.department === o.speciality.code).map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
          <button class="small shrink" data-appoint="${o.id}">任命</button>${purge}</div>`;
     const usage = o.record.usage.input + o.record.usage.output;
-    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)}<br><span class="persona">${esc(o.persona)}</span></td><td>${esc(o.speciality.label)}</td>
+    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)} <button class="small rename" data-rename="${o.id}" data-name="${esc(o.name)}" data-courtesy="${esc(o.courtesy)}" data-art="${esc(o.art)}" title="改名、改字或改号">易名</button><br><span class="persona">字${esc(o.courtesy)} · 号${esc(o.art)}</span><br><span class="persona">${esc(o.persona)}</span></td><td>${esc(o.speciality.label)}</td>
       <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>${o.demotion ? `<br><span class="badge failed" title="廷杖">${esc(o.demotion)}</span>` : ""}` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
       <td class="record">${o.model ? esc(o.model) : '<span class="hint">演示</span>'}${o.ceiling ? `<br><span class="hint">上限 ${esc(o.ceiling)}</span>` : ""}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.cost) : "—"}</td><td>${action}</td></tr>`;
@@ -1151,6 +1153,19 @@ document.addEventListener("click", (event) => {
   } else if (d.ghPr) {
     el.disabled = true;
     act(api(`/tasks/${d.ghPr}/github/pr`, {})).then((r) => r && toast(`草稿 PR 已开：${r.url}`));
+  } else if (d.rename) {
+    // 依次问姓名、字、号（预填现值）；任一处取消即作罢，未改的不提交。
+    const ask = (what, now) => { const v = prompt(`${what}（现为「${now}」）`, now); return v === null ? null : v.trim(); };
+    const name = ask("姓名", d.name);
+    const courtesy = name === null ? null : ask("字", d.courtesy);
+    const art = courtesy === null ? null : ask("号", d.art);
+    if (art !== null) {
+      const body = {};
+      if (name && name !== d.name) body.name = name;
+      if (courtesy && courtesy !== d.courtesy) body.courtesy = courtesy;
+      if (art && art !== d.art) body.art = art;
+      if (Object.keys(body).length) act(api(`/officials/${d.rename}/rename`, body)).then((r) => r && chronicle(r.note));
+    }
   } else if (d.pardon) {
     act(api(`/officials/${d.pardon}/pardon`, {})).then((r) => r && chronicle(r.note));
   }

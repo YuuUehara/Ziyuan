@@ -21,6 +21,13 @@ pub(crate) enum Command {
     Court,
     Officials,
     Recruit(Option<String>, Department),
+    /// 改名、改字、改号（`None` 的不变）。
+    Rename {
+        agent: AgentId,
+        name: Option<String>,
+        courtesy: Option<String>,
+        art: Option<String>,
+    },
     Edict {
         department: Department,
         text: String,
@@ -178,6 +185,31 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             [name, dept] => Command::Recruit(Some(name.clone()), dept.parse()?),
             _ => return Err("用法: ziyuan recruit [姓名] <部门>".into()),
         },
+        "rename" => {
+            const USAGE: &str =
+                "用法: ziyuan rename <官员ID> [--name 姓名] [--courtesy 字] [--art 号]";
+            let (id, flags) = args.split_first().ok_or(USAGE)?;
+            let (mut name, mut courtesy, mut art) = (None, None, None);
+            let mut rest = flags.iter();
+            while let Some(flag) = rest.next() {
+                let slot = match flag.as_str() {
+                    "--name" => &mut name,
+                    "--courtesy" => &mut courtesy,
+                    "--art" => &mut art,
+                    _ => return Err(USAGE.into()),
+                };
+                *slot = Some(rest.next().ok_or(USAGE)?.clone());
+            }
+            if name.is_none() && courtesy.is_none() && art.is_none() {
+                return Err(USAGE.into());
+            }
+            Command::Rename {
+                agent: agent_id(id)?,
+                name,
+                courtesy,
+                art,
+            }
+        }
         "edict" => parse_edict(args)?,
         "template" => parse_template(args)?,
         "run" => parse_run(args)?,

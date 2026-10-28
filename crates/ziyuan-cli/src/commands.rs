@@ -80,9 +80,11 @@ pub(crate) fn execute(
                     None => "未任官职".into(),
                 };
                 println!(
-                    "#{:<3} {:<6} {:<18} {} {} 模型 {} (完成 {} 件)",
+                    "#{:<3} {:<6} 字{} 号{} {:<18} {} {} 模型 {} (完成 {} 件)",
                     agent.id.0,
                     agent.name,
+                    court.courtesy_name(agent.id),
+                    court.art_name(agent.id),
                     office,
                     agent.speciality.label(),
                     Persona::of(agent.id).label(),
@@ -96,6 +98,12 @@ pub(crate) fn execute(
             let name = &session.court().agent(id).expect("刚招募").name;
             println!("诏令已颁：招募官员 #{} {}（未授官职）。", id.0, name);
         }
+        Command::Rename {
+            agent,
+            name,
+            courtesy,
+            art,
+        } => println!("{}", session.rename(agent, name, courtesy, art)?),
         Command::Edict {
             department,
             text,

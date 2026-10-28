@@ -46,7 +46,16 @@ pub async fn run(config: Config) -> Result<(), Box<dyn Error>> {
         }
     });
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &mut messages).await;
+    // 不支持备用屏的终端会留着启动前的输出（如「执行后端：…」），差量绘制不会擦掉它们。
+    // 直接清屏而不用 `Terminal::clear`：后者要向终端询问光标位置，有的终端不答。
+    let cleared = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::terminal::Clear(ratatui::crossterm::terminal::ClearType::All)
+    );
+    let result = match cleared {
+        Ok(()) => event_loop(&mut terminal, &mut app, &mut messages).await,
+        Err(e) => Err(e.into()),
+    };
     ratatui::restore();
     result
 }

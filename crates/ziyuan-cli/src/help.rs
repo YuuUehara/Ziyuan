@@ -13,6 +13,8 @@ pub(crate) const HELP: &str = concat!(
   ziyuan court                         查看制度与朝廷状态
   ziyuan officials                     查看官员、官职、品级、所用模型及任务完成数
   ziyuan recruit [姓名] <部门>         招募新官（不给姓名则随机取名；须另行 appoint 任职）
+  ziyuan rename <官员ID> [--name 姓名] [--courtesy 字] [--art 号]
+                                       改名、改字或改号（如徐珵改名徐有贞）；字号未改过的由官员 ID 而定
   ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具>] [--mcp <授权>] [--queue] <内容>
                                        下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan run [--jobs 4] [--timeout 300]
@@ -21,7 +23,7 @@ pub(crate) const HELP: &str = concat!(
                                        常朝：常驻执行，驿传与入队的诏令随到随办，办完自动请都察院复核；Ctrl-C 退朝
   ziyuan tasks                         查看诏令及其状态
   ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token] [--viewer]
-                                       启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）；
+                                       开奉天门：Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）；
                                        --viewer 另发只读的观政令牌（.ziyuan/web-viewer-token）
   ziyuan tui                           启动紫禁城终端界面
   ziyuan migrate                       检查事件簿：本版能否读，至少要哪个版本才能打开
@@ -161,6 +163,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "history",
     "records",
     "recruit",
+    "rename",
     "edict",
     "template",
     "run",

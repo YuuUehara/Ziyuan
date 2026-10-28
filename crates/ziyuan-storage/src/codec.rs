@@ -62,6 +62,21 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tAPPOINTED\t{}\t{}", agent.0, office.code())
         }
         OfficialDismissed { agent } => format!("v1\tDISMISSED\t{}", agent.0),
+        AgentRenamed {
+            agent,
+            name,
+            courtesy,
+            art,
+        } => {
+            let opt = |s: &Option<String>| s.as_deref().map(to_hex).unwrap_or_default();
+            format!(
+                "v1\tRENAMED\t{}\t{}\t{}\t{}",
+                agent.0,
+                opt(name),
+                opt(courtesy),
+                opt(art)
+            )
+        }
         OfficialPurged { agent } => format!("v1\tPURGED\t{}", agent.0),
         EdictApproved { task } => format!("v1\tAPPROVED\t{}", task.0),
         EdictDrafted {
@@ -524,6 +539,22 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             name: from_hex(field(3)?)?,
             speciality: field(4)?.parse::<Department>().map_err(|e| e.to_string())?,
         }),
+        "RENAMED" => {
+            let opt = |i: usize| -> Result<Option<String>, String> {
+                let f = field(i)?;
+                Ok(if f.is_empty() {
+                    None
+                } else {
+                    Some(from_hex(f)?)
+                })
+            };
+            AgentRenamed {
+                agent: AgentId(id(2)?),
+                name: opt(3)?,
+                courtesy: opt(4)?,
+                art: opt(5)?,
+            }
+        }
         "APPOINTED" => OfficialAppointed {
             agent: AgentId(id(2)?),
             office: field(3)?.parse::<Office>().map_err(|e| e.to_string())?,
@@ -846,6 +877,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
         CourierDelivered { .. } => 4,
         CourierReplied { .. } => 5,
+        AgentRenamed { .. } => 6,
         TemplateRemoved { .. } | OfficialCaned { .. } | OfficialPardoned { .. } => 3,
         CourtNominated { .. } => 4,
         TemplateApplied { .. } => 5,
@@ -894,6 +926,7 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         AgentRegistered(_) => "REGISTERED",
         OfficialAppointed { .. } => "APPOINTED",
         OfficialDismissed { .. } => "DISMISSED",
+        AgentRenamed { .. } => "RENAMED",
         OfficialPurged { .. } => "PURGED",
         InstitutionReformed(_) => "REFORMED",
         EmperorRetreat(_) => "RETREAT",
@@ -1007,6 +1040,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         Clock(_) | SuspicionReviewed { .. } | SuspicionAcquitted { .. } | CourierReplied { .. } => {
             5
         }
+        AgentRenamed { .. } => 7,
     })
 }
 
@@ -1030,7 +1064,7 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 42, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 43, "每种事件类型至少一条样本");
     }
     #[test]
     fn event_round_trip_chinese_and_tabs() {
@@ -1144,6 +1178,12 @@ mod tests {
                 }],
             },
             CourtEvent::ZhuangyuanNamed { agent: AgentId(2) },
+            CourtEvent::AgentRenamed {
+                agent: AgentId(2),
+                name: Some("徐\t有贞".into()),
+                courtesy: None,
+                art: Some("天全".into()),
+            },
             CourtEvent::CourierDelivered {
                 task,
                 station: "CI\t驿站".into(),

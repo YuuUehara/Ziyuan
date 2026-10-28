@@ -17,7 +17,7 @@
 | 玉玺 Yuxi | 职权、审批、审计 | `Seal`：每件诏令的工具与查阅范围，随事件簿审计 |
 | 诏令 ZhaoLing | 任务入口 | `Edict` 数据模型 + CLI |
 | 吏部 LiBu | 考绩、升迁 | `review` 评定、`examine` 考绩、`recommend` 荐举（只采信皇帝评定） |
-| 紫禁城 Forbidden City | 可视化与角色扮演 UI | `ziyuan serve`：Web 界面；`ziyuan tui`：终端界面 |
+| 紫禁城 Forbidden City | 可视化与角色扮演 UI | `ziyuan serve`：奉天门 Web 界面；`ziyuan tui`：紫禁城终端界面 |
 
 ## 项目结构
 
@@ -30,7 +30,7 @@ crates/
   ziyuan-github/      兵部驿站 · GitHub：issue/PR 入队、回奏写回评论、草稿 PR（凭据只在此使用）
   ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
   ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
-  ziyuan-web/         紫禁城 Web 界面（axum + 内嵌单页，SSE 实时推送）
+  ziyuan-web/         奉天门 Web 界面（axum + 内嵌单页，SSE 实时推送）
   ziyuan-tui/         紫禁城终端界面（ratatui）
   ziyuan-cli/         `ziyuan` 命令行（仅解析参数与呈现结果）
 
@@ -116,7 +116,7 @@ cd /tmp/ziyuan-demo
   - 模型与执行：[接入真实模型](docs/guide.md#接入真实模型)、[任务队列与并发](docs/guide.md#任务队列与并发)、[常朝：常驻执行与自动复核](docs/guide.md#常朝常驻执行与自动复核)、[外藩朝贡：MCP 工具](docs/guide.md#外藩朝贡mcp-工具)
   - 权限与改动：[玉玺：限定官员的权限](docs/guide.md#玉玺限定官员的权限)、[工部动手：受控写权限](docs/guide.md#工部动手受控写权限)、[户部度支：预算与限额](docs/guide.md#户部度支预算与限额)、[刑部与锦衣卫：防提示注入](docs/guide.md#刑部与锦衣卫防提示注入)
   - 评定与监督：[吏部：评定、考绩与荐举](docs/guide.md#吏部评定考绩与荐举)、[都察院：复核回奏与证据核验](docs/guide.md#都察院复核回奏与证据核验)、[廷推与廷杖](docs/guide.md#廷推与廷杖)、[内阁、皇权与昏君模式](docs/guide.md#内阁皇权与昏君模式)
-  - 协作与文书：[多官协作：分办与汇总](docs/guide.md#多官协作分办与汇总)、[人格与廷议](docs/guide.md#人格与廷议)、[翰林院：诏令模板](docs/guide.md#翰林院诏令模板)、[礼部：科举与文书](docs/guide.md#礼部科举与文书)、[礼部修 CHANGELOG](docs/guide.md#礼部修-changelog)
+  - 协作与文书：[多官协作：分办与汇总](docs/guide.md#多官协作分办与汇总)、[人格、字号与廷议](docs/guide.md#人格字号与廷议)、[翰林院：诏令模板](docs/guide.md#翰林院诏令模板)、[礼部：科举与文书](docs/guide.md#礼部科举与文书)、[礼部修 CHANGELOG](docs/guide.md#礼部修-changelog)
   - 记录与对接：[起居注：按诏令、官员、类型、时间查](docs/guide.md#起居注按诏令官员类型时间查)、[翰林院修史：实录与前例](docs/guide.md#翰林院修史实录与前例)、[兵部：驿传与八百里加急](docs/guide.md#兵部驿传与八百里加急)、[兵部驿站 · GitHub](docs/guide.md#兵部驿站--github)、[版本控制：Jujutsu](docs/guide.md#版本控制jujutsu)
 - [体系结构](docs/architecture.md)：分层、事件簿与设计取舍。
 - [稳定性约定](docs/stability.md)：1.0 起冻结哪些接口。

@@ -223,6 +223,23 @@ pub(crate) async fn nominate(
     })
     .await
 }
+/// `{ name?, courtesy?, art? }`：留空或缺省的一项不变。
+pub(crate) async fn rename(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let field = |key: &str| {
+        body[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let (name, courtesy, art) = (field("name"), field("courtesy"), field("art"));
+    app.mutate(move |s| Ok(json!({ "note": s.rename(AgentId(id), name, courtesy, art)? })))
+        .await
+}
 pub(crate) async fn cane(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,

@@ -333,6 +333,20 @@ impl App {
                 }
             }
             KeyCode::Char('e') => self.start_exam(agent),
+            KeyCode::Char('m') => {
+                let court = self.court();
+                let text = format!(
+                    "{} {} {}",
+                    court.agent(agent).map_or("", |a| a.name.as_str()),
+                    court.courtesy_name(agent),
+                    court.art_name(agent)
+                );
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::Rename(agent),
+                    text,
+                    department: 0,
+                });
+            }
             KeyCode::Char('d') => {
                 self.mutate(
                     |s| s.dismiss(agent),
@@ -427,6 +441,28 @@ impl App {
                     },
                     |(id, name)| format!("已招募官员 #{} {name}（按 p 授官）", id.0),
                 );
+            }
+            InputKind::Rename(agent) => {
+                let court = self.court();
+                let now = [
+                    court.agent(agent).map_or(String::new(), |a| a.name.clone()),
+                    court.courtesy_name(agent),
+                    court.art_name(agent),
+                ];
+                let words: Vec<&str> = text.split_whitespace().collect();
+                if words.len() != 3 {
+                    self.error("请依次写姓名、字、号，以空格分开");
+                    return;
+                }
+                // 与现在相同的项不改。
+                let [name, courtesy, art] =
+                    [0, 1, 2].map(|i| (words[i] != now[i]).then(|| words[i].to_owned()));
+                if let Some(note) = self.mutate(
+                    |s| s.rename(agent, name, courtesy, art),
+                    |_| format!("官员 #{} 易名", agent.0),
+                ) {
+                    self.modal = Some(Modal::Notice(note));
+                }
             }
             InputKind::Review(task, verdict) => {
                 self.mutate(

@@ -5,6 +5,7 @@ use crate::personnel::Candidate;
 use crate::{Court, GovernanceError, ServiceRecord, Task, TaskStatus};
 use ziyuan_core::{
     Agent, AgentId, CensorVerdict, GovernanceMode, Office, Record, TaskId, TokenUsage, Verdict,
+    default_styles,
 };
 
 impl Court {
@@ -19,6 +20,22 @@ impl Court {
     /// 按 ID 升序列出全部在册官员。
     pub fn agents(&self) -> impl Iterator<Item = &Agent> {
         self.agents.values()
+    }
+
+    /// 官员的字：皇帝改过的以事件簿为准，否则取 [`default_styles`]。
+    pub fn courtesy_name(&self, id: AgentId) -> String {
+        self.courtesy_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| default_styles(id).0)
+    }
+
+    /// 官员的号：同 [`Court::courtesy_name`]。
+    pub fn art_name(&self, id: AgentId) -> String {
+        self.art_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| default_styles(id).1)
     }
 
     pub fn office_of(&self, id: AgentId) -> Option<Office> {

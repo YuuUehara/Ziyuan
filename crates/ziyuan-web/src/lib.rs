@@ -1,4 +1,4 @@
-//! 紫禁城（Forbidden City）：紫垣的 Web 界面。
+//! 奉天门：紫垣的 Web 界面（与终端界面同属紫禁城一层）。
 //!
 //! 页面是内嵌的单个 HTML 文件；数据经 JSON API 读写，执行中的流式输出与结局经 SSE 推送。
 //! Web 界面同样代表皇帝，因此每个 API 请求都必须带令牌：浏览器经 `?token=` 或登录框换取
@@ -36,7 +36,7 @@ use crate::edicts::{
 };
 use crate::personnel::{
     abolish, appoint, budget, cane, crown, dismiss, exam, nominate, office_ceiling, office_model,
-    palace, pardon, purge, recruit, reform, retreat,
+    palace, pardon, purge, recruit, reform, rename, retreat,
 };
 use crate::run::{run, stop_run};
 use crate::state::{AppState, Inner};
@@ -113,6 +113,7 @@ pub fn router(config: Config) -> Router {
         .route("/officials/{id}/exam", post(exam))
         .route("/officials/{id}/crown", post(crown))
         .route("/officials/{id}/cane", post(cane))
+        .route("/officials/{id}/rename", post(rename))
         .route("/officials/{id}/pardon", post(pardon))
         .route("/nominate", post(nominate))
         .route("/palace", post(palace))

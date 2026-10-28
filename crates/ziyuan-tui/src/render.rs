@@ -115,6 +115,7 @@ impl App {
         if let Some(modal) = &self.modal {
             self.draw_modal(frame, modal);
         }
+        narrow_ambiguous(frame.buffer_mut());
     }
 
     /// 按各诏令实际所用模型估算的花费；查不到单价时为空。
@@ -133,7 +134,7 @@ impl App {
         let usage = court.total_usage();
         let mut spans = vec![
             Span::styled(
-                " 紫垣 · 奉天门 ",
+                " 紫垣 · 紫禁城 ",
                 Style::new().fg(Color::White).bg(VERMILION).bold(),
             ),
             Span::raw("  制度 "),
@@ -528,6 +529,12 @@ impl App {
                 Row::new(vec![
                     Cell::from(format!("#{}", a.id.0)).dim(),
                     Cell::from(a.name.clone()),
+                    Cell::from(format!(
+                        "{} {}",
+                        court.courtesy_name(a.id),
+                        court.art_name(a.id)
+                    ))
+                    .dim(),
                     match office {
                         Some(o) if demoted > 0 => Cell::from(o).fg(Color::Red),
                         Some(o) => Cell::from(o).fg(GOLD),
@@ -554,6 +561,7 @@ impl App {
             [
                 Constraint::Length(4),
                 Constraint::Length(8),
+                Constraint::Length(12),
                 Constraint::Length(20),
                 Constraint::Length(6),
                 Constraint::Length(10),
@@ -566,6 +574,7 @@ impl App {
             Row::new([
                 "ID",
                 "姓名",
+                "字 号",
                 "官职·品级",
                 "专长",
                 "人格",
@@ -661,9 +670,15 @@ impl App {
             frame.render_widget(Line::styled(format!(" {message}"), style), status);
         }
         let hints: &[(&str, &str)] = match (&self.modal, self.tab) {
-            (Some(Modal::Input { .. }), _) => {
-                &[("Enter", "确定"), ("Tab", "换部门"), ("Esc", "取消")]
-            }
+            // 只有下诏与招募可换部门。
+            (
+                Some(Modal::Input {
+                    kind: InputKind::Edict | InputKind::Recruit,
+                    ..
+                }),
+                _,
+            ) => &[("Enter", "确定"), ("Tab", "换部门"), ("Esc", "取消")],
+            (Some(Modal::Input { .. }), _) => &[("Enter", "确定"), ("Esc", "取消")],
             (Some(Modal::Choose { .. }), _) => {
                 &[("↑↓", "选择"), ("Enter", "确定"), ("Esc", "取消")]
             }
@@ -698,6 +713,7 @@ impl App {
                 ("d", "罢免"),
                 ("x", "革职"),
                 ("e", "应试"),
+                ("m", "易名"),
                 ("N/L", "廷推/枚卜"),
                 ("R", "实录"),
                 ("c/P", "廷杖/宽宥"),
@@ -741,11 +757,13 @@ impl App {
                     ),
                     InputKind::Skip(_) => ("逐段准奏", "驳回第几段（如 1,3）：", false),
                     InputKind::Records => ("翰林院实录", "检索词（留空看最近）：", false),
+                    InputKind::Rename(_) => ("易名", "姓名 字 号：", false),
                 };
                 let title = match kind {
                     InputKind::Review(task, _) | InputKind::Skip(task) => {
                         format!("{title} · 诏令 #{}", task.0)
                     }
+                    InputKind::Rename(agent) => format!("{title} · 官员 #{}", agent.0),
                     _ => title.to_owned(),
                 };
                 let popup = centered(area, 64, if with_department { 6 } else { 5 });
@@ -840,5 +858,33 @@ impl App {
                 frame.render_widget(paragraph, popup);
             }
         }
+    }
+}
+
+/// 把宽度有歧义的符号（`·`、`—`、`…`、`→` 等）换成 ASCII。
+///
+/// 这些符号在 CJK 终端（或用中文字体）里常显示为两格，ratatui 却按一格排版，后面的字便被挤开
+/// 或被盖住。界面文字多来自 CLI、Web 共用的描述，故在每帧画完后统一替换，只改终端界面。
+/// 边框线与方块字符（U+2500–U+259F）各终端都按一格画，不动；没列出的（如回奏里的希腊字母）也不动。
+pub(crate) fn narrow_ambiguous(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buffer.content {
+        let mut chars = cell.symbol().chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            continue;
+        };
+        let ascii = match c {
+            '·' | '‧' | '∙' => "/",
+            '—' | '–' | '―' => "-",
+            '…' => "~",
+            '→' | '▶' | '▸' => ">",
+            '←' | '◀' => "<",
+            '↑' => "^",
+            '↓' => "v",
+            '•' | '●' | '★' | '※' => "*",
+            '○' => "o",
+            '×' => "x",
+            _ => continue,
+        };
+        cell.set_symbol(ascii);
     }
 }

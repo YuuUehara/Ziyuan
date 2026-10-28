@@ -118,6 +118,7 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         Founded(_)
         | Clock(_)
         | AgentRegistered(_)
+        | AgentRenamed { .. }
         | OfficialAppointed { .. }
         | OfficialDismissed { .. }
         | OfficialPurged { .. }
@@ -143,6 +144,7 @@ pub(crate) fn event_agents(event: &CourtEvent) -> Vec<AgentId> {
     match event {
         AgentRegistered(a) => vec![a.id],
         OfficialAppointed { agent, .. }
+        | AgentRenamed { agent, .. }
         | OfficialDismissed { agent }
         | OfficialPurged { agent }
         | ExamTaken { agent, .. }
@@ -170,6 +172,18 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("任命 #{} 为{}", agent.0, office.label())
         }
         CourtEvent::OfficialDismissed { agent } => format!("罢免官员 #{}", agent.0),
+        CourtEvent::AgentRenamed {
+            agent,
+            name,
+            courtesy,
+            art,
+        } => {
+            let parts: Vec<String> = [("改名", name), ("改字", courtesy), ("改号", art)]
+                .into_iter()
+                .filter_map(|(verb, v)| v.as_ref().map(|v| format!("{verb}{v}")))
+                .collect();
+            format!("官员 #{} {}", agent.0, parts.join("，"))
+        }
         CourtEvent::OfficialPurged { agent } => format!("革职 #{}，削去仕籍", agent.0),
         CourtEvent::EdictApproved { task } => format!("诏令 #{} 批红", task.0),
         CourtEvent::EdictDrafted {

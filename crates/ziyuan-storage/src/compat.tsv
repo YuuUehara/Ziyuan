@@ -1,5 +1,5 @@
 # 事件簿兼容样本：每行「最早能读的发布版本<Tab>事件行」。
-# 版本由逐一用 v0.1.0–v0.5.0 发布时的解码器试读得出（能读即自该版起一直能读）。
+# 版本由逐一用 v0.1.0–v0.5.0 发布时的解码器试读得出（能读即自该版起一直能读）；此后新增的标其首发版本。
 # 新增事件类型、字段或代码时在此补一行，并更新 codec::readable_since。
 0.1	v1	APPOINTED	1	chancellor
 0.1	v1	APPOINTED	1	clerk:works
@@ -77,3 +77,5 @@
 0.5	v1	REPLIED	42	comment	68747470733a2f2f782f092c
 0.5	v1	REPLIED	42	pr	68747470733a2f2f6769746875622e636f6d2f6f2f722f70756c6c2f39
 0.5	v1	USAGE	42	0	0	7a792d303132333435363738396162
+0.7	v1	RENAMED	3	e5be90e69c89e8b49e	e58583e78e89	
+0.7	v1	RENAMED	3			e5a4a9e585a8

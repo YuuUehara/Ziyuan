@@ -757,6 +757,17 @@ async fn edict_runs_in_background_and_can_be_reviewed() {
             .unwrap()
             .contains('·')
     );
+    // 易名：空的一项不改；改后 state 里姓名与号随之而变，字照旧。
+    let courtesy = state["officials"][0]["courtesy"].clone();
+    let rename = json!({ "name": "徐有贞", "courtesy": "", "art": "天全" });
+    let (status, body) = call(&base, "/officials/1/rename", t, Some(rename)).await;
+    assert!(status == 200 && body["note"].as_str().unwrap().contains("改名徐有贞"));
+    let (_, state) = call(&base, "/state", t, None).await;
+    let official = &state["officials"][0];
+    assert_eq!(
+        (&official["name"], &official["courtesy"], &official["art"]),
+        (&json!("徐有贞"), &courtesy, &json!("天全"))
+    );
 
     // 另一个进程（此处为测试本身）持有执行者锁时拒绝执行。
     let held = EventLog::new(&root).try_lock_executor().unwrap().unwrap();

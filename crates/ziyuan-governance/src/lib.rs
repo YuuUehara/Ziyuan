@@ -112,6 +112,8 @@ pub enum GovernanceError {
     InvalidDebate(String),
     /// 度支须为正数。
     InvalidBudget,
+    /// 改名、改字号不合规矩（说明原因）。
+    InvalidName(String),
     /// 朝廷度支（tokens）已用尽。
     TreasuryExhausted(u64),
     /// 诏令已用尽其度支（tokens）。
@@ -172,6 +174,7 @@ impl fmt::Display for GovernanceError {
             }
             Self::AlreadyApproved(id) => write!(f, "诏令 #{} 已批红或已在执行", id.0),
             Self::NoChancellery => f.write_str("现行制度不设中书省，已无丞相可废"),
+            Self::InvalidName(why) => f.write_str(why),
             Self::InvalidModel(m) => write!(f, "模型名不能为空或含空白: {m:?}"),
             Self::NoCabinet => f.write_str("现行制度不设内阁，无从票拟"),
             Self::NotEligible { worker, department } => write!(
@@ -266,6 +269,11 @@ pub struct Court {
     nomination_votes: BTreeMap<AgentId, u32>,
     /// 受过廷杖的官员。
     canings: BTreeMap<AgentId, Caning>,
+    /// 皇帝改易过的字与号（未改的取 `default_styles`）。
+    #[serde(default)]
+    courtesy_names: BTreeMap<AgentId, String>,
+    #[serde(default)]
+    art_names: BTreeMap<AgentId, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

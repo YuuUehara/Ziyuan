@@ -910,3 +910,73 @@ fn appoint_validates_department() {
             .is_err()
     );
 }
+
+#[test]
+fn renaming_changes_only_the_given_parts_and_shows_in_routes() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let id = court.agents().next().unwrap().id;
+    let old = court.agent(id).unwrap().name.clone();
+    let (courtesy, art) = (court.courtesy_name(id), court.art_name(id));
+    assert_eq!(
+        (courtesy.clone(), art.clone()),
+        ziyuan_core::default_styles(id)
+    );
+
+    // 只改名：字号不变，派工路线随即用新名。
+    let event = court
+        .propose_rename(id, Some("徐有贞".into()), None, None)
+        .unwrap();
+    let mut events = founding_events(1);
+    events.push(event.clone());
+    court.apply(&event).unwrap();
+    assert_eq!(court.agent(id).unwrap().name, "徐有贞");
+    assert_eq!(court.courtesy_name(id), courtesy);
+    let edict = court
+        .new_edict(Department::Works, "x".into(), Seal::default())
+        .unwrap();
+    let route = court.route(&edict).unwrap().path.join(" ");
+    assert!(route.contains("徐有贞") && !route.contains(&old), "{route}");
+
+    // 只改号：名与字不变。
+    let event = court
+        .propose_rename(id, None, None, Some("天全".into()))
+        .unwrap();
+    events.push(event.clone());
+    court.apply(&event).unwrap();
+    assert_eq!(
+        (
+            court.agent(id).unwrap().name.as_str(),
+            court.courtesy_name(id),
+            court.art_name(id).as_str()
+        ),
+        ("徐有贞", courtesy.clone(), "天全")
+    );
+    // 回放得到同样的结果。
+    let replayed = Court::replay(&events).unwrap();
+    assert_eq!(replayed.agent(id).unwrap().name, "徐有贞");
+    assert_eq!(replayed.art_name(id), "天全");
+
+    for (name, courtesy, art) in [
+        (None, None, None),                              // 无所更易
+        (Some("徐有贞".to_owned()), None, None),         // 与现名相同
+        (None, Some("元 玉".to_owned()), None),          // 含空白
+        (None, None, Some("一二三四五六七".to_owned())), // 号过长
+    ] {
+        assert!(court.propose_rename(id, name, courtesy, art).is_err());
+    }
+    assert!(matches!(
+        court.propose_rename(AgentId(999), Some("某".into()), None, None),
+        Err(GovernanceError::UnknownAgent(_))
+    ));
+    // 回放同样拒绝不合规矩的改名。
+    assert!(
+        court
+            .apply(&CourtEvent::AgentRenamed {
+                agent: id,
+                name: Some(String::new()),
+                courtesy: None,
+                art: None,
+            })
+            .is_err()
+    );
+}

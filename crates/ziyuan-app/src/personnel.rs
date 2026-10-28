@@ -305,6 +305,45 @@ impl<S: EventStore> Session<S> {
         ))
     }
 
+    /// 改名、改字或改号（`None` 的一项不变），返回史官记。
+    pub fn rename(
+        &mut self,
+        agent: AgentId,
+        name: Option<String>,
+        courtesy: Option<String>,
+        art: Option<String>,
+    ) -> Result<String, AppError> {
+        self.reload()?;
+        let old = self
+            .court
+            .agent(agent)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        self.commit(|court| {
+            Ok(vec![court.propose_rename(
+                agent,
+                name.clone(),
+                courtesy.clone(),
+                art.clone(),
+            )?])
+        })?;
+        let court = &self.court;
+        let now = &court.agent(agent).expect("在册").name;
+        let styles = format!(
+            "字{}，号{}",
+            court.courtesy_name(agent),
+            court.art_name(agent)
+        );
+        Ok(if name.is_some() && *now != old {
+            format!(
+                "更名：{old}改名{now}，{styles}。\n\
+                 ——徐珵倡南迁之议，为于谦所斥，久不得进，遂改名有贞；天顺元年以夺门之功入阁，封武功伯。"
+            )
+        } else {
+            format!("赐字号：{now}，{styles}。")
+        })
+    }
+
     /// 廷杖：屡遭弹劾的在任官员降一级留用、收回写权，返回史官记。
     pub fn cane(&mut self, agent: AgentId) -> Result<String, AppError> {
         self.commit(|court| Ok(vec![court.propose_caning(agent)?]))?;

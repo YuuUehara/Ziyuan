@@ -2338,6 +2338,7 @@ version = "0.6.0"
 dependencies = [
  "ratatui",
  "tokio",
+ "unicode-width",
  "ziyuan-app",
  "ziyuan-core",
  "ziyuan-governance",

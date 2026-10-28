@@ -15,6 +15,7 @@ use ziyuan_storage::EventLog;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use unicode_width::UnicodeWidthChar;
 use ziyuan_runtime::DemoBackend;
 
 fn temp_app(name: &str) -> (App, UnboundedReceiver<Message>, PathBuf) {
@@ -41,6 +42,7 @@ fn press(app: &mut App, keys: &str) {
             '\t' => KeyCode::Tab,
             '↓' => KeyCode::Down,
             '⎋' => KeyCode::Esc,
+            '⌫' => KeyCode::Backspace,
             c => KeyCode::Char(c),
         };
         app.handle(Message::Input(Event::Key(KeyEvent::from(code))));
@@ -181,6 +183,20 @@ async fn issue_run_and_review_from_the_keyboard() {
     );
     press(&mut app, " ");
     assert!(app.modal.is_none());
+    // 三个标签页上都没有宽度有歧义的字符（边框线与方块字符除外），中文终端里不会挤开或盖住邻字。
+    for tab in ["1", "2", "3"] {
+        press(&mut app, tab);
+        let shown = screen(&app);
+        let ambiguous: String = shown
+            .chars()
+            .filter(|&c| c.width() == Some(1) && c.width_cjk() == Some(2))
+            .filter(|c| !('\u{2500}'..='\u{259f}').contains(c))
+            .collect();
+        assert!(
+            ambiguous.is_empty(),
+            "标签页 {tab} 有歧义字符 {ambiguous:?}：\n{shown}"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -291,6 +307,31 @@ async fn nominations_lots_and_caning_from_the_officials_tab() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn renaming_from_the_officials_tab_changes_only_what_was_edited() {
+    let (mut app, _messages, root) = temp_app("yiming");
+    let id = AgentId(1);
+    let (name, courtesy) = (
+        app.court().agent(id).unwrap().name.clone(),
+        app.court().courtesy_name(id),
+    );
+    // m 预填「姓名 字 号」：清空后只改号，姓名与字照抄。
+    press(&mut app, "2m");
+    press(&mut app, &"⌫".repeat(40));
+    press(&mut app, &format!("{name} {courtesy} 天全\n"));
+    assert_eq!(app.court().agent(id).unwrap().name, name);
+    assert_eq!(app.court().courtesy_name(id), courtesy);
+    assert_eq!(app.court().art_name(id), "天全");
+    assert!(screen(&app).contains("赐字号"), "{}", screen(&app));
+    // 少写一项不改，错误见于状态栏。
+    press(&mut app, " m");
+    press(&mut app, &"⌫".repeat(40));
+    press(&mut app, "徐有贞 元玉\n");
+    assert_eq!(app.court().agent(id).unwrap().name, name);
+    assert!(screen(&app).contains("空格分开"), "{}", screen(&app));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reform_and_appointments_follow_court_rules() {
     let (mut app, mut messages, root) = temp_app("court");
@@ -374,7 +415,7 @@ async fn reform_and_appointments_follow_court_rules() {
     // T 翰林院模板：第二项「补测试」入队并选中，详情列出验收标准。
     press(&mut app, "T");
     assert!(
-        screen(&app).contains("审查unsafe（内置·验收3条）"),
+        screen(&app).contains("审查unsafe（内置/验收3条）"),
         "{}",
         screen(&app)
     );

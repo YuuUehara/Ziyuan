@@ -84,6 +84,8 @@ pub(crate) enum InputKind {
     Skip(TaskId),
     /// 检索翰林院实录（空为最近各件）。
     Records,
+    /// 易名：预填「姓名 字 号」，改哪项就改哪项。
+    Rename(AgentId),
 }
 
 #[derive(Clone, Copy)]

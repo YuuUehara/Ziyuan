@@ -73,6 +73,13 @@ pub enum CourtEvent {
     OfficialDismissed {
         agent: AgentId,
     },
+    /// 皇帝为官员改名、改字或改号（如徐珵改名徐有贞）；`None` 的一项不变。身份、履历与人格不变。
+    AgentRenamed {
+        agent: AgentId,
+        name: Option<String>,
+        courtesy: Option<String>,
+        art: Option<String>,
+    },
     /// 革职：除去官职并削去仕籍，此后不得再任官；身份与履历保留。
     OfficialPurged {
         agent: AgentId,

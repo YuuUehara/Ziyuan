@@ -118,6 +118,8 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
             json!({
                 "id": a.id.0,
                 "name": a.name,
+                "courtesy": court.courtesy_name(a.id),
+                "art": court.art_name(a.id),
                 "persona": Persona::of(a.id).label(),
                 "speciality": { "code": a.speciality.code(), "label": a.speciality.label() },
                 "office": court.office_of(a.id).map(|o| office_json(o, court.mode())),
