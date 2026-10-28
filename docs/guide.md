@@ -1,6 +1,6 @@
 # 紫垣使用指南
 
-README 的「快速开始」之后，各项功能的详细用法都在这里。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
+README 的「快速开始」之后，各项功能的详细用法都在这里。截图取自 v0.6，用演示朝廷与模拟模型生成。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
 
 ## 接入真实模型
 
@@ -71,6 +71,9 @@ ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 
 ## 奉天门：Web 界面
 
+![奉天门首屏：左为下诏表单，右为诏令卡片](images/web-overview.png)
+
+
 ```bash
 cd /path/to/your/project && ziyuan serve --port 8080
 # 奉天门已开：http://127.0.0.1:8080/?token=…
@@ -81,11 +84,18 @@ cd /path/to/your/project && ziyuan serve --port 8080
 - 与 CLI 对齐：页首「开常朝」即 `run --watch`（常驻执行、办完自动请都察院复核，「散朝」停止）；下诏表单与官职上限可授外藩 MCP；「翰林院实录 · 礼部 · 兵部驿站」一栏可检索实录、一键请礼部修 CHANGELOG、收 GitHub 来件（启动前设 `ZIYUAN_GITHUB_REPO` / `ZIYUAN_GITHUB_TOKEN`）；驿传诏令评定后可在卡片上「回报 GitHub」，准奏落盘后可「开草稿 PR」。
 - Web 界面代表皇帝，每个 API 请求都须带令牌。令牌存于 `.ziyuan/web-token`（仅本人可读），重启不变；`ziyuan serve --new-token` 重新生成，旧令牌作废。
 - 观政令牌：`ziyuan serve --viewer` 另发一个只读令牌（存于 `.ziyuan/web-viewer-token`，启动时打印其地址），便于给旁人观政。凭它只能查看朝廷、诏令、起居注、实录与考成、度支等报告，页面不显示写操作；下诏、批红、准奏、改制、任免、执行等一切写请求都回 403。`--new-token` 同时重新生成两个令牌。
+
+  ![观政令牌：页首标「观政 · 只读」，写操作一律隐去](images/web-viewer.png)
 - 打开带 `?token=` 的地址后，服务器种下 HttpOnly、SameSite=Strict 的 Cookie 并跳转到不含令牌的地址；也可在页面登录框输入令牌。脚本可用 `Authorization: Bearer <令牌>`。
 - 默认只监听 127.0.0.1。`--bind 0.0.0.0` 可供其他机器访问，但 HTTP 是明文，请只在可信网络中使用，或置于 HTTPS 反向代理、SSH 隧道之后。
 - 与 CLI 共用事件簿与多进程规则：执行时取得执行者锁，CLI 正在执行时页面会提示稍后再试。
 
 ## 紫禁城：终端界面
+
+![紫禁城终端界面：诏令列表与工部奏本的改动](images/tui-edicts.png)
+
+![紫禁城终端界面：百官与派工路线](images/tui-officials.png)
+
 
 ```bash
 cd /path/to/your/project && ziyuan tui
@@ -127,6 +137,9 @@ ziyuan edict --tools none "只凭诏令文本回答"
 
 ## 工部动手：受控写权限
 
+![工部奏本：改动按段编号，可逐段勾选「准此段」，再准奏落盘或准奏并提交](images/web-tasks.png)
+
+
 工部诏令可以另授 `write_file`（改写或新建文件）与 `run_tests`（跑测试）。其他五部的诏令授这两项会被拒绝。
 
 ```bash
@@ -148,6 +161,9 @@ ziyuan discard 3    # 或驳回
 - 写入同样受玉玺范围与禁区约束，符号链接无法越界；官职的玉玺上限也能收回这两项权力。
 
 ## 吏部：评定、考绩与荐举
+
+![百官：官职、品级、模型与考绩；右侧为招募、荐举、官职配置与度支](images/web-officials.png)
+
 
 ```bash
 ziyuan review 3 accept "结论属实"      # 评定已完成的诏令（每件一次）
