@@ -12,21 +12,25 @@ use ziyuan_core::{
     Agent, AgentId, BudgetScope, CourtEvent, Department, Edict, GovernanceMode, Office, TokenUsage,
 };
 
-/// 最小开局（丞相制）：只有工部与吏部有人，其余四部留空待扩展。官员姓名由 `seed` 随机生成。
+/// 开局（丞相制）：丞相一人；吏部、工部各有尚书与郎中，户、礼、兵、刑四部各有尚书一人（本部无郎中时
+/// 尚书亲办），六部诏令都能承接。左都御史不设，由皇帝任命（设了，常朝办完即自动复核，要花 token）。
+/// 官员姓名由 `seed` 随机生成；#1–#6 与 v0.7.0 及以前的开局相同，四部尚书接在其后（#7–#10）。
 pub fn founding_events(seed: u64) -> Vec<CourtEvent> {
     use CourtEvent::*;
     use Department::*;
     let mut generator = crate::names::NameGenerator::new(seed);
     let mut taken: Vec<String> = Vec::new();
-    let recruits = [Personnel, Works, Personnel, Works, Personnel, Personnel]
-        .into_iter()
-        .zip(1..)
-        .map(|(speciality, id)| {
-            let name = generator.name(|n| taken.iter().any(|t| t == n));
-            taken.push(name.clone());
-            (id, name, speciality)
-        })
-        .collect::<Vec<_>>();
+    let recruits = [
+        Personnel, Works, Personnel, Works, Personnel, Personnel, Revenue, Rites, War, Justice,
+    ]
+    .into_iter()
+    .zip(1..)
+    .map(|(speciality, id)| {
+        let name = generator.name(|n| taken.iter().any(|t| t == n));
+        taken.push(name.clone());
+        (id, name, speciality)
+    })
+    .collect::<Vec<_>>();
     let mut events = vec![Founded(GovernanceMode::Chancellor)];
     for (id, name, speciality) in recruits {
         events.push(AgentRegistered(Agent {
@@ -61,6 +65,15 @@ pub fn founding_events(seed: u64) -> Vec<CourtEvent> {
             office: Office::Clerk(Personnel),
         },
     ]);
+    events.extend(
+        [Revenue, Rites, War, Justice]
+            .into_iter()
+            .zip(7..)
+            .map(|(department, id)| OfficialAppointed {
+                agent: AgentId(id),
+                office: Office::Minister(department),
+            }),
+    );
     events
 }
 

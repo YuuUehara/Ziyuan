@@ -161,6 +161,10 @@
   .arrow { color: var(--gold); font-size: 12px; }
   .step { display: inline-flex; align-items: center; gap: 4px; }
   .vacancy { font-size: 12px; color: var(--vermilion); }
+  .vacancies { margin-top: 14px; padding: 8px 12px; border-radius: 6px; font-size: 13px; border: 1px solid #e0a9a3; background: #fdf1ef; }
+  .vacancies h3 { margin: 0 0 4px; font-size: 14px; color: var(--vermilion); }
+  .vacancies ul { margin: 0; padding-left: 18px; }
+  .vacancies li { margin: 3px 0; }
 
   .tasks { display: grid; gap: 12px; }
   .task {
@@ -399,6 +403,7 @@
           <button class="small" id="chronicle-close" data-view>退朝</button>
         </div>
         <div class="routes" id="routes"></div>
+        <div class="vacancies" id="vacancies" hidden></div>
       </div>
     </section>
   </div>
@@ -815,6 +820,10 @@ function render() {
       : `<span class="vacancy">${esc(d.vacancy)}</span>`;
     return `<div class="route"><span class="dept">${esc(d.label)}</span><div class="chain">${chain}</div></div>`;
   }).join("");
+  // 缺位及其影响；补缺的命令换成页面上的做法。
+  $("vacancies").hidden = !s.vacancies.length;
+  $("vacancies").innerHTML = `<h3>朝堂缺位</h3><ul>${s.vacancies.map((v) => `<li>${esc(v.split("。补缺：")[0])}。</li>`).join("")}</ul>` +
+    (s.viewer ? "" : `<p class="hint">在下方百官表招募、任命即可补缺。</p>`);
 
   const tasks = [...s.tasks].reverse();
   const hidden = s.task_total - tasks.length;

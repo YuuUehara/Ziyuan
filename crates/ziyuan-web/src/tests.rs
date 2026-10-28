@@ -566,7 +566,13 @@ async fn courier_posts_edicts_and_urgent_ones_jump_the_queue() {
     assert_eq!(tasks[0]["suspicions"][0]["source"], "驿传");
     assert_eq!(tasks[0]["suspicions"][0]["bureau"], "锦衣卫");
     assert_eq!(tasks[0]["suspicions"][0]["acquitted"], false);
-    // 刑部无人不能复勘；皇帝可按序号平反，平反后状态里标出。
+    // 刑部无人（罢去刑部尚书 #10）不能复勘；皇帝可按序号平反，平反后状态里标出。
+    assert_eq!(
+        call(&base, "/officials/10/dismiss", t, Some(json!({})))
+            .await
+            .0,
+        200
+    );
     let (status, error) = call(&base, "/tasks/1/recheck", t, Some(json!({}))).await;
     assert!(
         status == 400 && error["error"].as_str().unwrap().contains("刑部无人"),

@@ -73,7 +73,7 @@ fn recruits_without_a_name_get_a_fresh_random_one() {
     }
     let names: std::collections::BTreeSet<_> =
         session.court().agents().map(|a| a.name.clone()).collect();
-    assert_eq!(names.len(), 26, "开国六人与新招二十人姓名各不相同");
+    assert_eq!(names.len(), 30, "开国十人与新招二十人姓名各不相同");
     // 姓名记入事件簿，重放后不变。
     let before: Vec<_> = session.court().agents().cloned().collect();
     drop(session);
@@ -201,7 +201,7 @@ async fn cabinet_runs_only_approved_edicts_and_reforms_leave_notes() {
     let commoner = session.recruit(None, Department::Works).unwrap();
     session.appoint(AgentId(6), Office::Chancellor).unwrap();
     let summary = session.abolish_chancellery().unwrap();
-    assert!(summary.contains("凡 5 人：中书右丞相"), "{summary}");
+    assert!(summary.contains("凡 9 人：中书右丞相"), "{summary}");
     let court = session.court();
     assert_eq!(court.mode(), GovernanceMode::DirectRule);
     assert!(court.agents().all(|a| court.office_of(a.id).is_none()));
@@ -541,7 +541,7 @@ fn exams_are_graded_recorded_and_crowned() {
             .unwrap(),
         None
     );
-    assert_eq!(heard, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(heard, [1, 2, 3, 4, 5, 6, 7, 8], "至多八人应考");
     assert!(session.crown(AgentId(99)).is_err());
     let note = session.crown(AgentId(4)).unwrap();
     assert!(note.contains("郎中一跃而魁天下"), "{note}");
@@ -621,6 +621,10 @@ fn nominations_advise_and_appointments_note_how_they_were_made() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("工部尚书未出缺"), "{err}");
+    // 户、礼、兵、刑四部尚书（#7–#10）暂罢，九卿只剩丞相与吏部尚书，票数好算。
+    for id in 7..=10 {
+        session.dismiss(AgentId(id)).unwrap();
+    }
     session.dismiss(AgentId(2)).unwrap();
     // 吏部尚书空缺不能廷推。
     session.dismiss(AgentId(3)).unwrap();
@@ -861,7 +865,8 @@ fn rechecked_false_alarms_are_acquitted_and_no_longer_block_proxy_approval() {
         )
         .unwrap()
         .id;
-    // 开国时刑部无人：不能复勘。
+    // 刑部无人（罢去开国的刑部尚书 #10）：不能复勘。
+    session.dismiss(AgentId(10)).unwrap();
     let judge = Judge("误报\n只是转述原文".into(), Default::default());
     let err = session.recheck(task, &judge).unwrap_err();
     assert!(err.to_string().contains("刑部无人可复勘"), "{err}");
@@ -1321,7 +1326,7 @@ impl WorkerBackend for Cabinet {
     ) -> Result<(String, TokenUsage), BoxError> {
         assert_eq!(model, Some("pro"), "首辅用其官职所配模型");
         assert!(
-            system.contains("内阁首辅") && user.contains("#7 新工 工部郎中"),
+            system.contains("内阁首辅") && user.contains("#11 新工 工部郎中"),
             "{user}"
         );
         Ok((
@@ -1361,7 +1366,7 @@ async fn cabinet_drafts_pick_the_worker_and_fall_back_when_unusable() {
     let bogus = issue(&mut session, "乙");
 
     // 旧例会派给 #4；首辅拟派 #7，执行时以票拟为准。
-    let cabinet = Cabinet("拟派：#7\n新工熟悉此事。".into(), Default::default());
+    let cabinet = Cabinet("拟派：#11\n新工熟悉此事。".into(), Default::default());
     assert_eq!(session.draft(picked, &cabinet).unwrap(), new);
     // 拟派了非本部官员（#3 吏部尚书）：按旧例拟派，意见中注明。
     let wrong = Cabinet("拟派：#3".into(), Default::default());
@@ -1642,7 +1647,8 @@ fn rites_may_write_only_the_changelog() {
     ));
 
     assert!(session.draft_changelog("0.5.0", &[]).is_err());
-    // 礼部无人：不能下诏。
+    // 礼部无人（罢去开国的礼部尚书 #8）：不能下诏。
+    session.dismiss(AgentId(8)).unwrap();
     let commits = [
         "abc123 feat: 实录".to_owned(),
         "def456 fix: 除零".to_owned(),
@@ -2265,9 +2271,12 @@ impl WorkerBackend for Planner {
         user: &str,
     ) -> Result<(String, TokenUsage), BoxError> {
         // 尚书不在候选之列；即便模型把汇总派给尚书 #2，也会被略去。
-        assert!(user.contains("#7 ") && !user.contains("工部尚书"), "{user}");
+        assert!(
+            user.contains("#11 ") && !user.contains("工部尚书"),
+            "{user}"
+        );
         let plan =
-            "拟分两件：\n1. #4：查 storage\n- ＃7：查 runtime\n#2：汇总\n#9\n说明：按 crate 分";
+            "拟分两件：\n1. #4：查 storage\n- ＃11：查 runtime\n#2：汇总\n#9\n说明：按 crate 分";
         Ok((
             plan.into(),
             TokenUsage {
@@ -2286,7 +2295,7 @@ async fn minister_splits_an_edict_and_summarizes_the_subtasks() {
     session
         .appoint(clerk, Office::Clerk(Department::Works))
         .unwrap();
-    assert_eq!(clerk, AgentId(7));
+    assert_eq!(clerk, AgentId(11));
     let seal = Seal {
         capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
         scope: vec![".".into()],
@@ -2323,7 +2332,7 @@ async fn minister_splits_an_edict_and_summarizes_the_subtasks() {
     let handler = |id: u64| court.task(TaskId(id)).unwrap().handler();
     assert_eq!(
         [handler(1), handler(2), handler(3)],
-        [Some(AgentId(2)), Some(AgentId(4)), Some(AgentId(7))]
+        [Some(AgentId(2)), Some(AgentId(4)), Some(AgentId(11))]
     );
     // 子诏令照常持写权；汇总在子诏令之后，内容附各份回奏，且只留只读工具。
     let jobs = planner.0.lock().unwrap().clone();
@@ -2551,7 +2560,7 @@ fn stale_session_reproposes_on_fresh_state() {
         .unwrap();
     assert_eq!((first.id, second.id), (TaskId(1), TaskId(2)));
     let recruited = a.recruit(Some("新工".into()), Department::Works).unwrap();
-    assert_eq!(recruited, AgentId(7));
+    assert_eq!(recruited, AgentId(11));
 
     let reopened = Session::open(EventLog::new(&root)).unwrap();
     assert_eq!(reopened.court().open_tasks(), [TaskId(1), TaskId(2)]);

@@ -239,12 +239,12 @@ fn abolition_purges_chancellors_and_cabinet_edicts_need_approval() {
         Err(GovernanceError::ApprovalNotNeeded)
     );
 
-    // 一键朱元璋：复设丞相后一键株连——在任官员（含六部）全部革职，白身 #7 幸免。
+    // 一键朱元璋：复设丞相后一键株连——在任官员（含六部）全部革职，白身 #11 幸免。
     apply(
         vec![
             court.propose_reform(GovernanceMode::Chancellor).unwrap(),
             CourtEvent::AgentRegistered(Agent {
-                id: AgentId(7),
+                id: AgentId(11),
                 name: "白身".into(),
                 speciality: Department::Works,
             }),
@@ -269,7 +269,7 @@ fn abolition_purges_chancellors_and_cabinet_edicts_need_approval() {
     assert_eq!(court.mode(), GovernanceMode::DirectRule);
     assert!(holders.iter().all(|&a| court.is_purged(a)));
     assert!(court.agents().all(|a| court.office_of(a.id).is_none()));
-    assert!(!court.is_purged(AgentId(7)));
+    assert!(!court.is_purged(AgentId(11)));
 }
 #[test]
 fn censorate_reviews_completed_edicts_and_feeds_the_service_record() {
@@ -511,7 +511,7 @@ fn split_edicts_run_subtasks_first_then_the_minister_summarizes() {
     apply(
         &mut court,
         CourtEvent::AgentRegistered(Agent {
-            id: AgentId(7),
+            id: AgentId(11),
             name: "新工".into(),
             speciality: Department::Works,
         }),
@@ -519,7 +519,7 @@ fn split_edicts_run_subtasks_first_then_the_minister_summarizes() {
     apply(
         &mut court,
         CourtEvent::OfficialAppointed {
-            agent: AgentId(7),
+            agent: AgentId(11),
             office: Office::Clerk(Department::Works),
         },
     );
@@ -544,19 +544,19 @@ fn split_edicts_run_subtasks_first_then_the_minister_summarizes() {
         split(&court, 1, &[(4, "甲"), (3, "乙")]),
         Err(GovernanceError::NotEligible { .. })
     ));
-    let event = split(&court, 1, &[(4, "查 storage"), (7, "查 runtime")]).unwrap();
+    let event = split(&court, 1, &[(4, "查 storage"), (11, "查 runtime")]).unwrap();
     apply(&mut court, event);
     // 子诏令 #2、#3 先执行，原诏令等子诏令结束；子诏令不再分办，原诏令不能再分。
     assert_eq!(court.runnable_tasks(), [TaskId(2), TaskId(3)]);
     assert_eq!(court.task(TaskId(3)).unwrap().edict.seal, Seal::default());
     for task in [1, 2] {
         assert_eq!(
-            split(&court, task, &[(4, "甲"), (7, "乙")]),
+            split(&court, task, &[(4, "甲"), (11, "乙")]),
             Err(GovernanceError::CannotSplit(TaskId(task)))
         );
     }
     let route = court.route_task(court.task(TaskId(3)).unwrap()).unwrap();
-    assert_eq!(route.worker, AgentId(7));
+    assert_eq!(route.worker, AgentId(11));
     assert!(
         route.path.last().unwrap().ends_with("（分办）"),
         "{:?}",
@@ -612,7 +612,7 @@ fn split_edicts_run_subtasks_first_then_the_minister_summarizes() {
         .unwrap();
     let id = edict.id;
     apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
-    let event = split(&court, id.0, &[(4, "甲"), (7, "乙")]).unwrap();
+    let event = split(&court, id.0, &[(4, "甲"), (11, "乙")]).unwrap();
     apply(&mut court, event);
     // （改制后 #1 本身也须批红。）
     assert!(court.runnable_tasks().is_empty());
@@ -645,10 +645,10 @@ fn cannot_replay_duplicate_appointment() {
 #[test]
 fn replay_applies_same_rules_as_proposals() {
     let mut events = founding_events(1);
-    events.push(CourtEvent::OfficialDismissed { agent: AgentId(7) });
+    events.push(CourtEvent::OfficialDismissed { agent: AgentId(11) });
     assert_eq!(
         Court::replay(&events).unwrap_err(),
-        GovernanceError::NotAppointed(AgentId(7))
+        GovernanceError::NotAppointed(AgentId(11))
     );
     let mut events = founding_events(1);
     events.push(CourtEvent::InstitutionReformed(GovernanceMode::Chancellor));
@@ -658,7 +658,7 @@ fn replay_applies_same_rules_as_proposals() {
 fn libu_counts_only_reviewed_results_and_ranks_by_them() {
     let mut events = founding_events(1);
     events.push(CourtEvent::AgentRegistered(Agent {
-        id: AgentId(7),
+        id: AgentId(11),
         name: "新工".into(),
         speciality: Department::Works,
     }));
@@ -714,12 +714,12 @@ fn libu_counts_only_reviewed_results_and_ranks_by_them() {
             });
         }
     };
-    // 工部郎中 #4 完成数最多，但多为驳回或未评定；新工（#7）完成少但被采纳。
+    // 工部郎中 #4 完成数最多，但多为驳回或未评定；新工（#11）完成少但被采纳。
     handle(4, true, Some(Verdict::Rejected), 0);
     handle(4, true, None, 0);
     handle(4, true, None, 0);
     handle(4, false, None, 2);
-    handle(7, true, Some(Verdict::Accepted), 1);
+    handle(11, true, Some(Verdict::Accepted), 1);
     let court = Court::replay(&events).unwrap();
 
     assert_eq!(
@@ -747,7 +747,7 @@ fn libu_counts_only_reviewed_results_and_ranks_by_them() {
         .map(|c| c.agent.id.0)
         .collect();
     // 新工居首；工部尚书 #2（无履历）在被驳回过的 #4 之前；吏部官员不入选。
-    assert_eq!(ranked, [7, 2, 4]);
+    assert_eq!(ranked, [11, 2, 4]);
     assert!(court.recommend(Office::FirstGrandSecretary).is_err());
 
     // 只能评定已完成且未评定过的诏令。
@@ -873,11 +873,11 @@ fn recruitment_enables_dynamic_worker_pool() {
         .propose_recruitment("新工".into(), Department::Works)
         .unwrap();
     court.apply(&event).unwrap();
-    assert!(court.agents.contains_key(&AgentId(7)));
+    assert!(court.agents.contains_key(&AgentId(11)));
     court
         .apply(
             &court
-                .propose_appointment(AgentId(7), Office::Clerk(Department::Works))
+                .propose_appointment(AgentId(11), Office::Clerk(Department::Works))
                 .unwrap(),
         )
         .unwrap();
@@ -896,7 +896,7 @@ fn recruitment_enables_dynamic_worker_pool() {
     for e in &completed {
         court.apply(e).unwrap();
     }
-    assert_eq!(court.route(&edict).unwrap().worker, AgentId(7));
+    assert_eq!(court.route(&edict).unwrap().worker, AgentId(11));
 }
 #[test]
 fn appoint_validates_department() {

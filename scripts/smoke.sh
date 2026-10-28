@@ -12,11 +12,11 @@ has() { local out; out="$(cat)"; grep -q -- "$1" <<< "$out"; }
 cd "$DEMO"
 "$BIN" init
 "$BIN" recruit '新工' works
-"$BIN" appoint 7 clerk:works
+"$BIN" appoint 11 clerk:works
 ROUTE="$("$BIN" edict --dept works '调查 Rust unsafe')"
 grep -q '丞相' <<< "$ROUTE"
 grep -q 'DEMO ONLY' <<< "$ROUTE"
-# 第二次派工应选当前记录任务数较少的官员 #7。
+# 第二次派工应选当前记录任务数较少的官员 #11（开国十人，新工排第十一）。
 ROUTE="$("$BIN" edict --dept works '第二次调查')"
 grep -q '新工' <<< "$ROUTE"
 "$BIN" reform direct
@@ -42,10 +42,10 @@ A="$(queue '排队一')"; B="$(queue '排队二')"; C="$(queue '撤销我')"
 if "$BIN" cancel "$C" > /dev/null 2>&1; then echo '不应重复撤销' >&2; exit 1; fi
 # 内阁制：未批红的诏令不执行
 "$BIN" tasks | has "#$A .*待批红（未票拟，旧例预拟：皇帝 → 内阁首辅"
-# 内阁票拟（演示后端按旧例拟派），再御笔改票给新工（#7）；B 不票拟直接批红（中旨）
+# 内阁票拟（演示后端按旧例拟派），再御笔改票给新工（#11）；B 不票拟直接批红（中旨）
 "$BIN" draft "$A" | has "诏令 #$A 票拟：拟派"
 if "$BIN" redraft "$A" 3 > /dev/null 2>&1; then echo '不应改派他部官员' >&2; exit 1; fi
-"$BIN" redraft "$A" 7 '新工熟悉' | has '御笔改票：新工熟悉'
+"$BIN" redraft "$A" 11 '新工熟悉' | has '御笔改票：新工熟悉'
 "$BIN" tasks | has "#$A .*待批红（票拟：.*工部郎中·新工（票拟）"
 grep -q '没有未结束的诏令' <<< "$("$BIN" run 2>/dev/null)"
 "$BIN" approve all | has "诏令 #$B 已批红"
@@ -57,7 +57,7 @@ TASKS="$("$BIN" tasks)"
 grep -q "#$C .*已撤销" <<< "$TASKS"
 if grep -q '待办\|未结束' <<< "$TASKS"; then echo '仍有未结束诏令' >&2; exit 1; fi
 grep -q '没有未结束的诏令' <<< "$("$BIN" run)"
-"$BIN" history | has "诏令 #$A 派给 #7"
+"$BIN" history | has "诏令 #$A 派给 #11"
 # 多进程同时入队：每件诏令编号唯一，事件簿保持可回放
 for i in $(seq 1 10); do "$BIN" edict --queue --dept works "并发$i" > /dev/null & done
 wait

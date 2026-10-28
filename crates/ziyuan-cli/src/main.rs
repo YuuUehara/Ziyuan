@@ -101,8 +101,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         Command::Help => println!("{HELP}"),
         Command::Completions(shell) => print!("{}", completions(shell)),
         Command::Init => {
-            Session::found(log)?;
-            println!("紫垣已建立。当前制度：丞相制。请执行 `ziyuan court`。");
+            let session = Session::found(log)?;
+            println!(
+                "紫垣已建立。当前制度：丞相制；丞相一人，六部各有尚书，吏部、工部另有郎中。请执行 `ziyuan court`。"
+            );
+            for note in ziyuan_app::vacancy_notes(session.court()) {
+                println!("  - {note}");
+            }
         }
         // 不经 Session：事件簿读不了时也要能指出是哪一行。
         Command::Migrate => migrate(&log)?,

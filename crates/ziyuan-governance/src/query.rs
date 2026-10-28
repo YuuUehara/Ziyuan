@@ -271,7 +271,7 @@ impl Court {
     }
 
     /// 正职在任则为正职，否则由副职署理；两者俱缺时为 `None`。返回 (官员, 实际官职)。
-    pub(crate) fn head_or_deputy(&self, head: Office, deputy: Office) -> Option<(&Agent, Office)> {
+    pub fn head_or_deputy(&self, head: Office, deputy: Office) -> Option<(&Agent, Office)> {
         self.appointed_as(head)
             .map(|a| (a, head))
             .or_else(|| self.appointed_as(deputy).map(|a| (a, deputy)))

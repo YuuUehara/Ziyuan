@@ -509,9 +509,16 @@ impl App {
 
     pub(crate) fn draw_officials(&self, frame: &mut Frame, area: Rect) {
         let court = self.court();
+        // 各部的缺位已见于派工路线；另列中枢与都察院的缺位及其影响。
+        let vacancies: Vec<String> = ziyuan_app::vacancy_notes(court)
+            .into_iter()
+            .filter(|n| !n.contains("尚书、"))
+            // 只留缺位与影响的头一句，一行放得下；补缺的按键见底栏。
+            .map(|n| n.split(['（', '。']).next().unwrap_or(&n).to_owned())
+            .collect();
         let [table_area, routes_area] = Layout::vertical([
             Constraint::Min(5),
-            Constraint::Length(Department::ALL.len() as u16 + 2),
+            Constraint::Length((Department::ALL.len() + vacancies.len()) as u16 + 2),
         ])
         .areas(area);
         let rows: Vec<Row> = court
@@ -607,6 +614,12 @@ impl App {
                 });
                 Line::from(spans)
             })
+            .chain(vacancies.into_iter().map(|n| {
+                Line::from(vec![
+                    Span::styled("缺位　", Style::new().fg(GOLD)),
+                    Span::styled(n, Style::new().fg(Color::Red)),
+                ])
+            }))
             .collect();
         frame.render_widget(
             Paragraph::new(routes).block(panel(format!("派工路线 · {}", court.mode().label()))),
