@@ -167,7 +167,8 @@ if "$BIN" budget court 0 > /dev/null 2>&1; then echo '度支须为正数' >&2; e
 "$BIN" court | has '朝廷度支：999999 tokens'
 "$BIN" budget | has '度支奏销'
 "$BIN" history | has '户部度支'
-"$BIN" budget court none > /dev/null
+"$BIN" budget court none > /dev/null    # 旧写法仍接受
+"$BIN" budget court default | has '取消限额'
 # 刑部与锦衣卫：演示回奏无可疑内容
 "$BIN" flags | has '无所奏报'
 if "$BIN" flags x > /dev/null 2>&1; then echo '诏令 ID 须为数字' >&2; exit 1; fi
@@ -243,6 +244,14 @@ NID="$("$BIN" officials | sed -n 's/^#\([0-9]*\) .*工部尚书.*/\1/p')"
 "$BIN" officials --json | has '"office"'
 "$BIN" history --json | has '"seq": 1'
 { "$BIN" edict --json x 2>&1 || true; } | has '只支持'
+"$BIN" migrate --json | has '"readable": true'
+"$BIN" flags --json > /dev/null
+# 退出码：用法错误为 2，运行中出错为 1。
+set +e
+"$BIN" no-such-command > /dev/null 2>&1; USAGE_RC=$?
+"$BIN" cancel 99999 > /dev/null 2>&1; RUN_RC=$?
+set -e
+[ "$USAGE_RC" = 2 ] && [ "$RUN_RC" = 1 ] || { echo "退出码不对：用法 $USAGE_RC、运行 $RUN_RC" >&2; exit 1; }
 "$BIN" completions bash | has 'complete -F _ziyuan ziyuan'
 "$BIN" completions fish | has 'minister:works'
 # 常朝：驿传随到随办，办完自动复核；Ctrl-C 退朝

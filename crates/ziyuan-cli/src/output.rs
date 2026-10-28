@@ -128,6 +128,45 @@ pub(crate) fn json_output(
                 .map(ziyuan_web::chronicle_json)
                 .collect()
         }
+        // 刑部与锦衣卫的密报，逐处展开；index 即 `acquit` 所用的序号。
+        Command::Flags(only) => {
+            let mut tasks = state()?["tasks"].take();
+            let mut flags = Vec::new();
+            for task in tasks.as_array_mut().into_iter().flatten() {
+                let id = task["id"].as_u64();
+                if only.is_some_and(|o| Some(o.0) != id) {
+                    continue;
+                }
+                for (i, s) in task["suspicions"]
+                    .take()
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    s["task"] = serde_json::json!(id);
+                    s["index"] = serde_json::json!(i + 1);
+                    flags.push(s.take());
+                }
+            }
+            flags.into()
+        }
+        Command::Mcp => ziyuan_runtime::mcp::survey(&std::env::current_dir()?)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(name, tools)| match tools {
+                Ok(tools) => serde_json::json!({
+                    "name": name,
+                    "ok": true,
+                    "tools": tools.into_iter().map(|t| serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(error) => serde_json::json!({ "name": name, "ok": false, "error": error }),
+            })
+            .collect(),
         _ => unreachable!("run 已检查 JSON_COMMANDS"),
     })
 }

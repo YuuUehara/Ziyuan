@@ -300,7 +300,7 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             _ => return Err("用法: ziyuan flags [诏令ID]".into()),
         },
         "budget" => {
-            const USAGE: &str = "用法: ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]";
+            const USAGE: &str = "用法: ziyuan budget [court|<官职>|<诏令ID> <tokens|default>]";
             match args.as_slice() {
                 [] => Command::Budget(None),
                 [scope, amount] => {
@@ -312,8 +312,9 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                         s => BudgetScope::Office(s.parse()?),
                     };
                     let tokens = match amount.as_str() {
-                        "none" => None,
-                        n => Some(n.parse().map_err(|_| "额度须为 tokens 数或 none")?),
+                        // 「恢复默认」统一写 default；none 是 v0.6 及以前的写法，仍然接受。
+                        "default" | "none" => None,
+                        n => Some(n.parse().map_err(|_| "额度须为 tokens 数或 default")?),
                     };
                     Command::Budget(Some((scope, tokens)))
                 }

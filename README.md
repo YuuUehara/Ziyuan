@@ -119,6 +119,7 @@ cd /tmp/ziyuan-demo
   - 协作与文书：[多官协作：分办与汇总](docs/guide.md#多官协作分办与汇总)、[人格与廷议](docs/guide.md#人格与廷议)、[翰林院：诏令模板](docs/guide.md#翰林院诏令模板)、[礼部：科举与文书](docs/guide.md#礼部科举与文书)、[礼部修 CHANGELOG](docs/guide.md#礼部修-changelog)
   - 记录与对接：[起居注：按诏令、官员、类型、时间查](docs/guide.md#起居注按诏令官员类型时间查)、[翰林院修史：实录与前例](docs/guide.md#翰林院修史实录与前例)、[兵部：驿传与八百里加急](docs/guide.md#兵部驿传与八百里加急)、[兵部驿站 · GitHub](docs/guide.md#兵部驿站--github)、[版本控制：Jujutsu](docs/guide.md#版本控制jujutsu)
 - [体系结构](docs/architecture.md)：分层、事件簿与设计取舍。
+- [稳定性约定](docs/stability.md)：1.0 起冻结哪些接口。
 - [CHANGELOG](CHANGELOG.md)：各版变化。
 - [路线图](docs/roadmap.md)：下一版的规划。
 

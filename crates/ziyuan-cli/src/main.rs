@@ -20,13 +20,28 @@ use crate::commands::execute;
 use crate::help::{HELP, JSON_COMMANDS, completions};
 use crate::output::json_output;
 
+/// 用法错误（未知命令、参数不对）：退出码 2，与运行中出错（退出码 1）分开，便于脚本区分。
+#[derive(Debug)]
+struct Usage(Box<dyn Error>);
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Error for Usage {}
+
 fn main() -> ExitCode {
     quiet_broken_pipe();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("错误：{error}");
-            ExitCode::FAILURE
+            match error.is::<Usage>() {
+                true => ExitCode::from(2),
+                false => ExitCode::FAILURE,
+            }
         }
     }
 }
@@ -60,10 +75,19 @@ fn run() -> Result<(), Box<dyn Error>> {
             .first()
             .is_some_and(|a| JSON_COMMANDS.contains(&a.as_str()))
     {
-        return Err(format!("--json 只支持 {}", JSON_COMMANDS.join("、")).into());
+        return Err(Usage(format!("--json 只支持 {}", JSON_COMMANDS.join("、")).into()).into());
     }
-    let command = parse(args)?;
+    let command = parse(args).map_err(Usage)?;
     let log = EventLog::new(&env::current_dir()?);
+    if json && matches!(command, Command::Migrate) {
+        // 不经 Session：事件簿读不了时也要给出报告。读不了时退出码为 1。
+        let report = migrate_json(&log);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report["readable"] == false {
+            return Err("本版读不了这本事件簿".into());
+        }
+        return Ok(());
+    }
     if json {
         let mut session = Session::open(log)?;
         println!(
@@ -176,6 +200,32 @@ fn chronicle(session: &mut Session<EventLog>) {
     if let Some(note) = session.take_chronicle() {
         eprintln!("{note}");
     }
+}
+
+/// `ziyuan migrate --json`：与文字报告同一份检查。
+fn migrate_json(log: &EventLog) -> serde_json::Value {
+    let version = env!("CARGO_PKG_VERSION");
+    let report = match log.inspect() {
+        Ok(report) => report,
+        Err(e) => {
+            return serde_json::json!({ "version": version, "readable": false, "problem": e.to_string() });
+        }
+    };
+    serde_json::json!({
+        "version": version,
+        "format": 1,
+        "events": report.events,
+        "readable": report.problem.is_none(),
+        "problem": report.problem.as_ref().map(ToString::to_string),
+        "readable_since": format!("0.{}.0", report.readable_since),
+        "first_needing": report.first_needing.as_ref().map(|(line, kind)| serde_json::json!({ "line": line, "kind": kind })),
+        "torn_tail": report.torn_tail,
+        "huidian": log.snapshot_header().map(|(events, tag)| serde_json::json!({
+            "events": events,
+            "tag": tag,
+            "current": tag == format!("v{version}"),
+        })),
+    })
 }
 
 fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {

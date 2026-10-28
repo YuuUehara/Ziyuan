@@ -56,8 +56,8 @@ pub(crate) const HELP: &str = concat!(
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
   ziyuan censor <诏令ID|all>           都察院复核回奏：核验引用与测试，御史背书或弹劾
-  ziyuan budget [court|<官职>|<诏令ID> <tokens|none>]
-                                       户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支；
+  ziyuan budget [court|<官职>|<诏令ID> <tokens|default>]
+                                       户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支（default 取消）；
                                        不带参数则出具度支奏销（按用途、模型、官员汇总花费）
   ziyuan post [--dept works] [--station 驿站] [--urgent] <内容|->
                                        兵部驿传：外部事件（CI 失败、新 issue）入队为诏令，`-` 读标准输入；
@@ -92,7 +92,7 @@ pub(crate) const HELP: &str = concat!(
                                        查看起居注（事件记录）；时间如 30m、2h、3d、2026-10-25、2026-10-25 14:30，
                                        按 ZIYUAN_TZ（如 +08:00，默认 UTC）
   ziyuan records [检索词]              翰林院实录：已结诏令的诏令、回奏与评定（只增不改）；给检索词则查前例
-  ziyuan <court|officials|tasks|history|records> --json
+  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp> --json
                                        以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
   ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
   ziyuan help
@@ -211,7 +211,16 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
 ];
 
 /// 支持 `--json` 的子命令。
-pub(crate) const JSON_COMMANDS: &[&str] = &["court", "officials", "tasks", "history", "records"];
+pub(crate) const JSON_COMMANDS: &[&str] = &[
+    "court",
+    "officials",
+    "tasks",
+    "history",
+    "records",
+    "migrate",
+    "flags",
+    "mcp",
+];
 
 /// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
 pub(crate) fn completions(shell: Shell) -> String {

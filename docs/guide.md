@@ -116,7 +116,8 @@ ziyuan completions zsh > ~/.ziyuan.zsh   # 借 bashcompinit；在 ~/.zshrc 的 c
 ziyuan completions fish > ~/.config/fish/completions/ziyuan.fish
 ```
 
-- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`；其他命令带 `--json` 会报错。
+- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）；其他命令带 `--json` 会报错。字段只增不删，见 [稳定性约定](stability.md)。
+- 退出码：0 成功，1 运行中出错，2 用法错误（未知命令、参数不对）。
 - 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名，以及 `apply` 的 `--skip`、`--commit`；官职代码含冒号也能正常补全。
 - 实测（2026-10）：bash 5.2、zsh 5.9、fish 3.6 中实际加载并按 Tab 补全过（官职代码、部门、子命令选项）。zsh 起初加载即报错（`${COMP_LINE:0:COMP_POINT}` 在 zsh 中被当作修饰符），且含冒号的官职代码补不出，均已修正。
 - 输出被提前关闭（如 `ziyuan history | head`）时安静退出，退出码为 0。
@@ -211,7 +212,7 @@ ziyuan run                              # 子诏令并发执行，全部结束�
 ziyuan budget court 200000        # 朝廷总额（全部诏令累计，含票拟、廷议、复核）
 ziyuan budget clerk:works 20000   # 工部郎中承办的每件诏令上限
 ziyuan budget 7 5000              # 某件诏令的上限（含其票拟、分办、廷议、复核）
-ziyuan budget court none          # 取消
+ziyuan budget court default       # 取消（v0.6 及以前写 none，仍可用）
 ziyuan budget                     # 度支奏销：各级余额，按用途、模型、承办官员汇总花费
 ```
 

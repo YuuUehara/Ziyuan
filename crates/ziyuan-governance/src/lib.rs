@@ -216,7 +216,7 @@ impl fmt::Display for GovernanceError {
             Self::TreasuryExhausted(limit) => write!(
                 f,
                 "国库告罄：朝廷度支 {limit} tokens 已用尽（户部奏：太仓无银）。\
-                 追加请 `ziyuan budget court <额度>`，取消请 `ziyuan budget court none`"
+                 追加请 `ziyuan budget court <额度>`，取消请 `ziyuan budget court default`"
             ),
             Self::TaskOverBudget { task, limit } => {
                 write!(

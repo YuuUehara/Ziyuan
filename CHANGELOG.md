@@ -5,6 +5,14 @@
 ### 新增
 
 - 外藩扩容：`.ziyuan/mcp.json` 可用 `url` 登记 Streamable HTTP 的 MCP 服务，请求头中的 `${VAR}` 取自环境；明文 http 只许本机地址。`ziyuan mcp` 列出每件工具的参数说明。
+- `migrate`、`flags`、`mcp` 支持 `--json`。
+- [稳定性约定](docs/stability.md)：写明 1.0 起冻结的接口与不在冻结范围内的部分。
+
+### 改进
+
+- 「恢复默认」统一写 `default`：`ziyuan budget … default` 取消限额（旧写法 `none` 仍可用）。
+- 退出码区分用法错误（2）与运行中出错（1）；此前一律为 1。
+- 帮助的说明列对齐，补列 `ZIYUAN_LLM_PROVIDER`、`ZIYUAN_TZ` 与 GitHub 相关的环境变量。
 
 ## 0.6.0
 
