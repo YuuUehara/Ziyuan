@@ -15,7 +15,7 @@ mod run;
 mod state;
 mod views;
 
-pub use auth::{load_or_create_token, random_token};
+pub use auth::{load_or_create_token, load_or_create_viewer_token, random_token};
 pub use json::{chronicle_json, court_json};
 
 use axum::Router;
@@ -46,8 +46,10 @@ const INDEX_HTML: &str = include_str!("index.html");
 pub struct Config {
     /// 朝廷所在目录（含 `.ziyuan/`），也是玉玺查阅范围的根。
     pub root: PathBuf,
-    /// 访问令牌（见 [`load_or_create_token`]）。
+    /// 皇帝令牌（见 [`load_or_create_token`]）。
     pub token: String,
+    /// 观政令牌（见 [`load_or_create_viewer_token`]）：只能查看朝廷、起居注与实录；`None` 为不启用。
+    pub viewer_token: Option<String>,
     pub backend: Arc<dyn WorkerBackend>,
     pub limits: Limits,
     /// 兵部驿站 · GitHub（`ZIYUAN_GITHUB_REPO` 未设时为 `None`）；凭据只在其中。

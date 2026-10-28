@@ -1,8 +1,8 @@
 //! 只读的 API：朝廷、起居注、廷推建议、考成、督职、预算、实录与 SSE 事件流。
 
-use axum::Json;
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::{Extension, Json};
 use futures_util::stream::{self, Stream};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -14,12 +14,14 @@ use ziyuan_app::{
 };
 use ziyuan_core::{AgentId, Office, TaskId};
 
+use crate::auth::Role;
 use crate::json::{RECENT_TASKS, chronicle_json, court_json, office_json, record_json};
 use crate::state::{ApiError, AppState, parse};
 
 /// 朝廷全貌；诏令只含待办理会的与最近 [`RECENT_TASKS`] 件，`?all=1` 为全部。
 pub(crate) async fn state(
     State(app): State<AppState>,
+    Extension(role): Extension<Role>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
     let running = app.running();
@@ -31,6 +33,7 @@ pub(crate) async fn state(
     value["running"] = json!(running);
     value["watching"] = json!(app.watching());
     value["github"] = json!(app.0.config.github.as_ref().map(|g| g.repo().to_owned()));
+    value["viewer"] = json!(role == Role::Viewer);
     Ok(Json(value))
 }
 

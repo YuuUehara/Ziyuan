@@ -20,8 +20,9 @@ pub(crate) const HELP: &str = concat!(
   ziyuan run --watch [--poll 5] [--no-censor]
                                        常朝：常驻执行，驿传与入队的诏令随到随办，办完自动请都察院复核；Ctrl-C 退朝
   ziyuan tasks                         查看诏令及其状态
-  ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]
-                                       启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）
+  ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token] [--viewer]
+                                       启动紫禁城 Web 界面（默认仅本机；令牌存于 .ziyuan/web-token）；
+                                       --viewer 另发只读的观政令牌（.ziyuan/web-viewer-token）
   ziyuan tui                           启动紫禁城终端界面
   ziyuan migrate                       检查事件簿：本版能否读，至少要哪个版本才能打开
   ziyuan login [--models]              用 ChatGPT 订阅额度调用模型：浏览器登录；--models 列出可选模型

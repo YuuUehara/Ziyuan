@@ -187,6 +187,15 @@
   .draft b { color: var(--vermilion); font-family: var(--serif); }
   #abolish-choice .actions { flex-direction: column; margin-top: 8px; }
   #retreat-btn { width: 100%; margin-bottom: 14px; }
+  /* 观政令牌只读：写操作的按钮与表单一律不显示，只留标了 data-view 的查看按钮。 */
+  body.viewer button:not([data-view]),
+  body.viewer .write,
+  body.viewer select[id^="appoint-"],
+  body.viewer select[id^="redraft-"],
+  body.viewer input[id^="note-"],
+  body.viewer label.pick { display: none !important; }
+  .viewer-badge { display: none; }
+  body.viewer .viewer-badge { display: inline; }
   button.zhu {
     padding: 9px; font-family: var(--serif); font-size: 15px;
     background: #2b1b17; color: var(--gold-soft); border-color: #000;
@@ -320,6 +329,7 @@
     <span class="stat">诏令 <b id="task-count">0</b> · 待办 <b id="open-count">0</b></span>
     <span class="stat">用量 <b id="usage-total">0</b> tokens<span id="cost-total"></span></span>
     <span class="stat" id="treasury-stat" hidden title="户部度支：朝廷总额的余额">度支余 <b id="treasury-left">0</b></span>
+    <span class="stat viewer-badge" title="观政令牌只能查看，不能下诏、批红、准奏或任免">观政 · 只读</span>
     <span class="stat" id="run-state">待命</span>
     <button class="gold" id="run-btn">执行待办诏令</button>
     <button id="watch-btn" title="常朝：常驻执行，随到随办，办完自动请都察院复核">开常朝</button>
@@ -329,7 +339,7 @@
 
 <main>
   <div class="stack">
-    <section class="card">
+    <section class="card write">
       <h2>下诏 <small>皇帝颁布诏令</small></h2>
       <form class="body" id="edict-form">
         <label for="edict-template">翰林院模板 <span>（选后填入内容与玉玺，可再改）</span></label>
@@ -384,7 +394,7 @@
         <div class="chronicle" id="chronicle" hidden>
           <h3>史官记</h3>
           <p id="chronicle-text"></p>
-          <button class="small" id="chronicle-close">退朝</button>
+          <button class="small" id="chronicle-close" data-view>退朝</button>
         </div>
         <div class="routes" id="routes"></div>
       </div>
@@ -401,7 +411,7 @@
     <div class="body officials-layout">
       <div class="table-wrap"><table><thead><tr><th>#</th><th>姓名</th><th>专长</th><th>官职</th><th>模型</th><th>考绩</th><th>用量</th><th></th></tr></thead><tbody id="officials"></tbody></table></div>
       <div>
-        <div class="side">
+        <div class="side write">
           <h3>招募</h3>
           <form id="recruit-form">
             <div class="row">
@@ -412,16 +422,16 @@
           </form>
         </div>
         <div class="side">
-          <h3>吏部荐举 <button class="small" id="kaocheng-btn" title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" title="户部：按用途、模型、官员汇总花费">度支奏销</button></h3>
+          <h3>吏部荐举 <button class="small" id="kaocheng-btn" data-view title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" data-view title="户部：按用途、模型、官员汇总花费">度支奏销</button></h3>
           <div class="row">
             <select id="recommend-office" data-keep></select>
-            <button class="shrink" id="recommend-btn">荐举</button>
+            <button class="shrink" id="recommend-btn" data-view>荐举</button>
             <button class="shrink" id="nominate-btn" title="廷推：九卿会推出缺之职，各举一人">廷推</button>
             <button class="shrink" id="lots-btn" title="枚卜：于廷推得票者中掣签，径直任命">枚卜</button>
           </div>
           <div id="recommend-result"><p class="hint">按「采纳 − 驳回 + 背书 − 弹劾 + 实证」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
         </div>
-        <div class="side">
+        <div class="side write">
           <h3>官职配置 <small class="hint">模型与玉玺上限</small></h3>
           <select id="config-office" data-keep></select>
           <p class="hint" id="config-current"></p>
@@ -456,7 +466,7 @@
             <button class="small shrink" id="court-budget-clear">取消</button>
           </div>
         </div>
-        <div class="side">
+        <div class="side write">
           <h3>礼部 <small class="hint">科举在百官表「应试」；考题放 .ziyuan/exam/*.txt</small></h3>
           <div class="row">
             <input type="text" id="palace-question" data-keep placeholder="殿试策问，天子亲出">
@@ -474,12 +484,12 @@
       <div>
         <form class="row" id="records-form">
           <input type="text" id="records-q" data-keep placeholder="检索实录：诏令、承办人、回奏摘要（留空为全部）">
-          <button class="small shrink" type="submit">检索</button>
+          <button class="small shrink" type="submit" data-view>检索</button>
           <span class="hint shrink" id="records-count"></span>
         </form>
         <ol class="records-list" id="records-list"><li class="hint">办结的诏令即入实录，承办新诏前也会参照；点「检索」查看。</li></ol>
       </div>
-      <div>
+      <div class="write">
         <h3>礼部修 CHANGELOG</h3>
         <div class="row"><input type="text" id="changelog-version" data-keep placeholder="版本（默认 Unreleased）"></div>
         <div class="row" style="margin-top:6px">
@@ -504,8 +514,8 @@
       <input type="text" id="hf-kind" data-keep placeholder="类型，如 tool、usage">
       <input type="text" id="hf-since" data-keep placeholder="起：2h、3d、2026-10-25">
       <input type="text" id="hf-until" data-keep placeholder="止">
-      <button class="small shrink" type="submit">筛选</button>
-      <button class="small shrink" type="button" id="hf-clear">全部</button>
+      <button class="small shrink" type="submit" data-view>筛选</button>
+      <button class="small shrink" type="button" id="hf-clear" data-view>全部</button>
       <span class="hint" id="hf-count"></span>
     </form>
     <ol class="history-list" id="history-list"></ol>
@@ -518,7 +528,7 @@
   <p>请打开 <code>ziyuan serve</code> 启动时打印的完整地址，或在此输入令牌（见 <code>.ziyuan/web-token</code>）。</p>
   <form id="login-form" class="row">
     <input type="password" id="login-token" autocomplete="off" placeholder="访问令牌">
-    <button class="gold" type="submit">入朝</button>
+    <button class="gold" type="submit" data-view>入朝</button>
   </form>
 </div></div>
 
@@ -760,6 +770,7 @@ function showCriteria() {
 
 function render() {
   const s = state;
+  document.body.classList.toggle("viewer", !!s.viewer);
   renderTemplates(s);
   $("mode-label").textContent = s.mode.label + (s.retreat ? " · 西苑修道中" : "");
   $("retreat-btn").textContent = s.retreat ? "回朝亲政" : "移居西苑修道（怠政）";
@@ -806,9 +817,9 @@ function render() {
   const tasks = [...s.tasks].reverse();
   const hidden = s.task_total - tasks.length;
   $("task-summary").innerHTML = !tasks.length ? "" : hidden > 0
-    ? `共 ${s.task_total} 件，列出待理会的与最近的 ${tasks.length} 件，最新在前 <button class="small" id="all-tasks">全部列出</button>`
-    : `共 ${s.task_total} 件，最新在前${showAll ? ` <button class="small" id="recent-tasks">只列最近</button>` : ""}`;
-  $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。请在左侧下诏。</div>`;
+    ? `共 ${s.task_total} 件，列出待理会的与最近的 ${tasks.length} 件，最新在前 <button class="small" id="all-tasks" data-view>全部列出</button>`
+    : `共 ${s.task_total} 件，最新在前${showAll ? ` <button class="small" id="recent-tasks" data-view>只列最近</button>` : ""}`;
+  $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。${s.viewer ? "" : "请在左侧下诏。"}</div>`;
 
   $("officials").innerHTML = s.officials.map((o) => {
     const purge = `<button class="small" data-exam="${o.id}" title="礼部科举：应试 .ziyuan/exam/ 下的考题">应试</button><button class="small reject" data-purge="${o.id}">革职</button>`;

@@ -9,6 +9,7 @@
 - 《大明会典》：每满 5000 条事件修一部快照（`.ziyuan/huidian`），打开时从会典接着回放；整本事件簿只在看起居注时读入。`ziyuan migrate` 显示会典状况。
 - 事件簿版本与兼容：`ziyuan migrate` 检查本版能否读、打开它至少要哪一版；新版保证读得回 v0.1–v0.5 写下的事件簿。
 - Web 与 TUI 追上 CLI：Web 可开关常朝、授外藩（MCP）、修 CHANGELOG、检索实录、一键回报 GitHub；TUI 补上复勘、平反与实录。
+- 观政令牌：`ziyuan serve --viewer` 另发只读令牌（`.ziyuan/web-viewer-token`），凭它只能查看朝廷、起居注与实录，写请求一律 403。
 - `ziyuan github pull --tools … --scope …` 给驿传诏令授工部写权，驿传诏令才能开草稿 PR；回奏如实写明改动状态与草稿 PR 链接。
 
 ### 改进

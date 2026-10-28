@@ -108,13 +108,22 @@ fn run() -> Result<(), Box<dyn Error>> {
 /// 奉天门（Web）与紫禁城（TUI）：常驻进程，自己打开会话。
 fn frontend(command: Command) -> Result<(), Box<dyn Error>> {
     match command {
-        Command::Serve { port, bind, rotate } => {
+        Command::Serve {
+            port,
+            bind,
+            rotate,
+            viewer,
+        } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             let root = env::current_dir()?;
             let config = ziyuan_web::Config {
                 token: ziyuan_web::load_or_create_token(&root, rotate)?,
+                viewer_token: match viewer {
+                    true => Some(ziyuan_web::load_or_create_viewer_token(&root, rotate)?),
+                    false => None,
+                },
                 root,
                 backend: worker_backend()?,
                 limits: DEFAULT_LIMITS,
@@ -130,6 +139,11 @@ fn frontend(command: Command) -> Result<(), Box<dyn Error>> {
                 };
                 println!("奉天门已开：http://{host}/?token={}", config.token);
                 println!("令牌存于 .ziyuan/web-token，重启不变；`--new-token` 重新生成。令牌即皇帝身份，请勿外传。");
+                if let Some(viewer) = &config.viewer_token {
+                    println!(
+                        "观政（只读）：http://{host}/?token={viewer}（存于 .ziyuan/web-viewer-token）"
+                    );
+                }
                 if !bind.is_loopback() {
                     println!(
                         "注意：正在监听 {addr}，其他机器可以访问。HTTP 为明文，令牌可能被窃听；\

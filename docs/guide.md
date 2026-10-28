@@ -80,6 +80,7 @@ cd /path/to/your/project && ziyuan serve --port 8080
 - 执行中官员的回答实时流式显示；页面每 5 秒刷新一次，以反映 CLI 等其他进程的变更。诏令只列待理会的（未结束、待评定、改动待准奏）与最近 50 件，「全部列出」可看全部；起居注只列最近 500 条，更早的用筛选查。
 - 与 CLI 对齐：页首「开常朝」即 `run --watch`（常驻执行、办完自动请都察院复核，「散朝」停止）；下诏表单与官职上限可授外藩 MCP；「翰林院实录 · 礼部 · 兵部驿站」一栏可检索实录、一键请礼部修 CHANGELOG、收 GitHub 来件（启动前设 `ZIYUAN_GITHUB_REPO` / `ZIYUAN_GITHUB_TOKEN`）；驿传诏令评定后可在卡片上「回报 GitHub」，准奏落盘后可「开草稿 PR」。
 - Web 界面代表皇帝，每个 API 请求都须带令牌。令牌存于 `.ziyuan/web-token`（仅本人可读），重启不变；`ziyuan serve --new-token` 重新生成，旧令牌作废。
+- 观政令牌：`ziyuan serve --viewer` 另发一个只读令牌（存于 `.ziyuan/web-viewer-token`，启动时打印其地址），便于给旁人观政。凭它只能查看朝廷、诏令、起居注、实录与考成、度支等报告，页面不显示写操作；下诏、批红、准奏、改制、任免、执行等一切写请求都回 403。`--new-token` 同时重新生成两个令牌。
 - 打开带 `?token=` 的地址后，服务器种下 HttpOnly、SameSite=Strict 的 Cookie 并跳转到不含令牌的地址；也可在页面登录框输入令牌。脚本可用 `Authorization: Bearer <令牌>`。
 - 默认只监听 127.0.0.1。`--bind 0.0.0.0` 可供其他机器访问，但 HTTP 是明文，请只在可信网络中使用，或置于 HTTPS 反向代理、SSH 隧道之后。
 - 与 CLI 共用事件簿与多进程规则：执行时取得执行者锁，CLI 正在执行时页面会提示稍后再试。

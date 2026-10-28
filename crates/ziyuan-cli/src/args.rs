@@ -48,6 +48,8 @@ pub(crate) enum Command {
         bind: std::net::IpAddr,
         /// 重新生成令牌（旧令牌作废）。
         rotate: bool,
+        /// 同时启用只读的观政令牌。
+        viewer: bool,
     },
     Tui,
     /// 检查事件簿：本版能否读、至少要哪个版本才能打开。
@@ -189,9 +191,10 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         },
         "logout" => no_args(args, Command::Logout)?,
         "serve" => {
-            const USAGE: &str = "用法: ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token]";
-            let (mut port, mut bind, mut rotate) =
-                (8080, std::net::Ipv4Addr::LOCALHOST.into(), false);
+            const USAGE: &str =
+                "用法: ziyuan serve [--port 8080] [--bind 127.0.0.1] [--new-token] [--viewer]";
+            let (mut port, mut bind, mut rotate, mut viewer) =
+                (8080, std::net::Ipv4Addr::LOCALHOST.into(), false, false);
             let mut rest = args.iter();
             while let Some(flag) = rest.next() {
                 match flag.as_str() {
@@ -206,10 +209,16 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                             .map_err(|_| "--bind 须为 IP 地址，如 0.0.0.0")?;
                     }
                     "--new-token" => rotate = true,
+                    "--viewer" => viewer = true,
                     _ => return Err(USAGE.into()),
                 }
             }
-            Command::Serve { port, bind, rotate }
+            Command::Serve {
+                port,
+                bind,
+                rotate,
+                viewer,
+            }
         }
         "cancel" => match <[String; 1]>::try_from(args) {
             Ok([id]) => Command::Cancel(TaskId(id.parse().map_err(|_| "诏令 ID 必须是数字")?)),

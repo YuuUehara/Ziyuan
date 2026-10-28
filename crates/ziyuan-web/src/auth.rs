@@ -2,7 +2,7 @@
 
 use axum::Json;
 use axum::extract::{Query, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use serde_json::{Value, json};
@@ -22,10 +22,19 @@ pub fn random_token() -> io::Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// 读取 `<root>/.ziyuan/web-token` 中的令牌；没有、内容不合格或 `rotate` 时生成新令牌写入
+/// 读取 `<root>/.ziyuan/web-token` 中的皇帝令牌；没有、内容不合格或 `rotate` 时生成新令牌写入
 /// （Unix 下仅本人可读写）。旧令牌随之失效。
 pub fn load_or_create_token(root: &std::path::Path, rotate: bool) -> io::Result<String> {
-    let path = root.join(".ziyuan").join("web-token");
+    load_or_create(root, "web-token", rotate)
+}
+
+/// 同 [`load_or_create_token`]，读写 `<root>/.ziyuan/web-viewer-token` 中的观政令牌。
+pub fn load_or_create_viewer_token(root: &std::path::Path, rotate: bool) -> io::Result<String> {
+    load_or_create(root, "web-viewer-token", rotate)
+}
+
+fn load_or_create(root: &std::path::Path, file: &str, rotate: bool) -> io::Result<String> {
+    let path = root.join(".ziyuan").join(file);
     if !rotate {
         match std::fs::read_to_string(&path) {
             Ok(text) if is_token(text.trim()) => return Ok(text.trim().to_owned()),
@@ -50,9 +59,25 @@ pub(crate) fn is_token(text: &str) -> bool {
 
 pub(crate) const COOKIE: &str = "ziyuan_token";
 
-/// 请求所带的令牌是否正确：`Authorization: Bearer <令牌>`，或登录后的 Cookie。
-pub(crate) fn authorized(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
-    let expected = app.0.config.token.as_bytes();
+/// 令牌代表的身份：皇帝无所不可；观政只能查看（GET），不能下诏、批红、准奏或任免。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    Emperor,
+    Viewer,
+}
+
+/// 令牌对应的身份；不对则为 `None`。
+pub(crate) fn role_of(app: &AppState, token: &str) -> Option<Role> {
+    let config = &app.0.config;
+    if constant_time_eq(token.as_bytes(), config.token.as_bytes()) {
+        return Some(Role::Emperor);
+    }
+    let viewer = config.viewer_token.as_deref()?;
+    constant_time_eq(token.as_bytes(), viewer.as_bytes()).then_some(Role::Viewer)
+}
+
+/// 请求所带令牌（`Authorization: Bearer <令牌>`，或登录后的 Cookie）代表的身份；带了多个时取最高者。
+pub(crate) fn role(app: &AppState, headers: &axum::http::HeaderMap) -> Option<Role> {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -66,18 +91,26 @@ pub(crate) fn authorized(app: &AppState, headers: &axum::http::HeaderMap) -> boo
     bearer
         .into_iter()
         .chain(cookies)
-        .any(|t| constant_time_eq(t.as_bytes(), expected))
+        .filter_map(|t| role_of(app, t))
+        .min_by_key(|role| *role != Role::Emperor)
 }
 
 pub(crate) async fn require_token(
     State(app): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    if authorized(&app, request.headers()) {
-        next.run(request).await
-    } else {
-        ApiError(StatusCode::UNAUTHORIZED, "缺少或错误的访问令牌".into()).into_response()
+    match role(&app, request.headers()) {
+        None => ApiError(StatusCode::UNAUTHORIZED, "缺少或错误的访问令牌".into()).into_response(),
+        Some(Role::Viewer) if request.method() != Method::GET => ApiError(
+            StatusCode::FORBIDDEN,
+            "观政令牌只能查看，不能下诏、批红、准奏或任免".into(),
+        )
+        .into_response(),
+        Some(role) => {
+            request.extensions_mut().insert(role);
+            next.run(request).await
+        }
     }
 }
 
@@ -92,7 +125,7 @@ pub(crate) async fn index(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     match query.get("token") {
-        Some(token) if constant_time_eq(token.as_bytes(), app.0.config.token.as_bytes()) => (
+        Some(token) if role_of(&app, token).is_some() => (
             StatusCode::SEE_OTHER,
             [
                 (header::SET_COOKIE, login_cookie(token)),
@@ -107,7 +140,7 @@ pub(crate) async fn index(
 /// 登录框：令牌正确则种下 Cookie。
 pub(crate) async fn login(State(app): State<AppState>, Json(body): Json<Value>) -> Response {
     let token = body["token"].as_str().unwrap_or("").trim();
-    if constant_time_eq(token.as_bytes(), app.0.config.token.as_bytes()) {
+    if role_of(&app, token).is_some() {
         let cookie = login_cookie(token);
         ([(header::SET_COOKIE, cookie)], Json(json!({}))).into_response()
     } else {

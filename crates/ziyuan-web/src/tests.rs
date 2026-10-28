@@ -13,6 +13,7 @@ use std::time::Duration;
 use ziyuan_runtime::DemoBackend;
 
 const TOKEN: &str = "test-token";
+const VIEWER: &str = "viewer-token";
 
 /// 在临时目录建朝并启动服务，返回 (基地址, 目录)。
 async fn start(name: &str) -> (String, PathBuf) {
@@ -25,6 +26,7 @@ async fn start(name: &str) -> (String, PathBuf) {
     let config = Config {
         root: root.clone(),
         token: TOKEN.into(),
+        viewer_token: Some(VIEWER.into()),
         backend: Arc::new(DemoBackend),
         limits: Limits {
             max_concurrent: 2,
@@ -170,6 +172,57 @@ async fn api_requires_the_token() {
     }
     std::fs::write(&path, "short\n").unwrap();
     assert!(is_token(&load_or_create_token(&root, false).unwrap()));
+    // 观政令牌另存一处，与皇帝令牌互不影响。
+    let viewer = load_or_create_viewer_token(&root, false).unwrap();
+    assert!(is_token(&viewer) && viewer != load_or_create_token(&root, false).unwrap());
+    assert_eq!(load_or_create_viewer_token(&root, false).unwrap(), viewer);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn viewer_token_can_only_look() {
+    let (base, root) = start("viewer").await;
+    let v = Some(VIEWER);
+    // 能看：朝廷（标明观政）、起居注、实录。
+    let (status, court) = call(&base, "/state", v, None).await;
+    assert_eq!((status, &court["viewer"]), (200, &json!(true)));
+    assert_eq!(
+        call(&base, "/state", Some(TOKEN), None).await.1["viewer"],
+        json!(false)
+    );
+    assert_eq!(call(&base, "/history", v, None).await.0, 200);
+    assert_eq!(call(&base, "/records", v, None).await.0, 200);
+    // 不能动：下诏、改制、度支、执行一律 403，事件簿不变。
+    let before = call(&base, "/state", Some(TOKEN), None).await.1["task_total"].clone();
+    for (path, body) in [
+        (
+            "/edicts",
+            json!({ "department": "works", "text": "观政者下诏" }),
+        ),
+        ("/reform", json!({ "mode": "direct" })),
+        ("/budget", json!({ "scope": "court", "tokens": 1 })),
+        ("/run", json!({})),
+    ] {
+        assert_eq!(call(&base, path, v, Some(body)).await.0, 403, "{path}");
+    }
+    let after = call(&base, "/state", Some(TOKEN), None).await.1;
+    assert_eq!(
+        (after["task_total"].clone(), after["mode"]["code"].clone()),
+        (before, court["mode"]["code"].clone())
+    );
+    // 观政令牌也能经登录框换 Cookie，Cookie 同样只读。
+    let (status, cookie, _) = raw(
+        format!("{base}/login"),
+        None,
+        Some(json!({ "token": VIEWER })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let pair = cookie.unwrap().split(';').next().unwrap().to_owned();
+    assert_eq!(
+        raw(format!("{base}/api/state"), Some(pair), None).await.0,
+        200
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
