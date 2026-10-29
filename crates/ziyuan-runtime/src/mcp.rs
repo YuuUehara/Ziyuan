@@ -759,7 +759,7 @@ mod tests {
     /// 用 Python 写的最小 MCP 服务：工具 echo（回显 text）、env（报告 SECRET 与 ZIYUAN_LLM_API_KEY
     /// 是否可见）、fail（出错）。会先发一条通知、一个反向请求，考验客户端。
     const FAKE: &str = r#"
-import json, os, sys
+import json, os, sys, tempfile
 sys.stdin.reconfigure(encoding="utf-8")  # MCP 规定 UTF-8；Windows 上管道默认按本地代码页解码
 def send(m): print(json.dumps(m), flush=True)
 for line in sys.stdin:
@@ -778,7 +778,7 @@ for line in sys.stdin:
         elif name == "env": r = {"content": [{"type": "text", "text": os.environ.get("SECRET", "-") + "|" + os.environ.get("ZIYUAN_LLM_API_KEY", "-") + "|" + os.getcwd()}]}
         elif name == "probe":
             out = []
-            for path in [args["outside"], os.path.join(os.environ.get("TMPDIR", "/tmp"), "ok")]:
+            for path in [args["outside"], os.path.join(tempfile.gettempdir(), "ok")]:
                 try: open(path, "w").write("x"); out.append("w")
                 except OSError: out.append("-")
             r = {"content": [{"type": "text", "text": "".join(out)}]}
