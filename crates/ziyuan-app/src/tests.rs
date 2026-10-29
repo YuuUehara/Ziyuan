@@ -1698,10 +1698,35 @@ async fn courier_replies_wait_for_review_and_acquittal() {
         body.contains("- 皇帝评定：采纳——好") && body.ends_with("办毕：div 未处理除数为零\n"),
         "{body}"
     );
+    // 外发前先记意图；中断后再来沿用同一幂等键（待确认），重放事件簿后亦然。
+    let op = session.courier_dispatch(clean, false).unwrap();
+    assert_eq!(session.courier_dispatch(clean, false).unwrap(), op);
+    session.reload().unwrap();
+    assert_eq!(session.court().courier_op(clean, false), Some(op.as_str()));
+    assert_eq!(session.court().courier_op(clean, true), None);
+    // 回报须带同一键。
+    let url = "https://github.com/o/r/issues/3#c1";
+    for wrong in [None, Some("other".to_owned())] {
+        let err = session
+            .record_reply(clean, false, url.into(), wrong)
+            .unwrap_err();
+        assert!(err.to_string().contains("幂等键不符"), "{err}");
+    }
     session
-        .record_reply(clean, false, "https://github.com/o/r/issues/3#c1".into())
+        .record_reply(clean, false, url.into(), Some(op.clone()))
         .unwrap();
+    assert_eq!(session.court().courier_op(clean, false), None);
     assert!(reason(&mut session, clean, false).contains("已回报过"));
+    assert!(session.courier_dispatch(clean, false).is_err());
+    // 旧版记下的回报不带键，照常可读。
+    session
+        .record_reply(
+            tainted,
+            false,
+            "https://github.com/o/r/issues/4#c1".into(),
+            None,
+        )
+        .unwrap();
     let history: Vec<_> = session
         .history()
         .unwrap()
@@ -2136,6 +2161,10 @@ async fn hunks_are_numbered_across_files_and_can_be_rejected_one_by_one() {
         made.id
             .starts_with(git(&["rev-parse", "--short=12", "HEAD"]).trim())
     );
+    // 提交后中断、重试：认出已有提交，不再提交一次。
+    let head = git(&["rev-parse", "HEAD"]);
+    assert_eq!(session.commit_applied(task, &root).unwrap(), made);
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -87,22 +87,26 @@ impl<S: EventStore> Session<S> {
             .collect())
     }
 
-    /// 把回奏写回来处的评论，记入事件簿；返回 issue/PR 编号与评论网址。
+    /// 把回奏写回来处的评论，记入事件簿；返回 issue/PR 编号与评论网址。外发前先记意图
+    /// （幂等键），上次发出而未及记账的，这次认出已发的评论只补记，不重发。
     pub fn github_reply(&mut self, hub: &GitHub, task: TaskId) -> Result<(u64, String), AppError> {
         self.check_reply(task, false)?;
         let number = self.github_number(hub, task)?;
+        let op = self.courier_dispatch(task, false)?;
         let entry = self.court().task(task).expect("已校验");
         let url = hub
-            .comment(number, &reply_text(self.court(), entry))
+            .comment(number, &reply_text(self.court(), entry), &op)
             .map_err(external)?;
-        self.record_reply(task, false, url.clone())?;
+        self.record_reply(task, false, url.clone(), Some(op))?;
         Ok((number, url))
     }
 
-    /// 把准奏落盘的改动在远端开为草稿 PR，记入事件簿；返回 PR 网址。
+    /// 把准奏落盘的改动在远端开为草稿 PR，记入事件簿；返回 PR 网址。外发前先记意图
+    /// （幂等键）；上次中断的，按同一键接着建分支或开 PR，已开的只补记。
     pub fn github_pull_request(&mut self, hub: &GitHub, task: TaskId) -> Result<String, AppError> {
         self.check_reply(task, true)?;
         let number = self.github_number(hub, task)?;
+        let op = self.courier_dispatch(task, true)?;
         let entry = self.court().task(task).expect("已校验");
         let changes = entry.changes.as_ref().expect("已校验有准奏的改动");
         let files = selected_files(&changes.files, &changes.skipped);
@@ -121,9 +125,10 @@ impl<S: EventStore> Session<S> {
                 &body,
                 &message,
                 &files,
+                &op,
             )
             .map_err(external)?;
-        self.record_reply(task, true, url.clone())?;
+        self.record_reply(task, true, url.clone(), Some(op))?;
         Ok(url)
     }
 }

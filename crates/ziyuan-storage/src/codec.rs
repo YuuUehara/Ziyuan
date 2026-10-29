@@ -241,16 +241,33 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             format!("v1\tCOURIER\t{}\t{}", task.0, to_hex(station))
         }
         EdictExpedited { task } => format!("v1\tURGENT\t{}", task.0),
+        CourierDispatched {
+            task,
+            pull_request,
+            op,
+        } => format!(
+            "v1\tDISPATCHED\t{}\t{}\t{}",
+            task.0,
+            if *pull_request { "pr" } else { "comment" },
+            to_hex(op)
+        ),
         CourierReplied {
             task,
             pull_request,
             url,
-        } => format!(
-            "v1\tREPLIED\t{}\t{}\t{}",
-            task.0,
-            if *pull_request { "pr" } else { "comment" },
-            to_hex(url)
-        ),
+            op,
+        } => {
+            let line = format!(
+                "v1\tREPLIED\t{}\t{}\t{}",
+                task.0,
+                if *pull_request { "pr" } else { "comment" },
+                to_hex(url)
+            );
+            match op {
+                Some(op) => format!("{line}\t{}", to_hex(op)),
+                None => line,
+            }
+        }
         // 验收标准各条单行，以换行连接后整体 hex。
         TemplateSaved { name, template } => format!(
             "v1\tTEMPLATE\t{}\t{}\t{}\t{}\t{}",
@@ -745,6 +762,15 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             task: TaskId(id(2)?),
             station: from_hex(field(3)?)?,
         },
+        "DISPATCHED" => CourierDispatched {
+            task: TaskId(id(2)?),
+            pull_request: match field(3)? {
+                "pr" => true,
+                "comment" => false,
+                other => return Err(format!("回报类型无效: {other}").into()),
+            },
+            op: from_hex(field(4)?)?,
+        },
         "REPLIED" => CourierReplied {
             task: TaskId(id(2)?),
             pull_request: match field(3)? {
@@ -753,6 +779,10 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
                 other => return Err(format!("回报类型无效: {other}").into()),
             },
             url: from_hex(field(4)?)?,
+            op: match parts.len() {
+                5 => None,
+                _ => Some(from_hex(field(5)?)?),
+            },
         },
         "URGENT" => EdictExpedited {
             task: TaskId(id(2)?),
@@ -876,7 +906,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ChangesProposed { .. } | CourtDebated { .. } | PalaceExamHeld { .. } => 4,
         ZhuangyuanNamed { .. } | EdictExpedited { .. } => 3,
         CourierDelivered { .. } => 4,
-        CourierReplied { .. } => 5,
+        CourierReplied { op: None, .. } | CourierDispatched { .. } => 5,
+        CourierReplied { .. } => 6,
         AgentRenamed { .. } => 6,
         TemplateRemoved { .. } | OfficialCaned { .. } | OfficialPardoned { .. } => 3,
         CourtNominated { .. } => 4,
@@ -954,6 +985,7 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         PalaceExamHeld { .. } => "PALACE",
         ZhuangyuanNamed { .. } => "ZHUANGYUAN",
         CourierDelivered { .. } => "COURIER",
+        CourierDispatched { .. } => "DISPATCHED",
         CourierReplied { .. } => "REPLIED",
         EdictExpedited { .. } => "URGENT",
         CourtNominated { .. } => "NOMINATED",
@@ -1001,6 +1033,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         // 不带玉玺字段的旧式诏令 v0.1 即可读；带玉玺的自 v0.2。
         EdictIssued(e) => seal(&e.seal, if line.split('\t').count() == 5 { 1 } else { 2 }),
         ModelUsage { trace: Some(_), .. } => 5,
+        CourierReplied { op: Some(_), .. } | CourierDispatched { .. } => 11,
         ChangesApplied { skipped, .. } if !skipped.is_empty() => 4,
         OfficeCeilingSet {
             ceiling: Some(s), ..
@@ -1064,7 +1097,7 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 43, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 44, "每种事件类型至少一条样本");
     }
     #[test]
     fn event_round_trip_chinese_and_tabs() {
@@ -1188,15 +1221,22 @@ mod tests {
                 task,
                 station: "CI\t驿站".into(),
             },
+            CourtEvent::CourierDispatched {
+                task,
+                pull_request: true,
+                op: "1f2e3d4c5b6a7980".into(),
+            },
             CourtEvent::CourierReplied {
                 task,
                 pull_request: true,
                 url: "https://github.com/o/r/pull/9".into(),
+                op: Some("1f2e3d4c5b6a7980".into()),
             },
             CourtEvent::CourierReplied {
                 task,
                 pull_request: false,
                 url: "https://x/\t,".into(),
+                op: None,
             },
             CourtEvent::EdictExpedited { task },
             CourtEvent::TemplateSaved {

@@ -253,6 +253,8 @@ impl Court {
                         courier: None,
                         replied: None,
                         pull_request: None,
+                        reply_op: None,
+                        pull_request_op: None,
                         urgent: false,
                         template: None,
                     },
@@ -392,6 +394,8 @@ impl Court {
                             courier: None,
                             replied: None,
                             pull_request: None,
+                            reply_op: None,
+                            pull_request_op: None,
                             urgent: parent.urgent,
                             template: None,
                             assignee: Some(sub.worker),
@@ -465,12 +469,27 @@ impl Court {
                 self.propose_courier(*task, station.clone())?;
                 self.tasks.get_mut(task).expect("已确认存在").courier = Some(station.clone());
             }
+            CourtEvent::CourierDispatched {
+                task,
+                pull_request,
+                op,
+            } => {
+                self.propose_courier_dispatch(*task, *pull_request, op)?;
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                if *pull_request {
+                    entry.pull_request_op = Some(op.clone());
+                } else {
+                    entry.reply_op = Some(op.clone());
+                }
+            }
             CourtEvent::CourierReplied {
                 task,
                 pull_request,
                 url,
+                op,
             } => {
                 self.propose_courier_reply(*task, *pull_request, url)?;
+                self.check_courier_op(*task, *pull_request, op.as_deref())?;
                 let entry = self.tasks.get_mut(task).expect("已确认存在");
                 if *pull_request {
                     entry.pull_request = Some(url.clone());

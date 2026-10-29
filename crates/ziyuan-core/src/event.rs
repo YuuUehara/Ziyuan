@@ -235,11 +235,21 @@ pub enum CourtEvent {
         task: TaskId,
         station: String,
     },
+    /// 驿站即将把结果送回来处（外发前先记意图）：`op` 为幂等键，写进外发的评论或 PR。
+    /// 记了而无对应的 `CourierReplied` 即「待确认」：重试时先按 `op` 在远端查找，找到就补记，
+    /// 不重发。
+    CourierDispatched {
+        task: TaskId,
+        pull_request: bool,
+        op: String,
+    },
     /// 驿站把结果送回来处：`pull_request` 为假是回奏评论，为真是准奏改动开的草稿 PR；`url` 为其网址。
+    /// `op` 为先前 `CourierDispatched` 的幂等键（旧版记下的没有）。
     CourierReplied {
         task: TaskId,
         pull_request: bool,
         url: String,
+        op: Option<String>,
     },
     /// 八百里加急：待办诏令插队先行，执行时限放宽。
     EdictExpedited {

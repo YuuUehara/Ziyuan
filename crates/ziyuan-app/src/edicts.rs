@@ -12,6 +12,19 @@ use ziyuan_storage::EventStore;
 use crate::cabinet::precedent;
 use crate::{AppError, Session, truncate};
 
+/// 新的驿传幂等键（16 位十六进制）：`RandomState` 每进程随机播种，再混入诏令号与时刻。
+fn new_op(task: TaskId) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(task.0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    hasher.write_u128(now);
+    hasher.write_u32(std::process::id());
+    format!("{:016x}", hasher.finish())
+}
+
 /// 各处改动的统一 diff（每段前后各留 3 行上下文），一处一份。段号跨文件连续编号、从 1 起，
 /// 即逐段准奏所用的段号。
 pub fn render_diffs(files: &[FileChange]) -> Vec<String> {
@@ -331,22 +344,46 @@ impl<S: EventStore> Session<S> {
             .map_err(AppError::from)
     }
 
-    /// 记下驿站已把回奏（或草稿 PR）送回来处。
+    /// 记下驿站已把回奏（或草稿 PR）送回来处；`op` 为外发前所记意图的幂等键。
     pub fn record_reply(
         &mut self,
         task: TaskId,
         pull_request: bool,
         url: String,
+        op: Option<String>,
     ) -> Result<(), AppError> {
         self.commit(|court| {
             court.propose_courier_reply(task, pull_request, &url)?;
+            court.check_courier_op(task, pull_request, op.as_deref())?;
             Ok(vec![CourtEvent::CourierReplied {
                 task,
                 pull_request,
                 url: url.clone(),
+                op: op.clone(),
             }])
         })?;
         Ok(())
+    }
+
+    /// 驿站外发前的幂等键：有待确认的意图则沿用（续作），否则新起一个并先记入事件簿。
+    pub fn courier_dispatch(
+        &mut self,
+        task: TaskId,
+        pull_request: bool,
+    ) -> Result<String, AppError> {
+        self.check_reply(task, pull_request)?;
+        if let Some(op) = self.court.courier_op(task, pull_request) {
+            return Ok(op.to_owned());
+        }
+        let op = new_op(task);
+        self.commit(|court| {
+            Ok(vec![court.propose_courier_dispatch(
+                task,
+                pull_request,
+                &op,
+            )?])
+        })?;
+        Ok(op)
     }
 
     /// 驳回诏令呈报的改动：不写入项目。

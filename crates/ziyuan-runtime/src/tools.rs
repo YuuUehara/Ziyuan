@@ -179,7 +179,8 @@ pub fn audit_args(tool: &str, args_json: &str) -> String {
 }
 
 /// 把皇帝准奏的改动写入项目。先逐一核对：路径仍在项目内且不属禁区，文件内容与呈报时的原文
-/// 一致（新建文件则仍不存在）；有任何一处不符则一处也不写。
+/// 一致（新建文件则仍不存在）；有任何一处不符则一处也不写。已等于改后内容的文件视为已写
+/// （上次落盘写到一半或写完未及记账就中断），跳过不写，重试因此能续完。
 pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError> {
     let root = root.canonicalize()?;
     let mut targets = Vec::new();
@@ -190,6 +191,9 @@ pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
+        if current.as_ref() == Some(&change.after) {
+            continue;
+        }
         if current != change.before {
             return Err(format!("{} 自呈报以来已被改动，拒绝落盘", change.path).into());
         }
@@ -1081,6 +1085,12 @@ mod tests {
             "staged"
         );
         assert_eq!(fs::read_to_string(root.join("src/new/a.rs")).unwrap(), "新");
+        // 写到一半中断（main.rs 已写、a.rs 未写）后重试：续写未写的，已写的不动。
+        fs::remove_file(root.join("src/new/a.rs")).unwrap();
+        apply_changes(&root, &changes).unwrap();
+        assert_eq!(fs::read_to_string(root.join("src/new/a.rs")).unwrap(), "新");
+        // 全部已写完：再落盘一次什么也不改，也不报错。
+        apply_changes(&root, &changes).unwrap();
         // 事件簿被篡改成越界路径时同样拒绝。
         let evil = [FileChange {
             path: "../evil".into(),

@@ -51,6 +51,63 @@ impl Court {
         Ok(())
     }
 
+    /// 驿站外发前记意图：回报须可行（同 [`Self::propose_courier_reply`]），且尚无同类待确认的意图
+    /// （有则须按原键续作，不另起）。`op` 须为 1–64 个 ASCII 字母、数字或 `-`。
+    pub fn propose_courier_dispatch(
+        &self,
+        task: TaskId,
+        pull_request: bool,
+        op: &str,
+    ) -> Result<CourtEvent, GovernanceError> {
+        self.propose_courier_reply(task, pull_request, "-")?;
+        if op.is_empty()
+            || op.len() > 64
+            || !op.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(GovernanceError::Military(
+                "幂等键须为 1–64 个字母、数字或连字符".into(),
+            ));
+        }
+        if let Some(pending) = self.courier_op(task, pull_request) {
+            return Err(GovernanceError::Military(format!(
+                "诏令 #{} 已有待确认的驿传（{pending}），须按原键续作",
+                task.0
+            )));
+        }
+        Ok(CourtEvent::CourierDispatched {
+            task,
+            pull_request,
+            op: op.to_owned(),
+        })
+    }
+
+    /// 诏令同类回报待确认的幂等键：已记意图而尚无网址。
+    pub fn courier_op(&self, task: TaskId, pull_request: bool) -> Option<&str> {
+        let entry = self.tasks.get(&task)?;
+        let (op, url) = if pull_request {
+            (&entry.pull_request_op, &entry.pull_request)
+        } else {
+            (&entry.reply_op, &entry.replied)
+        };
+        op.as_deref().filter(|_| url.is_none())
+    }
+
+    /// 回报所带的幂等键须与待确认的意图相符：记过意图的须带上同一键，未记的（旧版）不带。
+    pub fn check_courier_op(
+        &self,
+        task: TaskId,
+        pull_request: bool,
+        op: Option<&str>,
+    ) -> Result<(), GovernanceError> {
+        if self.courier_op(task, pull_request) == op {
+            return Ok(());
+        }
+        Err(GovernanceError::Military(format!(
+            "诏令 #{} 的回报与驿传意图的幂等键不符",
+            task.0
+        )))
+    }
+
     /// 驿传入队：诏令须待办且尚未记来处；来处须非空、不含控制字符、至多 80 字。
     pub fn propose_courier(
         &self,

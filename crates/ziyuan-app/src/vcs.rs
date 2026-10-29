@@ -77,6 +77,43 @@ fn fileset(path: &str) -> String {
     )
 }
 
+/// 往回查找的提交数：诏令准奏后通常随即提交，不必翻遍整个历史。
+const LOOKBACK: &str = "200";
+const END: &str = "--ziyuan-end--";
+
+/// `log` 输出（每条为短 ID、说明、`END` 行）中最近一条带 `Ziyuan-Edict: {edict}` 尾注的提交。
+fn find_trailer(log: &str, edict: u64) -> Option<String> {
+    let trailer = format!("Ziyuan-Edict: {edict}");
+    log.split(END).find_map(|entry| {
+        let mut lines = entry.trim_start_matches(['\r', '\n']).lines();
+        let id = lines.next()?.trim();
+        (!id.is_empty() && lines.any(|l| l.trim() == trailer)).then(|| id.to_owned())
+    })
+}
+
+/// 近来已为这件诏令记下的提交（中断后重试时不再重复提交）。查不到或查询出错都当作没有。
+pub fn find_edict_commit(root: &Path, edict: u64) -> Option<VcsCommit> {
+    if run(root, "jj", &["root"]).is_ok() {
+        let template = format!("commit_id.short(12) ++ \"\\n\" ++ description ++ \"\\n{END}\\n\"");
+        let revset = format!("ancestors(@, {LOOKBACK})");
+        let log = run(
+            root,
+            "jj",
+            &["log", "-r", &revset, "--no-graph", "-T", &template],
+        )
+        .ok()?;
+        return find_trailer(&log, edict).map(|id| VcsCommit { vcs: "jj", id });
+    }
+    let format = format!("--format=%h%n%B%n{END}");
+    let log = run(
+        root,
+        "git",
+        &["log", "-n", LOOKBACK, "--abbrev=12", &format],
+    )
+    .ok()?;
+    find_trailer(&log, edict).map(|id| VcsCommit { vcs: "git", id })
+}
+
 /// 在 `root` 所在的版本库里只提交 `paths`（相对 `root`）：有 jj 用 jj，否则用 git。
 pub fn commit_files(root: &Path, message: &str, paths: &[String]) -> Result<VcsCommit, AppError> {
     if paths.is_empty() {
@@ -117,7 +154,7 @@ pub fn commit_files(root: &Path, message: &str, paths: &[String]) -> Result<VcsC
 
 impl<S: EventStore> Session<S> {
     /// 把已准奏落盘的诏令改动记为一个提交（只含其落盘的文件）。不记入事件簿：
-    /// 提交说明末尾的 `Ziyuan-Edict` 足以对应。
+    /// 提交说明末尾的 `Ziyuan-Edict` 足以对应，重试时也凭它认出已有的提交、不再重复提交。
     pub fn commit_applied(&mut self, task: TaskId, root: &Path) -> Result<VcsCommit, AppError> {
         self.reload()?;
         let entry = self
@@ -133,6 +170,9 @@ impl<S: EventStore> Session<S> {
             .into_iter()
             .map(|f| f.path)
             .collect();
+        if let Some(made) = find_edict_commit(root, task.0) {
+            return Ok(made);
+        }
         commit_files(root, &commit_message(self.court(), entry), &paths)
     }
 }
@@ -140,6 +180,17 @@ impl<S: EventStore> Session<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trailer_lookup_takes_the_newest_exact_match() {
+        let log = format!(
+            "aaa\n说明\n\nZiyuan-Edict: 12\n{END}\nbbb\n说明\n\nZiyuan-Edict: 1\n{END}\nccc\nZiyuan-Edict: 1\n{END}\n"
+        );
+        assert_eq!(find_trailer(&log, 1).as_deref(), Some("bbb"));
+        assert_eq!(find_trailer(&log, 12).as_deref(), Some("aaa"));
+        assert_eq!(find_trailer(&log, 2), None);
+        assert_eq!(find_trailer("", 1), None);
+    }
 
     /// jj 版本库（与 git 共存）：只提交所列文件，别的改动留在新的工作副本里。没装 jj 时跳过。
     #[test]
@@ -193,6 +244,8 @@ mod tests {
         )
         .unwrap();
         assert!(message.ends_with("Ziyuan-Edict: 7"), "{message}");
+        assert_eq!(find_edict_commit(&root, 7), Some(made));
+        assert_eq!(find_edict_commit(&root, 77), None);
         assert!(commit_files(&root, "x", &[]).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

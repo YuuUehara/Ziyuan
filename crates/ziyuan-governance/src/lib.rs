@@ -316,6 +316,9 @@ pub struct Task {
     /// 驿站送回的回奏评论与草稿 PR 的网址。
     pub replied: Option<String>,
     pub pull_request: Option<String>,
+    /// 驿站外发回奏评论与草稿 PR 时记下的幂等键（`CourierDispatched`）；有键而无网址即待确认。
+    pub reply_op: Option<String>,
+    pub pull_request_op: Option<String>,
     /// 八百里加急。
     pub urgent: bool,
     /// 按翰林院模板下达时的模板名与验收标准。

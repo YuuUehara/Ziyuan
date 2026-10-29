@@ -110,6 +110,7 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         | SuspicionReviewed { task, .. }
         | SuspicionAcquitted { task, .. }
         | CourierDelivered { task, .. }
+        | CourierDispatched { task, .. }
         | CourierReplied { task, .. }
         | EdictExpedited { task }
         | TemplateApplied { task, .. }
@@ -323,10 +324,24 @@ pub fn describe_event(event: &CourtEvent) -> String {
             format!("兵部驿传：诏令 #{} 自「{station}」入队", task.0)
         }
         CourtEvent::EdictExpedited { task } => format!("八百里加急：诏令 #{} 插队先行", task.0),
+        CourtEvent::CourierDispatched {
+            task,
+            pull_request,
+            op,
+        } => format!(
+            "兵部驿传：诏令 #{} 即将{}（幂等键 {op}）",
+            task.0,
+            if *pull_request {
+                "开草稿 PR"
+            } else {
+                "送回回奏"
+            }
+        ),
         CourtEvent::CourierReplied {
             task,
             pull_request,
             url,
+            ..
         } => format!(
             "兵部驿传：诏令 #{} {}送回来处（{url}）",
             task.0,
