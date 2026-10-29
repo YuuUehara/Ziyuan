@@ -6,6 +6,10 @@
 
 - 字号：号不再人人都有，约半数官员无号，有无按官员 ID 伪随机决定（同一 ID 结果不变）；无号处在界面作「无」，易名把号写作「无」即去号。
 
+### 文档
+
+- ADR-0001（[docs/adr-0001-windows-sandbox.md](docs/adr-0001-windows-sandbox.md)）：Windows 号舍支持政策。v1.0 在 Windows 支持常规功能与只读工作流，需隔离的受保护执行 fail closed；预留 `ziyuan-sandbox-windows` 扩展点。SECURITY.md 与路线图同步标注。
+
 ## 0.10.0
 
 号舍（进程级沙箱）、可按域名放行的门吏代理、带语法着色的改动预览，以及奉天门「三殿分区」改版。
