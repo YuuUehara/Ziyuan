@@ -542,6 +542,30 @@ impl EventLog {
     }
 }
 
+/// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
+pub const RELEASES: [&str; 11] = [
+    "0.1.0",
+    "0.2.0",
+    "0.3.0",
+    "0.4.0",
+    "0.5.0",
+    "0.6.0",
+    "0.7.0",
+    "0.8.0",
+    "0.9.0",
+    "0.10.0",
+    "1.0.0-rc.1",
+];
+
+/// 序号对应的发布版本号；超出所知的报本版。
+pub fn release_name(ordinal: u32) -> &'static str {
+    ordinal
+        .checked_sub(1)
+        .and_then(|i| RELEASES.get(i as usize))
+        .copied()
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// [`EventLog::inspect`] 的结果（`ziyuan migrate` 所用）。
 #[derive(Debug)]
 pub struct LogReport {
@@ -549,7 +573,8 @@ pub struct LogReport {
     pub events: usize,
     /// 末尾有未写完的残行（下次追加前截掉）。
     pub torn_tail: bool,
-    /// 打开整本事件簿至少要 `0.x.0` 的 `x`；空事件簿为 1。
+    /// 打开整本事件簿至少要哪个发布版本：[`RELEASES`] 中的序号（从 1 起，见 [`release_name`]）；
+    /// 空事件簿为 1。
     pub readable_since: u32,
     /// 最先要求 `readable_since` 的一行：行号与事件类型（小写）。
     pub first_needing: Option<(usize, String)>,

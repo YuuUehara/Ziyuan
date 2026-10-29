@@ -999,7 +999,7 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
     }
 }
 
-/// 能读这一行的最早发布版本（`0.x.0` 的 `x`）。逐一用 v0.1–v0.5 发布时的解码器试读得出，
+/// 能读这一行的最早发布版本在 [`crate::RELEASES`] 中的序号（从 1 起，0.x.0 即 x）。逐一用 v0.1–v0.5 发布时的解码器试读得出，
 /// 样本见 `compat.tsv`。此后每新增事件类型、字段或代码，都要在这里与样本中记上新版本；
 /// 这里不用通配，新增事件类型时编译器会提醒。
 pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
@@ -1088,7 +1088,12 @@ mod tests {
                 continue;
             }
             let (version, line) = row.split_once('\t').unwrap();
-            let minor: u32 = version.strip_prefix("0.").unwrap().parse().unwrap();
+            // 样本中的版本写作 `0.x`（即 0.x.0）或完整版本号。
+            let minor = crate::RELEASES
+                .iter()
+                .position(|r| *r == version || r.strip_suffix(".0") == Some(version))
+                .unwrap_or_else(|| panic!("未知版本 {version}")) as u32
+                + 1;
             // 旧版写下的每种样本，本版都读得回来。
             assert_eq!(readable_since(line).unwrap(), minor, "{line}");
             let kind = line.split('\t').nth(1).unwrap();
@@ -1098,6 +1103,8 @@ mod tests {
             seen.insert(kind.to_owned());
         }
         assert_eq!(seen.len(), 44, "每种事件类型至少一条样本");
+        assert_eq!(crate::release_name(10), "0.10.0");
+        assert_eq!(crate::release_name(11), "1.0.0-rc.1");
     }
     #[test]
     fn event_round_trip_chinese_and_tabs() {

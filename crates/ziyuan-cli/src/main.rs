@@ -223,7 +223,7 @@ fn migrate_json(log: &EventLog) -> serde_json::Value {
         "events": report.events,
         "readable": report.problem.is_none(),
         "problem": report.problem.as_ref().map(ToString::to_string),
-        "readable_since": format!("0.{}.0", report.readable_since),
+        "readable_since": ziyuan_storage::release_name(report.readable_since),
         "first_needing": report.first_needing.as_ref().map(|(line, kind)| serde_json::json!({ "line": line, "kind": kind })),
         "torn_tail": report.torn_tail,
         "huidian": log.snapshot_header().map(|(events, tag)| serde_json::json!({
@@ -253,9 +253,13 @@ fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
                 4.. => "会报「由更新版本的紫垣写入」或解码失败",
                 _ => "会报解码失败",
             };
+            let need = ziyuan_storage::release_name(since);
+            let before = ziyuan_storage::release_name(since - 1);
+            let before = before
+                .strip_suffix(".0")
+                .map_or(before.to_owned(), |b| format!("{b}.x"));
             println!(
-                "本版 v{version} 可读；至少要 v0.{since}.0 才能打开（第 {line} 行 {kind} 起），v0.{}.x 及更早的版本{older}。",
-                since - 1
+                "本版 v{version} 可读；至少要 v{need} 才能打开（第 {line} 行 {kind} 起），v{before} 及更早的版本{older}。"
             );
         }
     }
