@@ -63,7 +63,7 @@ v0.8.0（已发布）：朝堂缺位时吏部荐举人选（闲居、专长相�
 
 都是新增，不破坏冻结的接口，可按需提前：
 
-- ~~**号舍：进程级沙箱**~~ `run_tests` 已入号舍（取贡院号舍之意：考生锁入单间，与外界隔绝）：Linux 用 bubblewrap，macOS 用 Seatbelt，不可联网、只可写测试副本。余下：本地外藩子进程入号舍；Windows（受限令牌与 AppContainer）；Linux 不装 bubblewrap 时改用内核自带的 Landlock。
+- ~~**号舍：进程级沙箱**~~ `run_tests` 已入号舍（取贡院号舍之意：考生锁入单间，与外界隔绝）：Linux 用 bubblewrap，macOS 用 Seatbelt，不可联网、只可写测试副本。本地外藩可在名册中写 `haoshe` 入号舍。余下：Windows（受限令牌与 AppContainer）；Linux 不装 bubblewrap 时改用内核自带的 Landlock。
 - ~~**改动预览**~~ 已完成：后端以 `similar` 求词级差异，以 `syntect` 按语言着色，Web 与 TUI 共用同一份结果。
 - ~~**奉天门改版**~~ 已完成「奏折与朱批」：石青金字匾额、朱丝栏双边、奏折式诏令与方印，采纳为朱批、驳回为墨批。
 

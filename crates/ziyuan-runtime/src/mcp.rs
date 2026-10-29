@@ -54,12 +54,22 @@ pub enum ServerConfig {
         command: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
+        /// 入号舍（名册写 `"haoshe": true` 或 `{ "network": false, "write": [...] }`）；`None` 为照常运行。
+        haoshe: Option<Haoshe>,
     },
     /// 远端服务（Streamable HTTP）。
     Http {
         url: String,
         headers: BTreeMap<String, String>,
     },
+}
+
+/// 本地服务的号舍：默认可联网（许多外藩本就是去取网上的东西），只可写一个临时目录
+/// （设为 `TMPDIR`）与 `write` 所列目录（相对项目根，或以 `~/` 开头）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Haoshe {
+    pub network: bool,
+    pub write: Vec<String>,
 }
 
 /// https 一律可用；http 只许本机地址。
@@ -112,6 +122,23 @@ pub fn load_config(root: &Path) -> Result<BTreeMap<String, ServerConfig>, BoxErr
                 command: command.to_owned(),
                 args: strings(&server["args"]),
                 env: table(&server["env"]),
+                haoshe: match &server["haoshe"] {
+                    Value::Null | Value::Bool(false) => None,
+                    Value::Bool(true) => Some(Haoshe {
+                        network: true,
+                        write: Vec::new(),
+                    }),
+                    Value::Object(o) => Some(Haoshe {
+                        network: o.get("network").and_then(Value::as_bool).unwrap_or(true),
+                        write: strings(&server["haoshe"]["write"]),
+                    }),
+                    _ => {
+                        return Err(format!(
+                            "{CONFIG}：服务 {name} 的 haoshe 须为 true、false 或对象"
+                        )
+                        .into());
+                    }
+                },
             },
             (None, Some(url)) if allowed_url(url) => ServerConfig::Http {
                 url: url.to_owned(),
@@ -152,16 +179,55 @@ fn expand(value: &str) -> String {
 }
 
 /// 启动 stdio 子进程：工作目录为项目根，环境只给无害的几项与名册写明的变量。
+/// 名册要求入号舍的，号舍不可用时拒绝启动（`ZIYUAN_SANDBOX=off` 时照常运行）。
 fn spawn(
     root: &Path,
     name: &str,
     program: &str,
     args: &[String],
     env: &BTreeMap<String, String>,
+    haoshe: Option<&Haoshe>,
 ) -> Result<Transport, BoxError> {
-    let mut command = Command::new(program);
+    let mut scratch = None;
+    let mut command = match haoshe {
+        Some(cell) if crate::haoshe::Mode::from_env()? != crate::haoshe::Mode::Off => {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "ziyuan-mcp-{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir)?;
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let mut writable = vec![dir.clone()];
+            writable.extend(
+                cell.write
+                    .iter()
+                    .filter_map(|w| match w.strip_prefix("~/") {
+                        Some(rest) => home.as_ref().map(|h| h.join(rest)),
+                        None => Some(root.join(w)),
+                    }),
+            );
+            let rules = crate::haoshe::Rules {
+                readable: vec![root.to_path_buf()],
+                writable,
+                hidden: vec![root.join(".ziyuan")],
+                network: cell.network,
+            };
+            let (command, _) = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
+                let _ = std::fs::remove_dir_all(&dir);
+                format!("外藩 {name} 须入号舍，但号舍不可用：{reason}")
+            })?;
+            scratch = Some(dir);
+            command
+        }
+        _ => {
+            let mut command = Command::new(program);
+            command.args(args);
+            command
+        }
+    };
     command
-        .args(args)
         .current_dir(root)
         .env_clear()
         .stdin(Stdio::piped())
@@ -174,6 +240,9 @@ fn spawn(
     }
     for (key, value) in env {
         command.env(key, expand(value));
+    }
+    if let Some(dir) = &scratch {
+        command.env("TMPDIR", dir);
     }
     let mut child = command
         .spawn()
@@ -193,6 +262,7 @@ fn spawn(
         child,
         stdin,
         lines,
+        scratch,
     })
 }
 
@@ -216,6 +286,8 @@ enum Transport {
         child: Child,
         stdin: ChildStdin,
         lines: Receiver<String>,
+        /// 号舍里可写的临时目录，服务停后删去。
+        scratch: Option<std::path::PathBuf>,
     },
     Http {
         agent: ureq::Agent,
@@ -265,9 +337,12 @@ fn refusal(their_id: Value) -> Value {
 impl Drop for Server {
     fn drop(&mut self) {
         match &mut self.transport {
-            Transport::Stdio { child, .. } => {
+            Transport::Stdio { child, scratch, .. } => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(dir) = scratch {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
             }
             Transport::Http {
                 agent,
@@ -293,7 +368,12 @@ impl Server {
     /// 连上服务（stdio 则启动子进程）并握手。
     pub fn connect(root: &Path, name: &str, config: &ServerConfig) -> Result<Self, BoxError> {
         let transport = match config {
-            ServerConfig::Stdio { command, args, env } => spawn(root, name, command, args, env)?,
+            ServerConfig::Stdio {
+                command,
+                args,
+                env,
+                haoshe,
+            } => spawn(root, name, command, args, env, haoshe.as_ref())?,
             ServerConfig::Http { url, headers } => Transport::Http {
                 agent: ureq::Agent::config_builder()
                     .http_status_as_error(false)
@@ -672,12 +752,18 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": "x", "method": "roots/list"})
         send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "fake"}}})
     elif m["method"] == "tools/list":
-        tools = [{"name": n, "description": n + " 工具", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}} for n in ["echo", "env", "fail"]]
+        tools = [{"name": n, "description": n + " 工具", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}} for n in ["echo", "env", "fail", "probe"]]
         send({"jsonrpc": "2.0", "id": m["id"], "result": {"tools": tools}})
     elif m["method"] == "tools/call":
         name, args = m["params"]["name"], m["params"]["arguments"]
         if name == "echo": r = {"content": [{"type": "text", "text": "回声：" + args.get("text", "")}, {"type": "image", "data": ""}]}
         elif name == "env": r = {"content": [{"type": "text", "text": os.environ.get("SECRET", "-") + "|" + os.environ.get("ZIYUAN_LLM_API_KEY", "-") + "|" + os.getcwd()}]}
+        elif name == "probe":
+            out = []
+            for path in [args["outside"], os.path.join(os.environ.get("TMPDIR", "/tmp"), "ok")]:
+                try: open(path, "w").write("x"); out.append("w")
+                except OSError: out.append("-")
+            r = {"content": [{"type": "text", "text": "".join(out)}]}
         else: r = {"content": [{"type": "text", "text": "坏了"}], "isError": True}
         send({"jsonrpc": "2.0", "id": m["id"], "result": r})
 "#;
@@ -715,9 +801,9 @@ for line in sys.stdin:
             "回声：你好\n〔非文本内容：image〕"
         );
         assert_eq!(tools[1].execute("{}").unwrap_err().to_string(), "坏了");
-        // 整服务授权给全部三件；不授则一件也没有，也不启动服务。
-        assert_eq!(sealed_tools(&root, &grants(&["fake"])).unwrap().len(), 3);
-        assert_eq!(sealed_tools(&root, &grants(&["*"])).unwrap().len(), 6);
+        // 整服务授权给全部四件；不授则一件也没有，也不启动服务。
+        assert_eq!(sealed_tools(&root, &grants(&["fake"])).unwrap().len(), 4);
+        assert_eq!(sealed_tools(&root, &grants(&["*"])).unwrap().len(), 8);
         assert!(sealed_tools(&root, &grants(&[])).unwrap().is_empty());
         // 名册里没有的服务、服务没有的工具：报错。
         let missing = sealed_tools(&root, &grants(&["nope"])).err().unwrap();
@@ -725,6 +811,48 @@ for line in sys.stdin:
         let missing = sealed_tools(&root, &grants(&["fake/rm"])).err().unwrap();
         assert!(missing.to_string().contains("没有工具 rm"), "{missing}");
         drop(tools);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn servers_in_haoshe_write_only_their_scratch_dir() {
+        let Some(root) = project("haoshe") else {
+            return;
+        };
+        let config = json!({ "servers": {
+            "cell": { "command": "python3", "args": ["-I", "fake.py"], "haoshe": { "network": false } },
+            "free": { "command": "python3", "args": ["-I", "fake.py"] },
+        }});
+        std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
+        let outside = root.join("escaped");
+        let args = json!({ "outside": outside }).to_string();
+        let confined = crate::haoshe::confine("true", &[], &crate::haoshe::Rules::default());
+        if confined.is_err() {
+            // 本机没有号舍：名册要求入号舍的服务拒绝启动，而不是照常运行。
+            let error = sealed_tools(&root, &grants(&["cell"])).err().unwrap();
+            assert!(error.to_string().contains("号舍不可用"), "{error}");
+        } else {
+            let tools = sealed_tools(&root, &grants(&["cell/probe"])).unwrap();
+            // 项目里写不进去，自己的临时目录写得了。
+            assert_eq!(tools[0].execute(&args).unwrap(), "-w");
+            assert!(!outside.exists());
+            drop(tools);
+        }
+        // 对照：不入号舍的服务两处都写得了，可见探测本身有效。
+        let tools = sealed_tools(&root, &grants(&["free/probe"])).unwrap();
+        assert_eq!(tools[0].execute(&args).unwrap(), "ww");
+        drop(tools);
+        std::fs::write(
+            root.join(CONFIG),
+            r#"{"servers":{"x":{"command":"a","haoshe":1}}}"#,
+        )
+        .unwrap();
+        assert!(
+            load_config(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("haoshe")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -751,8 +879,11 @@ for line in sys.stdin:
     /// 不带会话 ID 的后续请求回 400。启动后先在标准输出打印端口。
     const FAKE_HTTP: &str = r#"
 import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class H(BaseHTTPRequestHandler):
+    # 真实服务都是 HTTP/1.1 长连接；HTTP/1.0 时 ureq 偶尔复用已被关闭的连接，测试会时好时坏。
+    # 长连接要多线程服务，否则一条连接占住，后一个请求就等不到。
+    protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
     def reply(self, status, body=b"", kind="application/json", headers=()):
         self.send_response(status)
@@ -779,7 +910,7 @@ class H(BaseHTTPRequestHandler):
         text = a.get("text", "") + "|" + self.headers.get("Authorization", "-") + "|" + self.headers.get("MCP-Protocol-Version", "-")
         r = {"jsonrpc": "2.0", "id": m["id"], "result": {"content": [{"type": "text", "text": text}]}}
         self.reply(200, json.dumps(r).encode())
-s = HTTPServer(("127.0.0.1", 0), H)
+s = ThreadingHTTPServer(("127.0.0.1", 0), H)
 print(s.server_address[1], flush=True)
 s.serve_forever()
 "#;

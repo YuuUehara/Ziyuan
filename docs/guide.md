@@ -342,6 +342,7 @@ ziyuan ceiling clerk:works --mcp none                # 官职上限：工部郎�
 ```
 
 - 名册在 `.ziyuan/mcp.json`（官员读写不到），本地服务写 `command`（stdio），远端服务写 `url`（Streamable HTTP）。每次承办按玉玺连上所授的服务，办完即断；stdio 服务以项目根目录为工作目录，只继承 `PATH`、`HOME` 等少数变量与名册中写明的变量；HTTP 服务只收到名册中写明的请求头。`${VAR}` 取自当前环境，凭据不必写进名册，模型的 API Key 也不会交给外藩。HTTP 服务须用 https，只有本机地址（`localhost`、`127.0.0.1`、`::1`）可用 http，以免凭据明文过网。
+- **号舍**：本地服务可在名册中写 `"haoshe": true`（入号舍、可联网），或 `"haoshe": { "network": false, "write": ["data", "~/.cache/x"] }`。入号舍后只能写一个临时目录（设为 `TMPDIR`）与 `write` 所列目录，读不到 `.ziyuan` 与 `~/.ssh` 等凭据目录。号舍不可用时该服务拒绝启动，不会悄悄照常运行（`ZIYUAN_SANDBOX=off` 除外）。
 - **默认不授**：玉玺的 `mcp` 为空就一件外藩工具也没有，也不启动任何服务。授权记入事件簿，受官职上限约束（`ceiling --mcp`，未给时不设限），廷杖降级期间收回。工具名形如 `docs__search`。
 - 每次调用照常记入起居注（`history --kind tool`），输出照常包在外来文书边界中、经锦衣卫检查。
 - **外部工具做什么由服务决定，不受 `--scope` 约束**：只授信得过的服务。服务反向发来的请求（如 `roots/list`、采样）一概回绝。

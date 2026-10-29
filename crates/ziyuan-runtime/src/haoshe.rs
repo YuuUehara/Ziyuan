@@ -81,8 +81,19 @@ fn available() -> &'static Result<PathBuf, String> {
     })
 }
 
-/// 用系统的 shell 运行 `command`，按 `mode` 关进号舍：只可写 `writable`（及 `extra_writable`，
-/// 如 `CARGO_TARGET_DIR`），不可联网；`hidden` 中的目录读不到。返回命令与给审计看的说明。
+/// 号舍的规矩：可写哪些目录、读不到哪些目录、能否联网。
+#[derive(Debug, Clone, Default)]
+pub struct Rules {
+    /// 只读可见的目录：`/tmp` 换成空的 tmpfs 后，其下的项目等须重新露出。
+    pub readable: Vec<PathBuf>,
+    pub writable: Vec<PathBuf>,
+    /// 另行隐去的目录；家目录下的凭据目录（`SECRET_DIRS`）总是隐去。
+    pub hidden: Vec<PathBuf>,
+    pub network: bool,
+}
+
+/// 用系统的 shell 运行 `command`，按 `mode` 关进号舍（不可联网，只可写 `writable` 与
+/// `extra_writable`，如 `CARGO_TARGET_DIR`；`hidden` 读不到）。返回命令与给审计看的说明。
 pub fn shell(
     command: &str,
     mode: Mode,
@@ -96,16 +107,28 @@ pub fn shell(
             "未入号舍（ZIYUAN_SANDBOX=off）".into(),
         ));
     }
-    let program = match available() {
-        Ok(program) => program,
-        Err(reason) if mode == Mode::Require => {
-            return Err(
-                format!("号舍不可用，ZIYUAN_SANDBOX=require 不许照常运行：{reason}").into(),
-            );
-        }
-        Err(reason) => return Ok((plain_shell(command), format!("未入号舍：{reason}"))),
+    let mut writable_dirs = vec![writable.to_path_buf()];
+    writable_dirs.extend_from_slice(extra_writable);
+    let rules = Rules {
+        readable: Vec::new(),
+        writable: writable_dirs,
+        hidden: hidden.to_vec(),
+        network: false,
     };
-    let mut hidden: Vec<PathBuf> = hidden.to_vec();
+    let args = ["-c".to_owned(), command.to_owned()];
+    match confine("/bin/sh", &args, &rules) {
+        Ok(confined) => Ok(confined),
+        Err(reason) if mode == Mode::Require => {
+            Err(format!("号舍不可用，ZIYUAN_SANDBOX=require 不许照常运行：{reason}").into())
+        }
+        Err(reason) => Ok((plain_shell(command), format!("未入号舍：{reason}"))),
+    }
+}
+
+/// 把 `program args…` 关进号舍；本机没有号舍时返回原因，由调用者决定照常运行还是拒绝。
+pub fn confine(program: &str, args: &[String], rules: &Rules) -> Result<(Command, String), String> {
+    let sandbox = available().clone()?;
+    let mut hidden: Vec<PathBuf> = rules.hidden.clone();
     if let Some(home) = std::env::var_os("HOME") {
         hidden.extend(SECRET_DIRS.iter().map(|d| Path::new(&home).join(d)));
     }
@@ -114,15 +137,23 @@ pub fn shell(
         .filter_map(|p| p.canonicalize().ok())
         .filter(|p| p.is_dir())
         .collect();
-    let mut writable_dirs = vec![writable.canonicalize()?];
-    writable_dirs.extend(extra_writable.iter().filter_map(|p| p.canonicalize().ok()));
-    let mut child = Command::new(program);
+    let writable: Vec<PathBuf> = rules
+        .writable
+        .iter()
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
+    let net = if rules.network {
+        "可联网"
+    } else {
+        "不可联网"
+    };
+    let mut child = Command::new(sandbox);
     if cfg!(target_os = "macos") {
         child
             .arg("-p")
-            .arg(seatbelt_profile(&writable_dirs, &hidden));
-        child.args(["/bin/sh", "-c", command]);
-        return Ok((child, "号舍（Seatbelt）：不可联网，只可写测试副本".into()));
+            .arg(seatbelt_profile(&writable, &hidden, rules.network));
+        child.arg(program).args(args);
+        return Ok((child, format!("号舍（Seatbelt）：{net}，只可写指定目录")));
     }
     child.args([
         "--ro-bind",
@@ -134,28 +165,35 @@ pub fn shell(
         "/proc",
         "--tmpfs",
         "/tmp",
-        "--unshare-net",
         "--unshare-pid",
         "--die-with-parent",
         "--new-session",
     ]);
+    if !rules.network {
+        child.arg("--unshare-net");
+    }
+    for dir in rules.readable.iter().filter_map(|p| p.canonicalize().ok()) {
+        child.arg("--ro-bind").arg(&dir).arg(&dir);
+    }
     for dir in &hidden {
         child.arg("--tmpfs").arg(dir);
     }
-    for dir in &writable_dirs {
+    for dir in &writable {
         child.arg("--bind").arg(dir).arg(dir);
     }
-    child.args(["/bin/sh", "-c", command]);
-    Ok((child, "号舍（bubblewrap）：不可联网，只可写测试副本".into()))
+    child.arg(program).args(args);
+    Ok((child, format!("号舍（bubblewrap）：{net}，只可写指定目录")))
 }
 
-/// Seatbelt 的规则：默认放行，再禁网络、禁写（可写目录与 /dev 除外）、禁读凭据目录。
-fn seatbelt_profile(writable: &[PathBuf], hidden: &[PathBuf]) -> String {
+/// Seatbelt 的规则：默认放行，再禁写（可写目录与 /dev 除外）、禁读凭据目录，按需禁网络。
+fn seatbelt_profile(writable: &[PathBuf], hidden: &[PathBuf], network: bool) -> String {
     let quote = |p: &Path| format!("\"{}\"", p.display().to_string().replace('"', "\\\""));
     let mut profile = String::from(
-        "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n\
-         (allow file-write* (subpath \"/dev\"))\n",
+        "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write* (subpath \"/dev\"))\n",
     );
+    if !network {
+        profile.push_str("(deny network*)\n");
+    }
     for dir in writable {
         profile.push_str(&format!("(allow file-write* (subpath {}))\n", quote(dir)));
     }

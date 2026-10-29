@@ -7,7 +7,7 @@
 | 接口 | 约定 |
 | --- | --- |
 | 事件簿 `.ziyuan/court.log` | 格式 v1。新版总能读旧版写下的事件簿（有逐版样本的测试为证）；新增事件或行尾追加的可选字段不升格式版本。旧版读到新版写入的内容时提示升级，`ziyuan migrate` 指出至少要哪一版。 |
-| 外藩名册 `.ziyuan/mcp.json` | `servers` 下每个服务写 `command`（可带 `args`、`env`）或 `url`（可带 `headers`），二者择一；值中的 `${VAR}` 取自环境。 |
+| 外藩名册 `.ziyuan/mcp.json` | `servers` 下每个服务写 `command`（可带 `args`、`env`、`haoshe`）或 `url`（可带 `headers`），二者择一；值中的 `${VAR}` 取自环境。 |
 | 令牌 `.ziyuan/web-token`、`.ziyuan/web-viewer-token` | 32 位十六进制，可带换行；内容不合格时重新生成。 |
 | 考题 `.ziyuan/exam/*.txt` | 题目（可带「题：」前缀、可多行），其后一行「要点：甲；乙；丙」。 |
 | CLI 子命令与参数 | 见 `ziyuan help`。「恢复默认」统一写 `default`，「一件不授」统一写 `none`；`all` 只用于票拟、批红、复核、复勘、回报等可逐件重做的批量操作，落盘、评定、撤销必须逐件进行。 |
