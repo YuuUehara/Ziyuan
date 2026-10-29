@@ -23,9 +23,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # 号舍：装 bubblewrap，并放开 Ubuntu 对非特权用户命名空间的限制，号舍的测试才真跑。
+      # 号舍：装 bubblewrap 与 socat（按域名放行），并放开 Ubuntu 对非特权用户命名空间的限制，号舍的测试才真跑。
       - run: |
-          sudo apt-get install -y -q bubblewrap
+          sudo apt-get install -y -q bubblewrap socat
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       # smoke.sh 先跑 cargo test --workspace，再以演示后端走一遍 CLI。
       - run: bash scripts/smoke.sh

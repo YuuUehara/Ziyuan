@@ -68,7 +68,7 @@ pub enum ServerConfig {
 /// （设为 `TMPDIR`）与 `write` 所列目录（相对项目根，或以 `~/` 开头）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Haoshe {
-    pub network: bool,
+    pub network: crate::haoshe::Network,
     pub write: Vec<String>,
 }
 
@@ -125,11 +125,24 @@ pub fn load_config(root: &Path) -> Result<BTreeMap<String, ServerConfig>, BoxErr
                 haoshe: match &server["haoshe"] {
                     Value::Null | Value::Bool(false) => None,
                     Value::Bool(true) => Some(Haoshe {
-                        network: true,
+                        network: crate::haoshe::Network::Open,
                         write: Vec::new(),
                     }),
                     Value::Object(o) => Some(Haoshe {
-                        network: o.get("network").and_then(Value::as_bool).unwrap_or(true),
+                        network: match o.get("network") {
+                            None | Some(Value::Bool(true)) => crate::haoshe::Network::Open,
+                            Some(Value::Bool(false)) => crate::haoshe::Network::Off,
+                            Some(Value::Array(_)) => crate::haoshe::Network::only(strings(
+                                &o["network"],
+                            ))
+                            .map_err(|e| format!("{CONFIG}：服务 {name} 的 haoshe.network：{e}"))?,
+                            Some(_) => {
+                                return Err(format!(
+                                    "{CONFIG}：服务 {name} 的 haoshe.network 须为 true、false 或域名列表"
+                                )
+                                .into());
+                            }
+                        },
                         write: strings(&server["haoshe"]["write"]),
                     }),
                     _ => {
@@ -189,6 +202,7 @@ fn spawn(
     haoshe: Option<&Haoshe>,
 ) -> Result<Transport, BoxError> {
     let mut scratch = None;
+    let mut door = None;
     let mut command = match haoshe {
         Some(cell) if crate::haoshe::Mode::from_env()? != crate::haoshe::Mode::Off => {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -212,14 +226,15 @@ fn spawn(
                 readable: vec![root.to_path_buf()],
                 writable,
                 hidden: vec![root.join(".ziyuan")],
-                network: cell.network,
+                network: cell.network.clone(),
             };
-            let (command, _) = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
+            let confined = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
                 let _ = std::fs::remove_dir_all(&dir);
                 format!("外藩 {name} 须入号舍，但号舍不可用：{reason}")
             })?;
             scratch = Some(dir);
-            command
+            door = confined.proxy;
+            confined.command
         }
         _ => {
             let mut command = Command::new(program);
@@ -263,6 +278,7 @@ fn spawn(
         stdin,
         lines,
         scratch,
+        _door: door,
     })
 }
 
@@ -288,6 +304,8 @@ enum Transport {
         lines: Receiver<String>,
         /// 号舍里可写的临时目录，服务停后删去。
         scratch: Option<std::path::PathBuf>,
+        /// 按域名放行时的门吏，随服务一同撤下。
+        _door: Option<crate::haoshe::Proxy>,
     },
     Http {
         agent: ureq::Agent,

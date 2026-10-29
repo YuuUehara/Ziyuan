@@ -616,9 +616,14 @@ impl RunTests {
             .map(PathBuf::from)
             .into_iter()
             .collect();
-        let (mut child, haoshe) = crate::haoshe::shell(
+        let crate::haoshe::Confined {
+            command: mut child,
+            note: mut haoshe,
+            proxy,
+        } = crate::haoshe::shell(
             command,
             crate::haoshe::Mode::from_env()?,
+            crate::haoshe::Network::from_env()?,
             base,
             &target_dir,
             &[self.0.root.join(".ziyuan")],
@@ -654,6 +659,9 @@ impl RunTests {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
+        if let Some(denied) = proxy.map(|p| p.denied()).filter(|d| !d.is_empty()) {
+            haoshe.push_str(&format!("；拦下 {}", denied.join("、")));
+        }
         let mut log = fs::File::open(&log_path)?;
         let len = log.metadata()?.len();
         log.seek(SeekFrom::Start(len.saturating_sub(MAX_TEST_OUTPUT)))?;
