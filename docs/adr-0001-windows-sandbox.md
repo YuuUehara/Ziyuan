@@ -13,13 +13,13 @@
 v1.0 对 Windows 的承诺：
 
 1. Windows 支持常规功能与只读工作流（CLI、TUI、Web、观政）。
-2. 需要号舍隔离的受保护执行（`run_tests`、名册要求入号舍的外藩）在 Windows 上 **fail closed**：如实报「号舍不可用」，绝不悄悄退化为未隔离执行。`ZIYUAN_SANDBOX=require` 已是如此。
+2. 需要号舍隔离的受保护执行（`run_tests`、名册要求入号舍的外藩）在 Windows 上 **fail closed**：如实报「号舍不可用」，绝不悄悄退化为未隔离执行。默认的 `auto` 与 `require` 都是如此。
 3. `ZIYUAN_SANDBOX=off` 仍是用户显式确认风险后的无隔离执行，各界面与测试结果如实标注。
 4. 预留 `ziyuan-sandbox-windows` 扩展点：独立平台 crate，`SandboxCapability` 能力分级（`Unavailable` / `RestrictedProcess` / `FileSystemAndNetworkIsolated`），条件满足后实现。
 
-## 后续（另行提交）
+## 落地
 
-`auto` 对受保护操作的语义将收紧：无号舍平台默认拒绝，仅显式 `off` 照常运行（现状是照常运行并注明）。配套落地：稳定错误 `SandboxUnavailable { platform, operation, reason }`、CI 分开设明「Windows 功能可用」与「号舍暂缺」、SECURITY.md 与指南同步。
+`auto` 已收紧（原先没有号舍时照常运行并注明）：无号舍时受保护操作一律拒绝，返回稳定错误 `ziyuan_runtime::haoshe::SandboxUnavailable { platform, operation, reason }`，仅显式 `off` 照常运行。Windows CI 跑全部测试：`run_tests` 用例先断言拒绝，再以 `off` 核对副本逻辑。
 
 ## 备选
 

@@ -230,7 +230,7 @@ fn spawn(
             };
             let confined = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
                 let _ = std::fs::remove_dir_all(&dir);
-                format!("外藩 {name} 须入号舍，但号舍不可用：{reason}")
+                crate::haoshe::SandboxUnavailable::new(format!("外藩 {name}"), reason)
             })?;
             scratch = Some(dir);
             door = confined.proxy;
@@ -849,6 +849,7 @@ for line in sys.stdin:
             // 本机没有号舍：名册要求入号舍的服务拒绝启动，而不是照常运行。
             let error = sealed_tools(&root, &grants(&["cell"])).err().unwrap();
             assert!(error.to_string().contains("号舍不可用"), "{error}");
+            assert!(error.to_string().contains("外藩 cell"), "{error}");
         } else {
             let tools = sealed_tools(&root, &grants(&["cell/probe"])).unwrap();
             // 项目里写不进去，自己的临时目录写得了。

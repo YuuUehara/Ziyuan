@@ -10,7 +10,7 @@
 - [ ] **RC-04 GitHub 链路**：issue 与成员 `/ziyuan` 评论入队、评定后回报、准奏开草稿 PR，关联可追踪。
 - [ ] **RC-05 跨平台说明**：Linux/macOS/Windows 的支持范围在 README、SECURITY.md 与指南中如实分述；CI 分开设明「Windows 功能可用」与「号舍暂缺」。
 - [ ] **RC-06 兼容**：旧事件簿、会典、配置与 `.ziyuan/` 文件照常可读；契约测试与 `ziyuan migrate` 全绿。
-- [ ] **RC-07 沙箱负向**：要求号舍而不可用时受保护操作被拒且错误可审计（`require` 现状已拒；`auto` 收紧另行落地）；`off` 显式标注无隔离。
+- [ ] **RC-07 沙箱负向**：要求号舍而不可用时受保护操作被拒且错误可审计（`auto` 与 `require` 均拒，错误为 `SandboxUnavailable`）；`off` 显式标注无隔离。
 - [ ] **号字定案**：无号官员在 `officials --json`（`art` 空串）、TUI 与 Web 三处显示一致（作「无」）；易名写「无」即去号。已提交（885dc487）。
 
 ## 执行记录（验收时填写）

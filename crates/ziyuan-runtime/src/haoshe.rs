@@ -3,10 +3,11 @@
 //! 取贡院号舍之意：考生锁入单间，与外界隔绝。测试命令可能运行模型写入的代码，入号舍后
 //! 不能联网，只能写测试副本所在的临时目录，读不到家目录下常见的凭据（`.ssh`、`.aws` 等）
 //! 与项目的 `.ziyuan`。Linux 用 bubblewrap（`bwrap`），macOS 用系统自带的 Seatbelt
-//! （`sandbox-exec`）；Windows 暂无，如实注明。
+//! （`sandbox-exec`）；Windows 暂无（见 `docs/adr-0001-windows-sandbox.md`）。
 //!
-//! 由 `ZIYUAN_SANDBOX` 决定：`auto`（默认，有则用，无则照常运行并注明）、`require`（无则拒绝
-//! 运行）、`off`（不用）。`ZIYUAN_SANDBOX_ALLOW` 列出可访问的域名时，号舍仍断网，只经门吏
+//! 由 `ZIYUAN_SANDBOX` 决定：`auto`（默认）与 `require` 都是有则用、无则拒绝运行
+//! （[`SandboxUnavailable`]），绝不悄悄退化为未入号舍执行；`off` 为皇帝确认风险后不入号舍，
+//! 结果中如实注明。`ZIYUAN_SANDBOX_ALLOW` 列出可访问的域名时，号舍仍断网，只经门吏
 //! （[`proxy`]）放行这些域名的 HTTP(S)。
 mod proxy;
 
@@ -31,10 +32,45 @@ const SECRET_DIRS: &[&str] = &[
 /// 号舍的用法，取自 `ZIYUAN_SANDBOX`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    /// 默认：有号舍则入，没有则拒绝。
     Auto,
+    /// 与 `Auto` 相同，供想写明意图的配置沿用。
     Require,
+    /// 不入号舍。
     Off,
 }
+
+/// 受保护的执行须入号舍而本机号舍不可用：拒绝运行，不照常执行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxUnavailable {
+    /// `std::env::consts::OS`，如 `windows`、`linux`。
+    pub platform: &'static str,
+    /// 被拒的操作，如 `run_tests` 或 `外藩 名称`。
+    pub operation: String,
+    pub reason: String,
+}
+
+impl SandboxUnavailable {
+    pub fn new(operation: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            platform: std::env::consts::OS,
+            operation: operation.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SandboxUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "号舍不可用（{}），{} 须入号舍，不照常运行：{}。确认风险后可设 ZIYUAN_SANDBOX=off 不入号舍运行",
+            self.platform, self.operation, self.reason
+        )
+    }
+}
+
+impl std::error::Error for SandboxUnavailable {}
 
 impl Mode {
     pub fn from_env() -> Result<Self, BoxError> {
@@ -160,7 +196,8 @@ pub struct Confined {
 }
 
 /// 用系统的 shell 运行 `command`，按 `mode` 关进号舍（网络按 `network`，只可写 `writable` 与
-/// `extra_writable`，如 `CARGO_TARGET_DIR`；`hidden` 读不到）。
+/// `extra_writable`，如 `CARGO_TARGET_DIR`；`hidden` 读不到）。号舍不可用且 `mode` 不是 `Off`
+/// 时返回 [`SandboxUnavailable`]。
 pub fn shell(
     command: &str,
     mode: Mode,
@@ -186,13 +223,8 @@ pub fn shell(
         network,
     };
     let args = ["-c".to_owned(), command.to_owned()];
-    match confine("/bin/sh", &args, &rules) {
-        Ok(confined) => Ok(confined),
-        Err(reason) if mode == Mode::Require => {
-            Err(format!("号舍不可用，ZIYUAN_SANDBOX=require 不许照常运行：{reason}").into())
-        }
-        Err(reason) => Ok(plain(format!("未入号舍：{reason}"))),
-    }
+    confine("/bin/sh", &args, &rules)
+        .map_err(|reason| SandboxUnavailable::new("run_tests", reason).into())
 }
 
 /// 把 `program args…` 关进号舍；本机没有号舍时返回原因，由调用者决定照常运行还是拒绝。
@@ -387,25 +419,37 @@ mod tests {
             o = outside.display(),
             h = hidden.display()
         );
-        let Confined {
-            command: mut child,
-            note,
-            ..
-        } = shell(
+        let confined = shell(
             &script,
             Mode::Auto,
             Network::Off,
             &work,
             &[],
             std::slice::from_ref(&hidden),
-        )
-        .unwrap();
-        if note.starts_with("未入号舍") {
-            // 本机没有号舍（如 Windows、未装 bubblewrap）：只确认如实注明。CI 的 Linux 与 macOS 装有号舍。
-            eprintln!("跳过：{note}");
+        );
+        if available().is_err() {
+            // 本机没有号舍（如 Windows、未装 bubblewrap）：auto 与 require 都拒绝，不照常运行。
+            // CI 的 Linux 与 macOS 装有号舍，下面的隔离才真测。
+            for result in [
+                confined,
+                shell("echo x", Mode::Require, Network::Off, &work, &[], &[]),
+            ] {
+                let error = result.err().expect("号舍不可用时须拒绝");
+                let unavailable = error
+                    .downcast_ref::<SandboxUnavailable>()
+                    .expect("稳定的错误类型");
+                assert_eq!(unavailable.platform, std::env::consts::OS);
+                assert_eq!(unavailable.operation, "run_tests");
+                assert!(error.to_string().contains("ZIYUAN_SANDBOX=off"), "{error}");
+            }
             std::fs::remove_dir_all(base).unwrap();
             return;
         }
+        let Confined {
+            command: mut child,
+            note,
+            ..
+        } = confined.unwrap();
         let out = child.output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(

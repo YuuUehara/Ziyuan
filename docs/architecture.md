@@ -125,7 +125,7 @@ ChatGPT 订阅：`ZIYUAN_LLM_PROVIDER=chatgpt` 时凭据为 `Auth::Plan(Arc<chat
 
 `ziyuan-runtime::tools::sealed_tools(root, &seal)` 按玉玺提供 `read_file`（64 KiB 截断）、`list_files`（随 `read_file` 授予）、`search_code`（字面量、最多 50 条），工部另有 `write_file`（写入暂存区）与 `run_tests`。路径先 canonicalize 再检查是否在授权范围内，因此 `..`、绝对路径与指向外部的符号链接都被拒绝；列目录与搜索跳过 `.git`、`.jj`、`.ziyuan`、`target`。
 
-`ziyuan-runtime::haoshe`（号舍）把 `run_tests` 与名册写了 `haoshe` 的本地外藩关进操作系统沙箱：`confine(program, args, &Rules)` 在 Linux 上包一层 bubblewrap（`/` 只读、`/tmp` 换成 tmpfs、凭据目录换成空 tmpfs、只绑定可写目录），在 macOS 上生成 Seatbelt 规则交给 `sandbox-exec`；没有号舍时返回原因，`Mode`（`ZIYUAN_SANDBOX`）决定照常运行还是拒绝。`Rules.network` 为 `Network::{Off, Open, Only(域名)}`：`Only` 时号舍仍断网，`haoshe::proxy::Proxy`（门吏）在号舍外代为转递 `CONNECT` 与 `http://` 绝对地址的请求，只放行名单上的域名并记下被拦的。Linux 上门吏开在 Unix 套接字上，号舍内由 socat 在 `127.0.0.1:3128` 接入；macOS 上门吏开在本机端口，Seatbelt 只放行这一端口。代理地址经 `HTTP(S)_PROXY` 等变量交给号舍内的程序。返回的 `Confined` 持有门吏，须留到命令结束。
+`ziyuan-runtime::haoshe`（号舍）把 `run_tests` 与名册写了 `haoshe` 的本地外藩关进操作系统沙箱：`confine(program, args, &Rules)` 在 Linux 上包一层 bubblewrap（`/` 只读、`/tmp` 换成 tmpfs、凭据目录换成空 tmpfs、只绑定可写目录），在 macOS 上生成 Seatbelt 规则交给 `sandbox-exec`；没有号舍时返回原因，调用者据此返回 `SandboxUnavailable { platform, operation, reason }` 拒绝执行；只有 `Mode::Off`（`ZIYUAN_SANDBOX=off`）不入号舍照常运行。`Rules.network` 为 `Network::{Off, Open, Only(域名)}`：`Only` 时号舍仍断网，`haoshe::proxy::Proxy`（门吏）在号舍外代为转递 `CONNECT` 与 `http://` 绝对地址的请求，只放行名单上的域名并记下被拦的。Linux 上门吏开在 Unix 套接字上，号舍内由 socat 在 `127.0.0.1:3128` 接入；macOS 上门吏开在本机端口，Seatbelt 只放行这一端口。代理地址经 `HTTP(S)_PROXY` 等变量交给号舍内的程序。返回的 `Confined` 持有门吏，须留到命令结束。
 
 重试、度支、参数校验、外来文书边界、trace ID 与工具输出节略见 §3 的 Agent Loop 一条。尚未实现：并行执行工具、进程级沙箱（工具只受路径限制）。
 

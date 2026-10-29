@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 变更
+
+- 号舍 fail closed：`ZIYUAN_SANDBOX=auto`（默认）没有号舍时（Windows、未装 bubblewrap）`run_tests` 拒绝运行，不再照常运行并注明；与 `require` 相同。确认风险后设 `ZIYUAN_SANDBOX=off` 才不入号舍运行。拒绝时返回稳定错误 `haoshe::SandboxUnavailable { platform, operation, reason }`，外藩拒绝启动时也用它（见 ADR-0001）。
+
 ### 改进
 
 - 字号：号不再人人都有，约半数官员无号，有无按官员 ID 伪随机决定（同一 ID 结果不变）；无号处在界面作「无」，易名把号写作「无」即去号。

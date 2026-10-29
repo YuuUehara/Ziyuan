@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 玉玺（诏令所授的工具与范围） | 越出授权范围的读写（`..`、绝对路径、指向外部的符号链接都按 canonicalize 后的真实路径判断）；`.ziyuan`、`.git`、`.jj`、`.env*` 始终拒绝 | 范围之内的一切内容都会交给模型服务商 |
 | 写文件只进暂存区 | 未经皇帝准奏的改动不会落盘；落盘前可逐段驳回 | 准奏时没细看的改动 |
-| `run_tests` 与号舍 | 在项目的临时副本中运行皇帝设定的 `ZIYUAN_TEST_COMMAND`，清空环境变量（不传 API Key），模型不能改命令。入号舍（Linux 的 bubblewrap、macOS 的 Seatbelt）后不能联网，只能写副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录与项目的 `.ziyuan` | 号舍里仍可读系统与家目录中其他文件。`ZIYUAN_SANDBOX_ALLOW` 放行的域名可以收到号舍里的任何内容：放行 `github.com` 这类人人可上传的站点，就留了一条外传的路，名单宜只列只读的包源。没有号舍时（Windows、未装 bubblewrap）照常运行并在结果中注明；设 `ZIYUAN_SANDBOX=require` 则拒绝运行（Windows 号舍政策见 [ADR-0001](docs/adr-0001-windows-sandbox.md)）。本地外藩须在名册中写 `haoshe` 才入号舍 |
+| `run_tests` 与号舍 | 在项目的临时副本中运行皇帝设定的 `ZIYUAN_TEST_COMMAND`，清空环境变量（不传 API Key），模型不能改命令。入号舍（Linux 的 bubblewrap、macOS 的 Seatbelt）后不能联网，只能写副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录与项目的 `.ziyuan` | 号舍里仍可读系统与家目录中其他文件。`ZIYUAN_SANDBOX_ALLOW` 放行的域名可以收到号舍里的任何内容：放行 `github.com` 这类人人可上传的站点，就留了一条外传的路，名单宜只列只读的包源。没有号舍时（Windows、未装 bubblewrap）默认拒绝运行（fail closed），只有显式设 `ZIYUAN_SANDBOX=off` 才不入号舍运行并在结果中注明（Windows 号舍政策见 [ADR-0001](docs/adr-0001-windows-sandbox.md)）。本地外藩须在名册中写 `haoshe` 才入号舍 |
 | 外藩（MCP） | 只有玉玺授权的服务与工具会交给模型；凭据只在名册中引用环境变量；名册写了 `haoshe` 的本地服务入号舍，只能写临时目录与所列目录 | 没写 `haoshe` 的本地服务以你的身份运行，紫垣不限制它做什么；HTTP 外藩在别处运行，不受号舍约束 |
 | 锦衣卫（外来文书边界） | 工具输出与驿传内容包在带暗号的边界内，疑似指令注入的文字被检出、记入事件簿，修道期间不代批 | 检出靠关键词，换个说法就能绕过；它只提醒，不拦截 |
 | Web 令牌 | 无令牌的请求一律拒绝；观政令牌只能看 | 令牌泄露即等于皇帝；`--bind 0.0.0.0` 时 HTTP 是明文 |
@@ -17,7 +17,7 @@
 ## 建议
 
 - 授写权的工部诏令，先 `ziyuan diff` 看清再 `apply`；改了测试或构建脚本的，更要细看。
-- Linux 上装 bubblewrap（`apt install bubblewrap`），并设 `ZIYUAN_SANDBOX=require`，确保测试一定在号舍里跑。
+- Linux 上装 bubblewrap（`apt install bubblewrap`），测试才能在号舍里跑；没有号舍时 `run_tests` 默认拒绝，不要为图方便设 `ZIYUAN_SANDBOX=off`。
 - 在不放心的项目上，把 `ZIYUAN_TEST_COMMAND` 留空（不能跑测试），或在容器、虚拟机里运行紫垣。
 - Web 界面只在本机或可信网络中使用，远程访问请置于 HTTPS 反向代理或 SSH 隧道之后。
 

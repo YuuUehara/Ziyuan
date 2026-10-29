@@ -55,7 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 两者都跑全部测试，某个 crate 失败也跑完其余的（Windows 上 run_tests 经 cmd /C，符号链接相关的用例只在 Unix 上跑）。
+          # 两者都跑全部测试，某个 crate 失败也跑完其余的。Windows 无号舍：run_tests 用例先断言拒绝，再以 off 经 cmd /C 核对副本；符号链接相关的用例只在 Unix 上跑。
           - os: macos-latest
             command: cargo test --workspace --locked --no-fail-fast
           - os: windows-latest

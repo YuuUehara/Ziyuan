@@ -582,6 +582,12 @@ impl Tool for RunTests {
     }
 
     fn execute(&self, _args_json: &str) -> Result<String, BoxError> {
+        self.run(crate::haoshe::Mode::from_env()?)
+    }
+}
+
+impl RunTests {
+    fn run(&self, mode: crate::haoshe::Mode) -> Result<String, BoxError> {
         let command = self
             .0
             .test_command
@@ -594,14 +600,18 @@ impl Tool for RunTests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let copy = base.join("project");
-        let result = self.run_in_copy(command, &base, &copy);
+        let result = self.run_in_copy(command, mode, &base, &copy);
         let _ = fs::remove_dir_all(&base);
         result
     }
-}
 
-impl RunTests {
-    fn run_in_copy(&self, command: &str, base: &Path, copy: &Path) -> Result<String, BoxError> {
+    fn run_in_copy(
+        &self,
+        command: &str,
+        mode: crate::haoshe::Mode,
+        base: &Path,
+        copy: &Path,
+    ) -> Result<String, BoxError> {
         copy_tree(&self.0.root, &self.0.root, copy)?;
         for change in self.0.staged.lock().expect("暂存区锁未中毒").values() {
             let target = copy.join(&change.path);
@@ -622,7 +632,7 @@ impl RunTests {
             proxy,
         } = crate::haoshe::shell(
             command,
-            crate::haoshe::Mode::from_env()?,
+            mode,
             crate::haoshe::Network::from_env()?,
             base,
             &target_dir,
@@ -1012,7 +1022,24 @@ mod tests {
             assert!(write.execute(&args).is_err(), "{path}");
         }
 
-        let output = test.execute("{}").unwrap();
+        // 本机没有号舍（如 Windows）时 run_tests 拒绝运行；副本的内容改以 off 照常运行来核对。
+        let run_tests = |sealed: &Sealed, tool: &dyn Tool| {
+            let result = tool.execute("{}");
+            let unavailable = crate::haoshe::confine("true", &[], &Default::default()).is_err()
+                && crate::haoshe::Mode::from_env().unwrap() != crate::haoshe::Mode::Off;
+            if !unavailable {
+                return result;
+            }
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::haoshe::SandboxUnavailable>()
+                    .is_some(),
+                "{error}"
+            );
+            RunTests(sealed.sandbox.clone()).run(crate::haoshe::Mode::Off)
+        };
+        let output = run_tests(&sealed, test.as_ref()).unwrap();
         assert!(
             output.contains("通过（退出码 0）") && output.contains("COPY-OK"),
             "{output}"
@@ -1023,7 +1050,9 @@ mod tests {
             Some("exit 3"),
         )
         .unwrap();
-        let output = failing.tools[0].execute("{}").unwrap_err().to_string();
+        let output = run_tests(&failing, failing.tools[0].as_ref())
+            .unwrap_err()
+            .to_string();
         assert!(output.contains("未通过（退出码 3）"), "{output}");
         let unset = sealed_tools(&root, &seal(&[Capability::RunTests], &["."]), None).unwrap();
         assert!(unset.tools[0].execute("{}").is_err());
