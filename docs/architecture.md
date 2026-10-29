@@ -1,4 +1,4 @@
-# ZiYuan 设计文档（v0.9.0）
+# ZiYuan 设计文档（v0.10.0）
 
 ## 1. 核心目标
 
@@ -81,7 +81,7 @@ ziyuan-cli ──┬──▶ ziyuan-web (axum, SSE) ──┐
 - `ziyuan-llm`：`OpenAiCompatible` 实现 `ModelProvider`。HTTP/TLS 依赖只在此 crate，runtime 保持无网络依赖。
 - `ziyuan-app`：`Session<S: EventStore>` 是唯一的写入路径。每个用例：治理层提议事件 → 在 `Court` 副本上 `apply` 校验 → `EventStore::append` → 替换内存状态。被拒绝的操作不留事件；写入的事件一定可以回放。
 - `ziyuan-cli`：把参数解析为 `Command`，调用 `Session`，打印结果；`serve` 启动 Web 界面，`tui` 启动终端界面。
-- `ziyuan-web`：奉天门 Web 界面。内嵌单页（`index.html`，无构建步骤）+ JSON API + SSE。请求在阻塞线程中取用缓存的 `Session`（`reload` 增量刷新，并发请求时另开），与 CLI 一样受乐观并发保护；`POST /api/run` 取得执行者锁后在后台执行全部未结束的诏令，`RunUpdate` 经 SSE（`text` / `finished` / `changed`）推送；`{watch:true}` 改调 `Session::watch`（常朝，`WatchUpdate` 的提示经 `notice` 事件推送），`/api/state` 的 `watching` 标出。`GET /api/records?q=`（`ziyuan_core::find_records`，CLI `records` 同此）、`POST /api/changelog`、`POST /api/github/pull`、`/api/tasks/{id}/github/{reply,pr}` 与 CLI 走同一组 `Session` 方法；`Config.github` 为 `None` 时后三者返回 400。默认监听 127.0.0.1（`--bind` 可改）。全部 API 需 `Authorization: Bearer <令牌>` 或 HttpOnly、SameSite=Strict 的 `ziyuan_token` Cookie（`GET /?token=` 或 `POST /login` 种下，API 不再接受查询参数中的令牌）；令牌由 `load_or_create_token` 存于 `.ziyuan/web-token`（0600），`--new-token` 重新生成。中文描述（`describe_event` 等）移到 `ziyuan-app`，各前端共用。
+- `ziyuan-web`：奉天门 Web 界面。内嵌单页（`index.html`，无构建步骤；按 `location.hash` 分殿，奉天殿为诏令列表与所选诏令的全文，配色以 `html[data-theme]` 上的 CSS 变量切换并存于 `localStorage`）+ JSON API + SSE。请求在阻塞线程中取用缓存的 `Session`（`reload` 增量刷新，并发请求时另开），与 CLI 一样受乐观并发保护；`POST /api/run` 取得执行者锁后在后台执行全部未结束的诏令，`RunUpdate` 经 SSE（`text` / `finished` / `changed`）推送；`{watch:true}` 改调 `Session::watch`（常朝，`WatchUpdate` 的提示经 `notice` 事件推送），`/api/state` 的 `watching` 标出。`GET /api/records?q=`（`ziyuan_core::find_records`，CLI `records` 同此）、`POST /api/changelog`、`POST /api/github/pull`、`/api/tasks/{id}/github/{reply,pr}` 与 CLI 走同一组 `Session` 方法；`Config.github` 为 `None` 时后三者返回 400。默认监听 127.0.0.1（`--bind` 可改）。全部 API 需 `Authorization: Bearer <令牌>` 或 HttpOnly、SameSite=Strict 的 `ziyuan_token` Cookie（`GET /?token=` 或 `POST /login` 种下，API 不再接受查询参数中的令牌）；令牌由 `load_or_create_token` 存于 `.ziyuan/web-token`（0600），`--new-token` 重新生成。中文描述（`describe_event` 等）移到 `ziyuan-app`，各前端共用。
 - `ziyuan-tui`：紫禁城终端界面（ratatui）。`App` 不依赖真实终端：按键经 `App::handle`、画面经 `App::draw`，测试用 `TestBackend` 驱动。执行在 Tokio 任务中调用 `Session::run_open`（与 Web 共用：反复执行未结束的诏令直到队列清空），进度经通道送回界面；每秒 `Session::reload` 以看到其他进程的变更。复勘（`x`，后台 `Session::recheck`）、平反（`X`，`Session::acquit(task, None)`）与实录（`R`，`find_records`）与 CLI 同用 app 层方法。
 
 初始化生成 `Founded`, `AgentRegistered`, `OfficialAppointed`：#1–#6 为中书、吏部、工部的官员，v0.7.1 起另设 #7–#10 为户部、礼部、兵部、刑部尚书（都察院不设，免增复核开销）。开国阵容写入事件簿，旧朝廷回放不变。`ziyuan_app::vacancies` 列出朝堂缺位（`Vacancy{office,impact,candidate}`）：人选取 `Court::recommend` 中未任官、不在降级期者的第一位，不产生事件，任命仍走 `appoint`；供 `init` / `court`、Web（`/api/state` 的 `vacancies`，附一键任命）与 TUI 提示。诏令的事件序列：
@@ -124,6 +124,8 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 ChatGPT 订阅：`ZIYUAN_LLM_PROVIDER=chatgpt` 时凭据为 `Auth::Plan(Arc<chatgpt::Account>)`，请求改发 `/responses`（`responses::body`：系统消息并入 `instructions`，工具归入 namespace `ziyuan`，`store:false`、`stream:true`，不传输出上限），流由 `responses::read_events` 解析，只认 `response.completed` 为成功；错误码经 `plan_error` 译为中文。401 时 `Account::refresh(Some(旧令牌))` 续期后重发一次。`chatgpt::Account` 管 OAuth（授权码 + PKCE、首次以 `dynamic_agent_client` 注册、`ext_agent_host_id` 持久化、ring 校验 ID token 的 RS256 签名），凭据存于用户配置目录（`ZIYUAN_CONFIG_DIR`），续期持 `chatgpt.lock` 文件锁。`Catalog::price` 在订阅模式下返回 `None`。
 
 `ziyuan-runtime::tools::sealed_tools(root, &seal)` 按玉玺提供 `read_file`（64 KiB 截断）、`list_files`（随 `read_file` 授予）、`search_code`（字面量、最多 50 条），工部另有 `write_file`（写入暂存区）与 `run_tests`。路径先 canonicalize 再检查是否在授权范围内，因此 `..`、绝对路径与指向外部的符号链接都被拒绝；列目录与搜索跳过 `.git`、`.jj`、`.ziyuan`、`target`。
+
+`ziyuan-runtime::haoshe`（号舍）把 `run_tests` 与名册写了 `haoshe` 的本地外藩关进操作系统沙箱：`confine(program, args, &Rules)` 在 Linux 上包一层 bubblewrap（`/` 只读、`/tmp` 换成 tmpfs、凭据目录换成空 tmpfs、只绑定可写目录），在 macOS 上生成 Seatbelt 规则交给 `sandbox-exec`；没有号舍时返回原因，`Mode`（`ZIYUAN_SANDBOX`）决定照常运行还是拒绝。`Rules.network` 为 `Network::{Off, Open, Only(域名)}`：`Only` 时号舍仍断网，`haoshe::proxy::Proxy`（门吏）在号舍外代为转递 `CONNECT` 与 `http://` 绝对地址的请求，只放行名单上的域名并记下被拦的。Linux 上门吏开在 Unix 套接字上，号舍内由 socat 在 `127.0.0.1:3128` 接入；macOS 上门吏开在本机端口，Seatbelt 只放行这一端口。代理地址经 `HTTP(S)_PROXY` 等变量交给号舍内的程序。返回的 `Confined` 持有门吏，须留到命令结束。
 
 重试、度支、参数校验、外来文书边界、trace ID 与工具输出节略见 §3 的 Agent Loop 一条。尚未实现：并行执行工具、进程级沙箱（工具只受路径限制）。
 
