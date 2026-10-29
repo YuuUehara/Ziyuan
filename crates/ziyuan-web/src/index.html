@@ -259,6 +259,20 @@
   pre.diff .add, pre.diff .del, pre.diff .ctx, pre.diff .hunk { display: block; padding-right: 12px; }
   pre.diff .add { background: var(--add, #e3f0e6); }
   pre.diff .del { background: var(--del, #f8e8e4); }
+  .diff-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 8px 0 4px; font-size: 12px; color: var(--muted); }
+  .diff-bar button.current { background: var(--tint); color: var(--tint-ink); border-color: var(--line-strong); }
+  .diff-bar .gap { width: 10px; }
+  ul.diff-tree { list-style: none; margin: 6px 0 0; padding: 6px 10px; background: var(--well); border-radius: var(--radius); font: 12px/1.7 var(--mono); }
+  ul.diff-tree button.jump { all: unset; cursor: pointer; color: var(--ink); text-decoration: underline dotted var(--line-strong); }
+  .plus { color: var(--ok); } .minus { color: var(--bad); }
+  .hash { color: var(--muted); font-size: 11px; }
+  pre.diff .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  pre.diff .row > span { display: grid; grid-template-columns: 3.4em 1.8em minmax(0, 1fr); align-items: start; }
+  pre.diff .row .code { white-space: pre-wrap; word-break: break-all; }
+  pre.diff .row > span + span { border-left: 1px solid var(--line); }
+  pre.diff .row .none { background: var(--well); }
+  pre.diff .dl { display: block; padding: 0 12px 0 4px; }
+  pre.diff .note { display: block; padding: 2px 12px; color: var(--muted); font-family: var(--sans); font-size: 12px; }
   pre.diff .hunk { color: var(--muted); background: var(--well); margin: 4px 0; padding: 2px 12px; font-family: var(--sans); font-size: 12px; }
   pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; color: var(--ink); cursor: pointer; }
   pre.diff .pick input { margin: 0; }
@@ -691,6 +705,34 @@ let state = null;
 const streams = {};   // 诏令 ID → 执行中流式文本
 let palaceLive = null;  // 殿试进行中已推送的答卷
 const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
+// 改动的视图（统一/左右）与渲染（内置/git-delta），记在本机。
+const diffPrefs = (() => { try { return { layout: "unified", engine: "builtin", ...JSON.parse(localStorage.getItem("ziyuan-diff") || "{}") }; } catch { return { layout: "unified", engine: "builtin" }; } })();
+const deltaCache = {};  // "诏令|版本|并排|浅色" → { loading } | { error } | { hunks: 段号 → { html | error } }
+
+// git-delta 渲染的结果；未取过则去取，取回后重绘。按改动版本缓存，改动变了自然重取。
+function deltaFor(id, version, side) {
+  const bg = getComputedStyle(document.body).backgroundColor.match(/\d+/g) || [255, 255, 255];
+  const light = bg.slice(0, 3).reduce((a, b) => a + Number(b), 0) > 382;
+  // 列宽按改动区的实宽与等宽字宽估算（取整到 10 列，少重取）；还没画出来时用默认。
+  const host = document.querySelector(".changes pre.diff");
+  const ctx = document.createElement("canvas").getContext("2d");
+  ctx.font = `12.5px ${getComputedStyle(document.documentElement).getPropertyValue("--mono")}`;
+  const columns = host ? Math.floor((host.clientWidth - 24) / ctx.measureText("0").width / 10) * 10 : 0;
+  const width = Math.max(40, columns || (side ? 160 : 120));
+  const key = `${id}|${version}|${side}|${light}|${width}`;
+  if (!deltaCache[key]) {
+    deltaCache[key] = { loading: true };
+    api(`/tasks/${id}/changes/delta?side=${side ? 1 : 0}&light=${light ? 1 : 0}&width=${width}`)
+      .then((r) => {
+        const hunks = {};
+        r.files.forEach((f) => f.hunks.forEach((h) => { hunks[h.number] = h; }));
+        deltaCache[key] = r.version === version ? { hunks } : { error: "改动已变，请刷新" };
+      })
+      .catch((e) => { deltaCache[key] = { error: e.message }; })
+      .finally(() => preserve(render));
+  }
+  return deltaCache[key];
+}
 
 async function api(path, body) {
   const response = await fetch("api" + path, {
@@ -848,12 +890,12 @@ function taskHtml(t) {
     const c = t.changes;
     const stateLabel = { proposed: "待准奏", applied: "已落盘", discarded: "已驳回" }[c.state];
     const pending = c.state === "proposed";
-    // 段头「@@ 第 n 段 …」：待准奏时附勾选框（默认准），驳回过的段标出。
-    const hunkLine = (l) => {
-      const n = Number((l.match(/第 (\d+) 段/) || [])[1]);
-      const box = pending && n ? `<label class="pick"><input type="checkbox" checked data-keep id="hunk-${t.id}-${n}" class="hunk-${t.id}" data-n="${n}"> 准此段</label>` : "";
-      const off = c.skipped.includes(n) ? ` <span class="badge failed">此段驳回</span>` : "";
-      return `<span class="hunk">${esc(l)}${box}${off}</span>`;
+    // 段头：待准奏时附勾选框（默认准）；已处置的标出准或驳回。
+    const hunkLine = (h) => {
+      const n = h.number;
+      const box = pending ? `<label class="pick"><input type="checkbox" checked data-keep id="hunk-${t.id}-${n}" class="hunk-${t.id}" data-n="${n}"> 准此段</label>` : "";
+      const mark = { approved: ` <span class="badge completed">此段已准</span>`, rejected: ` <span class="badge failed">此段驳回</span>` }[h.status] || "";
+      return `<span class="hunk">@@ 第 ${n} 段 · 原第 ${h.lines[0]?.old ?? 1} 行 @@${box}${mark}</span>`;
     };
     // 每行：原、新行号，增删记号，按语言着色的代码；成对的删增行中改动的字词加底色。
     const codeLine = (l) => {
@@ -863,12 +905,45 @@ function taskHtml(t) {
       }).join("");
       return `<span class="${{ "+": "add", "-": "del" }[l.kind] || "ctx"}"><span class="ln">${l.old ?? ""}</span><span class="ln">${l.new ?? ""}</span><span class="sign">${l.kind === " " ? "" : l.kind}</span>${code}</span>`;
     };
-    const files = c.files.map((f) => `<details ${pending ? "open" : ""}>
-      <summary>${esc(f.path)}${f.created ? "（新建）" : ""}${pending && f.stale ? ` <span class="badge failed">原文已变</span>` : ""}</summary>
-      <pre class="diff">${f.hunks.map((h) => hunkLine(`@@ 第 ${h.number} 段 · 原第 ${h.lines[0]?.old ?? 1} 行 @@`) + h.lines.map(codeLine).join("")).join("")}</pre></details>`).join("");
-    const hunks = c.files.reduce((n, f) => n + (f.diff.match(/^@@ /gm) || []).length, 0);
+    // 左右并排：上下文两边同行；相邻的删、增逐行配对，多出的一边留空。
+    const cell = (l, side) => l
+      ? `<span class="${{ "+": "add", "-": "del" }[l.kind] || "ctx"}"><span class="ln">${(side === "old" ? l.old : l.new) ?? ""}</span><span class="sign">${l.kind === " " ? "" : l.kind}</span><span class="code">${l.spans.map((s) => {
+          const cls = [s.token ? "tk-" + s.token : "", s.changed ? "em" : ""].filter(Boolean).join(" ");
+          return cls ? `<span class="${cls}">${esc(s.text)}</span>` : esc(s.text);
+        }).join("")}</span></span>`
+      : `<span class="none"></span>`;
+    const splitLines = (lines) => {
+      let out = "";
+      for (let i = 0; i < lines.length;) {
+        if (lines[i].kind === " ") { out += `<span class="row">${cell(lines[i], "old")}${cell(lines[i], "new")}</span>`; i++; continue; }
+        const dels = [], adds = [];
+        while (i < lines.length && lines[i].kind === "-") dels.push(lines[i++]);
+        while (i < lines.length && lines[i].kind === "+") adds.push(lines[i++]);
+        for (let k = 0; k < Math.max(dels.length, adds.length); k++) out += `<span class="row">${cell(dels[k], "old")}${cell(adds[k], "new")}</span>`;
+      }
+      return out;
+    };
+    const split = diffPrefs.layout === "split";
+    const rendered = diffPrefs.engine === "delta" && state.delta ? deltaFor(t.id, c.version, split) : null;
+    const hunkBody = (h) => {
+      const d = rendered && rendered.hunks && rendered.hunks[h.number];
+      if (d && d.html) return d.html.map((l) => `<span class="dl">${l || " "}</span>`).join("");
+      const note = rendered && rendered.loading ? `<span class="note">delta 渲染中…</span>`
+        : rendered && (rendered.error || (d && d.error)) ? `<span class="note">delta 未能渲染（${esc(rendered.error || d.error)}），改用内置预览</span>` : "";
+      return note + (split ? splitLines(h.lines) : h.lines.map(codeLine).join(""));
+    };
+    const hashNote = (f) => f.base_hash ? `<span class="hash" title="呈报时原文的 ${esc(f.base_hash)}；原文变了则准奏被拒">base ${esc(f.base_hash.replace("sha256:", "").slice(0, 12))}</span>` : `<span class="hash">新建，无原文</span>`;
+    const stat = (f) => `<span class="plus">+${f.additions}</span> <span class="minus">−${f.deletions}</span>`;
+    const staleMark = (f) => pending && f.stale ? ` <span class="badge failed">原文已变</span>` : "";
+    const files = c.files.map((f, i) => `<details id="diff-${t.id}-${i}" ${pending ? "open" : ""}>
+      <summary>${esc(f.path)}${f.created ? "（新建）" : ""} ${stat(f)} ${hashNote(f)}${staleMark(f)}</summary>
+      <pre class="diff">${f.hunks.map((h) => hunkLine(h) + hunkBody(h)).join("")}</pre></details>`).join("");
+    const hunks = c.files.reduce((n, f) => n + f.hunks.length, 0);
+    const adds = c.files.reduce((n, f) => n + f.additions, 0), dels = c.files.reduce((n, f) => n + f.deletions, 0);
     const note = c.skipped.length ? `（驳回第 ${c.skipped.join("、")} 段）` : "";
-    body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件 ${hunks} 段，${stateLabel}${note}${pending && hunks > 1 ? `<span class="hint">　可逐段取舍：去掉勾选的段不落盘</span>` : ""}${files}</div>`;
+    const bar = `<div class="diff-bar">视图 ${[["unified", "统一"], ["split", "左右"]].map(([k, l]) => `<button class="small${diffPrefs.layout === k ? " current" : ""}" data-diff-layout="${k}">${l}</button>`).join("")}<span class="gap"></span>渲染 <button class="small${diffPrefs.engine !== "delta" ? " current" : ""}" data-diff-engine="builtin">内置</button><button class="small${diffPrefs.engine === "delta" ? " current" : ""}" data-diff-engine="delta"${state.delta ? "" : " disabled title=\"未找到 git-delta：设 ZIYUAN_DELTA 为其可执行文件路径后重启\""}>delta</button></div>`;
+    const tree = c.files.length > 1 ? `<ul class="diff-tree">${c.files.map((f, i) => `<li><button class="jump" data-diff-jump="diff-${t.id}-${i}">${esc(f.path)}</button> ${f.created ? "新建" : "改写"} ${stat(f)}${staleMark(f)}</li>`).join("")}</ul>` : "";
+    body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件 ${hunks} 段 <span class="plus">+${adds}</span> <span class="minus">−${dels}</span>，${stateLabel}${note}${pending && hunks > 1 ? `<span class="hint">　可逐段取舍：去掉勾选的段不落盘</span>` : ""}${bar}${tree}${files}</div>`;
     if (c.state === "proposed" && t.status === "completed") {
       // 原文已被别处改动的，准奏必被拒：不给准奏按钮，只能驳回。
       const stale = c.files.some((f) => f.stale);
@@ -1377,6 +1452,14 @@ document.addEventListener("click", (event) => {
     el.disabled = true;
     el.textContent = "御史复核中…";
     act(api(`/tasks/${d.censor}/censor`, {})).then((r) => r && toast(`诏令 #${d.censor} 都察院${r.label}`));
+  } else if (d.diffLayout || d.diffEngine) {
+    if (d.diffLayout) diffPrefs.layout = d.diffLayout;
+    if (d.diffEngine) diffPrefs.engine = d.diffEngine;
+    try { localStorage.setItem("ziyuan-diff", JSON.stringify(diffPrefs)); } catch {}
+    preserve(render);
+  } else if (d.diffJump) {
+    const target = $(d.diffJump);
+    if (target) { target.open = true; target.scrollIntoView({ behavior: "smooth", block: "start" }); }
   } else if (d.apply) {
     const skip = [...document.querySelectorAll(`.hunk-${d.apply}`)].filter((b) => !b.checked).map((b) => Number(b.dataset.n));
     const what = skip.length ? `（驳回第 ${skip.join("、")} 段，其余落盘）` : "";

@@ -25,7 +25,9 @@ use ziyuan_core::TaskId;
 use ziyuan_runtime::{CancelToken, Limits, WorkerBackend};
 use ziyuan_storage::EventLog;
 
-use crate::app::{Modal, Tab};
+use crate::app::{DiffView, Modal, Tab};
+use ratatui::text::Line;
+use std::cell::{Cell, RefCell};
 pub struct Config {
     /// 朝廷所在目录（含 `.ziyuan/`）。
     pub root: PathBuf,
@@ -103,8 +105,16 @@ pub struct App {
     live: HashMap<TaskId, String>,
     /// 廷议进行中已收到的发言（议毕后以事件簿为准）。
     debating: HashMap<TaskId, Vec<String>>,
+    /// 改动怎样显示（z 轮换）。
+    diff_view: DiffView,
+    /// 详情面板内宽，绘制时记下，供 git-delta 定宽。
+    detail_width: Cell<u16>,
+    /// git-delta 渲染过的改动：(诏令, 改动版本, 并排, 宽) → 逐段的行；渲染失败为 `None`。
+    delta_cache: RefCell<HashMap<DeltaKey, Option<Vec<Vec<Line<'static>>>>>>,
     quit: bool,
 }
+
+type DeltaKey = (TaskId, String, bool, u16);
 
 #[cfg(test)]
 mod tests;

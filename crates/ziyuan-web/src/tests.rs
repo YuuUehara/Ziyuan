@@ -844,3 +844,87 @@ async fn edict_runs_in_background_and_can_be_reviewed() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn changes_json_counts_lines_and_marks_each_hunk() {
+    use ziyuan_core::{AgentId, CourtEvent, Edict, FileChange};
+    use ziyuan_governance::{Court, founding_events};
+    let before: String = (1..=20).map(|i| format!("l{i}\n")).collect();
+    let after = before
+        .replacen("l1\n", "l0\nl1\n", 1)
+        .replace("l15\n", "L15\n");
+    let mut events = founding_events(1);
+    let task = TaskId(1);
+    events.extend([
+        CourtEvent::EdictIssued(Box::new(Edict {
+            id: task,
+            department: Department::Works,
+            text: "改".into(),
+            seal: Seal::default(),
+        })),
+        CourtEvent::TaskAssigned {
+            task,
+            worker: AgentId(2),
+            model: None,
+        },
+        CourtEvent::ChangesProposed {
+            task,
+            changes: vec![FileChange {
+                path: "src/a.rs".into(),
+                before: Some(before),
+                after,
+            }],
+        },
+        CourtEvent::TaskCompleted {
+            task,
+            worker: AgentId(2),
+            summary: "毕".into(),
+        },
+    ]);
+    let file = |events: &[CourtEvent]| {
+        let court = Court::replay(events).unwrap();
+        court_json(&court, &DemoBackend, None)["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == 1)
+            .unwrap()["changes"]["files"][0]
+            .clone()
+    };
+    let statuses = |f: &Value| {
+        f["hunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["status"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let pending = file(&events);
+    assert_eq!(
+        (pending["additions"].as_u64(), pending["deletions"].as_u64()),
+        (Some(2), Some(1))
+    );
+    assert!(
+        pending["base_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(statuses(&pending), ["pending", "pending"]);
+    events.push(CourtEvent::ChangesApplied {
+        task,
+        skipped: vec![2],
+    });
+    assert_eq!(statuses(&file(&events)), ["approved", "rejected"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delta_rendering_reports_availability_and_needs_changes() {
+    let (base, _root) = start("delta").await;
+    let t = Some(TOKEN);
+    let (status, state) = call(&base, "/state", t, None).await;
+    assert_eq!(status, 200);
+    assert!(state["delta"].is_boolean(), "{state}");
+    let (status, body) = call(&base, "/tasks/9/changes/delta", t, None).await;
+    assert_eq!(status, 400, "{body}");
+}

@@ -7,7 +7,8 @@ use ziyuan_runtime::Outcome;
 
 use crate::App;
 use crate::app::{
-    ChooseKind, ConfirmKind, InputKind, Message, Modal, TABS, Tab, appointable, drawable, nominable,
+    ChooseKind, ConfirmKind, DiffView, InputKind, Message, Modal, TABS, Tab, appointable, drawable,
+    nominable,
 };
 
 impl App {
@@ -194,6 +195,29 @@ impl App {
         }
     }
 
+    /// 改动显示：内置 → delta → delta 并排 → 内置；找不到 git-delta 时留在内置。
+    pub(crate) fn cycle_diff_view(&mut self) {
+        let next = match self.diff_view {
+            DiffView::Builtin => DiffView::Delta,
+            DiffView::Delta => DiffView::DeltaSide,
+            DiffView::DeltaSide => DiffView::Builtin,
+        };
+        if next != DiffView::Builtin && ziyuan_app::delta().is_none() {
+            self.status = Some((
+                "未找到可用的 git-delta：设 ZIYUAN_DELTA 为其可执行文件路径".into(),
+                true,
+            ));
+            return;
+        }
+        self.diff_view = next;
+        let label = match next {
+            DiffView::Builtin => "改动以内置预览显示",
+            DiffView::Delta => "改动经 git-delta 显示",
+            DiffView::DeltaSide => "改动经 git-delta 左右并排显示",
+        };
+        self.status = Some((label.into(), false));
+    }
+
     pub(crate) fn edict_key(&mut self, code: KeyCode) {
         let Some(task) = self.selected_task else {
             return;
@@ -222,6 +246,7 @@ impl App {
             }
             KeyCode::Char('f') => self.start_split(task),
             KeyCode::Char('v') => self.start_debate(task),
+            KeyCode::Char('z') => self.cycle_diff_view(),
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(

@@ -50,7 +50,10 @@ pub(crate) const HELP: &str = concat!(
   ziyuan redraft <诏令ID> <官员ID> [理由] 御笔改票：改定拟派的承办人
   ziyuan approve <诏令ID|all>          内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
   ziyuan appoint <官员ID> <官职>       任命（如 first-secretary / minister:works）
-  ziyuan diff <诏令ID>                 查看工部呈报的改动（统一 diff）
+  ziyuan diff <诏令ID> [--side-by-side] [--plain]
+                                       查看工部呈报的改动（统一 diff）；在终端且找到 git-delta
+                                       （ZIYUAN_DELTA 或 PATH 上实测可用的 delta）时经它显示，
+                                       --side-by-side 左右并排，--plain 不经 delta
   ziyuan apply <诏令ID> [--skip 1,3] [--commit]
                                        准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）；
                                        --skip 逐段驳回 diff 中所列段号，其余落盘；

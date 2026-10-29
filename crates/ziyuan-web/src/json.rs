@@ -257,14 +257,27 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                     "skipped": c.skipped,
                     // 准奏时回传，服务端据以确认审阅的正是记下的这份改动。
                     "version": changes_version(&c.files),
-                    "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| json!({
-                        "path": f.path,
-                        "created": f.before.is_none(),
-                        "base_hash": base_hash(f),
-                        "diff": diff,
-                        // 着色、带行号与词级标记的预览，段号与 diff 相同。
-                        "hunks": preview.hunks,
-                    })).collect::<Vec<_>>(),
+                    "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| {
+                        let count = |kind: char| preview.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == kind).count();
+                        json!({
+                            "path": f.path,
+                            "created": f.before.is_none(),
+                            "base_hash": base_hash(f),
+                            "additions": count('+'),
+                            "deletions": count('-'),
+                            "diff": diff,
+                            // 着色、带行号与词级标记的预览，段号与 diff 相同；status 为该段的处置。
+                            "hunks": preview.hunks.iter().map(|h| {
+                                let rejected = c.state == ChangeState::Discarded || c.skipped.contains(&h.number);
+                                let status = match c.state {
+                                    ChangeState::Proposed => "pending",
+                                    _ if rejected => "rejected",
+                                    _ => "approved",
+                                };
+                                json!({ "number": h.number, "status": status, "lines": h.lines })
+                            }).collect::<Vec<_>>(),
+                        })
+                    }).collect::<Vec<_>>(),
                 })),
                 "worker": worker.and_then(name),
                 // 礼部：回奏缺了哪些体例段落（发回重写后仍缺的照收并标注）。

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### 改进
+
+- 奏本审阅（Web）：改动可在「统一」与「左右」两种视图间切换，两边行号、着色与词级标记出自同一份预览；多文件时先列文件树（新建/改写、`+N −N`、原文已变），点文件名跳到该处；各文件标出呈报时原文的 `base_hash`（新建文件注「无原文」）；每段标明处置（待准、已准、驳回）。`--json` 与 `/api/state` 的改动各文件多了 `additions`、`deletions`，各段多了 `status`（`pending` / `approved` / `rejected`）。
+- git-delta 渲染：设 `ZIYUAN_DELTA` 为 [git-delta](https://github.com/dandavison/delta) 可执行文件的路径（未设则找 PATH 上的 `delta`），Web 奏本可选「delta」渲染（统一或左右），TUI 按 `z` 在内置、delta、delta 并排间轮换，`ziyuan diff` 在终端中经 delta 显示（`--side-by-side` 并排，`--plain` 不经 delta；管道输出照旧是统一 diff）。同名程序不止一个（如 Zed 的 Delta CLI），故以 git-delta 的参数实跑一小段差异来确认，不认的当作没有 delta，回退内置预览。段的划分、段号与逐段准奏不变，delta 只管呈现。新接口 `GET /api/tasks/{id}/changes/delta?side=&width=&light=` 逐段返回 HTML。
+
 ## 1.0.0-rc.1
 
 1.0 的候选版：号舍缺席时 fail closed、并发预算预留、外部副作用幂等、审阅即所准，并以 DeepSeek 跑通驿站到草稿 PR 的全链路验收（[docs/rc1-acceptance.md](docs/rc1-acceptance.md)）。rc 期间只修清单内的阻塞缺陷。

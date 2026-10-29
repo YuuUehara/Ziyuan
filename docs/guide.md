@@ -151,7 +151,7 @@ ziyuan edict --tools none "只凭诏令文本回答"
 ```bash
 export ZIYUAN_TEST_COMMAND="cargo test"      # 由皇帝设定，模型不能更改
 ziyuan edict --tools read_file,write_file,run_tests --scope src "修复 parse 的越界并补测试"
-ziyuan diff 3       # 查看呈报的统一 diff
+ziyuan diff 3       # 查看呈报的统一 diff（终端中有 git-delta 则经它显示；--side-by-side 并排，--plain 不经 delta）
 ziyuan apply 3      # 准奏：写入项目
 ziyuan apply 3 --skip 2,4   # 逐段准奏：驳回 diff 中第 2、4 段，其余写入
 ziyuan apply 3 --commit     # 落盘后把这些文件记为一个 jj（或 git）提交
@@ -164,6 +164,8 @@ ziyuan discard 3    # 或驳回
 - **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt。号舍里不能联网，只能写测试副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认）与 `require` 相同，没有号舍（如 Windows、未装 bubblewrap）则拒绝运行，报「号舍不可用」；`off` 不入号舍照常运行，结果中注明，须皇帝自担风险（Windows 政策见 [ADR-0001](adr-0001-windows-sandbox.md)）。号舍默认全断网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`；或用 `ZIYUAN_SANDBOX_ALLOW` 按域名放行，如 `ZIYUAN_SANDBOX_ALLOW="index.crates.io,static.crates.io"`。放行时号舍仍断网，只留一个本机代理（门吏），它只转递名单上域名的 HTTP(S)，其余回 403，被拦下的域名记在测试结果里。`example.com` 只放行其本身，`*.example.com` 只放行其子域。Linux 上按域名放行另须装 socat（`apt install socat`）。
 - **逐段准奏**：diff 按段编号（`@@ 第 n 段 · 原第 m 行 @@`，跨文件连续编号；相隔不超过 6 行的改动并为一段）。`--skip` 驳回所列各段，其余照原样写入，行尾与末行换行逐字节保留；新建文件整段驳回即不建。各段都驳回请直接 `discard`。驳回了哪些段记入事件簿（`ChangesApplied` 附段号）。Web 奏本每段有「准此段」勾选框，TUI 按 `W` 输入要驳回的段号。
 - **落盘进版本库**：`ziyuan apply --commit`、Web 的「准奏并提交」、TUI 的 `m`。落盘后只提交本诏令写入的文件（项目在 jj 版本库中用 `jj commit <文件>`，否则 `git commit --only`），工作区里别的改动原样留着；文件若在准奏前就有你自己未提交的改动，会一并提交。提交说明首行为「紫垣诏令 #n：…」，附承办者与驳回的段号，末行 `Ziyuan-Edict: n`；`ziyuan github pr` 开的草稿 PR 用同样的标题与提交说明，两边对得上。提交失败（如未设提交者）时改动仍已落盘，可自行提交。重试时若最近 200 个提交里已有带本诏令尾注的，就认作已提交、不再提交一次；落盘中断后重试，已写成改后内容的文件跳过，其余照常核对原文再写。
+- **审阅视图**：Web 奏本可切换「统一」与「左右」两种视图；多文件时先列文件树（新建/改写、`+N −N`、原文已变），点文件名跳到该处；各文件标出呈报时原文的 `base_hash`（准奏时据以核对），每段标明待准、已准或驳回。
+- **git-delta**：设 `ZIYUAN_DELTA` 为 [git-delta](https://github.com/dandavison/delta) 的路径（未设则找 PATH 上的 `delta`）。Web 奏本的「渲染」可选 delta，TUI 按 `z` 在内置、delta、delta 并排间轮换，`ziyuan diff` 在终端中经它显示。delta 只管呈现，段号与逐段准奏照旧。同名的 `delta` 不止一个（如 Zed 的 Delta CLI），紫垣以 git-delta 的参数实跑一小段差异确认，不认的就当作没有，回退内置预览；装了别的 `delta` 时请把 `ZIYUAN_DELTA` 指向 git-delta。Web 与 TUI 渲染时不读你的 git 配置（结果处处一致），`ziyuan diff` 则照你的 git 配置显示。
 - **审计只记摘要**：`write_file` 的工具审计只记「n 行，m 字节，全文见奏本」，全文只存在奏本里一份。
 - 写入同样受玉玺范围与禁区约束，符号链接无法越界；官职的玉玺上限也能收回这两项权力。
 

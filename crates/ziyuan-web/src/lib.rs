@@ -40,7 +40,9 @@ use crate::personnel::{
 };
 use crate::run::{run, stop_run};
 use crate::state::{AppState, Inner};
-use crate::views::{duzhi, events_stream, history, kaocheng, recommend, records, state};
+use crate::views::{
+    changes_delta, duzhi, events_stream, history, kaocheng, recommend, records, state,
+};
 const INDEX_HTML: &str = include_str!("index.html");
 
 pub struct Config {
@@ -99,6 +101,7 @@ pub fn router(config: Config) -> Router {
         .route("/tasks/{id}/github/pr", post(github_pr))
         .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/debate", post(debate))
+        .route("/tasks/{id}/changes/delta", get(changes_delta))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
         .route("/tasks/{id}/changes/discard", post(discard_changes))
         .route("/reform", post(reform))

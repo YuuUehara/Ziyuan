@@ -8,6 +8,7 @@
 mod cabinet;
 mod censorate;
 mod courier;
+mod delta;
 mod edicts;
 mod exam;
 mod history;
@@ -23,6 +24,9 @@ mod vcs;
 pub use cabinet::{criteria_note, debate_minutes};
 pub use censorate::{ACQUITTAL_NOTE, suspicion_status};
 pub use courier::{PullReport, changelog_commits};
+pub use delta::{
+    AnsiStyle, Delta, DeltaStyle, ansi_html, ansi_lines, delta, unified_diff, unified_hunks,
+};
 pub use edicts::{
     CHANGELOG_NOTE, PROXY_REVIEW_NOTE, base_hash, changelog_text, changes_version, render_diffs,
     reply_text, seal_note, selected_files, skipped_note, stale_files,

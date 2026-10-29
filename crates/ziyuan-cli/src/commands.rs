@@ -2,7 +2,7 @@
 
 use std::env;
 use std::error::Error;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use ziyuan_app::{
     ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, WatchOptions, WatchUpdate, demotion_note,
@@ -300,7 +300,7 @@ pub(crate) fn execute(
                 );
             }
         }
-        Command::Diff(task) => {
+        Command::Diff(task, side, plain) => {
             let entry = session
                 .court()
                 .task(task)
@@ -310,7 +310,19 @@ pub(crate) fn execute(
                 return Ok(());
             };
             println!("诏令 #{} 呈报改动{}：", task.0, changes_note(entry));
-            print!("{}", render_diffs(&changes.files).concat());
+            // 在终端且找到 git-delta 时经它显示（段头附段号）；管道、--plain 或 delta 出错时印统一 diff。
+            let shown = !plain
+                && io::stdout().is_terminal()
+                && ziyuan_app::delta().is_some_and(|delta| {
+                    io::stdout().flush().ok();
+                    delta
+                        .show(&ziyuan_app::unified_diff(&changes.files), side)
+                        .map_err(|e| eprintln!("git-delta 显示失败，改印统一 diff：{e}"))
+                        .is_ok()
+                });
+            if !shown {
+                print!("{}", render_diffs(&changes.files).concat());
+            }
             if changes.state == ChangeState::Proposed {
                 println!(
                     "逐段准奏：`ziyuan apply {} --skip <段号,…>` 驳回所列各段，其余落盘。",

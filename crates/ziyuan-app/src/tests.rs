@@ -2795,3 +2795,125 @@ async fn result_of_task_cancelled_elsewhere_is_discarded() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn delta_input_carries_standard_hunk_headers_and_hunk_numbers() {
+    // 第一段在开头多出一行，第二段的新起始行号因此加 1。
+    let before: String = (1..=20).map(|i| format!("l{i}\n")).collect();
+    let after = before
+        .replacen("l1\n", "l0\nl1\n", 1)
+        .replace("l15\n", "L15\n");
+    let files = [
+        FileChange {
+            path: "src/a.rs".into(),
+            before: Some(before),
+            after,
+        },
+        FileChange {
+            path: "docs/新.md".into(),
+            before: None,
+            after: "甲\n乙\n".into(),
+        },
+    ];
+    let hunks = unified_hunks(&files);
+    assert_eq!(hunks.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+    assert!(hunks[0][0].starts_with("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n+l0\n l1\n"), "{}", hunks[0][0]);
+    assert!(
+        hunks[0][1].contains("@@ -12,7 +13,7 @@\n"),
+        "{}",
+        hunks[0][1]
+    );
+    assert!(hunks[1][0].starts_with("diff --git a/docs/新.md b/docs/新.md\n--- /dev/null\n+++ b/docs/新.md\n@@ -0,0 +1,2 @@\n+甲\n+乙\n"), "{}", hunks[1][0]);
+    // 整份给终端看的：每个文件头只一次，段头后附与逐段准奏一致的段号。
+    let all = unified_diff(&files);
+    assert_eq!(all.matches("diff --git a/src/a.rs").count(), 1);
+    for n in 1..=3 {
+        assert!(all.contains(&format!(" @@ 第 {n} 段\n")), "{all}");
+    }
+    assert!(all.contains("@@ -12,7 +13,7 @@ 第 2 段\n"), "{all}");
+}
+
+#[test]
+fn ansi_output_parses_into_styled_spans_and_escaped_html() {
+    let text = "\n\x1b[34m│\x1b[38;2;1;2;3mfn\x1b[0m <b>\x1b[48;2;0;40;0;38;5;196mx\x1b[0m\x1b[0K\n\x1b]8;;http://x\x1b\\链接\x1b]8;;\x1b\\\x1b[1;3mY\x1b[22;23mZ\n\n";
+    let lines = ansi_lines(text);
+    assert_eq!(lines.len(), 2, "首尾空行去掉：{lines:?}");
+    let blue = AnsiStyle {
+        fg: Some((36, 114, 200)),
+        ..Default::default()
+    };
+    assert_eq!(lines[0][0], ("│".into(), blue));
+    assert_eq!(lines[0][1].1.fg, Some((1, 2, 3)));
+    assert_eq!(lines[0][2], (" <b>".into(), AnsiStyle::default()));
+    assert_eq!(lines[0][3].1.bg, Some((0, 40, 0)));
+    assert_eq!(lines[0][3].1.fg, Some((255, 0, 0)));
+    // OSC 链接只留文字；粗斜体可分别关掉。
+    let second: Vec<_> = lines[1]
+        .iter()
+        .map(|(t, s)| (t.as_str(), s.bold, s.italic))
+        .collect();
+    assert_eq!(
+        second,
+        [
+            ("链接", false, false),
+            ("Y", true, true),
+            ("Z", false, false)
+        ]
+    );
+    let html = ansi_html(text);
+    assert!(html[0].contains(" &lt;b&gt;"), "{}", html[0]);
+    assert!(
+        html[0].contains("<span style=\"color:#010203\">fn</span>"),
+        "{}",
+        html[0]
+    );
+    assert!(
+        html[0].contains("background:#002800;color:#ff0000")
+            || html[0].contains("color:#ff0000;background:#002800"),
+        "{}",
+        html[0]
+    );
+}
+
+#[test]
+fn delta_probe_rejects_what_is_not_git_delta() {
+    let missing = std::env::temp_dir().join("ziyuan-no-such-delta.exe");
+    assert!(Delta::probe(&missing).is_none());
+}
+
+/// 设了 ZIYUAN_DELTA 时用真的 git-delta 渲染一段；未设则跳过（CI 不装 delta）。
+#[test]
+fn real_git_delta_renders_hunks_when_configured() {
+    let Some(path) = std::env::var_os("ZIYUAN_DELTA").filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let delta = Delta::probe(Path::new(&path)).expect("ZIYUAN_DELTA 应指向 git-delta");
+    let files = [FileChange {
+        path: "src/x.rs".into(),
+        before: Some("fn main() {\n    old();\n}\n".into()),
+        after: "fn main() {\n    new();\n}\n".into(),
+    }];
+    let diff = &unified_hunks(&files)[0][0];
+    for side_by_side in [false, true] {
+        let style = DeltaStyle {
+            side_by_side,
+            width: 100,
+            light: true,
+        };
+        let lines = ansi_lines(&delta.render(diff, style).unwrap());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.iter().map(|(t, _)| t.as_str()).collect())
+            .collect();
+        assert!(text.iter().any(|l| l.contains("new();")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("old();")), "{text:?}");
+        // 带行号；并排时新旧在同一行。
+        assert!(text.iter().any(|l| l.contains('2')), "{text:?}");
+        assert_eq!(
+            text.iter()
+                .any(|l| l.contains("old();") && l.contains("new();")),
+            side_by_side,
+            "{text:?}"
+        );
+    }
+}

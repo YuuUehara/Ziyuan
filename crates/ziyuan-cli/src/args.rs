@@ -84,7 +84,8 @@ pub(crate) enum Command {
     Appoint(AgentId, Office),
     Examine(AgentId),
     Review(TaskId, Verdict, String),
-    Diff(TaskId),
+    /// 诏令、左右并排、不经 delta。
+    Diff(TaskId, bool, bool),
     /// 空列表表示由尚书拆分。
     Split(TaskId, Vec<(AgentId, String)>),
     /// 诏令、与议官员（空为默认人选）、轮数。
@@ -300,7 +301,13 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             Err(_) => return Err("用法: ziyuan appoint <官员ID> <官职>".into()),
         },
         "examine" => Command::Examine(parse_id(&args, "ziyuan examine <官员ID>")?),
-        "diff" => Command::Diff(task_id(&args, "ziyuan diff <诏令ID>")?),
+        "diff" => {
+            const USAGE: &str = "ziyuan diff <诏令ID> [--side-by-side] [--plain]";
+            let side = args.iter().any(|a| a == "--side-by-side");
+            let plain = args.iter().any(|a| a == "--plain");
+            args.retain(|a| a != "--side-by-side" && a != "--plain");
+            Command::Diff(task_id(&args, USAGE)?, side, plain)
+        }
         "kaocheng" => no_args(args, Command::Kaocheng)?,
         "post" => parse_post(args)?,
         "urgent" => match <[String; 1]>::try_from(args) {

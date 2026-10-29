@@ -482,3 +482,21 @@ fn officials_tab_names_vacancies_and_their_impact() {
     assert!(shown.contains("吏部荐 #1 "), "{shown}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn z_cycles_the_diff_view_only_when_git_delta_is_usable() {
+    let (mut app, _messages, root) = temp_app("diff-view");
+    press(&mut app, "n");
+    press(&mut app, "查\n");
+    press(&mut app, "z");
+    if ziyuan_app::delta().is_some() {
+        assert_eq!(app.diff_view, DiffView::Delta);
+        press(&mut app, "zz");
+        assert_eq!(app.diff_view, DiffView::Builtin);
+    } else {
+        // 找不到 git-delta（包括同名而非 git-delta 的程序）时留在内置预览并说明。
+        assert_eq!(app.diff_view, DiffView::Builtin);
+        assert!(app.status.as_ref().unwrap().0.contains("git-delta"));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

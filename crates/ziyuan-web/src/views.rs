@@ -1,6 +1,6 @@
 //! 只读的 API：朝廷、起居注、廷推建议、考成、督职、预算、实录与 SSE 事件流。
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{Extension, Json};
 use futures_util::stream::{self, Stream};
@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use tokio::sync::broadcast;
 use ziyuan_app::{
-    HistoryFilter, duzhi_report, format_time, history_entries, kaocheng_report, parse_time,
-    tz_offset,
+    DeltaStyle, HistoryFilter, ansi_html, changes_version, duzhi_report, format_time,
+    history_entries, kaocheng_report, parse_time, tz_offset, unified_hunks,
 };
 use ziyuan_core::{AgentId, Office, TaskId};
 
@@ -39,7 +39,78 @@ pub(crate) async fn state(
     value["watching"] = json!(app.watching());
     value["github"] = json!(app.0.config.github.as_ref().map(|g| g.repo().to_owned()));
     value["viewer"] = json!(role == Role::Viewer);
+    // 首次要实跑探测 git-delta，放到阻塞线程。
+    value["delta"] = json!(
+        tokio::task::spawn_blocking(|| ziyuan_app::delta().is_some())
+            .await
+            .unwrap_or(false)
+    );
     Ok(Json(value))
+}
+
+/// 一次最多交给 delta 渲染的段数：每段起一个进程。
+const DELTA_MAX_HUNKS: usize = 300;
+
+/// 某诏令呈报的改动经 git-delta 逐段渲染成 HTML：`?side=1` 左右并排，`width` 为列宽
+/// （默认 120），`light=1` 浅色底。段号与预览、逐段准奏一致；`version` 同预览，页面据以确认
+/// 渲染的正是眼前这份改动。
+pub(crate) async fn changes_delta(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let flag = |key: &str| query.get(key).map(String::as_str) == Some("1");
+    let style = DeltaStyle {
+        side_by_side: flag("side"),
+        width: query
+            .get("width")
+            .and_then(|w| w.parse::<u16>().ok())
+            .unwrap_or(120)
+            .clamp(40, 400),
+        light: flag("light"),
+    };
+    let files = app
+        .with_session(move |s| {
+            Ok(s.court()
+                .task(TaskId(id))
+                .and_then(|t| t.changes.as_ref())
+                .map(|c| c.files.clone()))
+        })
+        .await?
+        .ok_or_else(|| ApiError::bad(format!("诏令 #{id} 没有呈报改动")))?;
+    tokio::task::spawn_blocking(move || {
+        let delta = ziyuan_app::delta().ok_or_else(|| {
+            ApiError::bad("未找到可用的 git-delta：设 ZIYUAN_DELTA 为 git-delta 可执行文件的路径")
+        })?;
+        let hunks = unified_hunks(&files);
+        if hunks.iter().map(Vec::len).sum::<usize>() > DELTA_MAX_HUNKS {
+            return Err(ApiError::bad(format!(
+                "改动超过 {DELTA_MAX_HUNKS} 段，不交 delta 渲染"
+            )));
+        }
+        let mut number = 0;
+        let rendered: Vec<Value> = files
+            .iter()
+            .zip(hunks)
+            .map(|(f, hunks)| {
+                let hunks: Vec<Value> = hunks
+                    .iter()
+                    .map(|diff| {
+                        number += 1;
+                        match delta.render(diff, style) {
+                            Ok(out) => json!({ "number": number, "html": ansi_html(&out) }),
+                            Err(e) => json!({ "number": number, "error": e }),
+                        }
+                    })
+                    .collect();
+                json!({ "path": f.path, "hunks": hunks })
+            })
+            .collect();
+        Ok(json!({ "version": changes_version(&files), "files": rendered }))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map(Json)
 }
 
 /// 起居注：可按 `task`、`official`、`kind`、`since`、`until`（同 CLI：`2h`、`2026-10-25 14:30`）筛选；

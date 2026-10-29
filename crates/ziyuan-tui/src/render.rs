@@ -8,17 +8,46 @@ use ratatui::widgets::{
     Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use ziyuan_app::{
-    HistoryEntry, HistoryFilter, describe_record, estimate_cost, format_time, history_entries,
-    preview_changes, seal_note, skipped_note, stale_files, suspicion_status, tz_offset,
+    AnsiStyle, DeltaStyle, HistoryEntry, HistoryFilter, ansi_lines, changes_version,
+    describe_record, estimate_cost, format_time, history_entries, preview_changes, seal_note,
+    skipped_note, stale_files, suspicion_status, tz_offset, unified_hunks,
 };
+use ziyuan_core::FileChange;
 use ziyuan_core::{
-    AgentId, BudgetScope, CensorVerdict, Department, NO_ART, Office, Persona, Seal, Speech,
+    AgentId, BudgetScope, CensorVerdict, Department, NO_ART, Office, Persona, Seal, Speech, TaskId,
     Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 
 use crate::App;
-use crate::app::{ChooseKind, ConfirmKind, InputKind, Modal, TABS, Tab};
+use crate::app::{ChooseKind, ConfirmKind, DiffView, InputKind, Modal, TABS, Tab};
+
+/// 一次最多交给 git-delta 渲染的段数：每段起一个进程，且在绘制中同步进行。
+const DELTA_MAX_HUNKS: usize = 300;
+
+fn ansi_style(s: AnsiStyle) -> Style {
+    let rgb = |(r, g, b): (u8, u8, u8)| Color::Rgb(r, g, b);
+    let mut style = Style::new();
+    if let Some(c) = s.fg {
+        style = style.fg(rgb(c));
+    }
+    if let Some(c) = s.bg {
+        style = style.bg(rgb(c));
+    }
+    if s.bold {
+        style = style.bold();
+    }
+    if s.dim {
+        style = style.dim();
+    }
+    if s.italic {
+        style = style.italic();
+    }
+    if s.underline {
+        style = style.underlined();
+    }
+    style
+}
 
 /// 起居注页只列最近这么多条：事件簿有几十万条时，逐条描述会让每一帧都卡住。
 pub(crate) const HISTORY_LIMIT: usize = 1000;
@@ -244,6 +273,7 @@ impl App {
             frame.render_widget(Paragraph::new("").block(panel("详情".into())), detail_area);
             return;
         };
+        self.detail_width.set(detail_area.width.saturating_sub(2));
         let (text, following) = self.task_detail(task);
         let paragraph = Paragraph::new(text)
             .wrap(Wrap { trim: false })
@@ -264,6 +294,54 @@ impl App {
     }
 
     /// 诏令详情，以及是否应跟随末尾（正在流式输出）。
+    /// 按 [`DiffView`] 经 git-delta 渲染的各段（按段号排）；内置预览、找不到 delta、段太多或
+    /// 渲染出错时为 `None`。按改动版本与宽度缓存。
+    fn delta_hunks(&self, task: TaskId, files: &[FileChange]) -> Option<Vec<Vec<Line<'static>>>> {
+        let side_by_side = match self.diff_view {
+            DiffView::Builtin => return None,
+            DiffView::Delta => false,
+            DiffView::DeltaSide => true,
+        };
+        let width = self.detail_width.get().max(40);
+        let key = (task, changes_version(files), side_by_side, width);
+        if let Some(hit) = self.delta_cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let render = || {
+            let delta = ziyuan_app::delta()?;
+            let hunks: Vec<String> = unified_hunks(files).into_iter().flatten().collect();
+            if hunks.len() > DELTA_MAX_HUNKS {
+                return None;
+            }
+            let style = DeltaStyle {
+                side_by_side,
+                width,
+                light: false,
+            };
+            hunks
+                .iter()
+                .map(|diff| {
+                    let out = delta.render(diff, style).ok()?;
+                    Some(
+                        ansi_lines(&out)
+                            .into_iter()
+                            .map(|l| {
+                                Line::from(
+                                    l.into_iter()
+                                        .map(|(t, s)| Span::styled(t, ansi_style(s)))
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect::<Option<Vec<_>>>()
+        };
+        let rendered = render();
+        self.delta_cache.borrow_mut().insert(key, rendered.clone());
+        rendered
+    }
+
     pub(crate) fn task_detail(&self, task: &Task) -> (Text<'static>, bool) {
         let court = self.court();
         let name = |id: AgentId| court.agent(id).map_or("?".to_owned(), |a| a.name.clone());
@@ -452,6 +530,10 @@ impl App {
                 ChangeState::Proposed => stale_files(&self.config.root, &changes.files),
                 _ => vec![false; changes.files.len()],
             };
+            let delta = self.delta_hunks(task.edict.id, &changes.files);
+            if self.diff_view != DiffView::Builtin && delta.is_none() {
+                lines.push(Line::from("git-delta 未能渲染，改用内置预览（z 切换）").dim());
+            }
             // 与 Web 同一份预览：行号、按语言着色，成对删增行中改动的字词加底色。
             for (file, stale) in preview_changes(&changes.files).into_iter().zip(stale) {
                 let created = if file.created { "（新建）" } else { "" };
@@ -465,6 +547,12 @@ impl App {
                 lines.push(Line::from(head));
                 for hunk in &file.hunks {
                     lines.push(Line::from(format!("@@ 第 {} 段 @@", hunk.number)).dim());
+                    if let Some(rendered) =
+                        delta.as_ref().and_then(|d| d.get(hunk.number as usize - 1))
+                    {
+                        lines.extend(rendered.iter().cloned());
+                        continue;
+                    }
                     for line in &hunk.lines {
                         // (记号, 记号色, 行底色, 改动字词的底色)
                         let (sign, tint, back, mark) = match line.kind {
@@ -774,6 +862,7 @@ impl App {
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
                 ("w/W/u", "准奏/逐段/驳回改动"),
+                ("z", "改动显示"),
                 ("f", "分办"),
                 ("v", "廷议"),
                 ("i", "复核"),

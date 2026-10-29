@@ -64,6 +64,6 @@ v0.8.0（已发布）：朝堂缺位时吏部荐举人选（闲居、专长相�
 都是新增，不破坏冻结的接口，可按需提前：
 
 - ~~**号舍：进程级沙箱**~~ `run_tests` 已入号舍（取贡院号舍之意：考生锁入单间，与外界隔绝）：Linux 用 bubblewrap，macOS 用 Seatbelt，默认断网、只可写测试副本，可按域名放行（经本机门吏代理）。本地外藩可在名册中写 `haoshe` 入号舍。余下：Windows 按 [ADR-0001](adr-0001-windows-sandbox.md) 执行（v1.0 对需隔离的执行 fail closed，原生号舍满足再评估条件后另立 crate）；Linux 不装 bubblewrap 时改用内核自带的 Landlock。
-- ~~**改动预览**~~ 已完成：后端以 `similar` 求词级差异，以 `syntect` 按语言着色，Web 与 TUI 共用同一份结果。
+- ~~**改动预览**~~ 已完成：后端以 `similar` 求词级差异，以 `syntect` 按语言着色，Web 与 TUI 共用同一份结果。Web 另有统一/左右视图、文件树与 `+N −N`、逐段处置与 `base_hash`；可选经 git-delta 渲染（Web、TUI、`ziyuan diff`）。差异算法换 imara-diff 待基准测试后再议；语义（结构化）差异留作可选视图。
 - ~~**奉天门改版**~~ 已完成「三殿分区」：分殿导航、诏令列表与全文并排，配色汝窑天青、墨分五色、青绿山水三套可切换。
 

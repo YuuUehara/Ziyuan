@@ -40,6 +40,17 @@ pub enum Message {
     Nominated(Office, Result<String, String>),
 }
 
+/// 改动的显示方式。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DiffView {
+    /// 内置预览（行号、按语言着色、词级标记）。
+    Builtin,
+    /// 经 git-delta。
+    Delta,
+    /// 经 git-delta，左右并排。
+    DeltaSide,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
     Edicts,
@@ -156,6 +167,9 @@ impl App {
             run: None,
             live: HashMap::new(),
             debating: HashMap::new(),
+            diff_view: DiffView::Builtin,
+            detail_width: Default::default(),
+            delta_cache: Default::default(),
             quit: false,
         };
         Ok((app, receiver))
