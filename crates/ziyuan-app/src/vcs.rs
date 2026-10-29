@@ -178,7 +178,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(made.vcs, "jj");
-        let files = |rev: &str| run(&root, "jj", &["diff", "-r", rev, "--name-only"]).unwrap();
+        // jj 在 Windows 上可能以反斜杠显示路径（0.45.1 实测），归一化后再断言。
+        let files = |rev: &str| {
+            run(&root, "jj", &["diff", "-r", rev, "--name-only"])
+                .unwrap()
+                .replace('\\', "/")
+        };
         assert_eq!(files("@-"), "docs/新 文.md");
         assert_eq!(files("@"), "other.txt");
         let message = run(
