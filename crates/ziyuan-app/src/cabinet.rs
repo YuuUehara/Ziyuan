@@ -98,8 +98,13 @@ pub(crate) fn summary_prompt(court: &Court, task: &Task) -> String {
             TaskStatus::Cancelled => "已撤销".to_owned(),
             TaskStatus::Pending | TaskStatus::Assigned(_) => "未结束".to_owned(),
         };
+        let artifact = sub
+            .dag
+            .as_ref()
+            .and_then(|d| d.artifact.as_deref())
+            .map_or(String::new(), |a| format!("（约定产出：{a}）"));
         out.push_str(&format!(
-            "\n## 子诏令 #{}（{name}）：{}\n{outcome}\n",
+            "\n## 子诏令 #{}（{name}）：{}{artifact}\n{outcome}\n",
             id.0, sub.edict.text
         ));
     }
@@ -374,7 +379,7 @@ impl<S: EventStore> Session<S> {
     }
 
     /// 御定分办：皇帝亲自把待办诏令拆给本部官员，`plan` 为 (承办者, 子诏令内容)。
-    /// 返回子诏令 ID。
+    /// 写子诏令（玉玺含动土木之权）查阅范围彼此重叠，自动按 ID 次序串行。返回子诏令 ID。
     pub fn split(
         &mut self,
         task: TaskId,
@@ -382,13 +387,7 @@ impl<S: EventStore> Session<S> {
     ) -> Result<Vec<TaskId>, AppError> {
         self.commit(|court| {
             let note = "御定分办".to_owned();
-            Ok(vec![court.propose_split(
-                task,
-                plan.clone(),
-                note,
-                None,
-                TokenUsage::default(),
-            )?])
+            court.propose_split_serial_writes(task, plan.clone(), note, None, TokenUsage::default())
         })?;
         Ok(self.subtasks_of(task))
     }
@@ -484,13 +483,13 @@ impl<S: EventStore> Session<S> {
             note
         };
         self.commit(|court| {
-            Ok(vec![court.propose_split(
+            court.propose_split_serial_writes(
                 task,
                 plan.clone(),
                 note.clone(),
                 model.clone(),
                 usage,
-            )?])
+            )
         })?;
         Ok(self.subtasks_of(task))
     }

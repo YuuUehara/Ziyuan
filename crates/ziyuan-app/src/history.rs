@@ -94,6 +94,9 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         EdictSplit { task, subtasks, .. } => std::iter::once(*task)
             .chain(subtasks.iter().map(|s| s.id))
             .collect(),
+        EdictDag { task, nodes } => std::iter::once(*task)
+            .chain(nodes.iter().map(|n| n.task))
+            .collect(),
         EdictDrafted { task, .. }
         | CourtDebated { task, .. }
         | EdictApproved { task }
@@ -268,6 +271,27 @@ pub fn describe_event(event: &CourtEvent) -> String {
                 .map(|s| format!("#{}→#{}", s.id.0, s.worker.0))
                 .collect();
             format!("诏令 #{} 分办：{}", task.0, parts.join("、"))
+        }
+        CourtEvent::EdictDag { task, nodes } => {
+            let parts: Vec<_> = nodes
+                .iter()
+                .map(|n| {
+                    let deps = if n.dependencies.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "（先办 {}）",
+                            n.dependencies
+                                .iter()
+                                .map(|d| format!("#{}", d.0))
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        )
+                    };
+                    format!("#{}{deps}", n.task.0)
+                })
+                .collect();
+            format!("诏令 #{} 排程：{}", task.0, parts.join("、"))
         }
         CourtEvent::CensorReported {
             task,

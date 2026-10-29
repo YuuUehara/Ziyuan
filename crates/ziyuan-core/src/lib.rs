@@ -10,7 +10,7 @@ mod usage;
 
 pub use agent::{Agent, NO_ART, Persona, default_styles};
 pub use changes::{FileChange, Hunk};
-pub use event::{CourtEvent, Edict, Nomination, Speech, Subtask, Template};
+pub use event::{CourtEvent, DagNode, Edict, Nomination, Speech, Subtask, Template};
 pub use office::{BudgetScope, Department, GovernanceMode, Office};
 pub use records::{Record, find_records, search_records};
 pub use review::{

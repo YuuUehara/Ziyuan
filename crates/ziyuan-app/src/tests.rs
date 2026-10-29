@@ -11,8 +11,9 @@ use crate::time::*;
 use std::path::Path;
 use std::sync::Arc;
 use ziyuan_core::{
-    AgentId, BudgetScope, CHANGELOG, Capability, CensorVerdict, CourtEvent, Department, Evidence,
-    FileChange, GovernanceMode, Office, Persona, Price, Seal, TaskId, Threat, TokenUsage, Verdict,
+    AgentId, BudgetScope, CHANGELOG, Capability, CensorVerdict, CourtEvent, DagNode, Department,
+    Evidence, FileChange, GovernanceMode, Office, Persona, Price, Seal, TaskId, Threat, TokenUsage,
+    Verdict,
 };
 use ziyuan_governance::{Court, GovernanceError, TaskStatus};
 use ziyuan_runtime::{BoxError, CancelToken, Job, Outcome, Scheduler, WorkerBackend};
@@ -2555,6 +2556,231 @@ async fn minister_splits_an_edict_and_summarizes_the_subtasks() {
     }
 }
 
+#[tokio::test]
+async fn write_splits_run_serially_and_upstream_failure_blocks_the_rest() {
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let seal = Seal {
+        capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+        scope: vec![".".into()],
+        mcp: Default::default(),
+    };
+    let parent = session
+        .issue(Department::Works, "改全库".into(), seal.clone())
+        .unwrap()
+        .id;
+    let subs = session
+        .split(
+            parent,
+            vec![(AgentId(4), "改甲".into()), (AgentId(4), "改乙".into())],
+        )
+        .unwrap();
+    // 写子诏令查阅范围重叠：自动串行，后一件待前一件。
+    let court = session.court();
+    let second = court.task(subs[1]).unwrap();
+    assert_eq!(second.dag.as_ref().unwrap().dependencies, [subs[0]]);
+    assert_eq!(court.blocked_by(second), Some(subs[0]));
+
+    let planner = Planner::default();
+    session
+        .run_open(&scheduler(planner.clone()), &CancelToken::new(), |_| {})
+        .await
+        .unwrap();
+    let jobs = planner.0.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 3, "两件子诏令依序承办，末了尚书汇总");
+    assert!(
+        jobs[1].0.contains("上游子诏令的回奏") && jobs[1].0.contains("办妥：改甲"),
+        "{}",
+        jobs[1].0
+    );
+    for id in [parent].into_iter().chain(subs.iter().copied()) {
+        assert!(matches!(
+            session.court().task(id).unwrap().status,
+            TaskStatus::Completed { .. }
+        ));
+    }
+
+    // 上游失败：下游受阻不调度；撤销后尚书照旧汇总。
+    let next = session
+        .issue(Department::Works, "再改".into(), seal)
+        .unwrap()
+        .id;
+    let subs = session
+        .split(
+            next,
+            vec![(AgentId(4), "改丙".into()), (AgentId(4), "改丁".into())],
+        )
+        .unwrap();
+    session
+        .run_open(&scheduler(Broken), &CancelToken::new(), |_| {})
+        .await
+        .unwrap();
+    let court = session.court();
+    assert!(matches!(
+        court.task(subs[0]).unwrap().status,
+        TaskStatus::Failed { .. }
+    ));
+    let blocked = court.task(subs[1]).unwrap();
+    assert_eq!(blocked.status, TaskStatus::Pending);
+    assert_eq!(court.blocked_by(blocked), Some(subs[0]));
+    assert!(court.runnable_tasks().is_empty());
+    let direct_planner = Planner::default();
+    session
+        .run(
+            &[subs[1]],
+            &scheduler(direct_planner.clone()),
+            &CancelToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(direct_planner.0.lock().unwrap().is_empty());
+    assert_eq!(
+        session.court().task(subs[1]).unwrap().status,
+        TaskStatus::Pending
+    );
+    session.cancel(subs[1]).unwrap();
+    let summary_planner = Planner::default();
+    session
+        .run_open(
+            &scheduler(summary_planner.clone()),
+            &CancelToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    let summary = summary_planner.0.lock().unwrap().clone();
+    assert_eq!(summary.len(), 1, "只余尚书汇总一件");
+    assert!(
+        summary[0].0.contains("失败：模型不可用") && summary[0].0.contains("已撤销"),
+        "{}",
+        summary[0].0
+    );
+    assert!(matches!(
+        session.court().task(next).unwrap().status,
+        TaskStatus::Completed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn dag_artifacts_are_included_in_downstream_and_summary_prompts() {
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let parent = session
+        .issue(Department::Works, "汇总产出".into(), Seal::default())
+        .unwrap()
+        .id;
+    let node = |task, dependencies, artifact: &str| DagNode {
+        task: TaskId(task),
+        dependencies,
+        attempts: None,
+        deadline: None,
+        budget: None,
+        artifact: Some(artifact.into()),
+        approval_required: false,
+        idempotency_key: None,
+    };
+    session
+        .commit(|court| {
+            court.propose_split_dag(
+                parent,
+                vec![(AgentId(4), "先盘点".into()), (AgentId(4), "再复核".into())],
+                "御定分办".into(),
+                None,
+                TokenUsage::default(),
+                vec![
+                    node(TaskId(2).0, Vec::new(), "storage-report.json"),
+                    node(TaskId(3).0, vec![TaskId(2)], "verification.txt"),
+                ],
+            )
+        })
+        .unwrap();
+
+    let planner = Planner::default();
+    session
+        .run_open(&scheduler(planner.clone()), &CancelToken::new(), |_| {})
+        .await
+        .unwrap();
+    let jobs = planner.0.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 3);
+    assert!(
+        jobs[0].0.contains("约定产出：storage-report.json"),
+        "{}",
+        jobs[0].0
+    );
+    assert!(
+        jobs[1].0.contains("上游子诏令的回奏")
+            && jobs[1].0.contains("办妥：先盘点")
+            && jobs[1].0.contains("约定产出：verification.txt"),
+        "{}",
+        jobs[1].0
+    );
+    assert!(
+        jobs[2].0.contains("子诏令 #2")
+            && jobs[2].0.contains("storage-report.json")
+            && jobs[2].0.contains("子诏令 #3")
+            && jobs[2].0.contains("verification.txt"),
+        "{}",
+        jobs[2].0
+    );
+}
+
+#[tokio::test]
+async fn dag_deadline_and_attempt_limits_fail_instead_of_assigning() {
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let parent = session
+        .issue(Department::Works, "限时办".into(), Seal::default())
+        .unwrap()
+        .id;
+    let node = |task: u64, attempts: Option<u32>, deadline: Option<u64>| DagNode {
+        task: TaskId(task),
+        dependencies: Vec::new(),
+        attempts,
+        deadline,
+        budget: None,
+        artifact: None,
+        approval_required: false,
+        idempotency_key: None,
+    };
+    // 皇帝排程：#2 限期已过；#3 只许一次尝试，且已用于中断前的一回。
+    session
+        .commit(|court| {
+            court.propose_split_dag(
+                parent,
+                vec![(AgentId(4), "甲".into()), (AgentId(4), "乙".into())],
+                "御定分办".into(),
+                None,
+                TokenUsage::default(),
+                vec![node(2, None, Some(now() - 1)), node(3, Some(1), None)],
+            )
+        })
+        .unwrap();
+    session
+        .commit(|_| {
+            Ok(vec![CourtEvent::TaskAssigned {
+                task: TaskId(3),
+                worker: AgentId(4),
+                model: None,
+            }])
+        })
+        .unwrap();
+    session
+        .run_open(&scheduler(Planner::default()), &CancelToken::new(), |_| {})
+        .await
+        .unwrap();
+    let reason = |id: u64| match &session.court().task(TaskId(id)).unwrap().status {
+        TaskStatus::Failed { reason, .. } => reason.clone(),
+        other => panic!("#{id} 应失败，实为 {other:?}"),
+    };
+    assert!(reason(2).contains("期限已过"), "{}", reason(2));
+    assert!(reason(3).contains("尝试次数已尽"), "{}", reason(3));
+    // 两件子诏令既结，尚书照旧汇总。
+    assert!(matches!(
+        session.court().task(parent).unwrap().status,
+        TaskStatus::Completed { .. }
+    ));
+}
 /// 调用一次工具后失败。
 struct Broken;
 impl WorkerBackend for Broken {

@@ -8,8 +8,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use ziyuan_app::Session;
 use ziyuan_core::{
-    AgentId, BudgetScope, Department, GovernanceMode, Office, Seal, TaskId, Verdict,
+    AgentId, BudgetScope, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId,
+    TokenUsage, Verdict,
 };
+use ziyuan_governance::{Court, founding_events};
 use ziyuan_runtime::Limits;
 use ziyuan_storage::EventLog;
 
@@ -499,4 +501,40 @@ fn z_cycles_the_diff_view_only_when_git_delta_is_usable() {
         assert!(app.status.as_ref().unwrap().0.contains("git-delta"));
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn blocked_dag_subtask_uses_the_blocked_status_badge() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let edict = court
+        .new_edict(
+            Department::Works,
+            "改全库".into(),
+            Seal {
+                capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+                scope: vec![".".into()],
+                mcp: Default::default(),
+            },
+        )
+        .unwrap();
+    let parent = edict.id;
+    court
+        .apply(&CourtEvent::EdictIssued(Box::new(edict)))
+        .unwrap();
+    let events = court
+        .propose_split_serial_writes(
+            parent,
+            vec![(AgentId(4), "改甲".into()), (AgentId(2), "改乙".into())],
+            "御定分办".into(),
+            None,
+            TokenUsage::default(),
+        )
+        .unwrap();
+    for event in events {
+        court.apply(&event).unwrap();
+    }
+
+    let subtasks = &court.task(parent).unwrap().split.as_ref().unwrap().subtasks;
+    let blocked = court.task(subtasks[1]).unwrap();
+    assert_eq!(crate::render::status_badge(&court, blocked).0, "受阻");
 }

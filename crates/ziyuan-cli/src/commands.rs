@@ -194,6 +194,16 @@ pub(crate) fn execute(
             let court = session.court();
             let tasks = court.runnable_tasks();
             let waiting = court.tasks().filter(|t| court.needs_approval(t)).count();
+            let blocked: Vec<_> = court
+                .tasks()
+                .filter(|task| task.status.is_open())
+                .filter_map(|task| {
+                    court
+                        .blocked_by(task)
+                        .map(|dependency| (task.edict.id, dependency))
+                })
+                .map(|(task, dependency)| format!("#{}←#{}", task.0, dependency.0))
+                .collect();
             if waiting > 0 && !court.in_retreat() {
                 eprintln!(
                     "另有 {waiting} 件诏令待批红（`ziyuan approve <诏令ID|all>`），本次不执行。"
@@ -201,7 +211,15 @@ pub(crate) fn execute(
             }
             // 修道期间待批红的诏令由司礼监在执行时代批红。
             if tasks.is_empty() && !(court.in_retreat() && waiting > 0) {
-                println!("没有未结束的诏令。");
+                if blocked.is_empty() {
+                    println!("没有未结束的诏令。");
+                } else {
+                    println!(
+                        "没有可执行的诏令：依赖受阻 {} 件（{}）。用 `ziyuan tasks` 查看，并撤销受阻子诏令后再汇总。",
+                        blocked.len(),
+                        blocked.join("、")
+                    );
+                }
             } else {
                 run_tasks(session, None, worker_backend()?, limits)?;
             }
@@ -227,6 +245,10 @@ pub(crate) fn execute(
                             Ok(route) => format!("待批红（{label}：{}）", route.path.join(" → ")),
                             Err(e) => format!("待批红（票拟不成：{e}）"),
                         }
+                    }
+                    TaskStatus::Pending if court.blocked_by(task).is_some() => {
+                        let blocker = court.blocked_by(task).expect("刚查过");
+                        format!("受阻（先办 #{} 未成）", blocker.0)
                     }
                     TaskStatus::Pending => "待办".to_owned(),
                     TaskStatus::Assigned(w) => format!("已指派 {}（未结束）", name(*w)),
@@ -787,11 +809,32 @@ pub(crate) fn execute(
                 .and_then(|t| t.split.as_ref())
                 .map_or("", |s| s.note.as_str());
             println!("诏令 #{} 分办（{note}）：", task.0);
+            let mut chained = false;
             for id in subtasks {
                 let sub = court.task(id).expect("刚分办");
                 let worker = sub.assignee.and_then(|a| court.agent(a));
                 let name = worker.map_or("?", |a| a.name.as_str());
-                println!("  #{} → {name}：{}", id.0, sub.edict.text);
+                let deps = sub
+                    .dag
+                    .as_ref()
+                    .map(|d| d.dependencies.as_slice())
+                    .unwrap_or_default();
+                let order = if deps.is_empty() {
+                    String::new()
+                } else {
+                    chained = true;
+                    format!(
+                        "（先办 {}）",
+                        deps.iter()
+                            .map(|d| format!("#{}", d.0))
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )
+                };
+                println!("  #{} → {name}：{}{order}", id.0, sub.edict.text);
+            }
+            if chained {
+                println!("写子诏令查阅范围重叠，已按上述次序自动串行；上游失败则下游受阻。");
             }
             println!("`ziyuan run` 执行；子诏令全部结束后由尚书汇总回奏。");
         }

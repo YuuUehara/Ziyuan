@@ -1,6 +1,6 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
-    Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, Department, Edict,
+    Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, DagNode, Department, Edict,
     Evidence, FileChange, GovernanceMode, Nomination, Office, Seal, Speech, Subtask, TaskId,
     Template, Threat, TokenUsage, Verdict,
 };
@@ -206,6 +206,8 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
                 None => line,
             }
         }
+        // 排程节点见 `encode_dag`；与 `EdictSplit` 一同写入。
+        EdictDag { task, nodes } => format!("v1\tDAG\t{}\t{}", task.0, encode_dag(nodes)),
         // 发言为 `官员ID;官职;内容hex;输入;输出;模型hex（无模型为空）`，以逗号分隔。
         CourtDebated { task, speeches } => {
             format!("v1\tDEBATED\t{}\t{}", task.0, encode_speeches(speeches))
@@ -503,6 +505,89 @@ fn decode_votes(field: &str) -> Result<Vec<Nomination>, String> {
         .collect()
 }
 
+/// 排程节点为 `子ID;依赖(+相连，无依赖为 -);尝试上限(-);期限(-);度支(-);产出hex;须批红0/1;幂等键hex`，
+/// 以逗号分隔；产出与幂等键两段空即无。
+fn encode_dag(nodes: &[DagNode]) -> String {
+    let parts: Vec<_> = nodes
+        .iter()
+        .map(|n| {
+            let optional = |v: Option<u64>| v.map_or("-".to_owned(), |x| x.to_string());
+            let deps = if n.dependencies.is_empty() {
+                "-".to_owned()
+            } else {
+                n.dependencies
+                    .iter()
+                    .map(|d| d.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            };
+            format!(
+                "{};{};{};{};{};{};{};{}",
+                n.task.0,
+                deps,
+                optional(n.attempts.map(u64::from)),
+                optional(n.deadline),
+                optional(n.budget),
+                n.artifact.as_deref().map(to_hex).unwrap_or_default(),
+                u8::from(n.approval_required),
+                n.idempotency_key.as_deref().map(to_hex).unwrap_or_default()
+            )
+        })
+        .collect();
+    parts.join(",")
+}
+
+fn decode_dag(field: &str) -> Result<Vec<DagNode>, String> {
+    let number = |s: &str| -> Result<u64, String> { s.parse::<u64>().map_err(|e| e.to_string()) };
+    split_list(field)
+        .map(|entry| {
+            let [
+                task,
+                deps,
+                attempts,
+                deadline,
+                budget,
+                artifact,
+                approval,
+                idem,
+            ] = entry.split(';').collect::<Vec<_>>()[..]
+            else {
+                return Err("排程节点字段不合法".into());
+            };
+            let optional = |s: &str| -> Result<Option<u64>, String> {
+                (s != "-").then(|| number(s)).transpose()
+            };
+            let text = |s: &str| -> Result<Option<String>, String> {
+                match from_hex(s)?.as_str() {
+                    "" => Ok(None),
+                    found => Ok(Some(found.to_owned())),
+                }
+            };
+            Ok(DagNode {
+                task: TaskId(number(task)?),
+                dependencies: if deps == "-" {
+                    Vec::new()
+                } else {
+                    deps.split('+')
+                        .map(|d| number(d).map(TaskId))
+                        .collect::<Result<Vec<_>, _>>()?
+                },
+                attempts: optional(attempts)?
+                    .map(|v| u32::try_from(v).map_err(|e| e.to_string()))
+                    .transpose()?,
+                deadline: optional(deadline)?,
+                budget: optional(budget)?,
+                artifact: text(artifact)?,
+                approval_required: match approval {
+                    "1" => true,
+                    "0" => false,
+                    other => return Err(format!("批红标记无效: {other}")),
+                },
+                idempotency_key: text(idem)?,
+            })
+        })
+        .collect()
+}
 /// 逗号分隔的列表；空字段为空列表。
 fn split_list(field: &str) -> impl Iterator<Item = &str> {
     field.split(',').filter(|item| !item.is_empty())
@@ -729,6 +814,10 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
                 _ => Some(from_hex(field(7)?)?),
             },
         },
+        "DAG" => EdictDag {
+            task: TaskId(id(2)?),
+            nodes: decode_dag(field(3)?)?,
+        },
         "DEBATED" => CourtDebated {
             task: TaskId(id(2)?),
             speeches: decode_speeches(field(3)?)?,
@@ -918,6 +1007,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         CensorReported { model: None, .. } => 11,
         EdictSplit { model: None, .. } => 7,
         EdictSplit { .. } => 8,
+        EdictDag { .. } => 4,
         CensorReported { .. } => 12,
         SuspicionReviewed { model: None, .. } => 9,
         SuspicionReviewed { .. } => 10,
@@ -967,6 +1057,7 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         EdictIssued(_) => "EDICT",
         EdictDrafted { .. } => "DRAFTED",
         EdictSplit { .. } => "SPLIT",
+        EdictDag { .. } => "DAG",
         CourtDebated { .. } => "DEBATED",
         EdictApproved { .. } => "APPROVED",
         TaskAssigned { .. } => "ASSIGNED",
@@ -1034,6 +1125,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         EdictIssued(e) => seal(&e.seal, if line.split('\t').count() == 5 { 1 } else { 2 }),
         ModelUsage { trace: Some(_), .. } => 5,
         CourierReplied { op: Some(_), .. } | CourierDispatched { .. } => 11,
+        EdictDag { .. } => 12,
         ChangesApplied { skipped, .. } if !skipped.is_empty() => 4,
         OfficeCeilingSet {
             ceiling: Some(s), ..
@@ -1102,9 +1194,11 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 44, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 45, "每种事件类型至少一条样本");
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");
+        assert_eq!(crate::release_name(12), "1.0.0-rc.2");
+        assert_eq!(crate::release_name(12), env!("CARGO_PKG_VERSION"));
     }
     #[test]
     fn event_round_trip_chinese_and_tabs() {
@@ -1366,6 +1460,31 @@ mod tests {
                 note: String::new(),
                 model: None,
                 usage: TokenUsage::default(),
+            },
+            CourtEvent::EdictDag {
+                task,
+                nodes: vec![
+                    DagNode {
+                        task: TaskId(8),
+                        dependencies: vec![],
+                        attempts: Some(2),
+                        deadline: Some(1_792_909_102),
+                        budget: Some(5_000),
+                        artifact: Some("报告\t,；".into()),
+                        approval_required: true,
+                        idempotency_key: Some("op\t1".into()),
+                    },
+                    DagNode {
+                        task: TaskId(9),
+                        dependencies: vec![TaskId(8), TaskId(42)],
+                        attempts: None,
+                        deadline: None,
+                        budget: None,
+                        artifact: None,
+                        approval_required: false,
+                        idempotency_key: None,
+                    },
+                ],
             },
             CourtEvent::CourtDebated {
                 task,

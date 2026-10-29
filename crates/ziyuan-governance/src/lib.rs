@@ -25,8 +25,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use ziyuan_core::{
-    Agent, AgentId, CHANGELOG, Capability, Department, Edict, GovernanceMode, Nomination, Office,
-    Seal, Speech, TaskId, Template, TokenUsage, Verdict,
+    Agent, AgentId, CHANGELOG, Capability, DagNode, Department, Edict, GovernanceMode, Nomination,
+    Office, Seal, Speech, TaskId, Template, TokenUsage, Verdict,
 };
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +90,8 @@ pub enum GovernanceError {
     CannotSplit(TaskId),
     /// 分办须为 2–8 件，每件有内容。
     InvalidSplit(String),
+    /// 分办排程不合规矩（原因）。
+    InvalidDag(String),
     /// 已在修道（`true`）或已在朝（`false`）。
     RetreatUnchanged(bool),
     /// 皇帝修道期间，批红与评定由司礼监代批，须先回朝。
@@ -205,6 +207,7 @@ impl fmt::Display for GovernanceError {
                 id.0
             ),
             Self::InvalidSplit(why) => write!(f, "分办方案不合法：{why}"),
+            Self::InvalidDag(why) => write!(f, "分办排程不合法：{why}"),
             Self::RetreatUnchanged(true) => f.write_str("陛下已在西苑修道"),
             Self::RetreatUnchanged(false) => f.write_str("陛下本在朝中"),
             Self::CannotDebate(id) => write!(f, "诏令 #{} 不能廷议：须尚未执行", id.0),
@@ -303,6 +306,12 @@ pub struct Task {
     pub assignee: Option<AgentId>,
     /// 此诏令已分办（原诏令才有）。
     pub split: Option<Split>,
+    /// 分办排程的节点（子诏令才有）：依赖与限束，见 [`ziyuan_core::DagNode`]。
+    #[serde(default)]
+    pub dag: Option<DagNode>,
+    /// 历次指派的次数（含首次；中断恢复重跑亦计）。
+    #[serde(default)]
+    pub attempts: u32,
     /// 批红或评定是皇帝修道期间由司礼监代批的。
     pub proxied: bool,
     /// 历次廷议的发言（用量已计入 `usage`）；承办时附上最近一次的纪要。

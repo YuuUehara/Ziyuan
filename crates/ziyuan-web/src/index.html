@@ -833,7 +833,7 @@ function taskHtml(t) {
   if (t.split) {
     const s = t.split;
     const rows = s.subtasks.map((sub) =>
-      `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}</li>`).join("");
+      `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}${sub.deps && sub.deps.length ? `（先办 ${sub.deps.map((d) => `#${d}`).join("、")}）` : ""}${sub.blocked_by ? ` <span class="badge failed" title="排程依赖未成：上游失败或未结束，不再调度">受 #${sub.blocked_by} 所阻</span>` : ""}</li>`).join("");
     const state = t.status === "pending" ? (s.open ? `${s.open} 件未结` : "待尚书汇总") : "已汇总";
     body += `<div class="split"><b>多官分办</b>　${esc(s.note)}（${state}）<ul>${rows}</ul></div>`;
   }
@@ -978,7 +978,7 @@ function taskHtml(t) {
   }
   return `<article class="task ${t.status}">
     <div class="task-head"><span class="task-id">#${t.id}</span>${t.urgent ? '<span class="badge urgent">八百里加急</span>' : ""}${t.courier ? `<span class="badge courier" title="兵部驿站投递的外部事件">驿传 · ${esc(t.courier)}</span>` : ""}${t.template ? `<span class="badge template" title="翰林院模板；都察院复核时逐条核验">模板 · ${esc(t.template.name)}</span>` : ""}<span>${esc(t.department)}</span>
-      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
+      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${t.blocked_by ? `<span class="badge failed" title="排程依赖未成：上游失败或未结束，不再调度；撤销受阻的子诏令可让尚书汇总">受 #${t.blocked_by} 所阻</span>` : ""}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
     <div class="task-text">${esc(t.text)}</div>${t.template ? `<ol class="criteria" title="验收标准">${t.template.criteria.map((c) => `<li>${esc(c)}</li>`).join("")}</ol>` : ""}
     <div class="meta">${meta}</div>${body}${actions}</article>`;
 }

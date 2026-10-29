@@ -201,6 +201,17 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                 },
                 "status": kind,
                 "needs_approval": court.needs_approval(t),
+                // 排程（分办 DAG）：受阻时为第一件未成的依赖，前端据此标「受阻」。
+                "blocked_by": court.blocked_by(t).map(|b| b.0),
+                "dag": t.dag.as_ref().map(|d| json!({
+                    "dependencies": d.dependencies.iter().map(|x| x.0).collect::<Vec<_>>(),
+                    "attempts": d.attempts,
+                    "deadline": d.deadline,
+                    "budget": d.budget,
+                    "artifact": d.artifact,
+                    "approval_required": d.approval_required,
+                    "idempotency_key": d.idempotency_key,
+                })),
                 "proxied": t.proxied,
                 "budget": t.budget,
                 "urgent": t.urgent,
@@ -304,6 +315,9 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                             TaskStatus::Failed { .. } => "failed",
                             TaskStatus::Cancelled => "cancelled",
                         },
+                        // 排程：先办的依赖与受阻的那件（写子诏令自动串行时即前一件）。
+                        "deps": sub.dag.as_ref().map(|d| d.dependencies.iter().map(|x| x.0).collect::<Vec<_>>()).unwrap_or_default(),
+                        "blocked_by": court.blocked_by(sub).map(|b| b.0),
                     })).collect::<Vec<_>>(),
                 })),
                 "debates": t.debates.iter().map(|speeches| speeches.iter().map(|sp| json!({

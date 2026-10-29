@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use ziyuan_app::Session;
-use ziyuan_core::{Department, Seal, TaskId};
-use ziyuan_runtime::Limits;
+use ziyuan_core::{Department, Seal, TaskId, TokenUsage};
+use ziyuan_runtime::{BoxError, ExecutionHooks, Job, Limits, WorkerBackend};
 use ziyuan_storage::EventLog;
 
 use std::time::Duration;
@@ -15,8 +15,31 @@ use ziyuan_runtime::DemoBackend;
 const TOKEN: &str = "test-token";
 const VIEWER: &str = "viewer-token";
 
+struct SplitBackend;
+impl WorkerBackend for SplitBackend {
+    fn execute(&self, _job: &Job, _hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+        Ok("测试回奏".into())
+    }
+
+    fn complete(
+        &self,
+        _model: Option<&str>,
+        _system: &str,
+        _user: &str,
+    ) -> Result<(String, TokenUsage), BoxError> {
+        Ok((
+            "#4：检查 storage\n#11：检查 runtime".into(),
+            TokenUsage::default(),
+        ))
+    }
+}
+
 /// 在临时目录建朝并启动服务，返回 (基地址, 目录)。
 async fn start(name: &str) -> (String, PathBuf) {
+    start_with_backend(name, Arc::new(DemoBackend)).await
+}
+
+async fn start_with_backend(name: &str, backend: Arc<dyn WorkerBackend>) -> (String, PathBuf) {
     let root = std::env::temp_dir().join(format!("ziyuan-web-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -27,7 +50,7 @@ async fn start(name: &str) -> (String, PathBuf) {
         root: root.clone(),
         token: TOKEN.into(),
         viewer_token: Some(VIEWER.into()),
-        backend: Arc::new(DemoBackend),
+        backend,
         limits: Limits {
             max_concurrent: 2,
             timeout: Duration::from_secs(10),
@@ -916,6 +939,68 @@ fn changes_json_counts_lines_and_marks_each_hunk() {
         skipped: vec![2],
     });
     assert_eq!(statuses(&file(&events)), ["approved", "rejected"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn state_exposes_write_dag_dependencies_and_blockers() {
+    let (base, _root) = start_with_backend("dag", Arc::new(SplitBackend)).await;
+    let t = Some(TOKEN);
+    let (status, recruit) = call(
+        &base,
+        "/officials",
+        t,
+        Some(json!({ "name": "新工", "department": "works" })),
+    )
+    .await;
+    assert_eq!(
+        (status, recruit["id"].as_u64()),
+        (200, Some(11)),
+        "{recruit}"
+    );
+    assert_eq!(
+        call(
+            &base,
+            "/officials/11/appoint",
+            t,
+            Some(json!({ "office": "clerk:works" })),
+        )
+        .await
+        .0,
+        200
+    );
+    let (status, issued) = call(
+        &base,
+        "/edicts",
+        t,
+        Some(json!({
+            "department": "works",
+            "text": "改全库",
+            "tools": ["read_file", "write_file"],
+            "scope": ["src"]
+        })),
+    )
+    .await;
+    assert_eq!((status, issued["id"].as_u64()), (200, Some(1)), "{issued}");
+    let (status, split) = call(&base, "/tasks/1/split", t, Some(json!({}))).await;
+    assert_eq!(
+        (status, split["subtasks"].as_array().map(Vec::len)),
+        (200, Some(2)),
+        "{split}"
+    );
+
+    let (_, state) = call(&base, "/state", t, None).await;
+    let tasks = state["tasks"].as_array().unwrap();
+    let task = |id| tasks.iter().find(|task| task["id"] == id).unwrap();
+    let parent = task(1);
+    let first = task(2);
+    let second = task(3);
+    assert_eq!(first["dag"]["dependencies"], json!([]));
+    assert!(first["blocked_by"].is_null());
+    assert_eq!(second["dag"]["dependencies"], json!([2]));
+    assert_eq!(second["blocked_by"], 2);
+    assert_eq!(parent["split"]["subtasks"][0]["deps"], json!([]));
+    assert_eq!(parent["split"]["subtasks"][1]["deps"], json!([2]));
+    assert_eq!(parent["split"]["subtasks"][1]["blocked_by"], 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

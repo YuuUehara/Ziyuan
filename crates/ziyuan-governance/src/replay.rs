@@ -9,7 +9,8 @@ use crate::templates::TemplateUse;
 use crate::{Court, GovernanceError, Task, TaskStatus};
 use std::collections::{BTreeMap, BTreeSet};
 use ziyuan_core::{
-    Agent, AgentId, BudgetScope, CourtEvent, Department, Edict, GovernanceMode, Office, TokenUsage,
+    Agent, AgentId, BudgetScope, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId,
+    TokenUsage,
 };
 
 /// 开局（丞相制）：丞相一人；吏部、工部各有尚书与郎中，户、礼、兵、刑四部各有尚书一人（本部无郎中时
@@ -246,6 +247,8 @@ impl Court {
                         parent: None,
                         assignee: None,
                         split: None,
+                        dag: None,
+                        attempts: 0,
                         proxied: false,
                         debates: Vec::new(),
                         budget: None,
@@ -272,6 +275,7 @@ impl Court {
                 self.set_status(*task, TaskStatus::Assigned(*worker));
                 let entry = self.tasks.get_mut(task).expect("已确认存在");
                 entry.model = model.clone();
+                entry.attempts += 1;
                 // 重新指派（如上次运行中断）：上次暂存的改动作废。
                 entry.changes = None;
             }
@@ -400,6 +404,8 @@ impl Court {
                             template: None,
                             assignee: Some(sub.worker),
                             split: None,
+                            dag: None,
+                            attempts: 0,
                             proxied: false,
                             debates: Vec::new(),
                             budget: None,
@@ -415,6 +421,34 @@ impl Court {
                     model: model.clone(),
                     usage: *usage,
                 });
+            }
+            CourtEvent::EdictDag { task, nodes } => {
+                let subtasks: BTreeSet<TaskId> = self
+                    .tasks
+                    .get(task)
+                    .and_then(|t| t.split.as_ref())
+                    .ok_or(GovernanceError::InvalidDag(format!(
+                        "诏令 #{} 未分办，无从排程",
+                        task.0
+                    )))?
+                    .subtasks
+                    .iter()
+                    .copied()
+                    .collect();
+                Self::check_dag(nodes, &subtasks)?;
+                for node in nodes {
+                    let child = self.tasks.get_mut(&node.task).expect("check_dag 已核对");
+                    if child.dag.is_some() {
+                        return Err(GovernanceError::InvalidDag(format!(
+                            "子诏令 #{} 已排程，一件只排一次",
+                            node.task.0
+                        )));
+                    }
+                    if let Some(budget) = node.budget {
+                        child.budget = Some(budget);
+                    }
+                    child.dag = Some(node.clone());
+                }
             }
             CourtEvent::ExamTaken {
                 agent,

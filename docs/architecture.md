@@ -1,4 +1,4 @@
-# ZiYuan 设计文档（v1.0.0-rc.1）
+# ZiYuan 设计文档（v1.0.0-rc.2）
 
 ## 1. 核心目标
 
@@ -94,6 +94,14 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 
 `Session::issue` 只写 `EdictIssued`（路由不通则拒绝）。`Session::run` 按当前制度逐件写 `TaskAssigned`，交给 `Scheduler`，再把每条 `Progress` 作为事件提交。`Court::apply` 校验生命周期：结束后的诏令不能再变更；`ToolInvoked` 只能出现在已指派的诏令上；完成者必须是被指派者。未结束且已指派的诏令（进程中断）可重新指派。v0.1 日志中没有 `TaskAssigned` 的完成记录仍可回放。`Court::replay` 根据完整日志恢复当前朝廷状态；`InstitutionReformed` 在回放时清理最高协调职务。
 
+### 分办 DAG
+
+`EdictSplit` 先建立子诏令，追加的 `EdictDag{task,nodes}` 记录其依赖与排程元数据；两事件由同一提议原子提交。节点包含尝试次数上限、期限、度支、约定产出、另行批红要求和幂等键。`propose_split_serial_writes` 为有写权的子诏令按 ID 建依赖，只读子诏令不加依赖。
+
+`runnable_tasks` 只在所有依赖均已完成时放行子诏令；依赖失败或撤销时，下游保持待办但不再可运行，`blocked_by` 返回首个未完成依赖。原诏令仍在所有子诏令结束后交尚书汇总。`Session::run` 在指派前检查期限、尝试上限与度支，超限即记失败；`approval_required` 纳入批红门控，约定产出附入承办提示与汇总提示。
+
+事件簿仍只增不改：排程使用新事件编码 `DAG`，存储兼容性表将其最低读取版本登记为序号 12（`1.0.0-rc.2`），与当前工作区版本一致。
+
 ### 多进程
 
 - **读写锁**：`EventLog::load` 持共享文件锁，`append` 持独占文件锁，并在锁内核对事件数后整批写入、`fsync`。读者不会看到写了一半的批次。
@@ -101,7 +109,7 @@ EdictIssued ──▶ TaskAssigned ──▶ ToolInvoked* ──▶ TaskComplete
 - **残行**：末尾没有换行符的行来自崩溃中断的写入，读取时忽略，下次追加前截掉。多事件批次（仅 `init`）若在写入中途崩溃，可能留下完整的前几行。
 - **执行者锁**：`.ziyuan/executor.lock`（`try_lock`，进程退出即释放）。同一时刻只有一个进程执行诏令，因此“已指派但未结束”的诏令只可能来自中断的进程，`run` 可以安全地重新指派。其他进程仍可入队、撤销、任免；`run` 在每次提交时都会看到这些变化：被撤销的诏令跳过，执行中被撤销的结果作废。
 - **增量读取**：`EventLog` 记住游标（前若干条事件止于第几字节，以及文件的设备号与 inode）。`load_since(known)` 与 `append` 的事件数核对只读游标之后的内容；文件被删除重建、变短或游标处不在行首时游标作废、从头读取，此时若调用者已有事件则报 `Conflict`，`Session::reload` 据此从头重放。`Session::reload` 只把新事件应用到 `Court` 副本上。
-- **Schema 兼容**：新增事件类型或在行尾追加可选字段时格式版本仍为 v1；v0.4 起读到更高版本或未知事件类型返回 `StorageError::Newer`（提示升级，并报本版版本号），而不是 `Corrupt`；v0.3 及更早的版本只报解码失败，追加的可选字段在各旧版中都按「字段数量不正确」处理。已发布的版本改不了，因此兼容由新版负责：`codec::readable_since(line)` 给出能读这一行的最早发布版本（`RELEASES` 中的序号，`release_name` 转成版本号；0.10.0 之后为 1.0.0-rc.1），依据是逐一用 v0.1–v0.5 发布时的解码器试读 `crates/ziyuan-storage/src/compat.tsv` 中的样本（每种事件类型、可选字段、后加的官职与玉玺代码各至少一条）；测试保证本版读得回全部样本且版本与之相符，`readable_since` 不用通配，新增事件类型时编译器会提醒补上。`EventLog::inspect` 逐行求出 `LogReport`（事件数、残行、最早可读版本及最先要求它的一行、第一处读不了的行），`ziyuan migrate` 不经 `Session` 打印它。不另加首行头：每行已有格式版本，首行头会让 v0.4/v0.5 拒读全部新事件簿。只有改变既有字段含义时才升级版本，由读取方转换旧行，届时 `migrate` 才真正改写。
+- **Schema 兼容**：新增事件类型或在行尾追加可选字段时格式版本仍为 v1；v0.4 起读到更高版本或未知事件类型返回 `StorageError::Newer`（提示升级，并报本版版本号），而不是 `Corrupt`；v0.3 及更早的版本只报解码失败，追加的可选字段在各旧版中都按「字段数量不正确」处理。已发布的版本改不了，因此兼容由新版负责：`codec::readable_since(line)` 给出能读这一行的最早发布版本（`RELEASES` 中的序号，`release_name` 转成版本号；0.10.0 之后依次为 1.0.0-rc.1、1.0.0-rc.2），依据是逐一用 v0.1–v0.5 发布时的解码器试读 `crates/ziyuan-storage/src/compat.tsv` 中的样本（每种事件类型、可选字段、后加的官职与玉玺代码各至少一条）；测试保证本版读得回全部样本且版本与之相符，`readable_since` 不用通配，新增事件类型时编译器会提醒补上。`EventLog::inspect` 逐行求出 `LogReport`（事件数、残行、最早可读版本及最先要求它的一行、第一处读不了的行），`ziyuan migrate` 不经 `Session` 打印它。不另加首行头：每行已有格式版本，首行头会让 v0.4/v0.5 拒读全部新事件簿。只有改变既有字段含义时才升级版本，由读取方转换旧行，届时 `migrate` 才真正改写。
 - **快照**：实测 24 万条事件（64 MB）冷启动约 0.25 秒（其中解码约 0.09 秒，已改为查表解 hex），常驻进程刷新为微秒级。v0.6 按每件诏令 16 条事件（6 次工具调用与用量、约 1.6 KB 回奏）再测：5 万件（85 万条、230 MB）时 `EventLog::load` 约 0.8 秒、`Court::replay` 约 0.18 秒，解码中回奏全文的 hex 约占一半，内存：回奏全文在 `CourtEvent::TaskCompleted`、`TaskStatus::Completed` 与 `Record` 中都是 `Arc<str>`，事件簿与朝廷状态共用一份；`EdictIssued` 与 `TemplateSaved` 的载荷装箱，`CourtEvent` 由 152 字节降到 104 字节（工具调用、用量等小事件占绝大多数）；`EventLog::read_tail` / `inspect` 以 `BufReader` 逐行读、边读边解码，不把整段文件留在内存里；CLI 的 `serve` / `tui` 不再先开一个用不上的会话（只核对 `court.log` 非空），前端各自开会话；`history_entries` 只为返回的各条求事件类型。5 万件时 `ziyuan court` 峰值由 500 MB 降到 312 MB（0.97 → 0.75 秒），`serve` 常驻由 648 MB 降到 335 MB，`migrate` 由 239 MB 降到 4 MB。余下的大头是事件簿本身（约 225 MB：85 万条事件与回奏全文）。冷启动另由会典（见 §4）省去回放。前端的代价随诏令数增长更快，因此 `court_json(court, backend, recent)` 在 `recent` 为 `Some(n)` 时只列待理会的诏令（未结束、待评定、改动待准奏，连同分办的原诏令与子诏令）与最近 n 件，另给 `task_total` / `open_total`（Web 默认 50，`?all=1` 为全部；CLI `--json` 为全部）；`HistoryFilter.limit` 只为相符者中最后若干条生成描述（Web 默认 500，多取一条以给出 `truncated`；TUI 1000）；`event_kind` 改由 `codec::kind_of` 按变体给出，不再编码整条事件，`compat.tsv` 的测试保证二者一致。
 
 ## 4. Runtime 与 LLM

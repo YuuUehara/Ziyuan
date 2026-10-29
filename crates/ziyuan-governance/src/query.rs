@@ -134,12 +134,13 @@ impl Court {
             .collect()
     }
 
-    /// 内阁制下尚未批红的待办诏令：须先批红才能执行。子诏令随原诏令批红，自身不批红。
+    /// 内阁制下尚未批红的待办诏令：须先批红才能执行。子诏令随原诏令批红，自身不批红；
+    /// 排程要求另行批红的除外（皇帝须亲自 `approve` 那件子诏令）。
     pub fn needs_approval(&self, task: &Task) -> bool {
         self.mode == GovernanceMode::Cabinet
             && !task.approved
             && task.status == TaskStatus::Pending
-            && task.parent.is_none()
+            && (task.parent.is_none() || task.dag.as_ref().is_some_and(|d| d.approval_required))
     }
 
     /// 已分办的原诏令中尚未结束的子诏令数。
@@ -153,8 +154,33 @@ impl Court {
         })
     }
 
-    /// 现在就可以执行的诏令：未结束，（内阁制下）已批红；子诏令须原诏令已批红，
-    /// 已分办的原诏令须子诏令全部结束（届时由尚书汇总）。按 ID 升序。
+    /// 子诏令的排程依赖是否已满足（全部完成）。上游失败或撤销即受阻，不再调度：
+    /// 皇帝可撤销受阻的子诏令让尚书汇总，或另行处置。
+    fn dependencies_met(&self, task: &Task) -> bool {
+        task.dag
+            .as_ref()
+            .is_none_or(|dag| dag.dependencies.iter().all(|dep| self.dep_completed(*dep)))
+    }
+
+    /// 一件依赖是否已完成（失败、撤销不算：受阻须由皇帝处置）。
+    fn dep_completed(&self, dep: TaskId) -> bool {
+        matches!(
+            self.tasks.get(&dep),
+            Some(Task {
+                status: TaskStatus::Completed { .. },
+                ..
+            })
+        )
+    }
+
+    /// 排程受阻的依赖：未完成（含失败、撤销）的第一件；无依赖或不受阻为 `None`。
+    pub fn blocked_by(&self, task: &Task) -> Option<TaskId> {
+        let deps = task.dag.as_ref()?.dependencies.as_slice();
+        deps.iter().copied().find(|dep| !self.dep_completed(*dep))
+    }
+
+    /// 现在就可以执行的诏令：未结束，（内阁制下）已批红，排程的依赖全部完成；子诏令须原诏令
+    /// 已批红，已分办的原诏令须子诏令全部结束（届时由尚书汇总）。按 ID 升序。
     pub fn runnable_tasks(&self) -> Vec<TaskId> {
         let mut tasks = self
             .tasks
@@ -166,6 +192,7 @@ impl Court {
                     .is_none_or(|p| !self.needs_approval(p))
             })
             .filter(|t| self.open_subtasks(t) == 0)
+            .filter(|t| self.dependencies_met(t))
             .collect::<Vec<_>>();
         // 兵部：八百里加急插队先行，其余按诏令先后（排序稳定）。
         tasks.sort_by_key(|t| !t.urgent);

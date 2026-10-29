@@ -1,6 +1,6 @@
 use super::*;
 use ziyuan_core::{
-    Agent, AgentId, Capability, CensorVerdict, CourtEvent, Department, Edict, Evidence,
+    Agent, AgentId, Capability, CensorVerdict, CourtEvent, DagNode, Department, Edict, Evidence,
     GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
 };
 #[test]
@@ -620,6 +620,299 @@ fn split_edicts_run_subtasks_first_then_the_minister_summarizes() {
     assert_eq!(court.runnable_tasks(), [TaskId(id.0 + 1), TaskId(id.0 + 2)]);
 }
 
+#[test]
+fn dag_dependencies_gate_scheduling_and_upstream_failures_block() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let apply = |court: &mut Court, e: CourtEvent| court.apply(&e).unwrap();
+    apply(
+        &mut court,
+        CourtEvent::AgentRegistered(Agent {
+            id: AgentId(11),
+            name: "新工".into(),
+            speciality: Department::Works,
+        }),
+    );
+    apply(
+        &mut court,
+        CourtEvent::OfficialAppointed {
+            agent: AgentId(11),
+            office: Office::Clerk(Department::Works),
+        },
+    );
+    let edict = court
+        .new_edict(Department::Works, "查全库".into(), Seal::default())
+        .unwrap();
+    apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
+    let node = |task: u64, deps: &[u64]| DagNode {
+        task: TaskId(task),
+        dependencies: deps.iter().map(|d| TaskId(*d)).collect(),
+        attempts: None,
+        deadline: None,
+        budget: None,
+        artifact: None,
+        approval_required: false,
+        idempotency_key: None,
+    };
+    let split_dag = |nodes: Vec<DagNode>| {
+        court.propose_split_dag(
+            TaskId(1),
+            vec![
+                (AgentId(4), "甲".into()),
+                (AgentId(2), "乙".into()),
+                (AgentId(11), "丙".into()),
+            ],
+            "分办".into(),
+            None,
+            TokenUsage::default(),
+            nodes,
+        )
+    };
+    // 节点不齐、点名他件、依赖自身、依赖圈外、成环、零次数、零度支：皆拒。
+    for (why, nodes) in [
+        ("节点不齐", vec![node(2, &[]), node(3, &[])]),
+        ("点名他件", vec![node(2, &[]), node(3, &[]), node(9, &[])]),
+        ("依赖自身", vec![node(2, &[]), node(3, &[3]), node(4, &[])]),
+        ("依赖圈外", vec![node(2, &[]), node(3, &[9]), node(4, &[])]),
+        ("依赖成环", vec![node(2, &[3]), node(3, &[2]), node(4, &[])]),
+        (
+            "次数为零",
+            vec![
+                DagNode {
+                    attempts: Some(0),
+                    ..node(2, &[])
+                },
+                node(3, &[]),
+                node(4, &[]),
+            ],
+        ),
+        (
+            "度支为零",
+            vec![
+                DagNode {
+                    budget: Some(0),
+                    ..node(2, &[])
+                },
+                node(3, &[]),
+                node(4, &[]),
+            ],
+        ),
+    ] {
+        assert!(
+            matches!(split_dag(nodes), Err(GovernanceError::InvalidDag(_))),
+            "{why}应被拒"
+        );
+    }
+    // 依例排程：#3 待 #2，#4 待 #2 与 #3；#2 另有度支。
+    let events = split_dag(vec![
+        DagNode {
+            budget: Some(100),
+            ..node(2, &[])
+        },
+        node(3, &[2]),
+        node(4, &[2, 3]),
+    ])
+    .unwrap();
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        apply(&mut court, event.clone());
+    }
+    assert_eq!(court.task(TaskId(2)).unwrap().budget, Some(100));
+    assert_eq!(court.runnable_tasks(), [TaskId(2)]);
+    assert_eq!(
+        court.blocked_by(court.task(TaskId(3)).unwrap()),
+        Some(TaskId(2))
+    );
+    // #4 依赖 #2 与 #3：最先未成的是 #2。
+    assert_eq!(
+        court.blocked_by(court.task(TaskId(4)).unwrap()),
+        Some(TaskId(2))
+    );
+
+    apply(
+        &mut court,
+        CourtEvent::TaskAssigned {
+            task: TaskId(2),
+            worker: AgentId(4),
+            model: None,
+        },
+    );
+    apply(
+        &mut court,
+        CourtEvent::TaskCompleted {
+            task: TaskId(2),
+            worker: AgentId(4),
+            summary: "甲成".into(),
+        },
+    );
+    assert_eq!(court.runnable_tasks(), [TaskId(3)]);
+
+    // 上游失败：下游受阻，不再调度；原诏令亦不得汇总。
+    apply(
+        &mut court,
+        CourtEvent::TaskAssigned {
+            task: TaskId(3),
+            worker: AgentId(2),
+            model: None,
+        },
+    );
+    apply(
+        &mut court,
+        CourtEvent::TaskFailed {
+            task: TaskId(3),
+            reason: "模型不可用".into(),
+        },
+    );
+    assert!(court.runnable_tasks().is_empty());
+    assert_eq!(
+        court.blocked_by(court.task(TaskId(4)).unwrap()),
+        Some(TaskId(3))
+    );
+    // 指派计次：#3 曾指派一次。
+    assert_eq!(court.task(TaskId(3)).unwrap().attempts, 1);
+
+    // 撤销受阻的子诏令后，原诏令交尚书汇总。
+    apply(&mut court, CourtEvent::TaskCancelled { task: TaskId(4) });
+    assert_eq!(court.runnable_tasks(), [TaskId(1)]);
+
+    // 未分办无从排程；一件子诏令只排一次。
+    let edict = court
+        .new_edict(Department::Works, "再查".into(), Seal::default())
+        .unwrap();
+    let fresh = edict.id;
+    apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
+    assert!(matches!(
+        court.apply(&CourtEvent::EdictDag {
+            task: fresh,
+            nodes: vec![node(fresh.0 + 1, &[])]
+        }),
+        Err(GovernanceError::InvalidDag(_))
+    ));
+    assert!(matches!(
+        court.apply(&CourtEvent::EdictDag {
+            task: TaskId(1),
+            nodes: vec![node(2, &[]), node(3, &[]), node(4, &[])]
+        }),
+        Err(GovernanceError::InvalidDag(_))
+    ));
+}
+
+#[test]
+fn write_subtasks_are_serialized_automatically_and_readonly_ones_are_not() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let write = Seal {
+        capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+        scope: vec![".".into()],
+        mcp: Default::default(),
+    };
+    let edict = court
+        .new_edict(Department::Works, "改全库".into(), write)
+        .unwrap();
+    court
+        .apply(&CourtEvent::EdictIssued(Box::new(edict)))
+        .unwrap();
+    let events = court
+        .propose_split_serial_writes(
+            TaskId(1),
+            vec![(AgentId(4), "改甲".into()), (AgentId(2), "改乙".into())],
+            "御定分办".into(),
+            None,
+            TokenUsage::default(),
+        )
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    let CourtEvent::EdictDag { nodes, .. } = &events[1] else {
+        unreachable!("第二件是排程");
+    };
+    assert_eq!(nodes[0].dependencies, Vec::new());
+    assert_eq!(nodes[1].dependencies, [TaskId(2)]);
+    for event in events {
+        court.apply(&event).unwrap();
+    }
+    // 写子诏令串行：先 #2 后 #3。
+    assert_eq!(court.runnable_tasks(), [TaskId(2)]);
+
+    // 只读诏令无冲突，照旧全并行（不记排程事件）。
+    let edict = court
+        .new_edict(Department::Works, "再查".into(), Seal::default())
+        .unwrap();
+    let id = edict.id;
+    court
+        .apply(&CourtEvent::EdictIssued(Box::new(edict)))
+        .unwrap();
+    let events = court
+        .propose_split_serial_writes(
+            id,
+            vec![(AgentId(4), "查丙".into()), (AgentId(2), "查丁".into())],
+            "御定分办".into(),
+            None,
+            TokenUsage::default(),
+        )
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], CourtEvent::EdictSplit { .. }));
+    court.apply(&events[0]).unwrap();
+    assert_eq!(
+        court.runnable_tasks(),
+        [TaskId(2), TaskId(id.0 + 1), TaskId(id.0 + 2)]
+    );
+}
+
+#[test]
+fn dag_approval_required_subtasks_need_their_own_approval() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let apply = |court: &mut Court, e: CourtEvent| court.apply(&e).unwrap();
+    apply(
+        &mut court,
+        CourtEvent::InstitutionReformed(GovernanceMode::Cabinet),
+    );
+    apply(
+        &mut court,
+        CourtEvent::OfficialDismissed { agent: AgentId(6) },
+    );
+    apply(
+        &mut court,
+        CourtEvent::OfficialAppointed {
+            agent: AgentId(6),
+            office: Office::FirstGrandSecretary,
+        },
+    );
+    let edict = court
+        .new_edict(Department::Works, "查全库".into(), Seal::default())
+        .unwrap();
+    apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
+    let node = |task: u64, approval_required: bool| DagNode {
+        task: TaskId(task),
+        dependencies: Vec::new(),
+        attempts: None,
+        deadline: None,
+        budget: None,
+        artifact: None,
+        approval_required,
+        idempotency_key: None,
+    };
+    let events = court
+        .propose_split_dag(
+            TaskId(1),
+            vec![(AgentId(4), "甲".into()), (AgentId(2), "乙".into())],
+            "分办".into(),
+            None,
+            TokenUsage::default(),
+            vec![node(2, false), node(3, true)],
+        )
+        .unwrap();
+    for event in events {
+        apply(&mut court, event);
+    }
+    // 原诏令未批红：全都不动。
+    assert!(court.runnable_tasks().is_empty());
+    apply(&mut court, CourtEvent::EdictApproved { task: TaskId(1) });
+    // #3 须皇帝另行批红。
+    assert!(!court.needs_approval(court.task(TaskId(2)).unwrap()));
+    assert!(court.needs_approval(court.task(TaskId(3)).unwrap()));
+    assert_eq!(court.runnable_tasks(), [TaskId(2)]);
+    apply(&mut court, CourtEvent::EdictApproved { task: TaskId(3) });
+    assert_eq!(court.runnable_tasks(), [TaskId(2), TaskId(3)]);
+}
 #[test]
 fn cannot_create_two_chancellors() {
     let court = Court::replay(&founding_events(1)).unwrap();

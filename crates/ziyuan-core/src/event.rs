@@ -30,6 +30,46 @@ pub struct Subtask {
     pub text: String,
 }
 
+/// 分办排程（DAG）的一件子诏令节点：依赖与限束。承办者（owner）即 [`Subtask::worker`]。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagNode {
+    pub task: TaskId,
+    /// 须等这些子诏令全部完成方可调度；上游失败或撤销则阻塞，由皇帝处置。
+    #[serde(default)]
+    pub dependencies: Vec<TaskId>,
+    /// 尝试次数上限（含首次指派；中断恢复重跑亦计一次）。`None` 不限。
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    /// 期限（Unix 秒）：指派时已过即不再承办，径记失败。`None` 不限。
+    #[serde(default)]
+    pub deadline: Option<u64>,
+    /// 本件度支（tokens），与 `BudgetSet` 的 `task` 范围同效。
+    #[serde(default)]
+    pub budget: Option<u64>,
+    /// 约定产出（文件或事项），附在承办与汇总的提示中。
+    #[serde(default)]
+    pub artifact: Option<String>,
+    /// 此子诏令须皇帝另行批红，不随原诏令（只有内阁制下才有批红）。
+    #[serde(default)]
+    pub approval_required: bool,
+    /// 外部副作用的幂等键；目前只持久化，内置执行器不据此去重。
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+impl DagNode {
+    /// 无依赖亦无限束：排程与旧分办（全并行）无异。
+    pub fn is_trivial(&self) -> bool {
+        self.dependencies.is_empty()
+            && self.attempts.is_none()
+            && self.deadline.is_none()
+            && self.budget.is_none()
+            && self.artifact.is_none()
+            && self.idempotency_key.is_none()
+            && !self.approval_required
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edict {
     pub id: TaskId,
@@ -122,6 +162,14 @@ pub enum CourtEvent {
         note: String,
         model: Option<String>,
         usage: TokenUsage,
+    },
+    /// 分办排程：与 [`CourtEvent::EdictSplit`] 一同记录，为每件子诏令记下依赖与限束
+    /// （节点与子诏令一一对应）。依赖全部完成方可调度；上游失败或撤销则阻塞，由皇帝处置。
+    /// 写子诏令（玉玺含动土木之权）的查阅范围承自原诏令、彼此重叠，分办时自动按 ID 串行。
+    /// 旧分办没有此事件，视作无依赖全并行。
+    EdictDag {
+        task: TaskId,
+        nodes: Vec<DagNode>,
     },
     /// 廷议：数位在任官员就一件待办诏令依次发言辩论，纪要供票拟与承办参考。
     /// 只影响措辞与论证，不改变派工与玉玺。每段发言的用量计入诏令。

@@ -114,6 +114,9 @@ pub(crate) fn status_badge(court: &Court, task: &Task) -> (String, Style) {
             0 => ("待汇总".into(), Style::new().fg(Color::Yellow)),
             _ => ("分办中".into(), Style::new().fg(Color::Yellow)),
         },
+        TaskStatus::Pending if court.blocked_by(task).is_some() => {
+            ("受阻".into(), Style::new().fg(Color::LightRed))
+        }
         TaskStatus::Pending => ("待办".into(), Style::new().fg(Color::Gray)),
         TaskStatus::Assigned(_) => ("执行中".into(), Style::new().fg(Color::Yellow).bold()),
         TaskStatus::Completed { .. } => match &task.review {
@@ -406,11 +409,26 @@ impl App {
                 };
                 let (badge, style) = status_badge(court, sub);
                 let who = sub.handler().or(sub.assignee).map_or("?".to_owned(), name);
-                lines.push(Line::from(vec![
+                let mut line = vec![
                     Span::raw(format!("  #{} ", id.0)),
                     Span::styled(badge, style),
                     Span::raw(format!(" {who}：{}", sub.edict.text)),
-                ]));
+                ];
+                // 排程：先办的依赖（写子诏令自动串行时即前一件）。
+                let deps = sub
+                    .dag
+                    .as_ref()
+                    .map(|d| d.dependencies.as_slice())
+                    .unwrap_or_default();
+                if !deps.is_empty() {
+                    let deps = deps
+                        .iter()
+                        .map(|d| format!("#{}", d.0))
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    line.push(Span::raw(format!("（先办 {deps}）")).dim());
+                }
+                lines.push(Line::from(line));
             }
         }
         if task.usage.total() > 0 || task.tool_calls > 0 {

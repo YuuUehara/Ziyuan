@@ -1,11 +1,13 @@
 //! 内阁：票拟、批红、廷议与分办。
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::edicts::department_of;
 use crate::{Court, GovernanceError, TaskStatus};
 use serde::{Deserialize, Serialize};
 use ziyuan_core::{
-    Agent, AgentId, CourtEvent, Department, GovernanceMode, Office, Speech, Subtask, TaskId,
-    TokenUsage,
+    Agent, AgentId, CourtEvent, DagNode, Department, GovernanceMode, Office, Speech, Subtask,
+    TaskId, TokenUsage,
 };
 
 /// 分办方案。
@@ -96,6 +98,146 @@ impl Court {
         Ok(())
     }
 
+    /// 分办并排程：先按 `plan` 分办，再校验 `nodes`（须与子诏令一一对应，依赖不得成环）。
+    /// 节点全空（无依赖亦无限束）时不记排程事件，行为与旧分办相同。
+    /// 返回一或两条事件（`EdictSplit`，及有排程时的 `EdictDag`），一并原子写入。
+    pub fn propose_split_dag(
+        &self,
+        task: TaskId,
+        plan: Vec<(AgentId, String)>,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+        nodes: Vec<DagNode>,
+    ) -> Result<Vec<CourtEvent>, GovernanceError> {
+        let event = self.propose_split(task, plan, note, model, usage)?;
+        let CourtEvent::EdictSplit { subtasks, .. } = &event else {
+            unreachable!("propose_split 只出 EdictSplit");
+        };
+        let subtasks: BTreeSet<TaskId> = subtasks.iter().map(|s| s.id).collect();
+        Self::check_dag(&nodes, &subtasks)?;
+        if nodes.iter().all(DagNode::is_trivial) {
+            return Ok(vec![event]);
+        }
+        Ok(vec![event, CourtEvent::EdictDag { task, nodes }])
+    }
+
+    /// 分办并按例排程：写子诏令（玉玺含动土木之权）的查阅范围承自原诏令、彼此重叠，
+    /// 同时动土必致冲突，按 ID 次序自动串行（前一件成其后件的依赖）；只读子诏令照旧并行。
+    pub fn propose_split_serial_writes(
+        &self,
+        task: TaskId,
+        plan: Vec<(AgentId, String)>,
+        note: String,
+        model: Option<String>,
+        usage: TokenUsage,
+    ) -> Result<Vec<CourtEvent>, GovernanceError> {
+        let writes = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?
+            .edict
+            .seal
+            .capabilities
+            .iter()
+            .any(|c| c.is_works_only());
+        let blank = |task: TaskId| DagNode {
+            task,
+            dependencies: Vec::new(),
+            attempts: None,
+            deadline: None,
+            budget: None,
+            artifact: None,
+            approval_required: false,
+            idempotency_key: None,
+        };
+        // 子诏令 ID 按 `next_task_id` 起依序分配（`propose_split` 内亦然）。
+        let mut previous = None;
+        let nodes: Vec<DagNode> = (self.next_task_id..self.next_task_id + plan.len() as u64)
+            .map(|id| {
+                let mut node = blank(TaskId(id));
+                if writes {
+                    node.dependencies = previous
+                        .replace(TaskId(id))
+                        .map(|p| vec![p])
+                        .unwrap_or_default();
+                }
+                node
+            })
+            .collect();
+        self.propose_split_dag(task, plan, note, model, usage, nodes)
+    }
+
+    /// 排程校验：节点与（将分办出或已分办出的）子诏令一一对应；依赖只能是同批子诏令、
+    /// 不得依赖自身或成环；次数与度支须为正数。
+    pub(crate) fn check_dag(
+        nodes: &[DagNode],
+        subtasks: &BTreeSet<TaskId>,
+    ) -> Result<(), GovernanceError> {
+        let why = GovernanceError::InvalidDag;
+        if nodes.len() != subtasks.len() {
+            return Err(why(format!(
+                "排程节点须与子诏令一一对应，实为 {} 件对 {} 件",
+                nodes.len(),
+                subtasks.len()
+            )));
+        }
+        let seen: BTreeSet<TaskId> = nodes.iter().map(|n| n.task).collect();
+        if seen.len() != nodes.len() || !seen.iter().all(|id| subtasks.contains(id)) {
+            return Err(why("排程节点须与子诏令一一对应".into()));
+        }
+        for node in nodes {
+            if node.dependencies.contains(&node.task) {
+                return Err(why(format!("子诏令 #{} 不得依赖自身", node.task.0)));
+            }
+            if let Some(dep) = node.dependencies.iter().find(|dep| !subtasks.contains(dep)) {
+                return Err(why(format!(
+                    "子诏令 #{0} 依赖的 #{1} 不是同批分办的子诏令",
+                    node.task.0, dep.0
+                )));
+            }
+            if node.attempts == Some(0) {
+                return Err(why(format!(
+                    "子诏令 #{} 的尝试次数上限须为正数",
+                    node.task.0
+                )));
+            }
+            if node.budget == Some(0) {
+                return Err(why(format!("子诏令 #{} 的度支须为正数", node.task.0)));
+            }
+        }
+        // Kahn 消元判环：先消无依赖者，再看是否消尽。
+        let mut blocked: BTreeMap<TaskId, usize> = nodes
+            .iter()
+            .map(|n| (n.task, n.dependencies.len()))
+            .collect();
+        let mut dependents: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
+        for node in nodes {
+            for dep in &node.dependencies {
+                dependents.entry(*dep).or_default().push(node.task);
+            }
+        }
+        let mut ready: Vec<TaskId> = blocked
+            .iter()
+            .filter(|(_, left)| **left == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut resolved = 0;
+        while let Some(id) = ready.pop() {
+            resolved += 1;
+            for next in dependents.remove(&id).unwrap_or_default() {
+                let left = blocked.get_mut(&next).expect("节点已一一核对");
+                *left -= 1;
+                if *left == 0 {
+                    ready.push(next);
+                }
+            }
+        }
+        if resolved != nodes.len() {
+            return Err(why("依赖成环，无从排程".into()));
+        }
+        Ok(())
+    }
     /// 批红：内阁制下，诏令经内阁票拟（派工路线）后须皇帝批红才能执行。
     pub fn propose_approval(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
         if self.mode != GovernanceMode::Cabinet {

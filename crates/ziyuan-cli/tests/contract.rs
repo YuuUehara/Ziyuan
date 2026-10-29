@@ -4,6 +4,9 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use ziyuan_core::{AgentId, Capability, CourtEvent, Department, Seal, TokenUsage};
+use ziyuan_governance::Court;
+use ziyuan_storage::{EventLog, EventStore};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ziyuan");
 
@@ -187,6 +190,55 @@ fn exit_codes_distinguish_usage_errors_from_runtime_errors() {
         ziyuan(&dir, &["review", "99", "accept"]).status.code(),
         Some(1)
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn run_explains_when_only_blocked_subtasks_remain() {
+    let dir = temp_court("dag-blocked-run");
+    let mut log = EventLog::new(&dir);
+    let existing = log.load().unwrap();
+    let mut court = Court::replay(&existing).unwrap();
+    let edict = court
+        .new_edict(
+            Department::Works,
+            "改全库".into(),
+            Seal {
+                capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+                scope: vec![".".into()],
+                mcp: Default::default(),
+            },
+        )
+        .unwrap();
+    let parent = edict.id;
+    let mut events = vec![CourtEvent::EdictIssued(Box::new(edict))];
+    court.apply(&events[0]).unwrap();
+    let split = court
+        .propose_split_serial_writes(
+            parent,
+            vec![(AgentId(4), "改甲".into()), (AgentId(4), "改乙".into())],
+            "御定分办".into(),
+            None,
+            TokenUsage::default(),
+        )
+        .unwrap();
+    for event in split {
+        court.apply(&event).unwrap();
+        events.push(event);
+    }
+    let subtask = court.task(parent).unwrap().split.as_ref().unwrap().subtasks[0];
+    let failure = CourtEvent::TaskFailed {
+        task: subtask,
+        reason: "测试上游失败".into(),
+    };
+    court.apply(&failure).unwrap();
+    events.push(failure);
+    log.append(existing.len(), &events).unwrap();
+
+    let output = ok(&dir, &["run"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("受阻"), "{stdout}");
+    assert!(stdout.contains("ziyuan tasks"), "{stdout}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

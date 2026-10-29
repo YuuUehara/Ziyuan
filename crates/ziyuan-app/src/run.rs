@@ -12,7 +12,8 @@ use ziyuan_storage::EventStore;
 use crate::cabinet::{criteria_note, debate_minutes, summary_prompt};
 use crate::edicts::PROXY_REVIEW_NOTE;
 use crate::reports::execution_usage;
-use crate::{AppError, Session};
+use crate::time::now;
+use crate::{AppError, Session, truncate};
 
 /// 一件诏令在本次运行中的结局。
 #[derive(Clone, Debug)]
@@ -85,10 +86,9 @@ impl<S: EventStore> Session<S> {
         self.commit(|court| Ok(court.proxy_approvals(Some(tasks))))?;
         // 国库告罄：有可执行的诏令也不开工，留在队列待追加度支。
         let court = &self.court;
-        let runnable = tasks
-            .iter()
-            .filter_map(|&t| court.task(t))
-            .any(|t| t.status.is_open() && !court.needs_approval(t));
+        let runnable = tasks.iter().filter_map(|&t| court.task(t)).any(|t| {
+            t.status.is_open() && !court.needs_approval(t) && court.blocked_by(t).is_none()
+        });
         if runnable {
             court.check_treasury(0)?;
         }
@@ -107,9 +107,31 @@ impl<S: EventStore> Session<S> {
                 let entry = court
                     .task(task)
                     .ok_or(GovernanceError::UnknownEdict(task))?;
-                // 已结束，或内阁制下尚未批红：跳过。
-                if !entry.status.is_open() || court.needs_approval(entry) {
+                // 已结束、尚未批红或依赖未成：跳过。显式 run(task IDs) 也不得越过 DAG 门。
+                if !entry.status.is_open()
+                    || court.needs_approval(entry)
+                    || court.blocked_by(entry).is_some()
+                {
                     return Ok(Vec::new());
+                }
+                // 排程限束：期限已过或尝试次数已尽，不再承办，径记失败。
+                if let Some(dag) = &entry.dag {
+                    if let Some(deadline) = dag.deadline
+                        && now() > deadline
+                    {
+                        return Ok(vec![CourtEvent::TaskFailed {
+                            task,
+                            reason: "排程期限已过，不再承办".into(),
+                        }]);
+                    }
+                    if let Some(limit) = dag.attempts
+                        && entry.attempts >= limit
+                    {
+                        return Ok(vec![CourtEvent::TaskFailed {
+                            task,
+                            reason: format!("排程尝试次数已尽（上限 {limit}），不再承办"),
+                        }]);
+                    }
                 }
                 // 玉玺受承办者官职的上限约束；毫无交集则不予承办。
                 // 内阁制下按票拟派工（拟派者已不在任则按旧例）。
@@ -169,6 +191,31 @@ impl<S: EventStore> Session<S> {
                     };
                     if let Some(note) = criteria_note(entry) {
                         text = format!("{text}\n\n{note}");
+                    }
+                    // 排程：上游子诏令的回奏与约定产出附入承办提示（依赖已完成方可调度）。
+                    if let Some(dag) = &entry.dag {
+                        if !dag.dependencies.is_empty() {
+                            let nonce = guard::nonce();
+                            let mut upstream = format!(
+                                "上游子诏令的回奏（本件排在它们之后办理，可查可用）：\n{}\n",
+                                guard::warning("上游回奏", &nonce)
+                            );
+                            for dep in &dag.dependencies {
+                                if let Some(TaskStatus::Completed { summary, .. }) =
+                                    self.court.task(*dep).map(|t| &t.status)
+                                {
+                                    upstream.push_str(&format!(
+                                        "\n## 子诏令 #{}：\n{}\n",
+                                        dep.0,
+                                        guard::fence(&truncate(summary, 3000), &nonce)
+                                    ));
+                                }
+                            }
+                            text = format!("{text}\n\n{upstream}");
+                        }
+                        if let Some(artifact) = &dag.artifact {
+                            text = format!("{text}\n\n约定产出：{artifact}");
+                        }
                     }
                     let budget = self
                         .court
