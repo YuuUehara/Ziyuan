@@ -4,7 +4,7 @@
 
 > **实验性 Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
 
-**当前版本 v0.10.0。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
+**当前版本 v1.0.0-rc.1。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
 
 ![奉天门：紫垣的 Web 界面](docs/images/web-overview.png)
 
@@ -47,6 +47,14 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 发版（推送 `v*` 标签）时，GitHub Actions 会在 Release 上附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
 
 CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译，并在 macOS 与 Windows 上跑全部测试。
+
+### 平台支持
+
+| 平台 | 常规功能（下诏、执行、审阅、准奏、驿站、Web/TUI） | 号舍（`run_tests` 与外藩的沙箱） |
+| --- | --- | --- |
+| Linux | 支持 | bubblewrap（另装；按域名放行还要 socat） |
+| macOS | 支持 | 系统自带的 Seatbelt |
+| Windows | 支持 | 暂缺：需隔离的执行一律拒绝（fail closed），显式设 `ZIYUAN_SANDBOX=off` 才不入号舍运行，见 [ADR-0001](docs/adr-0001-windows-sandbox.md) |
 
 ## 快速开始
 

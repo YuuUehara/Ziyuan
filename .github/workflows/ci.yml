@@ -50,15 +50,17 @@ jobs:
       - run: cargo check --workspace --all-targets --locked
 
   platforms:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # 两者都跑全部测试，某个 crate 失败也跑完其余的。Windows 无号舍：run_tests 用例先断言拒绝，再以 off 经 cmd /C 核对副本；符号链接相关的用例只在 Unix 上跑。
           - os: macos-latest
+            name: macOS · 功能与号舍（Seatbelt）
             command: cargo test --workspace --locked --no-fail-fast
           - os: windows-latest
+            name: Windows · 功能可用 · 号舍暂缺（fail closed）
             command: cargo test --workspace --locked --no-fail-fast
     runs-on: ${{ matrix.os }}
     steps:

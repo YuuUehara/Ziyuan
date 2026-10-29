@@ -28,11 +28,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          if [ -f CHANGELOG.md ] && grep -q "^## $version" CHANGELOG.md; then
-            awk -v v="## $version" '$0 ~ "^## " { on = index($0, v) == 1; if (!on && seen) exit; seen = seen || on; next } on' CHANGELOG.md > notes.md
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          # 带连字符的版本（如 1.0.0-rc.1）是预发布，不标为 latest。
+          pre=""
+          case "$version" in *-*) pre="--prerelease" ;; esac
+          # 节标题须恰为「## 版本」（或其后跟空格），1.0.0 不会误收 1.0.0-rc.1 一节。
+          if [ -f CHANGELOG.md ] && grep -qE "^## $version( |$)" CHANGELOG.md; then
+            awk -v v="## $version" '$0 ~ "^## " { on = ($0 == v || index($0, v " ") == 1); if (!on && seen) exit; seen = seen || on; next } on' CHANGELOG.md > notes.md
+            gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" --notes-file notes.md
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" --generate-notes
           fi
 
   build:

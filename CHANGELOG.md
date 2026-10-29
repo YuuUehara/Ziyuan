@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-rc.1
+
+1.0 的候选版：号舍缺席时 fail closed、并发预算预留、外部副作用幂等、审阅即所准，并以 DeepSeek 跑通驿站到草稿 PR 的全链路验收（[docs/rc1-acceptance.md](docs/rc1-acceptance.md)）。rc 期间只修清单内的阻塞缺陷。
 
 ### 变更
 
@@ -13,8 +15,14 @@
 - 外部副作用可安全重试：回奏评论与草稿 PR 外发前先在事件簿记下意图与幂等键（新事件 `DISPATCHED`），送达后的 `REPLIED` 行尾带同一键。中断后重试时先在远端按键查找（评论里的 `<!-- ziyuan-op: … -->` 标记、PR 正文标记与分支提交的 `Ziyuan-Op` 尾注），找到就补记、不再发第二次；分支或 PR 被别人占用则报错，不覆盖。`apply --commit` 重试时按 `Ziyuan-Edict` 尾注认出近来已有的提交，不再重复提交；落盘写到一半中断后重试，已等于改后内容的文件跳过、续写其余。旧版写的事件簿照常可读；含新事件的事件簿要 1.0.0-rc.1 起才能打开，0.10 及更早版本提示升级；`ziyuan migrate` 照此报出所需版本（序号与版本号对照见 `ziyuan_storage::RELEASES`）。
 - 字号：号不再人人都有，约半数官员无号，有无按官员 ID 伪随机决定（同一 ID 结果不变）；无号处在界面作「无」，易名把号写作「无」即去号。
 
+### 修复
+
+- 落盘后未能提交（如未设提交者）时，重跑 `ziyuan apply <ID> --commit`（或 Web 再点「准奏并提交」）只补提交，不再报「没有待决改动」；已有同一尾注的提交则认作已提交。
+- `ziyuan officials` 与易名的回复中，无号官员的号作「无」，不再空着。
+
 ### 文档
 
+- README 新增「平台支持」表（Linux、macOS、Windows 的常规功能与号舍）；CI 的平台作业改名，分开写明「Windows · 功能可用 · 号舍暂缺」。
 - ADR-0001（[docs/adr-0001-windows-sandbox.md](docs/adr-0001-windows-sandbox.md)）：Windows 号舍支持政策。v1.0 在 Windows 支持常规功能与只读工作流，需隔离的受保护执行 fail closed；预留 `ziyuan-sandbox-windows` 扩展点。SECURITY.md 与路线图同步标注。
 - 冻结 1.0.0-rc.1 验收清单（[docs/rc1-acceptance.md](docs/rc1-acceptance.md)）：RC-01..07 逐条退出条件与阻塞缺陷类。
 
