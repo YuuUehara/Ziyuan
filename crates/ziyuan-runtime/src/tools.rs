@@ -5,7 +5,8 @@
 //!
 //! `write_file` 不写项目：改动暂存在内存里，执行结束后由 [`Sealed::changes`] 取出呈报，
 //! 皇帝准奏后才由 [`apply_changes`] 写入。`run_tests` 在项目的临时副本（叠加暂存改动）中
-//! 运行皇帝设定的命令，子进程只继承少数无害的环境变量（不含 API Key）。
+//! 运行皇帝设定的命令，子进程只继承少数无害的环境变量（不含 API Key），并关进号舍
+//! （见 [`crate::haoshe`]）：不能联网，只能写副本。
 use crate::BoxError;
 use crate::agent_loop::{Tool, ToolSpec};
 use serde_json::Value;
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -599,24 +600,6 @@ impl Tool for RunTests {
     }
 }
 
-/// 用系统的 shell 运行测试命令：Windows 为 `cmd /C`，其余为 `sh -c`。
-fn shell(command: &str) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut child = Command::new("cmd");
-        // 原样交给 cmd：按 MSVC 规则转义引号会改变 cmd 看到的命令。
-        child.arg("/C").raw_arg(command);
-        child
-    }
-    #[cfg(not(windows))]
-    {
-        let mut child = Command::new("sh");
-        child.arg("-c").arg(command);
-        child
-    }
-}
-
 impl RunTests {
     fn run_in_copy(&self, command: &str, base: &Path, copy: &Path) -> Result<String, BoxError> {
         copy_tree(&self.0.root, &self.0.root, copy)?;
@@ -629,7 +612,17 @@ impl RunTests {
         }
         let log_path = base.join("output.log");
         let log = fs::File::create(&log_path)?;
-        let mut child = shell(command);
+        let target_dir: Vec<PathBuf> = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        let (mut child, haoshe) = crate::haoshe::shell(
+            command,
+            crate::haoshe::Mode::from_env()?,
+            base,
+            &target_dir,
+            &[self.0.root.join(".ziyuan")],
+        )?;
         child
             .current_dir(copy)
             .env_clear()
@@ -640,6 +633,13 @@ impl RunTests {
             if let Some(value) = std::env::var_os(key) {
                 child.env(key, value);
             }
+        }
+        // 临时文件写在副本旁，号舍里也写得了，事后一并清除。
+        #[cfg(unix)]
+        {
+            let tmp = base.join("tmp");
+            fs::create_dir_all(&tmp)?;
+            child.env("TMPDIR", tmp);
         }
         let mut child = child.spawn()?;
         let started = Instant::now();
@@ -674,7 +674,7 @@ impl RunTests {
         } else {
             String::new()
         };
-        let report = format!("测试 `{command}`：{verdict}\n输出{note}：\n{tail}");
+        let report = format!("测试 `{command}`：{verdict}（{haoshe}）\n输出{note}：\n{tail}");
         // 未通过记为工具失败：审计中 `run_tests` 的成败即测试的成败，供都察院核验。
         if passed {
             Ok(report)

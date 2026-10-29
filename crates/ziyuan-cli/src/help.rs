@@ -124,6 +124,7 @@ pub(crate) const HELP: &str = concat!(
   ZIYUAN_LLM_BASE_URL  默认 https://api.openai.com/v1（如 https://api.deepseek.com/v1、http://localhost:11434/v1）
   ZIYUAN_LLM_API_KEY   API Key（本地 Ollama 可不设）
   ZIYUAN_TEST_COMMAND  run_tests 运行的测试命令（如 cargo test；由皇帝设定，模型不能更改）
+  ZIYUAN_SANDBOX       号舍（run_tests 的沙箱）：auto（默认，有则用）、require（没有则不跑）、off
   ZIYUAN_LLM_PRICE     估算花费用的单价「输入,输出[,币种]」（每百万 token）；
                        deepseek-flash / deepseek-v4-pro 内置官方高峰价（估算上限）
   ZIYUAN_LLM_RETRIES   网络错误、429、5xx 时的重试次数（默认 3，指数退避，遵守 Retry-After）

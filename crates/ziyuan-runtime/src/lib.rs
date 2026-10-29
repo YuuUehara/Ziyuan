@@ -247,5 +247,6 @@ impl WorkerBackend for AgentBackend {
 
 pub mod agent_loop;
 pub mod guard;
+pub mod haoshe;
 pub mod mcp;
 pub mod tools;

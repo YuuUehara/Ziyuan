@@ -10,8 +10,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_ziyuan");
 fn ziyuan(dir: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(BIN);
     command.args(args).current_dir(dir);
-    for (key, _) in std::env::vars() {
-        if key.starts_with("ZIYUAN_") {
+    // vars_os：环境中可能有非 UTF-8 的变量，vars() 遇到会 panic。
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("ZIYUAN_") {
             command.env_remove(key);
         }
     }
@@ -273,6 +274,7 @@ fn version_and_help_list_the_frozen_commands_and_environment() {
         "ZIYUAN_GITHUB_REPO",
         "ZIYUAN_GITHUB_TOKEN",
         "ZIYUAN_CONFIG_DIR",
+        "ZIYUAN_SANDBOX",
     ] {
         assert!(help.contains(var), "help 未列出 {var}");
     }

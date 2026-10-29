@@ -63,7 +63,7 @@ v0.8.0（已发布）：朝堂缺位时吏部荐举人选（闲居、专长相�
 
 都是新增，不破坏冻结的接口，可按需提前：
 
-- **号舍：进程级沙箱**（暂名，取贡院号舍之意：考生锁入单间，出入搜检，与外界隔绝）。把 `run_tests` 与本地外藩子进程关进操作系统的沙箱：Linux 用 Landlock（内核自带，限文件读写）加 seccomp（禁网络），或调用 bubblewrap；macOS 用 Seatbelt（`sandbox-exec`）；Windows 用受限令牌与 AppContainer，做不到时如实提示。默认只可写临时副本、不可联网，由玉玺另授。Codex CLI、Claude Code 与 pi 的沙箱扩展都是这一路。
+- ~~**号舍：进程级沙箱**~~ `run_tests` 已入号舍（取贡院号舍之意：考生锁入单间，与外界隔绝）：Linux 用 bubblewrap，macOS 用 Seatbelt，不可联网、只可写测试副本。余下：本地外藩子进程入号舍；Windows（受限令牌与 AppContainer）；Linux 不装 bubblewrap 时改用内核自带的 Landlock。
 - **改动预览**：后端以 `similar` 求行内（词级）差异，以 `syntect` 按语言着色，Web 与 TUI 共用同一份结果。
 - **奉天门改版**：Web 前端按紫垣的主题重新设计（宫墙朱红、琉璃金、奏折与朱批的版式），不再是通用的后台样式。页面不在冻结范围内，改版不影响兼容。
 

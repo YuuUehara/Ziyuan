@@ -159,6 +159,7 @@ ziyuan discard 3    # 或驳回
 - **只暂存，不落盘**：`write_file` 的改动留在内存里，同一诏令内 `read_file` 读到的是新内容；诏令完成时作为奏本（`ChangesProposed`）记入事件簿，项目文件不变。
 - **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
 - **测试在副本里跑**：`run_tests` 把项目复制到临时目录（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与 `target`），叠加暂存改动，运行 `ZIYUAN_TEST_COMMAND`。子进程只继承 `PATH`、`HOME` 等少数环境变量，API Key 不会传进去；时限 10 分钟，返回退出码与输出末尾。
+- **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt。号舍里不能联网，只能写测试副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认，没有号舍则照常运行并注明）、`require`（没有则拒绝运行）、`off`。号舍内不能联网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`。
 - **逐段准奏**：diff 按段编号（`@@ 第 n 段 · 原第 m 行 @@`，跨文件连续编号；相隔不超过 6 行的改动并为一段）。`--skip` 驳回所列各段，其余照原样写入，行尾与末行换行逐字节保留；新建文件整段驳回即不建。各段都驳回请直接 `discard`。驳回了哪些段记入事件簿（`ChangesApplied` 附段号）。Web 奏本每段有「准此段」勾选框，TUI 按 `W` 输入要驳回的段号。
 - **落盘进版本库**：`ziyuan apply --commit`、Web 的「准奏并提交」、TUI 的 `m`。落盘后只提交本诏令写入的文件（项目在 jj 版本库中用 `jj commit <文件>`，否则 `git commit --only`），工作区里别的改动原样留着；文件若在准奏前就有你自己未提交的改动，会一并提交。提交说明首行为「紫垣诏令 #n：…」，附承办者与驳回的段号，末行 `Ziyuan-Edict: n`；`ziyuan github pr` 开的草稿 PR 用同样的标题与提交说明，两边对得上。提交失败（如未设提交者）时改动仍已落盘，可自行提交。
 - **审计只记摘要**：`write_file` 的工具审计只记「n 行，m 字节，全文见奏本」，全文只存在奏本里一份。
