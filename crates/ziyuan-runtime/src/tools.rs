@@ -178,6 +178,39 @@ pub fn audit_args(tool: &str, args_json: &str) -> String {
     args.to_string()
 }
 
+/// 准奏前项目中文件的现状。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseState {
+    /// 仍是呈报时的原文（新建文件则仍不存在）。
+    Original,
+    /// 已是改后内容：上次落盘写到一半或写完未及记账就中断。
+    Written,
+    /// 已被别处改动（含改成非 UTF-8 或二进制内容）。
+    Changed,
+}
+
+/// `change` 所指文件的现状，逐字节比较（CRLF 与 LF 视为不同）。路径越界或属禁区时报错。
+pub fn base_state(root: &Path, change: &FileChange) -> Result<BaseState, BoxError> {
+    Ok(base_state_in(&root.canonicalize()?, change)?.0)
+}
+
+fn base_state_in(root: &Path, change: &FileChange) -> Result<(BaseState, PathBuf), BoxError> {
+    let target = contained(root, &change.path)?;
+    let current = match fs::read(&target) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let state = if current.as_deref() == Some(change.after.as_bytes()) {
+        BaseState::Written
+    } else if current.as_deref() == change.before.as_deref().map(str::as_bytes) {
+        BaseState::Original
+    } else {
+        BaseState::Changed
+    };
+    Ok((state, target))
+}
+
 /// 把皇帝准奏的改动写入项目。先逐一核对：路径仍在项目内且不属禁区，文件内容与呈报时的原文
 /// 一致（新建文件则仍不存在）；有任何一处不符则一处也不写。已等于改后内容的文件视为已写
 /// （上次落盘写到一半或写完未及记账就中断），跳过不写，重试因此能续完。
@@ -185,19 +218,14 @@ pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError
     let root = root.canonicalize()?;
     let mut targets = Vec::new();
     for change in changes {
-        let target = contained(&root, &change.path)?;
-        let current = match fs::read(&target) {
-            Ok(bytes) => Some(String::from_utf8(bytes).map_err(|_| "非 UTF-8 文件")?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        if current.as_ref() == Some(&change.after) {
-            continue;
+        let (state, target) = base_state_in(&root, change)?;
+        match state {
+            BaseState::Written => {}
+            BaseState::Original => targets.push((target, &change.after)),
+            BaseState::Changed => {
+                return Err(format!("{} 自呈报以来已被改动，拒绝落盘", change.path).into());
+            }
         }
-        if current != change.before {
-            return Err(format!("{} 自呈报以来已被改动，拒绝落盘", change.path).into());
-        }
-        targets.push((target, &change.after));
     }
     for (target, after) in targets {
         if let Some(parent) = target.parent() {
@@ -1091,6 +1119,23 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("src/new/a.rs")).unwrap(), "新");
         // 全部已写完：再落盘一次什么也不改，也不报错。
         apply_changes(&root, &changes).unwrap();
+        assert_eq!(base_state(&root, &changes[0]).unwrap(), BaseState::Written);
+        // 逐字节比较：只把行尾改成 CRLF 也算被改动；改成非 UTF-8 内容同样拒绝。
+        let crlf = FileChange {
+            path: "src/main.rs".into(),
+            before: Some("a\nb\n".into()),
+            after: "a\nB\n".into(),
+        };
+        fs::write(root.join("src/main.rs"), "a\r\nb\r\n").unwrap();
+        assert_eq!(base_state(&root, &crlf).unwrap(), BaseState::Changed);
+        fs::write(root.join("src/main.rs"), [0xff, 0xfe, 0]).unwrap();
+        assert_eq!(base_state(&root, &crlf).unwrap(), BaseState::Changed);
+        let err = apply_changes(&root, std::slice::from_ref(&crlf))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("已被改动"), "{err}");
+        fs::write(root.join("src/main.rs"), "a\nb\n").unwrap();
+        assert_eq!(base_state(&root, &crlf).unwrap(), BaseState::Original);
         // 事件簿被篡改成越界路径时同样拒绝。
         let evil = [FileChange {
             path: "../evil".into(),

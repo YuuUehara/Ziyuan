@@ -24,8 +24,8 @@ pub use cabinet::{criteria_note, debate_minutes};
 pub use censorate::{ACQUITTAL_NOTE, suspicion_status};
 pub use courier::{PullReport, changelog_commits};
 pub use edicts::{
-    CHANGELOG_NOTE, PROXY_REVIEW_NOTE, changelog_text, render_diffs, reply_text, seal_note,
-    selected_files, skipped_note,
+    CHANGELOG_NOTE, PROXY_REVIEW_NOTE, base_hash, changelog_text, changes_version, render_diffs,
+    reply_text, seal_note, selected_files, skipped_note, stale_files,
 };
 pub use exam::{ExamPaper, exam_papers};
 pub use history::{HistoryEntry, HistoryFilter, describe_event, history_entries};

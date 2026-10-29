@@ -133,7 +133,8 @@ pub(crate) async fn cancel(
     .await
 }
 
-/// 准奏：把呈报的改动写入项目；`skip` 为逐段驳回的段号，`commit` 为真时落盘后记为一个 jj/git 提交。
+/// 准奏：把呈报的改动写入项目；`skip` 为逐段驳回的段号，`commit` 为真时落盘后记为一个 jj/git 提交，
+/// `version` 为预览所示的改动版本（可省；给了而不符即 409）。
 pub(crate) async fn apply_changes(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
@@ -152,8 +153,16 @@ pub(crate) async fn apply_changes(
             .ok_or_else(|| ApiError::bad("skip 须为段号数组"))?,
     };
     let commit = body.get("commit").and_then(Value::as_bool).unwrap_or(false);
+    let version = match body.get("version") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| ApiError::bad("version 须为字符串"))?
+                .to_owned(),
+        ),
+    };
     app.mutate(move |s| {
-        s.apply_changes(TaskId(id), &root, skipped)?;
+        s.apply_reviewed(TaskId(id), &root, skipped, version.as_deref())?;
         if !commit {
             return Ok(json!({ "ok": true }));
         }

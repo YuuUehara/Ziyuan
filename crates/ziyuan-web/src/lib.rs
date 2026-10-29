@@ -16,7 +16,7 @@ mod state;
 mod views;
 
 pub use auth::{load_or_create_token, load_or_create_viewer_token, random_token};
-pub use json::{chronicle_json, court_json};
+pub use json::{chronicle_json, court_json, mark_stale};
 
 use axum::Router;
 use axum::middleware::{self};

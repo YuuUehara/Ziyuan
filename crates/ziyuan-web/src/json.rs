@@ -2,13 +2,41 @@
 
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use ziyuan_app::{TaskReport, demotion_note, estimate_cost, kaocheng_grade, render_diffs};
+use std::path::Path;
+use ziyuan_app::{
+    TaskReport, base_hash, changes_version, demotion_note, estimate_cost, kaocheng_grade,
+    render_diffs, stale_files,
+};
 use ziyuan_core::{
     AgentId, BudgetScope, Department, GovernanceMode, Office, Persona, Seal, TaskId, TokenUsage,
     missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, ServiceRecord, Task, TaskStatus};
 use ziyuan_runtime::{Outcome, WorkerBackend};
+
+/// 给待准奏改动的各文件标上 `stale`：原文自呈报以来已被别处改动，准奏会被拒。
+/// 要读项目文件，故不在 [`court_json`] 里做。
+pub fn mark_stale(value: &mut Value, court: &Court, root: &Path) {
+    let Some(tasks) = value["tasks"].as_array_mut() else {
+        return;
+    };
+    for entry in tasks {
+        let Some(changes) = entry["id"]
+            .as_u64()
+            .and_then(|id| court.task(TaskId(id)))
+            .and_then(|t| t.changes.as_ref())
+            .filter(|c| c.state == ChangeState::Proposed)
+        else {
+            continue;
+        };
+        let stale = stale_files(root, &changes.files);
+        if let Some(files) = entry["changes"]["files"].as_array_mut() {
+            for (file, stale) in files.iter_mut().zip(stale) {
+                file["stale"] = json!(stale);
+            }
+        }
+    }
+}
 
 /// 一件实录的 JSON（`ziyuan records --json` 同此）。
 pub fn chronicle_json(r: &ziyuan_core::Record) -> Value {
@@ -227,9 +255,12 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                         ChangeState::Discarded => "discarded",
                     },
                     "skipped": c.skipped,
+                    // 准奏时回传，服务端据以确认审阅的正是记下的这份改动。
+                    "version": changes_version(&c.files),
                     "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| json!({
                         "path": f.path,
                         "created": f.before.is_none(),
+                        "base_hash": base_hash(f),
                         "diff": diff,
                         // 着色、带行号与词级标记的预览，段号与 diff 相同。
                         "hunks": preview.hunks,

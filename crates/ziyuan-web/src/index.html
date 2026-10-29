@@ -864,15 +864,18 @@ function taskHtml(t) {
       return `<span class="${{ "+": "add", "-": "del" }[l.kind] || "ctx"}"><span class="ln">${l.old ?? ""}</span><span class="ln">${l.new ?? ""}</span><span class="sign">${l.kind === " " ? "" : l.kind}</span>${code}</span>`;
     };
     const files = c.files.map((f) => `<details ${pending ? "open" : ""}>
-      <summary>${esc(f.path)}${f.created ? "（新建）" : ""}</summary>
+      <summary>${esc(f.path)}${f.created ? "（新建）" : ""}${pending && f.stale ? ` <span class="badge failed">原文已变</span>` : ""}</summary>
       <pre class="diff">${f.hunks.map((h) => hunkLine(`@@ 第 ${h.number} 段 · 原第 ${h.lines[0]?.old ?? 1} 行 @@`) + h.lines.map(codeLine).join("")).join("")}</pre></details>`).join("");
     const hunks = c.files.reduce((n, f) => n + (f.diff.match(/^@@ /gm) || []).length, 0);
     const note = c.skipped.length ? `（驳回第 ${c.skipped.join("、")} 段）` : "";
     body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件 ${hunks} 段，${stateLabel}${note}${pending && hunks > 1 ? `<span class="hint">　可逐段取舍：去掉勾选的段不落盘</span>` : ""}${files}</div>`;
     if (c.state === "proposed" && t.status === "completed") {
-      body += `<div class="review-row"><span style="flex:1"></span>
-        <button class="small gold" data-apply="${t.id}">准奏落盘</button>
-        <button class="small" data-apply="${t.id}" data-commit="1" title="落盘后只把这些文件记为一个 jj（或 git）提交">准奏并提交</button>
+      // 原文已被别处改动的，准奏必被拒：不给准奏按钮，只能驳回。
+      const stale = c.files.some((f) => f.stale);
+      const blocked = stale ? " disabled title=\"有文件的原文自呈报以来已被改动，准奏会被拒；可驳回后重下诏令\"" : "";
+      body += `<div class="review-row">${stale ? `<span class="hint">有文件的原文已变，不能准奏</span>` : ""}<span style="flex:1"></span>
+        <button class="small gold" data-apply="${t.id}" data-version="${c.version}"${blocked}>准奏落盘</button>
+        <button class="small" data-apply="${t.id}" data-version="${c.version}" data-commit="1" title="落盘后只把这些文件记为一个 jj（或 git）提交"${blocked}>准奏并提交</button>
         <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
     }
   }
@@ -1379,7 +1382,7 @@ document.addEventListener("click", (event) => {
     const what = skip.length ? `（驳回第 ${skip.join("、")} 段，其余落盘）` : "";
     const commit = d.commit === "1";
     if (confirm(`把诏令 #${d.apply} 的改动写入项目${what}${commit ? "，并记为一个提交" : ""}？`)) {
-      act(api(`/tasks/${d.apply}/changes/apply`, { skip, commit })).then((r) => {
+      act(api(`/tasks/${d.apply}/changes/apply`, { skip, commit, version: d.version })).then((r) => {
         if (!r) return;
         if (r.commit_error) toast(`已准奏落盘${what}，但未能提交：${r.commit_error}`, true);
         else toast(`已准奏，改动已落盘${what}` + (r.commit ? `，记为 ${r.vcs} 提交 ${r.commit}` : ""));

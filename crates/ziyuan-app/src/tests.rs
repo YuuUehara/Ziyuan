@@ -2219,7 +2219,45 @@ async fn works_changes_are_proposed_then_applied_or_discarded_by_the_emperor() {
     );
     assert!(diff.ends_with("+new\n keep\n"), "{diff}");
 
-    session.apply_changes(edit, &root, Vec::new()).unwrap();
+    // 审阅的版本须与记下的改动相符：页面来自别处（版本不符）则一处也不写。
+    let version = crate::changes_version(&changes.files);
+    assert!(version.starts_with("sha256:") && version.len() == 7 + 64);
+    assert_eq!(
+        crate::base_hash(&changes.files[0]).unwrap(),
+        // printf 'old\nkeep\n' | sha256sum
+        "sha256:93862b8f30e3b375e8a4ebfc514bab781f8e817fb28cc8e6774c4d116e73f0cd"
+    );
+    // 改后内容不同，版本也不同；只看原文的 base_hash 不变。
+    let mut other = changes.files.clone();
+    other[0].after.push('!');
+    assert_ne!(crate::changes_version(&other), version);
+    assert_eq!(
+        crate::base_hash(&other[0]),
+        crate::base_hash(&changes.files[0])
+    );
+    let err = session
+        .apply_reviewed(edit, &root, Vec::new(), Some("sha256:00"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("版本不符"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "old\nkeep\n"
+    );
+    // 预览后原文被别处改动：标为原文已变，准奏被拒；改回后照常。
+    assert_eq!(crate::stale_files(&root, &changes.files), [false]);
+    std::fs::write(root.join("README.md"), "他人改动\n").unwrap();
+    assert_eq!(crate::stale_files(&root, &changes.files), [true]);
+    let err = session
+        .apply_reviewed(edit, &root, Vec::new(), Some(&version))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("已被改动"), "{err}");
+    std::fs::write(root.join("README.md"), "old\nkeep\n").unwrap();
+
+    session
+        .apply_reviewed(edit, &root, Vec::new(), Some(&version))
+        .unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("README.md")).unwrap(),
         "new\nkeep\n"

@@ -96,11 +96,9 @@ pub(crate) fn json_output(
     command: &Command,
 ) -> Result<serde_json::Value, Box<dyn Error>> {
     let state = || -> Result<serde_json::Value, Box<dyn Error>> {
-        Ok(ziyuan_web::court_json(
-            session.court(),
-            worker_backend()?.as_ref(),
-            None,
-        ))
+        let mut value = ziyuan_web::court_json(session.court(), worker_backend()?.as_ref(), None);
+        ziyuan_web::mark_stale(&mut value, session.court(), &std::env::current_dir()?);
+        Ok(value)
     };
     Ok(match command {
         Command::Court => state()?,

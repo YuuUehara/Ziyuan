@@ -9,7 +9,7 @@ use ratatui::widgets::{
 };
 use ziyuan_app::{
     HistoryEntry, HistoryFilter, describe_record, estimate_cost, format_time, history_entries,
-    preview_changes, seal_note, skipped_note, suspicion_status, tz_offset,
+    preview_changes, seal_note, skipped_note, stale_files, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, NO_ART, Office, Persona, Seal, Speech,
@@ -447,10 +447,22 @@ impl App {
                     skipped_note(&changes.skipped)
                 )),
             ]));
+            // 原文已被别处改动的文件，准奏必被拒，先标出来。
+            let stale = match changes.state {
+                ChangeState::Proposed => stale_files(&self.config.root, &changes.files),
+                _ => vec![false; changes.files.len()],
+            };
             // 与 Web 同一份预览：行号、按语言着色，成对删增行中改动的字词加底色。
-            for file in preview_changes(&changes.files) {
+            for (file, stale) in preview_changes(&changes.files).into_iter().zip(stale) {
                 let created = if file.created { "（新建）" } else { "" };
-                lines.push(Line::from(format!("▸ {}{created}", file.path)).bold());
+                let mut head = vec![Span::raw(format!("▸ {}{created}", file.path)).bold()];
+                if stale {
+                    head.push(Span::styled(
+                        "　原文已变，准奏会被拒（u 驳回）",
+                        Style::new().fg(Color::Red),
+                    ));
+                }
+                lines.push(Line::from(head));
                 for hunk in &file.hunks {
                     lines.push(Line::from(format!("@@ 第 {} 段 @@", hunk.number)).dim());
                     for line in &hunk.lines {

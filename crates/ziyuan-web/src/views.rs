@@ -15,7 +15,7 @@ use ziyuan_app::{
 use ziyuan_core::{AgentId, Office, TaskId};
 
 use crate::auth::Role;
-use crate::json::{RECENT_TASKS, chronicle_json, court_json, office_json, record_json};
+use crate::json::{RECENT_TASKS, chronicle_json, court_json, mark_stale, office_json, record_json};
 use crate::state::{ApiError, AppState, parse};
 
 /// 朝廷全貌；诏令只含待办理会的与最近 [`RECENT_TASKS`] 件，`?all=1` 为全部。
@@ -26,9 +26,14 @@ pub(crate) async fn state(
 ) -> Result<Json<Value>, ApiError> {
     let running = app.running();
     let backend = app.0.config.backend.clone();
+    let root = app.0.config.root.clone();
     let recent = (query.get("all").map(String::as_str) != Some("1")).then_some(RECENT_TASKS);
     let mut value = app
-        .with_session(move |s| Ok(court_json(s.court(), backend.as_ref(), recent)))
+        .with_session(move |s| {
+            let mut value = court_json(s.court(), backend.as_ref(), recent);
+            mark_stale(&mut value, s.court(), &root);
+            Ok(value)
+        })
         .await?;
     value["running"] = json!(running);
     value["watching"] = json!(app.watching());

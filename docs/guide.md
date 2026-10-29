@@ -159,7 +159,7 @@ ziyuan discard 3    # 或驳回
 ```
 
 - **只暂存，不落盘**：`write_file` 的改动留在内存里，同一诏令内 `read_file` 读到的是新内容；诏令完成时作为奏本（`ChangesProposed`）记入事件簿，项目文件不变。
-- **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
+- **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。核对逐字节进行：只改了行尾（CRLF/LF）、改成非 UTF-8 或二进制内容都算改动。原文已变的文件在 Web 与 TUI 的奏本中标「原文已变」（`--json` 中为 `stale: true`），Web 不给准奏按钮，只能驳回后重下诏令。Web 准奏时回传预览所示的改动版本（`changes.version`），与服务端记下的不符即拒绝，以免照着别的项目或旧页面准奏。工部只能新建与改写文件，不能删除、改名或写二进制文件；符号链接按其指向判断，指向项目之外或禁区的一律拒绝。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
 - **测试在副本里跑**：`run_tests` 把项目复制到临时目录（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与 `target`），叠加暂存改动，运行 `ZIYUAN_TEST_COMMAND`。子进程只继承 `PATH`、`HOME` 等少数环境变量，API Key 不会传进去；时限 10 分钟，返回退出码与输出末尾。
 - **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt。号舍里不能联网，只能写测试副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认）与 `require` 相同，没有号舍（如 Windows、未装 bubblewrap）则拒绝运行，报「号舍不可用」；`off` 不入号舍照常运行，结果中注明，须皇帝自担风险（Windows 政策见 [ADR-0001](adr-0001-windows-sandbox.md)）。号舍默认全断网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`；或用 `ZIYUAN_SANDBOX_ALLOW` 按域名放行，如 `ZIYUAN_SANDBOX_ALLOW="index.crates.io,static.crates.io"`。放行时号舍仍断网，只留一个本机代理（门吏），它只转递名单上域名的 HTTP(S)，其余回 403，被拦下的域名记在测试结果里。`example.com` 只放行其本身，`*.example.com` 只放行其子域。Linux 上按域名放行另须装 socat（`apt install socat`）。
 - **逐段准奏**：diff 按段编号（`@@ 第 n 段 · 原第 m 行 @@`，跨文件连续编号；相隔不超过 6 行的改动并为一段）。`--skip` 驳回所列各段，其余照原样写入，行尾与末行换行逐字节保留；新建文件整段驳回即不建。各段都驳回请直接 `discard`。驳回了哪些段记入事件簿（`ChangesApplied` 附段号）。Web 奏本每段有「准此段」勾选框，TUI 按 `W` 输入要驳回的段号。

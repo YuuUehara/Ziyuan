@@ -116,6 +116,62 @@ pub fn selected_files(files: &[FileChange], skipped: &[u32]) -> Vec<FileChange> 
     selected
 }
 
+fn sha256(parts: &[&[u8]]) -> String {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    for part in parts {
+        ctx.update(part);
+    }
+    let hex: String = ctx
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
+
+/// 呈报时原文的内容版本（`sha256:` 加十六进制）；新建文件为 `None`。
+pub fn base_hash(change: &FileChange) -> Option<String> {
+    change.before.as_ref().map(|b| sha256(&[b.as_bytes()]))
+}
+
+/// 一份改动的版本：逐文件的路径、原文与改后内容（各带长度前缀）的 SHA-256。预览带上它，
+/// 准奏时据以确认审阅的正是记下的这份改动。
+pub fn changes_version(files: &[FileChange]) -> String {
+    let len = |s: &str| (s.len() as u64).to_le_bytes();
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for f in files {
+        parts.push(len(&f.path).to_vec());
+        parts.push(f.path.as_bytes().to_vec());
+        match &f.before {
+            Some(b) => {
+                parts.push(vec![1]);
+                parts.push(len(b).to_vec());
+                parts.push(b.as_bytes().to_vec());
+            }
+            None => parts.push(vec![0]),
+        }
+        parts.push(len(&f.after).to_vec());
+        parts.push(f.after.as_bytes().to_vec());
+    }
+    sha256(&parts.iter().map(Vec::as_slice).collect::<Vec<_>>())
+}
+
+/// 各文件的原文自呈报以来是否已被别处改动（已是改后内容的不算）；查不了的也算。
+/// 有一处为真，准奏就会被拒。
+pub fn stale_files(root: &Path, files: &[FileChange]) -> Vec<bool> {
+    files
+        .iter()
+        .map(|f| {
+            !matches!(
+                ziyuan_runtime::tools::base_state(root, f),
+                Ok(ziyuan_runtime::tools::BaseState::Original
+                    | ziyuan_runtime::tools::BaseState::Written)
+            )
+        })
+        .collect()
+}
+
 /// 送回来处的回奏正文（Markdown）：承办者、评定、复核与回奏全文。
 pub fn reply_text(court: &Court, task: &Task) -> String {
     let id = task.edict.id.0;
@@ -322,8 +378,30 @@ impl<S: EventStore> Session<S> {
         root: &Path,
         skipped: Vec<u32>,
     ) -> Result<(), AppError> {
+        self.apply_reviewed(task, root, skipped, None)
+    }
+
+    /// 同 [`apply_changes`](Self::apply_changes)；`version` 为审阅时预览所示的
+    /// [`changes_version`]，与记下的改动不符（如页面来自别的项目或旧的事件簿）即拒绝，一处也不写。
+    pub fn apply_reviewed(
+        &mut self,
+        task: TaskId,
+        root: &Path,
+        skipped: Vec<u32>,
+        version: Option<&str>,
+    ) -> Result<(), AppError> {
         self.reload()?;
         let event = self.court.propose_application(task, skipped)?;
+        if let Some(seen) = version {
+            let files = &self.court.task(task).expect("已确认存在").changes;
+            let files = &files.as_ref().expect("已确认有待决改动").files;
+            if changes_version(files) != seen {
+                return Err(AppError::Apply(format!(
+                    "诏令 #{} 的改动与审阅时所见的版本不符，请刷新后重新审阅",
+                    task.0
+                )));
+            }
+        }
         let CourtEvent::ChangesApplied { skipped, .. } = &event else {
             unreachable!("准奏只产生 ChangesApplied");
         };
