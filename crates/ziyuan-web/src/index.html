@@ -5,257 +5,393 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>奉天门 · 紫垣</title>
 <style>
-  /* 奏折与朱批：宣纸为底，朱丝栏为框，方印标状态，匾额为页首。 */
+  /* 三殿分区：左为殿名，中为诏令，右为所选诏令的全文。
+     分区只靠留白、细线与底色深浅；强调色只有一枚朱印。配色见 [data-theme]。 */
+  :root, [data-theme="tianqing"] {
+    /* 汝窑天青：天青配象牙白。 */
+    --bg: #f6f3ea;
+    --sheet: #fcfbf6;
+    --well: #eef1ec;
+    --nav: #e1ebe8;
+    --nav-ink: #2c3b3a;
+    --nav-muted: #6f8481;
+    --nav-current: #fcfbf6;
+    --ink: #1f2826;
+    --muted: #6d7a76;
+    --line: #d9ddd3;
+    --line-strong: #9fb0ab;
+    --tint: #dce9e6;
+    --tint-ink: #33564f;
+    --seal: #b4382a;
+    --seal-ink: #fff8f0;
+    --ok: #3c7a62;
+    --warn: #a0782c;
+    --bad: #b4382a;
+    --info: #4c7c8f;
+    --add: #e3f0e6; --add-em: #bcdcc4;
+    --del: #f8e8e4; --del-em: #efc6bd;
+  }
+  [data-theme="mo"] {
+    /* 墨分五色：生绢上焦、浓、重、淡、清，几乎不用彩。 */
+    --bg: #efebe0;
+    --sheet: #f8f5ec;
+    --well: #e7e2d5;
+    --nav: #e4dfd1;
+    --nav-ink: #1c1b18;
+    --nav-muted: #625c52;
+    --nav-current: #f8f5ec;
+    --ink: #1c1b18;
+    --muted: #625c52;
+    --line: #d8d1c1;
+    --line-strong: #8f887b;
+    --tint: #dcd6c8;
+    --tint-ink: #2e2c27;
+    --seal: #8e3226;
+    --seal-ink: #f8f5ec;
+    --ok: #4e6b55;
+    --warn: #8a7340;
+    --bad: #8e3226;
+    --info: #55636b;
+  }
+  [data-theme="qinglv"] {
+    /* 青绿山水：黛蓝为殿名，石绿与赭石点染。 */
+    --bg: #f5f2e9;
+    --sheet: #fbf9f3;
+    --well: #ecefe9;
+    --nav: #1f2c45;
+    --nav-ink: #e7ecef;
+    --nav-muted: #bcc7d6;
+    --nav-current: #2d3d5c;
+    --ink: #1b2433;
+    --muted: #6c7380;
+    --line: #dcd8cc;
+    --line-strong: #93a2a6;
+    --tint: #d6e8e1;
+    --tint-ink: #23584b;
+    --seal: #b0582a;
+    --seal-ink: #fff8ee;
+    --ok: #2f7f6a;
+    --warn: #b0702e;
+    --bad: #a8402c;
+    --info: #3f6390;
+  }
   :root {
-    --lacquer: #8e1b13;
-    --lacquer-dark: #4a0d0a;
-    --vermilion: #b5281c;
-    --gold: #c9a24a;
-    --gold-soft: #f3e2b0;
-    --plaque: #1c4148;
-    --plaque-dark: #0f2a30;
-    --paper: #f3ead5;
-    --paper-dark: #e9dcbd;
-    --sheet: #fcf8ed;
-    --ink: #24180f;
-    --muted: #7a6650;
-    --jade: #2c6e55;
-    --line: #d6c193;
-    --rule: rgba(181, 40, 28, .55);
-    --radius: 2px;
     --serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
     --sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    --radius: 3px;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     font-family: var(--sans);
     color: var(--ink);
-    background-color: var(--paper);
-    /* 宣纸：极淡的纤维纹与晕染。 */
-    background-image:
-      radial-gradient(ellipse at 15% 0%, rgba(255, 252, 240, .9) 0, transparent 50%),
-      radial-gradient(ellipse at 90% 100%, rgba(201, 162, 74, .10) 0, transparent 55%),
-      repeating-linear-gradient(97deg, rgba(122, 102, 80, .025) 0 1px, transparent 1px 7px);
-    background-attachment: fixed;
+    background: var(--bg);
     font-size: 14px;
-    line-height: 1.55;
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
+
+  /* ---- 页首：一条细栏 ---- */
   header {
-    background: linear-gradient(180deg, var(--plaque) 0%, var(--plaque-dark) 100%);
-    color: var(--gold-soft);
-    border-bottom: 3px solid var(--gold);
-    box-shadow: 0 3px 0 var(--lacquer), 0 6px 14px rgba(15, 42, 48, .25);
-    padding: 12px 28px;
     display: flex;
     align-items: center;
-    gap: 24px;
+    gap: 20px;
     flex-wrap: wrap;
+    padding: 10px 24px;
+    background: var(--sheet);
+    border-bottom: 1px solid var(--line);
   }
-  /* 匾额：双重金框，内为石青底金字。 */
-  .brand { display: flex; align-items: center; gap: 14px; }
-  .brand h1 {
-    margin: 0;
-    padding: 2px 18px 2px 26px;
-    font-family: var(--serif);
-    font-size: 30px;
-    font-weight: 700;
-    letter-spacing: 12px;
-    color: #f1cf73;
-    background: var(--plaque-dark);
-    border: 4px double var(--gold);
-    box-shadow: inset 0 0 0 2px var(--plaque-dark), inset 0 0 12px rgba(0, 0, 0, .55), 0 2px 0 #081a1e;
-    text-shadow: 0 1px 0 #3a2a05;
-    white-space: nowrap;
-  }
-  .brand span { font-family: var(--serif); font-size: 13px; opacity: .85; letter-spacing: 2px; }
-  .header-stats { display: flex; gap: 8px; margin-left: auto; align-items: center; flex-wrap: wrap; }
-  .stat {
-    border: 1px solid rgba(201, 162, 74, .55);
-    border-radius: var(--radius);
-    padding: 3px 10px;
-    font-size: 13px;
-    background: rgba(0, 0, 0, .18);
-    white-space: nowrap;
-  }
-  .stat b { color: #f1cf73; font-weight: 600; font-family: var(--serif); }
-  .stat.live { border-color: #f1cf73; color: #fff3cf; }
-  .stat.live::before {
-    content: ""; display: inline-block; width: 7px; height: 7px;
-    background: #f1cf73; margin-right: 6px; animation: pulse 1s infinite alternate;
+  .brand { display: flex; align-items: baseline; gap: 12px; }
+  .brand h1 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 700; letter-spacing: 6px; }
+  .brand span { font-family: var(--serif); font-size: 12px; color: var(--muted); letter-spacing: 2px; }
+  .header-stats { display: flex; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+  .header-stats .stat + .stat::before { content: ""; display: inline-block; width: 1px; height: 12px; background: var(--line); margin: 0 12px; vertical-align: -1px; }
+  .stat { white-space: nowrap; }
+  .stat b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat.exhausted b { color: var(--bad); }
+  .header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  #run-state { font-size: 13px; color: var(--muted); margin-right: 4px; }
+  #run-state.live { color: var(--ok); }
+  #run-state.live::before {
+    content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok); margin-right: 6px; animation: pulse 1s infinite alternate;
   }
   @keyframes pulse { from { opacity: .3; } to { opacity: 1; } }
+  .themes { display: inline-flex; margin-left: 8px; border: 1px solid var(--line); border-radius: var(--radius); }
+  .themes button { border: 0; border-radius: 0; background: transparent; color: var(--muted); }
+  .themes button + button { border-left: 1px solid var(--line); }
+  .themes button.current { color: var(--ink); background: var(--well); }
 
-  main {
-    max-width: 1320px;
-    margin: 0 auto;
-    padding: 26px 28px 48px;
-    display: grid;
-    grid-template-columns: minmax(340px, 420px) 1fr;
-    gap: 24px;
-    align-items: start;
+  /* ---- 殿名 ---- */
+  .court { flex: 1; display: grid; grid-template-columns: 176px minmax(0, 1fr); min-height: 0; }
+  .halls { background: var(--nav); padding: 18px 0; display: flex; flex-direction: column; gap: 2px; }
+  .halls a {
+    position: relative; display: block; padding: 10px 18px 10px 22px; color: var(--nav-ink); text-decoration: none;
+    border-left: 2px solid transparent;
   }
-  .full { grid-column: 1 / -1; }
-  main > *, .stack > *, .officials-layout > * { min-width: 0; }
-  .table-wrap { overflow-x: auto; }
-  .reply, .task-text { overflow-wrap: anywhere; }
-  .stack { display: grid; gap: 24px; }
-  /* 版框：四周双边，外粗内细，朱色。 */
-  .card {
-    background: var(--sheet);
-    border: 2px solid var(--rule);
-    border-radius: 0;
-    outline: 1px solid var(--rule);
-    outline-offset: -6px;
-    box-shadow: 0 1px 0 rgba(255, 255, 255, .7) inset, 0 3px 10px rgba(74, 13, 10, .07);
-    padding: 4px;
+  .halls a b { display: block; font-family: var(--serif); font-size: 16px; font-weight: 600; letter-spacing: 3px; }
+  .halls a span { display: block; font-size: 12px; color: var(--nav-muted); }
+  .halls a:hover { background: color-mix(in srgb, var(--nav-current) 55%, transparent); }
+  .halls a.current { background: var(--nav-current); border-left-color: var(--seal); }
+  .halls a i {
+    position: absolute; right: 14px; top: 13px; font-style: normal; font-size: 11px; line-height: 18px;
+    min-width: 18px; padding: 0 5px; text-align: center; border-radius: 9px; background: var(--seal); color: var(--seal-ink);
   }
-  .card > h2, .card > summary > h2 {
-    margin: 0;
-    padding: 12px 18px 10px;
-    font-family: var(--serif);
-    font-size: 19px;
-    font-weight: 700;
-    letter-spacing: 4px;
-    color: var(--lacquer);
-    border-bottom: 1px solid var(--rule);
-    display: flex;
-    align-items: center;
-    gap: 10px;
+
+  main { min-width: 0; padding: 22px 28px 48px; }
+  .hall { max-width: 1400px; }
+
+  /* ---- 分区：纸面与细线，不加粗框 ---- */
+  .card { background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius); }
+  .card + .card, .hall > .card + .card { margin-top: 20px; }
+  .card.narrow { max-width: 860px; }
+  .card > h2, .list-head h2 {
+    margin: 0; padding: 14px 20px 12px; font-family: var(--serif); font-size: 18px; font-weight: 600; letter-spacing: 3px;
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   }
-  /* 标题前一枚小方印。 */
-  .card > h2::before, .card > summary > h2::before {
-    content: ""; flex: 0 0 auto; width: 9px; height: 9px;
-    background: var(--vermilion); box-shadow: 0 0 0 2px var(--sheet), 0 0 0 3px var(--vermilion);
-  }
-  .card h2 small { font-family: var(--sans); font-size: 12px; letter-spacing: 0; color: var(--muted); font-weight: normal; }
+  .card > h2 { border-bottom: 1px solid var(--line); }
+  .card h2 small, .list-head h2 small { font-family: var(--sans); font-size: 12px; letter-spacing: 0; color: var(--muted); font-weight: normal; }
   .card > h2 .spacer { margin-left: auto; }
-  .body { padding: 16px 18px; }
+  .body { padding: 16px 20px; }
+  h3 { font-family: var(--serif); font-weight: 600; font-size: 15px; letter-spacing: 2px; margin: 0 0 8px; }
 
-  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; letter-spacing: .5px; }
+  /* ---- 奉天殿：诏令列表与全文 ---- */
+  .edicts { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 24px; align-items: start; }
+  .edict-list { position: sticky; top: 12px; max-height: calc(100vh - 100px); display: flex; flex-direction: column; }
+  .list-head { display: flex; align-items: baseline; }
+  .list-head h2 { padding: 0 0 8px; flex: 1; }
+  .filters { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .filters button { border-color: transparent; background: transparent; color: var(--muted); }
+  .filters button span { font-variant-numeric: tabular-nums; opacity: .8; }
+  .filters button.current { color: var(--ink); border-color: var(--line-strong); background: var(--sheet); }
+  ol.tasks { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+  .edict-row {
+    display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; align-items: start;
+    padding: 10px 8px 10px 6px; border-bottom: 1px solid var(--line); cursor: pointer; border-left: 2px solid transparent;
+  }
+  .edict-row:hover { background: var(--well); }
+  .edict-row:focus-visible { outline: 1px solid var(--line-strong); outline-offset: -1px; }
+  .edict-row.selected { background: var(--tint); border-left-color: var(--seal); }
+  .edict-row.cancelled .row-text { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+  .row-id { font-family: var(--serif); font-weight: 600; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .edict-row.selected .row-id { color: var(--seal); }
+  .row-main { min-width: 0; }
+  .row-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-family: var(--serif); font-size: 14.5px; line-height: 1.5; overflow-wrap: anywhere; }
+  .row-meta { display: block; font-size: 12px; color: var(--muted); }
+  /* 状态：一点颜色加两个字。 */
+  .dot { font-size: 12px; white-space: nowrap; color: var(--muted); }
+  .dot::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; background: var(--line-strong); }
+  .dot.pending::before { background: var(--warn); }
+  .dot.assigned::before { background: var(--info); animation: pulse 1s infinite alternate; }
+  .dot.completed::before, .dot.accept::before { background: var(--ok); }
+  .dot.failed::before, .dot.reject::before { background: var(--bad); }
+  .dot.awaiting { color: var(--seal); }
+  .dot.awaiting::before { background: var(--seal); }
+  .edict-detail { min-width: 0; }
+  .edict-detail .card { margin-bottom: 20px; }
+
+  /* 诏令全文：一张纸，不再套框中框。 */
+  .task { background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 24px; }
+  .task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+  /* 诏令编号：一枚小朱印。 */
+  .task-id {
+    font-family: var(--serif); font-weight: 700; font-size: 13px; color: var(--seal-ink); background: var(--seal);
+    padding: 0 5px; min-width: 24px; line-height: 20px; text-align: center; border-radius: 2px;
+  }
+  .task-text { font-family: var(--serif); font-size: 17px; line-height: 1.7; margin: 12px 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .meta { font-size: 12px; color: var(--muted); display: flex; gap: 6px 16px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+  .badge {
+    font-size: 12px; padding: 0 7px; line-height: 20px; border-radius: 10px; white-space: nowrap;
+    background: var(--well); color: var(--muted); border: 0;
+  }
+  .badge.pending { color: var(--warn); }
+  .badge.assigned { color: var(--info); }
+  .badge.completed, .badge.accept { color: var(--ok); }
+  .badge.failed, .badge.reject { color: var(--bad); }
+  .badge.awaiting { background: var(--seal); color: var(--seal-ink); }
+  .badge.urgent { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+  .badge.seal, .badge.template, .badge.courier, .badge.cancelled { color: var(--tint-ink); background: var(--tint); }
+  .badge.accept { font-weight: 600; }
+
+  /* 正文各段：小标题加留白，左缘一道细线区分来源。 */
+  .reply, .split, .debate, .flags, .censure, .changes, .draft, .chronicle {
+    margin-top: 16px; padding: 2px 0 2px 14px; border-left: 2px solid var(--line); font-size: 13.5px;
+  }
+  .reply { white-space: pre-wrap; font-family: var(--serif); font-size: 14.5px; line-height: 1.8; max-height: 460px; overflow: auto; overflow-wrap: anywhere; }
+  .reply.stream { border-left-color: var(--info); }
+  .reply.stream::after { content: "▍"; color: var(--info); animation: pulse .6s infinite alternate; }
+  .reply.error { border-left-color: var(--bad); color: var(--bad); }
+  .split ul, .flags ul { margin: 4px 0 0; padding-left: 18px; }
+  .debate summary { cursor: pointer; }
+  .debate p { margin: 6px 0 0; white-space: pre-wrap; }
+  .debate .who { font-weight: 600; font-family: var(--serif); }
+  .debate.live { border-left-style: dashed; }
+  .flags { border-left-color: var(--bad); }
+  .flags .flag-head, .flags .flag-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .flags li { margin: 3px 0; }
+  .flags li.done { color: var(--muted); }
+  .flags .recheck { font-size: 12px; margin-top: 2px; }
+  .flags .recheck.upheld b { color: var(--bad); }
+  .flags .recheck.cleared b, .flags .acquitted { color: var(--ok); }
+  .flags .acquitted { font-size: 12px; white-space: nowrap; }
+  .censure { white-space: pre-wrap; border-left-color: var(--info); }
+  .censure.impeach { border-left-color: var(--bad); }
+  .censure .ev { color: var(--muted); font-size: 12px; }
+  .draft { color: var(--muted); }
+  .draft b, .split b, .flags b, .censure b, .changes > b, .debate b { font-family: var(--serif); color: var(--ink); }
+  .chronicle { font-family: var(--serif); line-height: 1.8; margin: 0 0 16px; }
+  .chronicle p { margin: 0 0 8px; white-space: pre-line; }
+  ol.criteria { margin: 4px 0 6px; padding-left: 22px; font-size: 12.5px; color: var(--muted); }
+  .persona { color: var(--muted); font-size: 12px; }
+
+  /* 工部奏本 */
+  .changes { border-left-color: var(--line-strong); }
+  .changes details { margin-top: 8px; }
+  .changes summary { cursor: pointer; font-family: var(--mono); font-size: 12.5px; }
+  pre.diff {
+    margin: 6px 0 0; padding: 6px 0; background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius);
+    font: 12.5px/1.55 var(--mono); max-height: 520px; overflow: auto; white-space: pre;
+  }
+  pre.diff .add, pre.diff .del, pre.diff .ctx, pre.diff .hunk { display: block; padding-right: 12px; }
+  pre.diff .add { background: var(--add, #e3f0e6); }
+  pre.diff .del { background: var(--del, #f8e8e4); }
+  pre.diff .hunk { color: var(--muted); background: var(--well); margin: 4px 0; padding: 2px 12px; font-family: var(--sans); font-size: 12px; }
+  pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; color: var(--ink); cursor: pointer; }
+  pre.diff .pick input { margin: 0; }
+  pre.diff .ln { display: inline-block; width: 3.4em; padding-right: .6em; text-align: right; color: var(--line-strong); user-select: none; }
+  pre.diff .ln + .ln { border-right: 1px solid var(--line); }
+  pre.diff .sign { display: inline-block; width: 1.8em; text-align: center; user-select: none; color: var(--muted); }
+  pre.diff .add .sign { color: var(--ok); }
+  pre.diff .del .sign { color: var(--bad); }
+  pre.diff .add .em { background: var(--add-em, #bcdcc4); border-radius: 2px; }
+  pre.diff .del .em { background: var(--del-em, #efc6bd); border-radius: 2px; }
+  pre.diff .tk-keyword { color: #9c3527; font-weight: 600; }
+  pre.diff .tk-string { color: #2b6a63; }
+  pre.diff .tk-comment { color: #8d8a7c; font-style: italic; }
+  pre.diff .tk-number, pre.diff .tk-constant { color: #6a4a8a; }
+  pre.diff .tk-function { color: #86601c; }
+  pre.diff .tk-type, pre.diff .tk-macro { color: #2f5f8a; }
+  [data-theme="mo"] pre.diff [class^="tk-"] { color: var(--ink); }
+  [data-theme="mo"] pre.diff .tk-comment { color: var(--muted); }
+  [data-theme="mo"] pre.diff .tk-keyword { font-weight: 700; }
+
+  .review-row { display: flex; gap: 6px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  .review-row input { flex: 1; min-width: 160px; }
+
+  /* ---- 表单与按钮：墨色细框，只有「采纳」钤朱 ---- */
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
   label:first-child { margin-top: 0; }
   input[type=text], input[type=number], input[type=password], select, textarea {
-    width: 100%;
-    font: inherit;
-    color: var(--ink);
-    background: #fffdf6;
-    border: 1px solid var(--line);
-    border-bottom-color: #b9a06a;
-    border-radius: var(--radius);
-    padding: 7px 9px;
+    width: 100%; font: inherit; color: var(--ink); background: var(--sheet);
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 7px 9px;
   }
-  textarea { min-height: 76px; resize: vertical; font-family: var(--serif); }
-  input:focus, select:focus, textarea:focus { outline: 2px solid rgba(201, 162, 74, .6); outline-offset: 0; border-color: var(--gold); }
+  textarea { min-height: 96px; resize: vertical; font-family: var(--serif); font-size: 15px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--line-strong); box-shadow: 0 0 0 3px var(--tint); }
   .row { display: flex; gap: 8px; align-items: center; }
   .row > * { flex: 1; }
   .row > .shrink { flex: 0 0 auto; width: auto; }
-  .checks { display: flex; gap: 6px 12px; flex-wrap: wrap; }
-  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); font-size: 13px; }
-  input[type=checkbox] { accent-color: var(--vermilion); }
+  .checks { display: flex; gap: 6px 14px; flex-wrap: wrap; }
+  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); font-size: 13px; font-family: var(--mono); }
+  input[type=checkbox] { accent-color: var(--tint-ink); }
   .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+  code { font-family: var(--mono); font-size: .92em; }
 
   button {
-    font: inherit;
-    cursor: pointer;
-    border-radius: var(--radius);
-    border: 1px solid #c4ab74;
-    background: linear-gradient(180deg, #fffaf0, #f1e6cb);
-    color: var(--ink);
-    padding: 6px 12px;
-    white-space: nowrap;
-    letter-spacing: .5px;
+    font: inherit; cursor: pointer; border-radius: var(--radius); border: 1px solid var(--line-strong);
+    background: var(--sheet); color: var(--ink); padding: 6px 12px; white-space: nowrap;
   }
-  button:hover { border-color: var(--gold); background: #fff6df; }
-  /* 匾额下的按钮：石青底上描金边。 */
-  header button:not(.gold) { background: transparent; color: var(--gold-soft); border-color: rgba(201, 162, 74, .7); }
-  header button:not(.gold):hover { background: rgba(201, 162, 74, .15); }
+  button:hover { background: var(--well); }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  /* 朱红印泥：内衬一道浅线，如钤印的边。 */
-  button.primary {
-    background: var(--vermilion); border-color: var(--lacquer); color: #fff6e3;
-    font-family: var(--serif); font-weight: 600;
-    box-shadow: inset 0 0 0 2px var(--vermilion), inset 0 0 0 3px rgba(255, 230, 200, .55);
-  }
-  button.primary:hover { background: var(--lacquer); box-shadow: inset 0 0 0 2px var(--lacquer), inset 0 0 0 3px rgba(255, 230, 200, .55); }
-  button.gold {
-    background: linear-gradient(180deg, #e2c071, var(--gold)); border-color: #8f6f22; color: var(--lacquer-dark);
-    font-family: var(--serif); font-weight: 700;
-  }
-  button.gold:hover { background: #e6bb5f; }
-  button.small { padding: 3px 9px; font-size: 12px; }
-  /* 朱批与墨批：采纳用朱，驳回用墨。 */
-  button.accept { color: var(--vermilion); border-color: rgba(181, 40, 28, .5); font-family: var(--serif); font-weight: 700; }
-  button.accept:hover { background: var(--vermilion); color: #fff6e3; }
-  button.reject { color: #3a2a20; border-color: #8a7a68; font-family: var(--serif); }
-  button.reject:hover { background: #3a2a20; color: var(--sheet); }
-  .actions { display: flex; gap: 8px; margin-top: 14px; }
-
-  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
-  .modes button { padding: 9px 6px; font-family: var(--serif); font-size: 15px; letter-spacing: 2px; }
-  .modes button.current {
-    background: var(--plaque); color: #f1cf73; border-color: var(--gold); cursor: default;
-    box-shadow: inset 0 0 0 2px var(--plaque), inset 0 0 0 3px rgba(201, 162, 74, .6);
-  }
-  /* 各部等高：有路线折行时，其余各部同高，纵向居中，不再参差。 */
-  .routes { display: grid; gap: 0; grid-auto-rows: 1fr; border-top: 1px solid var(--rule); }
-  .route {
-    display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px;
-    padding: 5px 0; border-bottom: 1px solid rgba(181, 40, 28, .18);
-  }
-  .route .dept { font-family: var(--serif); color: var(--lacquer); font-weight: 700; text-align: center; border-right: 1px solid var(--rule); }
-  .chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-  /* 名帖：方角、细框。 */
-  .chip {
-    font-size: 12px; padding: 1px 7px; border-radius: var(--radius);
-    background: #fffdf6; border: 1px solid var(--line); white-space: nowrap; font-family: var(--serif);
-  }
-  .chip.emperor { background: var(--gold); border-color: #8f6f22; color: var(--lacquer-dark); font-weight: 700; }
-  .arrow { color: var(--vermilion); font-size: 11px; }
-  .step { display: inline-flex; align-items: center; gap: 4px; }
-  .vacancy { font-size: 12px; color: var(--vermilion); }
-  .vacancies { margin-top: 14px; padding: 8px 12px 8px 14px; font-size: 13px; border: 1px solid rgba(181, 40, 28, .45); border-left: 4px solid var(--vermilion); background: #fbefe6; }
-  .vacancies h3 { margin: 0 0 4px; font-size: 14px; color: var(--vermilion); font-family: var(--serif); letter-spacing: 2px; }
-  .vacancies ul { margin: 0; padding-left: 18px; }
-  .vacancies li { margin: 3px 0; }
-
-  .tasks { display: grid; gap: 14px; }
-  /* 奏折：纸上淡淡的竖栏，左缘一道状态色的折口。 */
-  .task {
-    position: relative;
-    border: 1px solid var(--line);
-    border-left: 5px solid var(--line);
-    padding: 12px 16px 12px 15px;
-    background-color: #fffdf5;
-    background-image: repeating-linear-gradient(90deg, transparent 0 31px, rgba(181, 40, 28, .045) 31px 32px);
-    box-shadow: 0 1px 2px rgba(74, 13, 10, .06);
-  }
-  .task.pending { border-left-color: var(--gold); }
-  .task.assigned { border-left-color: #c86a1e; }
-  .task.completed { border-left-color: var(--jade); }
-  .task.failed { border-left-color: var(--vermilion); }
-  .task.cancelled { border-left-color: #b9aa96; opacity: .75; }
-  .task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  /* 诏令编号钤为朱文方印。 */
-  .task-id {
-    font-family: var(--serif); font-weight: 700; color: #fff6e3; background: var(--vermilion);
-    padding: 0 6px; min-width: 28px; text-align: center; line-height: 22px;
-    box-shadow: inset 0 0 0 1px rgba(255, 230, 200, .6);
-  }
-  .task-text { font-family: var(--serif); font-size: 16px; margin: 6px 0 6px; white-space: pre-wrap; }
-  /* 状态印：方角、双线。 */
-  .badge {
-    font-size: 12px; padding: 0 6px; border: 1px solid; border-radius: var(--radius);
-    white-space: nowrap; font-family: var(--serif); line-height: 20px;
-  }
-  .badge.pending { color: #7d5d12; border-color: #d4b56a; background: #fbf2d8; }
-  .badge.assigned { color: #9a4f10; border-color: #e0ad78; background: #fcecd9; }
-  .badge.completed { color: var(--jade); border-color: #8fbfa8; background: #e6f1ea; }
-  .badge.failed { color: var(--vermilion); border-color: #e2a59d; background: #fae7e4; }
-  .badge.awaiting { color: #fff6e3; border-color: var(--vermilion); background: var(--vermilion); }
-  .draft { margin-top: 8px; font-size: 13px; color: var(--muted); }
-  .draft b { color: var(--vermilion); font-family: var(--serif); }
+  button.small { padding: 2px 9px; font-size: 12.5px; }
+  /* 主要动作：墨色实底，每处至多一个。 */
+  button.primary, button.gold { background: var(--ink); border-color: var(--ink); color: var(--sheet); }
+  button.primary:hover, button.gold:hover { background: color-mix(in srgb, var(--ink) 85%, var(--sheet)); }
+  button.gold.small { background: var(--sheet); color: var(--ink); border-color: var(--ink); font-weight: 600; }
+  button.gold.small:hover { background: var(--well); }
+  /* 采纳：前钤一枚小朱印。驳回：墨字。 */
+  button.accept { border-color: var(--seal); color: var(--seal); font-weight: 600; }
+  button.accept::before { content: ""; display: inline-block; width: 7px; height: 7px; background: var(--seal); margin-right: 6px; vertical-align: 1px; }
+  button.accept:hover { background: color-mix(in srgb, var(--seal) 8%, var(--sheet)); }
+  button.reject { color: var(--ink); }
+  button.reject:hover { color: var(--bad); border-color: var(--bad); background: var(--sheet); }
+  button.zhu { width: 100%; padding: 8px; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
   #abolish-choice .actions { flex-direction: column; margin-top: 8px; }
-  #retreat-btn { width: 100%; margin-bottom: 14px; }
+  #retreat-btn { margin-bottom: 16px; }
+
+  details.save-template { margin-top: 14px; font-size: 13px; }
+  details.save-template summary { cursor: pointer; color: var(--muted); }
+  details.save-template textarea { min-height: 80px; margin-top: 6px; }
+
+  /* ---- 华盖殿：制度与派工 ---- */
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-bottom: 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); overflow: hidden; }
+  .modes button { border: 0; border-radius: 0; padding: 9px 6px; font-family: var(--serif); font-size: 15px; letter-spacing: 2px; background: var(--sheet); }
+  .modes button + button { border-left: 1px solid var(--line-strong); }
+  .modes button.current { background: var(--ink); color: var(--sheet); cursor: default; }
+  .routes { display: grid; border-top: 1px solid var(--line); }
+  /* 每部一行：部名定宽，路线单行，过长则横向滚动，各行等高。 */
+  .route { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 40px; border-bottom: 1px solid var(--line); }
+  .route .dept { font-family: var(--serif); font-weight: 600; text-align: center; }
+  .chain { display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: thin; padding: 6px 0; }
+  .step { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+  .chip { font-size: 12.5px; padding: 1px 8px; border-radius: 10px; background: var(--well); white-space: nowrap; font-family: var(--serif); }
+  .chip.emperor { background: var(--tint); color: var(--tint-ink); font-weight: 600; }
+  .arrow { color: var(--line-strong); font-size: 10px; }
+  .vacancy { font-size: 12.5px; color: var(--bad); }
+  .vacancies { margin-top: 16px; padding: 2px 0 2px 14px; border-left: 2px solid var(--seal); font-size: 13.5px; }
+  .vacancies h3 { color: var(--seal); }
+  .vacancies ul { margin: 0; padding-left: 18px; }
+  .vacancies li { margin: 4px 0; }
+
+  /* ---- 文华殿：百官 ---- */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { white-space: nowrap; text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-weight: normal; font-size: 12px; color: var(--muted); }
+  td.name { font-family: var(--serif); font-size: 15px; }
+  td .row select { min-width: 130px; }
+  td .row { flex-wrap: wrap; max-width: 230px; }
+  td .row > button { flex: 0 0 auto; }
+  #officials td:last-child .row { min-width: 100px; }
+  button.rename { padding: 0 6px; font-size: 11px; margin-left: 4px; vertical-align: 1px; }
+  .record { font-size: 12px; white-space: nowrap; }
+  .record .a { color: var(--ok); }
+  .record .r { color: var(--bad); }
+  .officials-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; }
+  /* 文华殿：百官表占满宽，招募、荐举、配置等分栏排在表下。 */
+  #hall-wenhua .officials-layout { grid-template-columns: minmax(0, 1fr); }
+  #hall-wenhua .officials-layout > div:last-child {
+    columns: 300px; column-gap: 32px; border-top: 1px solid var(--line); padding-top: 18px;
+  }
+  #hall-wenhua .side { border-left: 0; padding-left: 0; margin: 0 0 24px; break-inside: avoid; }
+  .officials-layout > * { min-width: 0; }
+  .side { border-left: 1px solid var(--line); padding-left: 20px; }
+  .side + .side { margin-top: 20px; }
+  .officials-layout h3 { margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .officials-layout h3:first-child { margin-top: 0; }
+  .officials-layout h3 small { font-family: var(--sans); letter-spacing: 0; font-weight: normal; color: var(--muted); }
+  .row label { margin: 0; display: flex; align-items: center; gap: 4px; color: var(--ink); font-size: 12px; }
+  #palace .debate { max-height: 460px; overflow-y: auto; }
+  ol.ranking { margin: 10px 0 0; padding-left: 22px; }
+  ol.ranking li { margin-bottom: 6px; }
+  pre.kaocheng { white-space: pre-wrap; font: 12px/1.6 var(--mono); background: var(--well); border-radius: var(--radius); padding: 10px; margin: 6px 0 0; }
+
+  /* ---- 武英殿与起居注 ---- */
+  .records-list { margin: 12px 0 0; padding-left: 22px; max-height: 60vh; overflow: auto; font-size: 13.5px; }
+  .records-list li { margin-bottom: 8px; }
+  #records-q { flex: 1; }
+  .history-filter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 14px 20px 0; }
+  .history-filter input[type=text] { width: 9em; padding: 4px 8px; font-size: 13px; }
+  .history-filter #hf-kind, .history-filter #hf-since { width: 13em; }
+  .history-list { margin: 0; padding: 12px 20px 18px 54px; max-height: 70vh; overflow: auto; font-size: 13px; }
+  .history-list li { margin-bottom: 3px; }
+
+  .empty { color: var(--muted); text-align: center; padding: 32px 0; }
+
   /* 观政令牌只读：写操作的按钮与表单一律不显示，只留标了 data-view 的查看按钮。 */
   body.viewer button:not([data-view]),
   body.viewer .write,
@@ -265,357 +401,273 @@
   body.viewer label.pick { display: none !important; }
   .viewer-badge { display: none; }
   body.viewer .viewer-badge { display: inline; }
-  button.zhu {
-    padding: 9px; font-family: var(--serif); font-size: 15px;
-    background: #2b1b17; color: var(--gold-soft); border-color: #000;
-  }
-  button.zhu:hover { background: #000; }
-  .chronicle {
-    margin-bottom: 14px; padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--gold);
-    background: #fbf3df; font-family: var(--serif); line-height: 1.8;
-  }
-  .chronicle h3 { margin: 0 0 4px; font-size: 14px; color: var(--lacquer); }
-  .chronicle p { margin: 0 0 8px; white-space: pre-line; }
-  .badge.cancelled { color: var(--muted); border-color: var(--line); background: var(--paper-dark); }
-  /* 评定如朱批、墨批。 */
-  .badge.accept { color: #fff6e3; background: var(--vermilion); border-color: var(--lacquer); font-weight: 700; }
-  .badge.reject { color: var(--sheet); background: #3a2a20; border-color: #1d140e; }
-  .badge.seal { color: var(--lacquer); border-color: var(--gold); background: #fff4d6; }
-  .badge.urgent { color: #fff; border-color: #b8461f; background: linear-gradient(90deg, #b8461f, #e07a2e); }
-  .badge.template { color: #3d4f7a; border-color: #b6c2df; background: #eef1f9; }
-  ol.criteria { margin: 4px 0 6px; padding-left: 22px; font-size: 12px; color: var(--muted); }
-  .task ol.criteria { margin: 4px 0 0; }
-  details.save-template { margin-top: 10px; font-size: 13px; }
-  details.save-template summary { cursor: pointer; color: var(--muted); }
-  details.save-template textarea { min-height: 80px; margin-top: 6px; }
-  .badge.courier { color: #2f5d62; border-color: #9cc3c0; background: #e8f3f1; }
-  .meta { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
-  /* 回奏：誊在纸上，左留朱色天头线。 */
-  .reply {
-    margin: 8px 0 0; padding: 8px 12px; border-radius: 0;
-    background: var(--sheet); border: 1px solid var(--line); border-left: 2px solid var(--rule);
-    white-space: pre-wrap; font-family: var(--serif); font-size: 13.5px; line-height: 1.7; max-height: 260px; overflow: auto;
-  }
-  .reply.stream { border-style: solid; border-color: #ecc195; background: #fff8ec; }
-  .reply.stream::after { content: "▍"; color: #e08a2b; animation: pulse .6s infinite alternate; }
-  .reply.error { border-color: #e9b4ae; background: #fdf1ef; color: #8c2620; }
-  .changes { margin-top: 8px; border: 1px solid var(--gold); border-top: 3px double var(--gold); background: #fffaf0; padding: 6px 10px; font-size: 13px; }
-  .changes summary { cursor: pointer; font-family: ui-monospace, monospace; }
-  pre.diff { margin: 4px 0; padding: 6px 8px; background: #fffefa; border: 1px solid var(--line); border-radius: 0; font-size: 12px; max-height: 420px; overflow: auto; white-space: pre; }
-  pre.diff .add { color: var(--ink); background: #e8f4ea; display: block; }
-  pre.diff .del { color: var(--ink); background: #fbecea; display: block; }
-  pre.diff .hunk { color: var(--muted); display: block; margin-top: 4px; }
-  pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; font-family: system-ui, sans-serif; color: var(--ink); cursor: pointer; }
-  pre.diff .pick input { margin: 0; }
-  pre.diff .ctx { display: block; }
-  /* 行号槽与增删记号；改动的字词加深底色。 */
-  pre.diff .ln { display: inline-block; width: 3.2em; padding-right: .6em; text-align: right; color: #b3a07c; user-select: none; border-right: 1px solid rgba(181, 40, 28, .15); }
-  pre.diff .ln + .ln { margin-right: 0; }
-  pre.diff .sign { display: inline-block; width: 1.6em; text-align: center; user-select: none; color: var(--muted); }
-  pre.diff .add .sign { color: #1d6b3a; }
-  pre.diff .del .sign { color: #8c2620; }
-  pre.diff .add .em { background: #bfe5c8; border-radius: 2px; }
-  pre.diff .del .em { background: #f5c3bc; border-radius: 2px; text-decoration: line-through; text-decoration-color: rgba(140, 38, 32, .45); }
-  /* 墨色为主，关键字朱、字符串石青、注释淡赭、数字与常量黛紫、函数与类型赭石。 */
-  pre.diff .tk-keyword { color: #a1261b; font-weight: 600; }
-  pre.diff .tk-string { color: #22636b; }
-  pre.diff .tk-comment { color: #9a8566; font-style: italic; }
-  pre.diff .tk-number, pre.diff .tk-constant { color: #6a3d8a; }
-  pre.diff .tk-function { color: #8a5a12; }
-  pre.diff .tk-type, pre.diff .tk-macro { color: #2c5e8a; }
-  .review-row { display: flex; gap: 6px; margin-top: 8px; }
-  .stat.exhausted { border-color: #e9b4ae; color: #ffd5cf; }
-  .split { margin-top: 8px; padding: 6px 10px; border-radius: var(--radius); font-size: 13px; border: 1px solid var(--gold); background: #fffaf0; }
-  .split ul { margin: 4px 0 0; padding-left: 18px; }
-  .debate { margin-top: 8px; padding: 6px 10px; border-radius: var(--radius); font-size: 13px; border: 1px solid #c9b8d8; background: #f8f4fb; }
-  .debate summary { cursor: pointer; }
-  .debate p { margin: 6px 0 0; white-space: pre-wrap; }
-  .debate .who { font-weight: 600; color: #4b2a63; }
-  .debate.live { border-style: dashed; }
-  .persona { color: var(--muted); font-size: 12px; }
-  button.rename { padding: 0 6px; font-size: 11px; margin-left: 4px; vertical-align: 1px; }
-  .flags { margin-top: 8px; padding: 6px 10px; border-radius: var(--radius); font-size: 13px; border: 1px solid #c0392b; background: #fdf1ef; }
-  .flags ul { margin: 4px 0 0; padding-left: 18px; }
-  .flags .hint { font-size: 12px; }
-  .flags .flag-head, .flags .flag-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .flags li { margin: 3px 0; }
-  .flags li.done { color: #777; }
-  .flags .recheck { font-size: 12px; margin-top: 2px; }
-  .flags .recheck.upheld b { color: #c0392b; }
-  .flags .recheck.cleared b { color: #2e7d32; }
-  .flags .acquitted { font-size: 12px; color: #2e7d32; white-space: nowrap; }
-  .censure { margin-top: 8px; padding: 6px 10px; border-radius: var(--radius); font-size: 13px; border: 1px solid #b9c7d8; background: #f2f6fb; white-space: pre-wrap; }
-  .censure.impeach { border-color: #e9b4ae; background: #fdf1ef; }
-  .censure .ev { color: var(--muted); font-size: 12px; }
-  pre.kaocheng { white-space: pre-wrap; font-size: 12px; background: var(--paper); border: 1px dashed var(--line); border-radius: var(--radius); padding: 8px; margin: 6px 0 0; }
-  .review-row input { flex: 1; }
-  .empty { color: var(--muted); text-align: center; padding: 26px 0; }
-
-  table { width: 100%; border-collapse: collapse; }
-  th, td { white-space: nowrap; text-align: left; padding: 8px 7px; border-bottom: 1px solid #efe4cb; vertical-align: middle; }
-  th { font-weight: normal; font-size: 12px; color: var(--lacquer); font-family: var(--serif); letter-spacing: 1px; border-bottom: 1px solid var(--rule); }
-  td.name { font-family: var(--serif); font-size: 15px; }
-  td .row select { min-width: 130px; }
-  td .row { flex-wrap: wrap; max-width: 230px; }
-  td .row > button { flex: 0 0 auto; }
-  /* 任免按钮两两一行，不叠成一竖列。 */
-  #officials td:last-child .row { min-width: 100px; }
-  .side h3 small { font-family: var(--sans); letter-spacing: 0; font-weight: normal; }
-  #palace .debate { max-height: 460px; overflow-y: auto; }
-  .record { font-size: 12px; white-space: nowrap; }
-  .record .a { color: var(--jade); }
-  .record .r { color: var(--vermilion); }
-  .officials-layout { display: grid; grid-template-columns: 1fr 280px; gap: 22px; }
-  .side { border-left: 1px solid var(--line); padding-left: 18px; }
-  .officials-layout h3 { font-family: var(--serif); color: var(--lacquer); font-size: 15px; margin: 14px 0 8px; letter-spacing: 2px; padding-bottom: 4px; border-bottom: 1px solid rgba(181, 40, 28, .25); }
-  .officials-layout h3:first-child { margin-top: 0; }
-  .row label { margin: 0; display: flex; align-items: center; gap: 4px; color: var(--ink); font-size: 12px; }
-  .side h3 { font-family: var(--serif); color: var(--lacquer); font-size: 15px; margin: 0 0 8px; letter-spacing: 2px; padding-bottom: 4px; border-bottom: 1px solid rgba(181, 40, 28, .25); }
-  .side + .side { margin-top: 18px; }
-  ol.ranking { margin: 10px 0 0; padding-left: 22px; }
-  ol.ranking li { margin-bottom: 6px; }
-
-  details.history summary { cursor: pointer; list-style: none; }
-  details.history summary::-webkit-details-marker { display: none; }
-  details.history:not([open]) summary h2 { border-bottom: 0; }
-  details.history summary h2::after { content: "展开"; margin-left: auto; font-family: var(--sans); font-size: 12px; color: var(--muted); letter-spacing: 0; }
-  details.history[open] summary h2::after { content: "收起"; }
-  .history-list { margin: 0; padding: 12px 18px 16px 52px; max-height: 360px; overflow: auto; font-size: 13px; }
-  .history-list li { break-inside: avoid; margin-bottom: 3px; }
-  .records-list { margin: 10px 0 0; padding-left: 22px; max-height: 320px; overflow: auto; font-size: 13px; }
-  .records-list li { margin-bottom: 6px; }
-  #records-q { flex: 1; }
-  .history-filter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 18px 0; }
-  .history-filter input[type=text] { width: 9em; padding: 4px 8px; font-size: 13px; }
-  .history-filter #hf-kind, .history-filter #hf-since { width: 13em; }
 
   #toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
-    background: var(--plaque-dark); color: var(--gold-soft); border: 3px double var(--gold);
-    padding: 9px 18px; border-radius: 0; font-family: var(--serif); box-shadow: 0 6px 20px rgba(0,0,0,.25);
-    opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 80vw;
+    background: var(--ink); color: var(--sheet); padding: 9px 18px; border-radius: var(--radius);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .18); opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 80vw;
   }
   #toast.show { opacity: 1; }
-  #toast.error { background: #fbe9e6; color: #8c2620; border-color: #e0a9a3; }
-  #locked {
-    position: fixed; inset: 0; background: rgba(43, 29, 20, .7); display: none;
-    align-items: center; justify-content: center;
-  }
+  #toast.error { background: var(--bad); color: #fff; }
+  #locked { position: fixed; inset: 0; background: rgba(20, 24, 24, .55); display: none; align-items: center; justify-content: center; }
   #locked.show { display: flex; }
-  #locked div { background: var(--sheet); padding: 28px 34px; border: 2px solid var(--rule); outline: 1px solid var(--rule); outline-offset: -7px; max-width: 460px; }
-  #locked h2 { font-family: var(--serif); color: var(--lacquer); margin-top: 0; }
+  #locked div { background: var(--sheet); padding: 28px 34px; border-radius: var(--radius); max-width: 460px; }
+  #locked h2 { font-family: var(--serif); margin-top: 0; }
 
-  @media (max-width: 980px) {
-    main { grid-template-columns: minmax(0, 1fr); padding: 16px; }
-    header { padding: 12px 16px; }
-    .brand h1 { font-size: 24px; letter-spacing: 8px; padding: 2px 10px 2px 18px; }
-    .header-stats { margin-left: 0; }
-    .officials-layout { grid-template-columns: 1fr; }
+  @media (max-width: 1100px) {
+    .edicts { grid-template-columns: minmax(0, 1fr); }
+    .edict-list { position: static; max-height: 46vh; }
+    .officials-layout { grid-template-columns: minmax(0, 1fr); }
     .side { border-left: 0; padding-left: 0; }
+  }
+  @media (max-width: 760px) {
+    .court { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+    .header-stats { gap: 2px 14px; }
+    .header-stats .stat + .stat::before { display: none; }
+    .halls { flex-direction: row; overflow-x: auto; padding: 0; }
+    .halls a { border-left: 0; border-bottom: 2px solid transparent; padding: 8px 9px; flex: 1 0 auto; text-align: center; }
+    .halls a b { font-size: 15px; letter-spacing: 1px; }
+    .halls a i { top: 2px; right: 0; }
+    .halls a.current { border-bottom-color: var(--seal); }
+    .halls a span { display: none; }
+    main { padding: 16px; }
+    header { padding: 10px 16px; }
+    .header-actions { margin-left: 0; }
   }
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><h1>奉天门</h1><span>御门听政 · 紫垣 ZiYuan</span></div>
+  <div class="brand"><h1>奉天门</h1><span>紫垣 · 御门听政</span></div>
   <div class="header-stats">
     <span class="stat">制度 <b id="mode-label">—</b></span>
     <span class="stat">诏令 <b id="task-count">0</b> · 待办 <b id="open-count">0</b></span>
     <span class="stat">用量 <b id="usage-total">0</b> tokens<span id="cost-total"></span></span>
     <span class="stat" id="treasury-stat" hidden title="户部度支：朝廷总额的余额">度支余 <b id="treasury-left">0</b></span>
     <span class="stat viewer-badge" title="观政令牌只能查看，不能下诏、批红、准奏或任免">观政 · 只读</span>
+  </div>
+  <div class="header-actions">
     <span class="stat" id="run-state">待命</span>
     <button class="gold" id="run-btn">执行待办诏令</button>
     <button id="watch-btn" title="常朝：常驻执行，随到随办，办完自动请都察院复核">开常朝</button>
     <button id="stop-btn" hidden>中止执行</button>
+    <span class="themes" role="group" aria-label="配色">
+      <button class="small" data-theme="tianqing" data-view title="汝窑天青">天青</button><button class="small" data-theme="mo" data-view title="墨分五色">墨分</button><button class="small" data-theme="qinglv" data-view title="青绿山水">青绿</button>
+    </span>
   </div>
 </header>
 
-<main>
-  <div class="stack">
-    <section class="card write">
-      <h2>下诏 <small>皇帝颁布诏令</small></h2>
-      <form class="body" id="edict-form">
-        <label for="edict-template">翰林院模板 <span>（选后填入内容与玉玺，可再改）</span></label>
-        <select id="edict-template" data-keep></select>
-        <ol class="criteria" id="template-criteria" hidden></ol>
-        <label for="edict-text">诏令内容</label>
-        <textarea id="edict-text" data-keep placeholder="例如：检查 storage crate 中的 unsafe 代码并说明用途" required></textarea>
-        <label for="edict-dept">承办部门</label>
-        <select id="edict-dept" data-keep></select>
-        <label for="edict-scope">玉玺 · 查阅范围 <span>（逗号分隔，留空为整个项目）</span></label>
-        <input type="text" id="edict-scope" data-keep placeholder="crates/ziyuan-storage, README.md">
-        <label>玉玺 · 可用工具</label>
-        <div class="checks">
-          <label><input type="checkbox" id="tool-read_file" data-keep checked> read_file</label>
-          <label><input type="checkbox" id="tool-search_code" data-keep checked> search_code</label>
-          <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> write_file</label>
-          <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> run_tests</label>
-        </div>
-        <label for="edict-mcp">玉玺 · 外藩 MCP <span>（服务名逗号分隔，留空为不许；须在官职外藩上限内）</span></label>
-        <input type="text" id="edict-mcp" data-keep placeholder="如 docs, fetch">
-        <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。外部事件（CI 等）可凭令牌 POST <code>api/courier</code> 经兵部驿站入队。</p>
-        <div class="actions">
-          <button type="submit" class="primary" data-run="1">下诏并执行</button>
-          <button type="submit" data-run="0">仅入队</button>
-        </div>
-        <details class="save-template">
-          <summary>存为翰林院模板</summary>
-          <div class="row">
-            <input type="text" id="template-name" data-keep placeholder="模板名，如 查死锁">
-            <button type="button" class="small shrink" id="template-save">存模板</button>
-            <button type="button" class="small shrink reject" id="template-remove" hidden>撤去所选模板</button>
-          </div>
-          <textarea id="template-criteria-input" data-keep placeholder="验收标准，一行一条（1–8 条），都察院复核时逐条核验"></textarea>
-          <p class="hint">以上方的内容、部门与玉玺为模板；同名覆盖，内置模板可覆盖、不能撤去。</p>
-        </details>
-      </form>
-    </section>
+<div class="court">
+  <nav class="halls" aria-label="三殿">
+    <a href="#fengtian" data-hall="fengtian"><b>奉天殿</b><span>诏令</span><i id="hall-badge-fengtian" hidden></i></a>
+    <a href="#huagai" data-hall="huagai"><b>华盖殿</b><span>朝堂</span><i id="hall-badge-huagai" hidden></i></a>
+    <a href="#wenhua" data-hall="wenhua"><b>文华殿</b><span>百官</span></a>
+    <a href="#wuying" data-hall="wuying"><b>武英殿</b><span>实录 · 礼部 · 驿站</span></a>
+    <a href="#qiju" data-hall="qiju"><b>起居注</b><span>事件簿</span></a>
+  </nav>
 
-    <section class="card">
-      <h2>朝堂 <small>制度与派工路线</small></h2>
-      <div class="body">
-        <div class="modes" id="modes"></div>
-        <button class="zhu" id="retreat-btn" title="昏君模式：批红与评定由司礼监代批，一一记入事件簿；工部改动仍须亲自准奏"></button>
-        <div class="chronicle" id="abolish-choice" hidden>
-          <h3>罢中书省，丞相如何处置？</h3>
+  <main>
+    <div class="hall" id="hall-fengtian">
+      <div class="edicts">
+        <div class="edict-list">
+          <div class="list-head">
+            <h2>诏令 <small id="task-summary"></small></h2>
+            <button class="small write" id="edict-new" title="颁布新诏令">下诏</button>
+          </div>
+          <div class="filters" id="filters"></div>
+          <ol class="tasks" id="tasks"></ol>
+        </div>
+        <div class="edict-detail">
+      <section class="card write" id="edict-sheet" hidden>
+        <h2>下诏 <small>皇帝颁布诏令</small><button type="button" class="small spacer" id="edict-close" data-view>收起</button></h2>
+        <form class="body" id="edict-form">
+          <label for="edict-template">翰林院模板 <span>（选后填入内容与玉玺，可再改）</span></label>
+          <select id="edict-template" data-keep></select>
+          <ol class="criteria" id="template-criteria" hidden></ol>
+          <label for="edict-text">诏令内容</label>
+          <textarea id="edict-text" data-keep placeholder="例如：检查 storage crate 中的 unsafe 代码并说明用途" required></textarea>
+          <label for="edict-dept">承办部门</label>
+          <select id="edict-dept" data-keep></select>
+          <label for="edict-scope">玉玺 · 查阅范围 <span>（逗号分隔，留空为整个项目）</span></label>
+          <input type="text" id="edict-scope" data-keep placeholder="crates/ziyuan-storage, README.md">
+          <label>玉玺 · 可用工具</label>
+          <div class="checks">
+            <label><input type="checkbox" id="tool-read_file" data-keep checked> read_file</label>
+            <label><input type="checkbox" id="tool-search_code" data-keep checked> search_code</label>
+            <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> write_file</label>
+            <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> run_tests</label>
+          </div>
+          <label for="edict-mcp">玉玺 · 外藩 MCP <span>（服务名逗号分隔，留空为不许；须在官职外藩上限内）</span></label>
+          <input type="text" id="edict-mcp" data-keep placeholder="如 docs, fetch">
+          <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。外部事件（CI 等）可凭令牌 POST <code>api/courier</code> 经兵部驿站入队。</p>
           <div class="actions">
-            <button id="reform-direct">罢免丞相（留仕籍，可再起用）</button>
-            <button class="zhu" id="abolish-btn">一键朱元璋（株连百官，革职削籍）</button>
-            <button class="small" id="abolish-cancel">取消</button>
+            <button type="submit" class="primary" data-run="1">下诏并执行</button>
+            <button type="submit" data-run="0">仅入队</button>
+          </div>
+          <details class="save-template">
+            <summary>存为翰林院模板</summary>
+            <div class="row">
+              <input type="text" id="template-name" data-keep placeholder="模板名，如 查死锁">
+              <button type="button" class="small shrink" id="template-save">存模板</button>
+              <button type="button" class="small shrink reject" id="template-remove" hidden>撤去所选模板</button>
+            </div>
+            <textarea id="template-criteria-input" data-keep placeholder="验收标准，一行一条（1–8 条），都察院复核时逐条核验"></textarea>
+            <p class="hint">以上方的内容、部门与玉玺为模板；同名覆盖，内置模板可覆盖、不能撤去。</p>
+          </details>
+        </form>
+      </section>
+          <div id="task-detail"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hall" id="hall-huagai" hidden>
+      <section class="card narrow">
+        <h2>朝堂 <small>制度、派工路线与缺位</small></h2>
+        <div class="body">
+          <div class="modes" id="modes"></div>
+          <button class="zhu" id="retreat-btn" title="昏君模式：批红与评定由司礼监代批，一一记入事件簿；工部改动仍须亲自准奏"></button>
+          <div class="chronicle" id="abolish-choice" hidden>
+            <h3>罢中书省，丞相如何处置？</h3>
+            <div class="actions">
+              <button id="reform-direct">罢免丞相（留仕籍，可再起用）</button>
+              <button class="zhu" id="abolish-btn">一键朱元璋（株连百官，革职削籍）</button>
+              <button class="small" id="abolish-cancel">取消</button>
+            </div>
+          </div>
+          <div class="chronicle" id="chronicle" hidden>
+            <h3>史官记</h3>
+            <p id="chronicle-text"></p>
+            <button class="small" id="chronicle-close" data-view>退朝</button>
+          </div>
+          <div class="routes" id="routes"></div>
+          <div class="vacancies" id="vacancies" hidden></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="hall" id="hall-wenhua" hidden>
+    <section class="card full">
+      <h2>百官 <small>任免、考绩与荐举</small></h2>
+      <div class="body officials-layout">
+        <div class="table-wrap"><table><thead><tr><th>#</th><th>姓名</th><th>专长</th><th>官职</th><th>模型</th><th>考绩</th><th>用量</th><th></th></tr></thead><tbody id="officials"></tbody></table></div>
+        <div>
+          <div class="side write">
+            <h3>招募</h3>
+            <form id="recruit-form">
+              <div class="row">
+                <input type="text" id="recruit-name" data-keep placeholder="姓名（留空则随机）">
+                <select id="recruit-dept" data-keep class="shrink"></select>
+              </div>
+              <div class="actions"><button type="submit">招募（不授官职）</button></div>
+            </form>
+          </div>
+          <div class="side">
+            <h3>吏部荐举 <button class="small" id="kaocheng-btn" data-view title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" data-view title="户部：按用途、模型、官员汇总花费">度支奏销</button></h3>
+            <div class="row">
+              <select id="recommend-office" data-keep></select>
+              <button class="shrink" id="recommend-btn" data-view>荐举</button>
+              <button class="shrink" id="nominate-btn" title="廷推：九卿会推出缺之职，各举一人">廷推</button>
+              <button class="shrink" id="lots-btn" title="枚卜：于廷推得票者中掣签，径直任命">枚卜</button>
+            </div>
+            <div id="recommend-result"><p class="hint">按「采纳 − 驳回 + 背书 − 弹劾 + 实证」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
+          </div>
+          <div class="side write">
+            <h3>官职配置 <small class="hint">模型与玉玺上限</small></h3>
+            <select id="config-office" data-keep></select>
+            <p class="hint" id="config-current"></p>
+            <div class="row">
+              <input type="text" id="config-model" data-keep placeholder="模型，如 deepseek-v4-pro">
+              <button class="small shrink" id="model-set">指定</button>
+              <button class="small shrink" id="model-clear">默认</button>
+            </div>
+            <div class="row">
+              <input type="text" id="ceiling-scope" data-keep placeholder="上限范围，逗号分隔（空为整个项目）">
+            </div>
+            <div class="row">
+              <input type="text" id="ceiling-mcp" data-keep placeholder="外藩上限（空为不限，none 为不许）">
+            </div>
+            <div class="row" style="flex-wrap:wrap">
+              <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> read_file</label>
+              <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> search_code</label>
+              <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> write_file</label>
+              <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> run_tests</label>
+              <button class="small shrink" id="ceiling-set">设上限</button>
+              <button class="small shrink" id="ceiling-clear">取消</button>
+            </div>
+            <h3>户部度支 <small class="hint">token 上限，用尽即停支</small></h3>
+            <div class="row">
+              <input type="number" min="1" id="office-budget" data-keep placeholder="此官职每件诏令的上限">
+              <button class="small shrink" id="office-budget-set">设限</button>
+              <button class="small shrink" id="office-budget-clear">取消</button>
+            </div>
+            <div class="row">
+              <input type="number" min="1" id="court-budget" data-keep placeholder="朝廷总额">
+              <button class="small shrink" id="court-budget-set">设限</button>
+              <button class="small shrink" id="court-budget-clear">取消</button>
+            </div>
+          </div>
+          <div class="side write">
+            <h3>礼部 <small class="hint">科举在百官表「应试」；考题放 .ziyuan/exam/*.txt</small></h3>
+            <div class="row">
+              <input type="text" id="palace-question" data-keep placeholder="殿试策问，天子亲出">
+              <button class="small shrink" id="palace-btn">殿试</button>
+            </div>
+            <div id="palace"></div>
           </div>
         </div>
-        <div class="chronicle" id="chronicle" hidden>
-          <h3>史官记</h3>
-          <p id="chronicle-text"></p>
-          <button class="small" id="chronicle-close" data-view>退朝</button>
-        </div>
-        <div class="routes" id="routes"></div>
-        <div class="vacancies" id="vacancies" hidden></div>
       </div>
     </section>
-  </div>
+    </div>
 
-  <section class="card">
-    <h2>诏令 <small id="task-summary"></small></h2>
-    <div class="body tasks" id="tasks"></div>
-  </section>
-
-  <section class="card full">
-    <h2>百官 <small>任免、考绩与荐举</small></h2>
-    <div class="body officials-layout">
-      <div class="table-wrap"><table><thead><tr><th>#</th><th>姓名</th><th>专长</th><th>官职</th><th>模型</th><th>考绩</th><th>用量</th><th></th></tr></thead><tbody id="officials"></tbody></table></div>
-      <div>
-        <div class="side write">
-          <h3>招募</h3>
-          <form id="recruit-form">
-            <div class="row">
-              <input type="text" id="recruit-name" data-keep placeholder="姓名（留空则随机）">
-              <select id="recruit-dept" data-keep class="shrink"></select>
-            </div>
-            <div class="actions"><button type="submit">招募（不授官职）</button></div>
+    <div class="hall" id="hall-wuying" hidden>
+    <section class="card full">
+      <h2>翰林院实录 · 礼部 · 兵部驿站 <small>检索旧案、修 CHANGELOG、收 GitHub 来件</small></h2>
+      <div class="body officials-layout">
+        <div>
+          <form class="row" id="records-form">
+            <input type="text" id="records-q" data-keep placeholder="检索实录：诏令、承办人、回奏摘要（留空为全部）">
+            <button class="small shrink" type="submit" data-view>检索</button>
+            <span class="hint shrink" id="records-count"></span>
           </form>
+          <ol class="records-list" id="records-list"><li class="hint">办结的诏令即入实录，承办新诏前也会参照；点「检索」查看。</li></ol>
         </div>
-        <div class="side">
-          <h3>吏部荐举 <button class="small" id="kaocheng-btn" data-view title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" data-view title="户部：按用途、模型、官员汇总花费">度支奏销</button></h3>
-          <div class="row">
-            <select id="recommend-office" data-keep></select>
-            <button class="shrink" id="recommend-btn" data-view>荐举</button>
-            <button class="shrink" id="nominate-btn" title="廷推：九卿会推出缺之职，各举一人">廷推</button>
-            <button class="shrink" id="lots-btn" title="枚卜：于廷推得票者中掣签，径直任命">枚卜</button>
+        <div class="write">
+          <h3>礼部修 CHANGELOG</h3>
+          <div class="row"><input type="text" id="changelog-version" data-keep placeholder="版本（默认 Unreleased）"></div>
+          <div class="row" style="margin-top:6px">
+            <input type="text" id="changelog-since" data-keep placeholder="起点（默认上个 tag）">
+            <button class="small shrink" id="changelog-btn" title="据 git log 下一件礼部诏令，只入队">修</button>
           </div>
-          <div id="recommend-result"><p class="hint">按「采纳 − 驳回 + 背书 − 弹劾 + 实证」、失败数排序；仅为建议，任命仍须皇帝亲自批准。</p></div>
-        </div>
-        <div class="side write">
-          <h3>官职配置 <small class="hint">模型与玉玺上限</small></h3>
-          <select id="config-office" data-keep></select>
-          <p class="hint" id="config-current"></p>
-          <div class="row">
-            <input type="text" id="config-model" data-keep placeholder="模型，如 deepseek-v4-pro">
-            <button class="small shrink" id="model-set">指定</button>
-            <button class="small shrink" id="model-clear">默认</button>
+          <h3>兵部驿站 · GitHub</h3>
+          <p class="hint" id="github-state"></p>
+          <div class="row" id="github-row" hidden>
+            <input type="text" id="github-label" data-keep placeholder="标签（默认 ziyuan）">
+            <button class="small shrink" id="github-pull">收来件</button>
           </div>
-          <div class="row">
-            <input type="text" id="ceiling-scope" data-keep placeholder="上限范围，逗号分隔（空为整个项目）">
-          </div>
-          <div class="row">
-            <input type="text" id="ceiling-mcp" data-keep placeholder="外藩上限（空为不限，none 为不许）">
-          </div>
-          <div class="row" style="flex-wrap:wrap">
-            <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> read_file</label>
-            <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> search_code</label>
-            <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> write_file</label>
-            <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> run_tests</label>
-            <button class="small shrink" id="ceiling-set">设上限</button>
-            <button class="small shrink" id="ceiling-clear">取消</button>
-          </div>
-          <h3>户部度支 <small class="hint">token 上限，用尽即停支</small></h3>
-          <div class="row">
-            <input type="number" min="1" id="office-budget" data-keep placeholder="此官职每件诏令的上限">
-            <button class="small shrink" id="office-budget-set">设限</button>
-            <button class="small shrink" id="office-budget-clear">取消</button>
-          </div>
-          <div class="row">
-            <input type="number" min="1" id="court-budget" data-keep placeholder="朝廷总额">
-            <button class="small shrink" id="court-budget-set">设限</button>
-            <button class="small shrink" id="court-budget-clear">取消</button>
-          </div>
-        </div>
-        <div class="side write">
-          <h3>礼部 <small class="hint">科举在百官表「应试」；考题放 .ziyuan/exam/*.txt</small></h3>
-          <div class="row">
-            <input type="text" id="palace-question" data-keep placeholder="殿试策问，天子亲出">
-            <button class="small shrink" id="palace-btn">殿试</button>
-          </div>
-          <div id="palace"></div>
         </div>
       </div>
+    </section>
     </div>
-  </section>
 
-  <section class="card full">
-    <h2>翰林院实录 · 礼部 · 兵部驿站 <small>检索旧案、修 CHANGELOG、收 GitHub 来件</small></h2>
-    <div class="body officials-layout">
-      <div>
-        <form class="row" id="records-form">
-          <input type="text" id="records-q" data-keep placeholder="检索实录：诏令、承办人、回奏摘要（留空为全部）">
-          <button class="small shrink" type="submit" data-view>检索</button>
-          <span class="hint shrink" id="records-count"></span>
-        </form>
-        <ol class="records-list" id="records-list"><li class="hint">办结的诏令即入实录，承办新诏前也会参照；点「检索」查看。</li></ol>
-      </div>
-      <div class="write">
-        <h3>礼部修 CHANGELOG</h3>
-        <div class="row"><input type="text" id="changelog-version" data-keep placeholder="版本（默认 Unreleased）"></div>
-        <div class="row" style="margin-top:6px">
-          <input type="text" id="changelog-since" data-keep placeholder="起点（默认上个 tag）">
-          <button class="small shrink" id="changelog-btn" title="据 git log 下一件礼部诏令，只入队">修</button>
-        </div>
-        <h3>兵部驿站 · GitHub</h3>
-        <p class="hint" id="github-state"></p>
-        <div class="row" id="github-row" hidden>
-          <input type="text" id="github-label" data-keep placeholder="标签（默认 ziyuan）">
-          <button class="small shrink" id="github-pull">收来件</button>
-        </div>
-      </div>
+    <div class="hall" id="hall-qiju" hidden>
+    <section class="card history" id="history">
+      <h2>起居注 <small>事件簿全文，可筛选</small></h2>
+      <form class="history-filter" id="history-filter">
+        <input type="text" id="hf-task" data-keep placeholder="诏令 ID">
+        <input type="text" id="hf-official" data-keep placeholder="官员 ID">
+        <input type="text" id="hf-kind" data-keep placeholder="类型，如 tool、usage">
+        <input type="text" id="hf-since" data-keep placeholder="起：2h、3d、2026-10-25">
+        <input type="text" id="hf-until" data-keep placeholder="止">
+        <button class="small shrink" type="submit" data-view>筛选</button>
+        <button class="small shrink" type="button" id="hf-clear" data-view>全部</button>
+        <span class="hint" id="hf-count"></span>
+      </form>
+      <ol class="history-list" id="history-list"></ol>
+    </section>
     </div>
-  </section>
-
-  <details class="card full history" id="history">
-    <summary><h2>起居注 <small>事件簿全文，可筛选</small></h2></summary>
-    <form class="history-filter" id="history-filter">
-      <input type="text" id="hf-task" data-keep placeholder="诏令 ID">
-      <input type="text" id="hf-official" data-keep placeholder="官员 ID">
-      <input type="text" id="hf-kind" data-keep placeholder="类型，如 tool、usage">
-      <input type="text" id="hf-since" data-keep placeholder="起：2h、3d、2026-10-25">
-      <input type="text" id="hf-until" data-keep placeholder="止">
-      <button class="small shrink" type="submit" data-view>筛选</button>
-      <button class="small shrink" type="button" id="hf-clear" data-view>全部</button>
-      <span class="hint" id="hf-count"></span>
-    </form>
-    <ol class="history-list" id="history-list"></ol>
-  </details>
-</main>
+  </main>
+</div>
 
 <div id="toast"></div>
 <div id="locked"><div>
@@ -853,6 +905,106 @@ function taskHtml(t) {
     <div class="meta">${meta}</div>${body}${actions}</article>`;
 }
 
+// ---- 奉天殿：左列诏令，右为所选诏令的全文 ----
+// 待理会：须皇帝亲手处置（批红、评定、准奏）。
+const needsEmperor = (t) => t.needs_approval
+  || (t.status === "completed" && !t.review && !state.retreat)
+  || (t.changes && t.changes.state === "proposed" && t.status === "completed");
+const FILTERS = [
+  ["all", "全部", () => true],
+  ["attention", "待理会", needsEmperor],
+  ["open", "进行中", (t) => (t.status === "pending" || t.status === "assigned") && !t.needs_approval],
+  ["closed", "已结", (t) => !needsEmperor(t) && t.status !== "pending" && t.status !== "assigned"],
+];
+let filter = "all";
+let selected = null;   // 诏令 ID；"new" 为下诏
+
+function taskRow(t) {
+  const status = t.needs_approval ? ["awaiting", "待批红"]
+    : t.status === "completed" && t.changes && t.changes.state === "proposed" ? ["awaiting", "待准奏"]
+    : t.status === "completed" && !t.review ? ["completed", "待评定"]
+    : t.review ? [t.review.verdict, t.review.label]
+    : [t.status, statusLabel[t.status]];
+  const first = t.text.split("\n")[0];
+  return `<li class="edict-row ${t.status}${String(t.id) === String(selected) ? " selected" : ""}${needsEmperor(t) ? " attention" : ""}" data-select="${t.id}" tabindex="0">
+    <span class="row-id">${t.id}</span>
+    <span class="row-main"><span class="row-text">${esc(first)}</span>
+      <span class="row-meta">${esc(t.department)}${t.worker ? ` · ${esc(t.worker)}` : ""}${t.urgent ? " · 加急" : ""}</span></span>
+    <span class="dot ${status[0]}">${esc(status[1])}</span></li>`;
+}
+
+function renderEdicts(tasks) {
+  const counts = Object.fromEntries(FILTERS.map(([code, , test]) => [code, tasks.filter(test).length]));
+  $("filters").innerHTML = FILTERS.map(([code, label]) =>
+    `<button class="small${code === filter ? " current" : ""}" data-filter="${code}" data-view>${label} <span>${counts[code]}</span></button>`).join("");
+  const shown = tasks.filter(FILTERS.find(([code]) => code === filter)[2]);
+  if (selected !== "new" && !tasks.some((t) => String(t.id) === String(selected))) {
+    const next = tasks.find(needsEmperor) || tasks[0];
+    selected = next ? next.id : state.viewer ? null : "new";
+  }
+  $("tasks").innerHTML = shown.length ? shown.map(taskRow).join("")
+    : `<li class="empty">${tasks.length ? "此类无诏令" : "尚无诏令"}</li>`;
+  $("edict-sheet").hidden = selected !== "new";
+  $("edict-close").hidden = !tasks.length;
+  const t = tasks.find((x) => String(x.id) === String(selected));
+  $("task-detail").innerHTML = t ? taskHtml(t) : selected === "new" ? ""
+    : `<div class="empty">尚无诏令。</div>`;
+  $("hall-badge-fengtian").hidden = !counts.attention;
+  $("hall-badge-fengtian").textContent = counts.attention;
+}
+
+function select(id) {
+  selected = id;
+  preserve(render);
+}
+$("tasks").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-select]");
+  if (row) select(row.dataset.select);
+});
+$("tasks").addEventListener("keydown", (event) => {
+  const row = event.target.closest("[data-select]");
+  if (!row) return;
+  const sibling = event.key === "ArrowDown" ? row.nextElementSibling : event.key === "ArrowUp" ? row.previousElementSibling : null;
+  if (event.key === "Enter") select(row.dataset.select);
+  else if (sibling && sibling.dataset.select) {
+    event.preventDefault();
+    select(sibling.dataset.select);
+    $("tasks").querySelector(`[data-select="${sibling.dataset.select}"]`)?.focus();
+  }
+});
+$("filters").addEventListener("click", (event) => {
+  const b = event.target.closest("[data-filter]");
+  if (b) { filter = b.dataset.filter; preserve(render); }
+});
+$("edict-new").addEventListener("click", () => { select("new"); $("edict-text").focus(); });
+$("edict-close").addEventListener("click", () => { selected = null; preserve(render); });
+
+// ---- 分殿：随地址栏的 # 切换 ----
+const HALLS = ["fengtian", "huagai", "wenhua", "wuying", "qiju"];
+let hall = "fengtian";
+function showHall() {
+  const want = location.hash.slice(1);
+  hall = HALLS.includes(want) ? want : "fengtian";
+  for (const h of HALLS) $("hall-" + h).hidden = h !== hall;
+  document.querySelectorAll("[data-hall]").forEach((a) => a.classList.toggle("current", a.dataset.hall === hall));
+  if (hall === "qiju" && state) loadHistory().catch((e) => toast(e.message, true));
+  if (hall === "wuying" && state) loadRecords().catch((e) => toast(e.message, true));
+}
+window.addEventListener("hashchange", showHall);
+showHall();
+
+// ---- 配色：汝窑天青（默认）、墨分五色、青绿山水，记在本机 ----
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  document.querySelectorAll("[data-theme]").forEach((b) => b.classList.toggle("current", b.dataset.theme === theme));
+  try { localStorage.setItem("ziyuan-theme", theme); } catch {}
+}
+document.querySelector(".themes").addEventListener("click", (event) => {
+  const b = event.target.closest("button[data-theme]");
+  if (b) setTheme(b.dataset.theme);
+});
+setTheme((() => { try { return localStorage.getItem("ziyuan-theme"); } catch { return null; } })() || "tianqing");
+
 function renderTemplates(s) {
   const select = $("edict-template");
   select.innerHTML = `<option value="">（不用模板）</option>` + s.templates.map((t) =>
@@ -915,6 +1067,8 @@ function render() {
       : `<span class="vacancy">${esc(d.vacancy)}</span>`;
     return `<div class="route"><span class="dept">${esc(d.label)}</span><div class="chain">${chain}</div></div>`;
   }).join("");
+  $("hall-badge-huagai").hidden = !s.vacancies.length;
+  $("hall-badge-huagai").textContent = s.vacancies.length;
   // 缺位及其影响，附吏部荐举的人选；任命须皇帝点按确认。
   $("vacancies").hidden = !s.vacancies.length;
   $("vacancies").innerHTML = `<h3>朝堂缺位</h3><ul>${s.vacancies.map((v) => {
@@ -924,14 +1078,14 @@ function render() {
       : "无人可荐，须先招募";
     return `<li>${esc(v.impact)}。${pick}</li>`;
   }).join("")}</ul>` +
-    (s.viewer ? "" : `<p class="hint">荐举只是建议；也可在下方百官表招募、任命。</p>`);
+    (s.viewer ? "" : `<p class="hint">荐举只是建议；也可在文华殿招募、任命。</p>`);
 
   const tasks = [...s.tasks].reverse();
   const hidden = s.task_total - tasks.length;
   $("task-summary").innerHTML = !tasks.length ? "" : hidden > 0
     ? `共 ${s.task_total} 件，列出待理会的与最近的 ${tasks.length} 件，最新在前 <button class="small" id="all-tasks" data-view>全部列出</button>`
     : `共 ${s.task_total} 件，最新在前${showAll ? ` <button class="small" id="recent-tasks" data-view>只列最近</button>` : ""}`;
-  $("tasks").innerHTML = tasks.length ? tasks.map(taskHtml).join("") : `<div class="empty">尚无诏令。${s.viewer ? "" : "请在左侧下诏。"}</div>`;
+  renderEdicts(tasks);
 
   $("officials").innerHTML = s.officials.map((o) => {
     const purge = `<button class="small" data-exam="${o.id}" title="礼部科举：应试 .ziyuan/exam/ 下的考题">应试</button><button class="small reject" data-purge="${o.id}">革职</button>`;
@@ -969,7 +1123,7 @@ async function refresh() {
     preserve(render);
     showCriteria();
     renderOfficeConfig(state);
-    if ($("history").open) loadHistory();
+    if (hall === "qiju") loadHistory();
   } catch (e) {
     if (!$("locked").classList.contains("show")) toast(e.message, true);
   }
@@ -1004,6 +1158,7 @@ $("edict-form").addEventListener("submit", async (event) => {
   };
   const result = await act(api("/edicts", body));
   if (!result) return;
+  selected = result.id;
   $("edict-text").value = "";
   $("edict-template").value = "";
   showCriteria();
@@ -1148,7 +1303,6 @@ $("palace-btn").addEventListener("click", () => {
     .catch((e) => toast(e.message, true))
     .finally(() => { palaceLive = null; refresh(); });
 });
-$("history").addEventListener("toggle", () => { if ($("history").open) loadHistory(); });
 $("history-filter").addEventListener("submit", (event) => {
   event.preventDefault();
   loadHistory().catch((e) => toast(e.message, true));
@@ -1296,7 +1450,8 @@ function connect() {
     const { task, text } = JSON.parse(event.data);
     streams[task] = (streams[task] || "") + text;
     const el = $("stream-" + task);
-    if (el) { el.textContent = streams[task]; el.scrollTop = el.scrollHeight; } else scheduleRefresh();
+    // 只有正看着的诏令需要整页刷新来显出流式文本；其余的状态变化另有 changed 推送。
+    if (el) { el.textContent = streams[task]; el.scrollTop = el.scrollHeight; } else if (String(task) === String(selected)) scheduleRefresh();
   });
   source.addEventListener("finished", (event) => {
     const { task } = JSON.parse(event.data);
