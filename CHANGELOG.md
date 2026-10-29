@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.0
+
+冻结前收尾：契约测试守住稳定性约定，补上 `--version`、安全说明与依赖审计。
+
 ### 新增
 
 - `ziyuan --version`（亦可 `version`、`-V`）。
