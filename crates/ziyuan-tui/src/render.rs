@@ -12,8 +12,8 @@ use ziyuan_app::{
     preview_changes, seal_note, skipped_note, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
-    AgentId, BudgetScope, CensorVerdict, Department, Office, Persona, Seal, Speech, Verdict,
-    missing_sections,
+    AgentId, BudgetScope, CensorVerdict, Department, NO_ART, Office, Persona, Seal, Speech,
+    Verdict, missing_sections,
 };
 use ziyuan_governance::{ChangeState, Court, Task, TaskStatus};
 
@@ -586,15 +586,17 @@ impl App {
                     label
                 });
                 let record = court.service_record(a.id);
+                // 无号官员作「无」，字号旁不空缺。
+                let art = court.art_name(a.id);
+                let art = if art.is_empty() {
+                    NO_ART.to_owned()
+                } else {
+                    art
+                };
                 Row::new(vec![
                     Cell::from(format!("#{}", a.id.0)).dim(),
                     Cell::from(a.name.clone()),
-                    Cell::from(format!(
-                        "{} {}",
-                        court.courtesy_name(a.id),
-                        court.art_name(a.id)
-                    ))
-                    .dim(),
+                    Cell::from(format!("{} {}", court.courtesy_name(a.id), art)).dim(),
                     match office {
                         Some(o) if demoted > 0 => Cell::from(o).fg(Color::Red),
                         Some(o) => Cell::from(o).fg(GOLD),

@@ -1096,7 +1096,7 @@ function render() {
       : `<div class="row"><select id="appoint-${o.id}" data-keep>${s.offices.filter((of) => !of.department || of.department === o.speciality.code).map((of) => `<option value="${of.code}">${esc(of.label)}</option>`).join("")}</select>
          <button class="small shrink" data-appoint="${o.id}">任命</button>${purge}</div>`;
     const usage = o.record.usage.input + o.record.usage.output;
-    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)} <button class="small rename" data-rename="${o.id}" data-name="${esc(o.name)}" data-courtesy="${esc(o.courtesy)}" data-art="${esc(o.art)}" title="改名、改字或改号">易名</button><br><span class="persona">字${esc(o.courtesy)} · 号${esc(o.art)}</span><br><span class="persona">${esc(o.persona)}</span></td><td>${esc(o.speciality.label)}</td>
+    return `<tr><td>${o.id}</td><td class="name">${esc(o.name)} <button class="small rename" data-rename="${o.id}" data-name="${esc(o.name)}" data-courtesy="${esc(o.courtesy)}" data-art="${esc(o.art)}" title="改名、改字或改号">易名</button><br><span class="persona">字${esc(o.courtesy)} · 号${esc(o.art || "无")}</span><br><span class="persona">${esc(o.persona)}</span></td><td>${esc(o.speciality.label)}</td>
       <td>${o.office ? `${esc(o.office.label)} <span class="hint">${esc(o.office.rank)}</span>${o.demotion ? `<br><span class="badge failed" title="廷杖">${esc(o.demotion)}</span>` : ""}` : o.purged ? '<span class="badge failed">已革职</span>' : '<span class="hint">未任官职</span>'}</td>
       <td class="record">${o.model ? esc(o.model) : '<span class="hint">演示</span>'}${o.ceiling ? `<br><span class="hint">上限 ${esc(o.ceiling)}</span>` : ""}</td>
       <td>${recordHtml(o.record)}</td><td class="record">${usage ? fmt(usage) + cost(o.cost) : "—"}</td><td>${action}</td></tr>`;

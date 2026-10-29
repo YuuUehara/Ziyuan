@@ -8,7 +8,7 @@ mod review;
 mod seal;
 mod usage;
 
-pub use agent::{Agent, Persona, default_styles};
+pub use agent::{Agent, NO_ART, Persona, default_styles};
 pub use changes::{FileChange, Hunk};
 pub use event::{CourtEvent, Edict, Nomination, Speech, Subtask, Template};
 pub use office::{BudgetScope, Department, GovernanceMode, Office};
