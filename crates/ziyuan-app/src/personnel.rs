@@ -429,10 +429,15 @@ impl<S: EventStore> Session<S> {
         })?;
         let court = &self.court;
         let now = &court.agent(agent).expect("在册").name;
+        let art = court.art_name(agent);
         let styles = format!(
             "字{}，号{}",
             court.courtesy_name(agent),
-            court.art_name(agent)
+            if art.is_empty() {
+                ziyuan_core::NO_ART
+            } else {
+                &art
+            }
         );
         Ok(if name.is_some() && *now != old {
             format!(

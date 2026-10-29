@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use ziyuan_app::CHANGELOG_NOTE;
 use ziyuan_core::{AgentId, Capability, Department, Persona, Seal, TaskId, Template, Verdict};
+use ziyuan_governance::ChangeState;
 
 use crate::state::{ApiError, AppState, parse, str_field, string_list};
 
@@ -162,7 +163,16 @@ pub(crate) async fn apply_changes(
         ),
     };
     app.mutate(move |s| {
-        s.apply_reviewed(TaskId(id), &root, skipped, version.as_deref())?;
+        s.reload()?;
+        let applied = s
+            .court()
+            .task(TaskId(id))
+            .and_then(|t| t.changes.as_ref())
+            .is_some_and(|c| c.state == ChangeState::Applied);
+        // 已落盘而上次未能提交：带 commit 再请求只补提交。
+        if !(commit && skipped.is_empty() && applied) {
+            s.apply_reviewed(TaskId(id), &root, skipped, version.as_deref())?;
+        }
         if !commit {
             return Ok(json!({ "ok": true }));
         }

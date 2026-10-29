@@ -9,7 +9,9 @@ use ziyuan_app::{
     describe_record, duzhi_report, format_time, history_entries, kaocheng_grade, kaocheng_report,
     render_diffs, seal_note, skipped_note, suspicion_status, tz_offset,
 };
-use ziyuan_core::{AgentId, BudgetScope, GovernanceMode, Persona, Seal, TaskId, missing_sections};
+use ziyuan_core::{
+    AgentId, BudgetScope, GovernanceMode, NO_ART, Persona, Seal, TaskId, missing_sections,
+};
 use ziyuan_governance::{ChangeState, TaskStatus};
 use ziyuan_llm::price_for;
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
@@ -87,12 +89,13 @@ pub(crate) fn execute(
                     None if court.is_purged(agent.id) => "已革职".into(),
                     None => "未任官职".into(),
                 };
+                let art = court.art_name(agent.id);
                 println!(
                     "#{:<3} {:<6} 字{} 号{} {:<18} {} {} 模型 {} (完成 {} 件)",
                     agent.id.0,
                     agent.name,
                     court.courtesy_name(agent.id),
-                    court.art_name(agent.id),
+                    if art.is_empty() { NO_ART } else { &art },
                     office,
                     agent.speciality.label(),
                     Persona::of(agent.id).label(),
@@ -317,20 +320,36 @@ pub(crate) fn execute(
         }
         Command::Apply(task, skipped, commit) => {
             let root = env::current_dir()?;
-            session.apply_changes(task, &root, skipped)?;
-            let skipped = session
-                .court()
-                .task(task)
-                .and_then(|t| t.changes.as_ref())
-                .map_or(String::new(), |c| skipped_note(&c.skipped));
-            println!(
-                "诏令已颁：准奏，诏令 #{} 的改动已写入项目{skipped}。",
-                task.0
-            );
+            let applied = |session: &Session<EventLog>| {
+                session
+                    .court()
+                    .task(task)
+                    .and_then(|t| t.changes.as_ref())
+                    .is_some_and(|c| c.state == ChangeState::Applied)
+            };
+            // 已落盘而上次未能提交：`--commit` 只补提交（已有同一尾注的提交则认作已提交）。
+            session.reload()?;
+            if commit && skipped.is_empty() && applied(session) {
+                println!("诏令 #{} 的改动早已落盘，补记提交。", task.0);
+            } else {
+                session.apply_changes(task, &root, skipped)?;
+                let skipped = session
+                    .court()
+                    .task(task)
+                    .and_then(|t| t.changes.as_ref())
+                    .map_or(String::new(), |c| skipped_note(&c.skipped));
+                println!(
+                    "诏令已颁：准奏，诏令 #{} 的改动已写入项目{skipped}。",
+                    task.0
+                );
+            }
             if commit {
-                let made = session
-                    .commit_applied(task, &root)
-                    .map_err(|e| format!("改动已落盘，但未能提交：{e}"))?;
+                let made = session.commit_applied(task, &root).map_err(|e| {
+                    format!(
+                        "改动已落盘，但未能提交：{e}（修好后可重跑 `ziyuan apply {} --commit` 补提交）",
+                        task.0
+                    )
+                })?;
                 println!(
                     "已记为 {} 提交 {}（只含本诏令落盘的文件）。",
                     made.vcs, made.id
