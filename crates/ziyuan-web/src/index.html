@@ -301,13 +301,28 @@
   .reply.error { border-color: #e9b4ae; background: #fdf1ef; color: #8c2620; }
   .changes { margin-top: 8px; border: 1px solid var(--gold); border-top: 3px double var(--gold); background: #fffaf0; padding: 6px 10px; font-size: 13px; }
   .changes summary { cursor: pointer; font-family: ui-monospace, monospace; }
-  pre.diff { margin: 4px 0; padding: 6px 8px; background: #fffefa; border: 1px solid var(--line); border-radius: 0; font-size: 12px; max-height: 280px; overflow: auto; white-space: pre; }
-  pre.diff .add { color: #1d6b3a; background: #e8f6ec; display: block; }
-  pre.diff .del { color: #8c2620; background: #fdf1ef; display: block; }
+  pre.diff { margin: 4px 0; padding: 6px 8px; background: #fffefa; border: 1px solid var(--line); border-radius: 0; font-size: 12px; max-height: 420px; overflow: auto; white-space: pre; }
+  pre.diff .add { color: var(--ink); background: #e8f4ea; display: block; }
+  pre.diff .del { color: var(--ink); background: #fbecea; display: block; }
   pre.diff .hunk { color: var(--muted); display: block; margin-top: 4px; }
   pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; font-family: system-ui, sans-serif; color: var(--ink); cursor: pointer; }
   pre.diff .pick input { margin: 0; }
   pre.diff .ctx { display: block; }
+  /* 行号槽与增删记号；改动的字词加深底色。 */
+  pre.diff .ln { display: inline-block; width: 3.2em; padding-right: .6em; text-align: right; color: #b3a07c; user-select: none; border-right: 1px solid rgba(181, 40, 28, .15); }
+  pre.diff .ln + .ln { margin-right: 0; }
+  pre.diff .sign { display: inline-block; width: 1.6em; text-align: center; user-select: none; color: var(--muted); }
+  pre.diff .add .sign { color: #1d6b3a; }
+  pre.diff .del .sign { color: #8c2620; }
+  pre.diff .add .em { background: #bfe5c8; border-radius: 2px; }
+  pre.diff .del .em { background: #f5c3bc; border-radius: 2px; text-decoration: line-through; text-decoration-color: rgba(140, 38, 32, .45); }
+  /* 墨色为主，关键字朱、字符串石青、注释淡赭、数字与常量黛紫、函数与类型赭石。 */
+  pre.diff .tk-keyword { color: #a1261b; font-weight: 600; }
+  pre.diff .tk-string { color: #22636b; }
+  pre.diff .tk-comment { color: #9a8566; font-style: italic; }
+  pre.diff .tk-number, pre.diff .tk-constant { color: #6a3d8a; }
+  pre.diff .tk-function { color: #8a5a12; }
+  pre.diff .tk-type, pre.diff .tk-macro { color: #2c5e8a; }
   .review-row { display: flex; gap: 6px; margin-top: 8px; }
   .stat.exhausted { border-color: #e9b4ae; color: #ffd5cf; }
   .split { margin-top: 8px; padding: 6px 10px; border-radius: var(--radius); font-size: 13px; border: 1px solid var(--gold); background: #fffaf0; }
@@ -788,10 +803,17 @@ function taskHtml(t) {
       const off = c.skipped.includes(n) ? ` <span class="badge failed">此段驳回</span>` : "";
       return `<span class="hunk">${esc(l)}${box}${off}</span>`;
     };
+    // 每行：原、新行号，增删记号，按语言着色的代码；成对的删增行中改动的字词加底色。
+    const codeLine = (l) => {
+      const code = l.spans.map((s) => {
+        const cls = [s.token ? "tk-" + s.token : "", s.changed ? "em" : ""].filter(Boolean).join(" ");
+        return cls ? `<span class="${cls}">${esc(s.text)}</span>` : esc(s.text);
+      }).join("");
+      return `<span class="${{ "+": "add", "-": "del" }[l.kind] || "ctx"}"><span class="ln">${l.old ?? ""}</span><span class="ln">${l.new ?? ""}</span><span class="sign">${l.kind === " " ? "" : l.kind}</span>${code}</span>`;
+    };
     const files = c.files.map((f) => `<details ${pending ? "open" : ""}>
       <summary>${esc(f.path)}${f.created ? "（新建）" : ""}</summary>
-      <pre class="diff">${f.diff.split("\n").filter((l, i) => i > 1 && l).map((l) => l[0] === "@" ? hunkLine(l) :
-        `<span class="${{ "+": "add", "-": "del" }[l[0]] || "ctx"}">${esc(l)}</span>`).join("")}</pre></details>`).join("");
+      <pre class="diff">${f.hunks.map((h) => hunkLine(`@@ 第 ${h.number} 段 · 原第 ${h.lines[0]?.old ?? 1} 行 @@`) + h.lines.map(codeLine).join("")).join("")}</pre></details>`).join("");
     const hunks = c.files.reduce((n, f) => n + (f.diff.match(/^@@ /gm) || []).length, 0);
     const note = c.skipped.length ? `（驳回第 ${c.skipped.join("、")} 段）` : "";
     body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件 ${hunks} 段，${stateLabel}${note}${pending && hunks > 1 ? `<span class="hint">　可逐段取舍：去掉勾选的段不落盘</span>` : ""}${files}</div>`;

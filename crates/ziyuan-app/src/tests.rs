@@ -85,6 +85,64 @@ fn recruits_without_a_name_get_a_fresh_random_one() {
 }
 
 #[test]
+fn previews_number_lines_mark_changed_words_and_colour_code() {
+    // 第一段在开头多出两行，第二段的新行号因此比原行号大 2。
+    let before: String = (1..=20).map(|i| format!("let x{i} = {i};\n")).collect();
+    let after = before
+        .replacen("let x1 = 1;\n", "// 新增\nlet y = 0;\nlet x1 = 1;\n", 1)
+        .replace("let x15 = 15;", "let x15 = 150;");
+    let files = [FileChange {
+        path: "src/a.rs".into(),
+        before: Some(before),
+        after,
+    }];
+    let [file] = preview_changes(&files).try_into().unwrap();
+    assert_eq!(
+        file.hunks.iter().map(|h| h.number).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let changed = |kind: char| {
+        let line = file.hunks[1].lines.iter().find(|l| l.kind == kind).unwrap();
+        let words: String = line
+            .spans
+            .iter()
+            .filter(|s| s.changed)
+            .map(|s| s.text.as_str())
+            .collect();
+        (line.old, line.new, words)
+    };
+    assert_eq!(changed('-'), (Some(15), None, "15".into()));
+    assert_eq!(changed('+'), (None, Some(17), "150".into()));
+    // 上下文行两边行号都有，且差 2。
+    let context = file.hunks[1].lines.iter().find(|l| l.kind == ' ').unwrap();
+    assert_eq!(context.new.unwrap(), context.old.unwrap() + 2);
+    // 按 Rust 着色：注释、关键字、数字。
+    let tokens: Vec<_> = file.hunks[0]
+        .lines
+        .iter()
+        .flat_map(|l| &l.spans)
+        .filter_map(|s| s.token.map(|t| (t, s.text.trim())))
+        .collect();
+    for expected in [("comment", "// 新增"), ("keyword", "let"), ("number", "0")] {
+        assert!(tokens.contains(&expected), "{expected:?} 不在 {tokens:?}");
+    }
+    // 整行重写不逐词标出；认不出的语言不着色。
+    let files = [FileChange {
+        path: "notes.unknownext".into(),
+        before: Some("甲乙丙丁\n".into()),
+        after: "完全不同的一句话\n".into(),
+    }];
+    let [file] = preview_changes(&files).try_into().unwrap();
+    assert!(
+        file.hunks[0]
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .all(|s| !s.changed && s.token.is_none())
+    );
+}
+
+#[test]
 fn vacancies_recommend_only_idle_officials_of_the_right_speciality() {
     let mut store = MemoryEventLog::default();
     let mut session = Session::found(&mut store).unwrap();

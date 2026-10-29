@@ -4,6 +4,7 @@
 
 ### 新增
 
+- 改动预览：Web 与 TUI 的工部奏本带原、新行号，按语言着色（syntect），成对的删、增行只标出真正改了的字词（similar）；整行重写不逐词标。`--json` 的改动另增 `hunks` 字段。
 - 号舍：`run_tests` 关进操作系统的沙箱（Linux 的 bubblewrap、macOS 的 Seatbelt），不能联网，只能写测试副本，读不到 `~/.ssh` 等凭据目录；结果注明是否入了号舍。新环境变量 `ZIYUAN_SANDBOX`（`auto` / `require` / `off`）。
 
 ### 改进

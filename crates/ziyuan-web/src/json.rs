@@ -227,10 +227,12 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                         ChangeState::Discarded => "discarded",
                     },
                     "skipped": c.skipped,
-                    "files": c.files.iter().zip(render_diffs(&c.files)).map(|(f, diff)| json!({
+                    "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| json!({
                         "path": f.path,
                         "created": f.before.is_none(),
                         "diff": diff,
+                        // 着色、带行号与词级标记的预览，段号与 diff 相同。
+                        "hunks": preview.hunks,
                     })).collect::<Vec<_>>(),
                 })),
                 "worker": worker.and_then(name),

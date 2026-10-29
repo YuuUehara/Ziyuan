@@ -9,7 +9,7 @@ use ratatui::widgets::{
 };
 use ziyuan_app::{
     HistoryEntry, HistoryFilter, describe_record, estimate_cost, format_time, history_entries,
-    render_diffs, seal_note, skipped_note, suspicion_status, tz_offset,
+    preview_changes, seal_note, skipped_note, suspicion_status, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, CensorVerdict, Department, Office, Persona, Seal, Speech, Verdict,
@@ -25,6 +25,19 @@ pub(crate) const HISTORY_LIMIT: usize = 1000;
 
 pub(crate) const VERMILION: Color = Color::Rgb(178, 34, 34);
 pub(crate) const GOLD: Color = Color::Rgb(218, 165, 32);
+
+/// 改动预览的语法配色（深色终端）。
+fn token_color(token: Option<&str>) -> Option<Color> {
+    Some(match token? {
+        "keyword" => Color::Rgb(230, 110, 95),
+        "string" => Color::Rgb(120, 190, 180),
+        "comment" => Color::Rgb(140, 130, 110),
+        "number" | "constant" => Color::Rgb(190, 150, 220),
+        "function" => Color::Rgb(220, 180, 100),
+        "type" | "macro" => Color::Rgb(120, 160, 220),
+        _ => return None,
+    })
+}
 
 /// 廷议发言的一行：「官职姓名（人格）：内容」。
 pub(crate) fn speech_line(name: &str, speaker: AgentId, speech: &Speech) -> String {
@@ -434,15 +447,49 @@ impl App {
                     skipped_note(&changes.skipped)
                 )),
             ]));
-            for diff in render_diffs(&changes.files) {
-                for line in diff.lines() {
-                    let style = match line.chars().next() {
-                        Some('+') if !line.starts_with("+++") => Style::new().fg(Color::Green),
-                        Some('-') if !line.starts_with("---") => Style::new().fg(Color::Red),
-                        Some('@') => Style::new().dim(),
-                        _ => Style::new(),
-                    };
-                    lines.push(Line::styled(line.to_owned(), style));
+            // 与 Web 同一份预览：行号、按语言着色，成对删增行中改动的字词加底色。
+            for file in preview_changes(&changes.files) {
+                let created = if file.created { "（新建）" } else { "" };
+                lines.push(Line::from(format!("▸ {}{created}", file.path)).bold());
+                for hunk in &file.hunks {
+                    lines.push(Line::from(format!("@@ 第 {} 段 @@", hunk.number)).dim());
+                    for line in &hunk.lines {
+                        // (记号, 记号色, 行底色, 改动字词的底色)
+                        let (sign, tint, back, mark) = match line.kind {
+                            '+' => (
+                                "+",
+                                Color::Green,
+                                Color::Rgb(20, 45, 25),
+                                Color::Rgb(40, 105, 55),
+                            ),
+                            '-' => (
+                                "-",
+                                Color::Red,
+                                Color::Rgb(55, 20, 18),
+                                Color::Rgb(125, 40, 35),
+                            ),
+                            _ => (" ", Color::Reset, Color::Reset, Color::Reset),
+                        };
+                        let number =
+                            |n: Option<usize>| n.map_or("    ".into(), |n| format!("{n:>4}"));
+                        let mut spans = vec![
+                            Span::styled(
+                                format!("{} {} ", number(line.old), number(line.new)),
+                                Style::new().dim(),
+                            ),
+                            Span::styled(format!("{sign} "), Style::new().fg(tint)),
+                        ];
+                        spans.extend(line.spans.iter().map(|s| {
+                            let fg = token_color(s.token).unwrap_or(Color::Reset);
+                            let style = if s.changed {
+                                Style::new().fg(fg).bg(mark).bold()
+                            } else {
+                                Style::new().fg(fg).bg(back)
+                            };
+                            Span::styled(s.text.clone(), style)
+                        }));
+                        lines.push(Line::from(spans));
+                    }
                 }
             }
         }
