@@ -97,7 +97,7 @@ pub enum CourtEvent {
         office: Office,
         ceiling: Option<Seal>,
     },
-    /// 皇帝设定度支（token 限额）；`None` 取消。超支即停，最多超出一次模型调用的用量。
+    /// 皇帝设定度支（token 限额）；`None` 取消。超支即停；每次调用前预留，最多超出实际用量高于预留的部分。
     BudgetSet {
         scope: BudgetScope,
         tokens: Option<u64>,

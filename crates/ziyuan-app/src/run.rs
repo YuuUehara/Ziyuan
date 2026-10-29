@@ -2,10 +2,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
 use ziyuan_core::{CensorVerdict, CourtEvent, Edict, TaskId, Threat, TokenUsage, Verdict};
 use ziyuan_governance::{GovernanceError, TaskStatus};
-use ziyuan_runtime::{CancelToken, Job, Outcome, Progress, Scheduler, WorkerBackend, guard};
+use ziyuan_runtime::{
+    CancelToken, Job, Outcome, Progress, Scheduler, Treasury, WorkerBackend, guard,
+};
 use ziyuan_storage::EventStore;
 
 use crate::cabinet::{criteria_note, debate_minutes, summary_prompt};
@@ -93,7 +94,7 @@ impl<S: EventStore> Session<S> {
         }
         let treasury = court
             .treasury_remaining()
-            .map(|left| Arc::new(AtomicI64::new(left as i64)));
+            .map(|left| Arc::new(Treasury::new(left)));
         // 翰林院实录：本次开工前已结的诏令，供承办者以 search_records 查阅前例。
         let records = Arc::new(court.records());
         let mut jobs = Vec::new();

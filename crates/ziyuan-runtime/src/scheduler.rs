@@ -2,9 +2,9 @@
 //!
 //! 后端是同步的（模型 HTTP 调用会阻塞），因此每个任务在阻塞线程池中执行；
 //! 取消是协作式的：调度器立即给出结论，后端在下一次检查 [`ExecutionHooks::is_cancelled`] 时停下。
-use crate::{ExecutionHooks, WorkerBackend};
+use crate::{ExecutionHooks, Treasury, WorkerBackend};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use ziyuan_core::{Agent, Edict, FileChange, Record, TaskId, Threat, TokenUsage};
@@ -55,11 +55,11 @@ pub struct Job {
     /// 承办者官职指定的模型；`None` 用后端默认模型。
     pub model: Option<String>,
     /// 本次执行可用的 tokens（度支余额）；用尽即停，结局为「度支超限」。`None` 不限。
-    /// 每次模型调用结束后才知道用量，因此最多超出一次调用。
+    /// 每次模型调用前预留、结束后按实际用量结算，超出预留的部分照实记账（软上限）。
     pub budget: Option<u64>,
-    /// 国库余额（tokens），同一次执行的各件共用；用尽后执行中的停支，未开始的不再开始
-    /// （结局为 `NotStarted`，诏令留在队列）。`None` 不限。
-    pub treasury: Option<Arc<AtomicI64>>,
+    /// 国库账本，同一次执行的各件共用；并发的各件先预留再调用，不会同时用同一笔余额。
+    /// 用尽后执行中的停支，未开始的不再开始（结局为 `NotStarted`，诏令留在队列）。`None` 不限。
+    pub treasury: Option<Arc<Treasury>>,
     /// 八百里加急：时限为常规的两倍（入队次序由调用方排定，加急在前、先得空位）。
     pub urgent: bool,
     /// 翰林院实录（同一次执行的各件共用）；非空时承办者多一件只读工具 `search_records`。
@@ -180,10 +180,7 @@ async fn run_job(
 ) -> Outcome {
     let treasury = job.treasury.clone();
     let timeout = if job.urgent { timeout * 2 } else { timeout };
-    if treasury
-        .as_ref()
-        .is_some_and(|t| t.load(Ordering::SeqCst) <= 0)
-    {
+    if treasury.as_ref().is_some_and(|t| t.left() <= 0) {
         return Outcome::NotStarted;
     }
     let spent = Arc::new(AtomicU64::new(0));
@@ -196,6 +193,7 @@ async fn run_job(
         spent: spent.clone(),
         treasury: treasury.clone(),
         trace: Default::default(),
+        call: Default::default(),
     };
     let task_cancel = hooks.cancel.clone();
     // 用到额度即停支；`strict` 时须超出才算（恰好用完而办成的照常采信）。
@@ -209,10 +207,7 @@ async fn run_job(
                 )));
             }
         }
-        if treasury
-            .as_ref()
-            .is_some_and(|t| reached(t.load(Ordering::SeqCst)))
-        {
+        if treasury.as_ref().is_some_and(|t| reached(t.left())) {
             return Some(Outcome::Failed("国库告罄：朝廷度支已用尽，户部停支".into()));
         }
         None
@@ -248,9 +243,28 @@ struct TaskHooks {
     budget: Option<u64>,
     /// 本次执行已用的 tokens。
     spent: Arc<AtomicU64>,
-    treasury: Option<Arc<AtomicI64>>,
+    treasury: Option<Arc<Treasury>>,
     /// 当前模型调用的 trace ID。
     trace: std::sync::Mutex<Option<String>>,
+    /// 当前模型调用的预留，及其间是否已报告用量。
+    call: std::sync::Mutex<Option<Reserved>>,
+}
+
+struct Reserved {
+    /// 预留之数；有国库时即向国库所留。
+    tokens: u64,
+    reported: bool,
+}
+
+impl TaskHooks {
+    /// 记账：本件已用与国库余额都扣去 `tokens`；用到额度即停支。
+    fn charge(&self, tokens: u64) {
+        let spent = self.spent.fetch_add(tokens, Ordering::SeqCst) + tokens;
+        let left = self.treasury.as_ref().map(|t| t.charge(tokens));
+        if self.budget.is_some_and(|limit| spent >= limit) || left.is_some_and(|l| l <= 0) {
+            self.cancel.cancel();
+        }
+    }
 }
 
 impl ExecutionHooks for TaskHooks {
@@ -268,25 +282,50 @@ impl ExecutionHooks for TaskHooks {
             usage,
             trace: self.trace.lock().expect("锁未中毒").clone(),
         });
-        let spent = self.spent.fetch_add(usage.total(), Ordering::SeqCst) + usage.total();
-        let total = usage.total() as i64;
-        let left = self
-            .treasury
-            .as_ref()
-            .map(|t| t.fetch_sub(total, Ordering::SeqCst) - total);
-        if self.budget.is_some_and(|limit| spent >= limit) || left.is_some_and(|l| l <= 0) {
-            self.cancel.cancel();
+        if let Some(call) = self.call.lock().expect("锁未中毒").as_mut() {
+            call.reported = true;
+        }
+        self.charge(usage.total());
+    }
+
+    fn reserve_tokens(&self, min: u64, max: u64) -> Option<u64> {
+        let own = self
+            .budget
+            .map(|limit| limit.saturating_sub(self.spent.load(Ordering::SeqCst)));
+        let max = own.map_or(max, |own| own.min(max));
+        if max < min {
+            return None;
+        }
+        let tokens = match &self.treasury {
+            Some(treasury) => treasury.reserve(min, max, &|| self.cancel.is_cancelled())?,
+            None => max,
+        };
+        *self.call.lock().expect("锁未中毒") = Some(Reserved {
+            tokens,
+            reported: false,
+        });
+        Some(tokens)
+    }
+
+    fn settle_tokens(&self, answered: bool) {
+        let Some(call) = self.call.lock().expect("锁未中毒").take() else {
+            return;
+        };
+        if let Some(treasury) = &self.treasury {
+            treasury.release(call.tokens);
+        }
+        // 已答复却没有用量（服务端未报告）：按预留额记账，宁可多记不可漏记。
+        if answered && !call.reported {
+            self.charge(call.tokens);
         }
     }
 
+    /// 余额：本件度支与国库余额中较小者（不扣他件的预留，预留时再扣）。
     fn token_allowance(&self) -> Option<u64> {
         let own = self
             .budget
             .map(|limit| limit.saturating_sub(self.spent.load(Ordering::SeqCst)));
-        let treasury = self
-            .treasury
-            .as_ref()
-            .map(|t| t.load(Ordering::SeqCst).max(0) as u64);
+        let treasury = self.treasury.as_ref().map(|t| t.left().max(0) as u64);
         match (own, treasury) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -526,7 +565,7 @@ mod tests {
         assert_eq!((calls(1), calls(2), calls(4)), (3, 5, 5));
 
         // 国库 150，两件共用：第一件用尽后停支，第二件不再开始。
-        let treasury = Arc::new(AtomicI64::new(150));
+        let treasury = Arc::new(Treasury::new(150));
         let shared = |id| Job {
             treasury: Some(treasury.clone()),
             ..job(id)
@@ -543,7 +582,7 @@ mod tests {
                 (2, Outcome::NotStarted),
             ]
         );
-        assert_eq!(treasury.load(Ordering::SeqCst), -10);
+        assert_eq!(treasury.left(), -10);
     }
 
     /// 花 40 tokens 后回报余额。
@@ -568,7 +607,7 @@ mod tests {
                 timeout: Duration::from_secs(10),
             },
         );
-        let treasury = Arc::new(AtomicI64::new(500));
+        let treasury = Arc::new(Treasury::new(500));
         let jobs = vec![
             Job {
                 budget: Some(100),
@@ -592,6 +631,105 @@ mod tests {
                 (3, done("None None")),
             ]
         );
+    }
+
+    /// 像 `agent_loop` 一样每次调用前预留、调用后结算，每次用尽所留；记下见过的最低国库余额。
+    struct Reserving {
+        treasury: Arc<Treasury>,
+        lowest: std::sync::atomic::AtomicI64,
+    }
+    impl WorkerBackend for Reserving {
+        fn execute(&self, job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            for _ in 0..10 {
+                let Some(got) = hooks.reserve_tokens(100, 400) else {
+                    return Err("度支不足".into());
+                };
+                thread::sleep(Duration::from_millis(2));
+                hooks.model_usage(TokenUsage {
+                    input: got / 2,
+                    output: got - got / 2,
+                });
+                hooks.settle_tokens(true);
+                self.lowest
+                    .fetch_min(self.treasury.left(), Ordering::SeqCst);
+            }
+            Ok(format!("done {}", job.edict.id.0))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_jobs_reserve_before_spending_and_never_oversell() {
+        let treasury = Arc::new(Treasury::new(3000));
+        let backend = Arc::new(Reserving {
+            treasury: treasury.clone(),
+            lowest: std::sync::atomic::AtomicI64::new(i64::MAX),
+        });
+        let scheduler = Scheduler::new(
+            backend.clone(),
+            Limits {
+                max_concurrent: 4,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let jobs = (1..=4)
+            .map(|id| Job {
+                treasury: Some(treasury.clone()),
+                ..job(id)
+            })
+            .collect();
+        let progress = collect(scheduler.start(jobs, &CancelToken::new())).await;
+        // 每次都用尽所留：预留之外不花一分，国库从不为负，预留最终归零。
+        assert!(backend.lowest.load(Ordering::SeqCst) >= 0);
+        assert!(treasury.left() >= 0, "{}", treasury.left());
+        assert_eq!(treasury.reserved(), 0);
+        let spent: u64 = progress
+            .iter()
+            .filter_map(|p| match p {
+                Progress::Usage { usage, .. } => Some(usage.total()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(treasury.left(), 3000 - spent as i64);
+    }
+
+    /// 预留 300 后：`answered` 时不报用量即答复，否则调用失败。
+    struct Unreported {
+        answered: bool,
+    }
+    impl WorkerBackend for Unreported {
+        fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            let got = hooks.reserve_tokens(300, 300);
+            hooks.settle_tokens(self.answered);
+            Ok(format!("{got:?} {:?}", hooks.token_allowance()))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answers_without_reported_usage_are_charged_the_reservation() {
+        for (answered, expected, left) in [
+            (true, "Some(300) Some(700)", 700),
+            (false, "Some(300) Some(1000)", 1000),
+        ] {
+            let treasury = Arc::new(Treasury::new(1000));
+            let scheduler = Scheduler::new(
+                Arc::new(Unreported { answered }),
+                Limits {
+                    max_concurrent: 1,
+                    timeout: Duration::from_secs(10),
+                },
+            );
+            let jobs = vec![Job {
+                budget: Some(5000),
+                treasury: Some(treasury.clone()),
+                ..job(1)
+            }];
+            let progress = collect(scheduler.start(jobs, &CancelToken::new())).await;
+            assert_eq!(
+                outcomes(&progress),
+                [(1, Outcome::Completed(expected.into()))]
+            );
+            assert_eq!((treasury.left(), treasury.reserved()), (left, 0));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

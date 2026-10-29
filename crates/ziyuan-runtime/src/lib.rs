@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use ziyuan_core::{Capability, FileChange, Persona, Price, Threat, TokenUsage, missing_sections};
 
 mod scheduler;
+mod treasury;
 pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
+pub use treasury::Treasury;
 
 /// 后端/模型/工具 Adapter 的错误类型：由具体实现决定内部结构。
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -63,6 +65,15 @@ pub trait ExecutionHooks {
     fn max_output(&self) -> Option<u64> {
         None
     }
+    /// 为即将发出的模型调用向度支预留 tokens：在 `min..=max` 内尽量多留，返回所留之数。
+    /// 不足 `min` 时（并发的他件释放预留后仍不足，或已撤销）返回 `None`。不限度支时留 `max`。
+    /// 每次成功预留之后必有一次 [`Self::settle_tokens`]。
+    fn reserve_tokens(&self, _min: u64, max: u64) -> Option<u64> {
+        Some(max)
+    }
+    /// 模型调用结束，释放预留。`answered`（模型已答复）而服务端未报告用量的，按预留额记账；
+    /// 调用失败的不记。
+    fn settle_tokens(&self, _answered: bool) {}
     /// 锦衣卫在外来文书（`source` 如 `tool:read_file`）中检出可疑内容。
     fn suspicion(&self, _source: &str, _threat: Threat, _excerpt: &str) {}
 }

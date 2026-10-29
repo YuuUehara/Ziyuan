@@ -13,6 +13,9 @@ const KEEP_RECENT_OUTPUTS: usize = 4;
 const ABRIDGED_HEAD: usize = 200;
 /// 度支余额扣去预计输入后不足此数，就不再发请求（只够几个字的回答没有意义）。
 const MIN_OUTPUT: u64 = 64;
+/// 每次调用为输出预留的上限。Adapter 只在输出上限低于 8192 时才向 API 传 `max_tokens`，
+/// 模型写得更长时超出部分照实结算（度支是软上限）。
+const RESERVED_OUTPUT: u64 = 8192;
 
 #[derive(Debug)]
 pub enum LoopError {
@@ -226,6 +229,18 @@ fn validate_at(schema: &Value, value: &Value, path: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// 一次模型调用的度支预留；离开作用域（含 panic）时结算，预留不会滞留而令他件空等。
+struct Reservation<'a> {
+    hooks: &'a dyn ExecutionHooks,
+    answered: bool,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.hooks.settle_tokens(self.answered);
+    }
+}
+
 /// 包住执行钩子：记下每次调用服务端报告的用量，据此预判下一次的输入，
 /// 并把本次调用的输出上限经 [`ExecutionHooks::max_output`] 交给模型 Adapter。
 struct Metered<'a> {
@@ -259,6 +274,12 @@ impl ExecutionHooks for Metered<'_> {
     fn max_output(&self) -> Option<u64> {
         self.cap.get()
     }
+    fn reserve_tokens(&self, min: u64, max: u64) -> Option<u64> {
+        self.inner.reserve_tokens(min, max)
+    }
+    fn settle_tokens(&self, answered: bool) {
+        self.inner.settle_tokens(answered);
+    }
     fn changes_proposed(&self, changes: Vec<FileChange>) {
         self.inner.changes_proposed(changes);
     }
@@ -289,23 +310,43 @@ impl Metered<'_> {
         if self.is_cancelled() {
             return Err(LoopError::Cancelled);
         }
-        // 预判度支：余额扣去预计输入后至少还要够写一段回答。
+        // 预判度支：余额扣去预计输入后至少还要够写一段回答；再向度支预留预计输入加输出上限，
+        // 并发的他件不会同时用同一笔余额。
+        let mut reservation = None;
         let cap = match self.token_allowance() {
             Some(allowance) => {
                 let estimate = self.predict(messages, specs);
+                let budget = LoopError::Budget {
+                    estimate,
+                    allowance,
+                };
                 if estimate + MIN_OUTPUT > allowance {
-                    return Err(LoopError::Budget {
-                        estimate,
-                        allowance,
-                    });
+                    return Err(budget);
                 }
-                Some(allowance - estimate)
+                let want = estimate + (allowance - estimate).min(RESERVED_OUTPUT);
+                let Some(got) = self.inner.reserve_tokens(estimate + MIN_OUTPUT, want) else {
+                    return Err(if self.is_cancelled() {
+                        LoopError::Cancelled
+                    } else {
+                        budget
+                    });
+                };
+                reservation = Some(Reservation {
+                    hooks: self.inner,
+                    answered: false,
+                });
+                Some(got - estimate)
             }
             None => None,
         };
         self.cap.set(cap);
         self.last.set((messages.len(), TokenUsage::default()));
-        model.next_turn(messages, specs, self).map_err(|e| {
+        let turn = model.next_turn(messages, specs, self);
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.answered = turn.is_ok();
+        }
+        drop(reservation);
+        turn.map_err(|e| {
             // 撤销导致的中止不算模型故障。
             if self.is_cancelled() {
                 LoopError::Cancelled
