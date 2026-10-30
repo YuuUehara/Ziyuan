@@ -12,8 +12,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::recovery::{
+    MAX_RECORD_BYTES, RecordState, RecoveryError, RecoveryRecord, decode_record, encode_record,
+};
+
 pub const DEFAULT_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 pub const WRITE_PROTOCOL: u64 = 1;
+/// The single pending-or-terminal recovery record, relative to `.ziyuan`.
+const RECORD_FILE: &str = "recovery.json";
 
 #[derive(Debug)]
 pub enum WorkspaceError {
@@ -24,6 +30,12 @@ pub enum WorkspaceError {
     Newer { found: u64 },
     Unfinished { generation: u64 },
     NotStarted { generation: u64 },
+    Recovery(RecoveryError),
+    PendingRecovery { operation_id: String },
+    FinishPending { operation_id: String },
+    RecordMismatch { operation_id: String },
+    NoPendingRecord,
+    RecordExists { operation_id: String },
 }
 impl fmt::Display for WorkspaceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -44,6 +56,23 @@ impl fmt::Display for WorkspaceError {
             Self::NotStarted { generation } => {
                 write!(f, "workspace write generation {generation} has not started")
             }
+            Self::Recovery(e) => write!(f, "workspace recovery record is unusable: {e}"),
+            Self::PendingRecovery { operation_id } => write!(
+                f,
+                "workspace has a published recovery operation {operation_id}: run `ziyuan text recovery status` and finish it before writing"
+            ),
+            Self::FinishPending { operation_id } => write!(
+                f,
+                "recovery operation {operation_id} is finished but not closed: run `ziyuan text recovery finish {operation_id} --yes`"
+            ),
+            Self::RecordMismatch { operation_id } => {
+                write!(f, "recovery record does not match operation {operation_id}")
+            }
+            Self::NoPendingRecord => write!(f, "workspace has no recovery record"),
+            Self::RecordExists { operation_id } => write!(
+                f,
+                "workspace recovery record for operation {operation_id} already exists"
+            ),
         }
     }
 }
@@ -51,6 +80,7 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::Recovery(e) => Some(e),
             _ => None,
         }
     }
@@ -58,6 +88,11 @@ impl std::error::Error for WorkspaceError {
 impl From<io::Error> for WorkspaceError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+impl From<RecoveryError> for WorkspaceError {
+    fn from(error: RecoveryError) -> Self {
+        Self::Recovery(error)
     }
 }
 
@@ -163,6 +198,47 @@ impl Workspace {
         }
         Ok(guard)
     }
+
+    /// Read only: the single pending-or-terminal recovery record.
+    ///
+    /// The file is read without the write lock, so a caller holding the lock sees a
+    /// stable record. An absent file is `None`; an unreadable one is an error rather
+    /// than a reset.
+    pub fn pending_record(&self) -> Result<Option<RecoveryRecord>, WorkspaceError> {
+        let dir = self.root.join(".ziyuan");
+        if !check_path(&dir, true)? {
+            return Ok(None);
+        }
+        read_record(&dir.join(RECORD_FILE))
+    }
+
+    /// Refuse ordinary managed writes while an interrupted or unfinished operation
+    /// exists. A `Prepared` record is private staging and does not block.
+    pub fn ensure_writable(&self) -> Result<(), WorkspaceError> {
+        let generation = self.generation()?;
+        let record = self.pending_record()?;
+        if let Some(record) = &record {
+            match record.state {
+                RecordState::Published => {
+                    return Err(WorkspaceError::PendingRecovery {
+                        operation_id: record.operation_id.clone(),
+                    });
+                }
+                RecordState::Completed | RecordState::Abandoned => {
+                    if generation % 2 != 0 {
+                        return Err(WorkspaceError::FinishPending {
+                            operation_id: record.operation_id.clone(),
+                        });
+                    }
+                }
+                RecordState::Prepared => {}
+            }
+        }
+        if generation % 2 != 0 {
+            return Err(WorkspaceError::Unfinished { generation });
+        }
+        Ok(())
+    }
 }
 
 /// The file is dropped before the in-process reservation. Dropping never finishes
@@ -208,6 +284,111 @@ impl WriteGuard {
             format!("{next}\n").as_bytes(),
         )?;
         Ok(next)
+    }
+
+    /// `begin`, for callers that reserve the odd generation before planning.
+    pub fn reserve(&mut self) -> Result<u64, WorkspaceError> {
+        self.begin()
+    }
+
+    /// Write the single recovery record atomically.
+    ///
+    /// Only `Prepared` and `Published` may be published; a record already present
+    /// (in any state) is never overwritten here — `complete`, `abandon` and
+    /// `remove_record` are the only ways past it.
+    pub fn publish(&mut self, record: &RecoveryRecord) -> Result<(), WorkspaceError> {
+        if !matches!(record.state, RecordState::Prepared | RecordState::Published) {
+            return Err(WorkspaceError::Unsafe(format!(
+                "recovery record state {:?} cannot be published",
+                record.state
+            )));
+        }
+        // recovery.rs does not canonicalize, so compare against the root this handle
+        // was opened with. Only the separator form and a leading verbatim prefix may
+        // differ; any other textual difference is a different workspace.
+        let root = self.workspace.root();
+        if !same_root(root, &record.workspace) {
+            return Err(WorkspaceError::Unsafe(format!(
+                "recovery record workspace {} is not this workspace {}",
+                record.workspace.display(),
+                root.display()
+            )));
+        }
+        let path = self.workspace.root().join(".ziyuan").join(RECORD_FILE);
+        if check_path(&self.workspace.root().join(".ziyuan"), true)? && self.readable()?.is_some() {
+            return Err(WorkspaceError::RecordExists {
+                operation_id: record.operation_id.clone(),
+            });
+        }
+        let bytes = encode_record(record)?;
+        atomic_replace(&path, &bytes)
+    }
+
+    /// Mark the published record completed. Does not advance the generation.
+    pub fn complete(&mut self, operation_id: &str) -> Result<RecoveryRecord, WorkspaceError> {
+        let mut record = self.matching(operation_id, RecordState::Published)?;
+        record.state = RecordState::Completed;
+        self.rewrite(&record)?;
+        Ok(record)
+    }
+
+    /// Mark the prepared record abandoned. Does not advance the generation.
+    pub fn abandon(&mut self, operation_id: &str) -> Result<RecoveryRecord, WorkspaceError> {
+        let mut record = self.matching(operation_id, RecordState::Prepared)?;
+        record.state = RecordState::Abandoned;
+        self.rewrite(&record)?;
+        Ok(record)
+    }
+
+    /// Delete the record. The caller advances the generation with `finish` first;
+    /// a still-published record is never removed, so no one can "unlock" by deletion.
+    pub fn remove_record(&mut self) -> Result<(), WorkspaceError> {
+        let Some(record) = self.readable()? else {
+            return Err(WorkspaceError::NoPendingRecord);
+        };
+        if !matches!(
+            record.state,
+            RecordState::Completed | RecordState::Abandoned
+        ) {
+            return Err(WorkspaceError::Unsafe(format!(
+                "recovery record state {:?} cannot be removed",
+                record.state
+            )));
+        }
+        let path = self.workspace.root().join(".ziyuan").join(RECORD_FILE);
+        check_path(&path, false)?;
+        fs::remove_file(&path)?;
+        #[cfg(unix)]
+        if let Ok(dir) = File::open(self.workspace.root().join(".ziyuan")) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    }
+
+    fn readable(&self) -> Result<Option<RecoveryRecord>, WorkspaceError> {
+        self.workspace.pending_record()
+    }
+
+    fn matching(
+        &self,
+        operation_id: &str,
+        expected: RecordState,
+    ) -> Result<RecoveryRecord, WorkspaceError> {
+        let record = self.readable()?.ok_or(WorkspaceError::NoPendingRecord)?;
+        if record.operation_id != operation_id
+            || record.state != expected
+            || !same_root(self.workspace.root(), &record.workspace)
+        {
+            return Err(WorkspaceError::RecordMismatch {
+                operation_id: operation_id.to_string(),
+            });
+        }
+        Ok(record)
+    }
+
+    fn rewrite(&self, record: &RecoveryRecord) -> Result<(), WorkspaceError> {
+        let path = self.workspace.root().join(".ziyuan").join(RECORD_FILE);
+        atomic_replace(&path, &encode_record(record)?)
     }
 }
 
@@ -305,6 +486,49 @@ fn read_control(path: &Path) -> Result<Option<Vec<u8>>, WorkspaceError> {
         )));
     }
     Ok(Some(bytes))
+}
+
+/// Read the record with bounded reading: one byte past the codec limit is enough for
+/// [`decode_record`] to report `TooLarge` without the caller buffering more.
+fn read_record(path: &Path) -> Result<Option<RecoveryRecord>, WorkspaceError> {
+    if !check_path(path, false)? {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    decode_record(&bytes).map(Some).map_err(Into::into)
+}
+
+/// The record codec accepts only `/` or `X:\` leading bytes, while a canonical
+/// Same root, allowing either separator and an optional leading verbatim prefix
+/// (`\\?\`) on both sides. Nothing else is relaxed:
+/// a relative, verbatim, unresolved or different path never matches.
+fn same_root(root: &Path, recorded: &Path) -> bool {
+    if root == recorded {
+        return true;
+    }
+    let split = |path: &Path| -> Vec<String> {
+        path.to_string_lossy()
+            .split(['\\', '/'])
+            .map(str::to_string)
+            .collect()
+    };
+    let (left, right) = (split(root), split(recorded));
+    // `Workspace::open` stores a verbatim root on Windows; the record codec cannot
+    // represent the `\\?\` prefix, so it is dropped on both sides before comparing.
+    let strip = |mut parts: Vec<String>| {
+        if parts.len() > 1 && parts[0].is_empty() && parts[1].is_empty() {
+            parts.drain(..2);
+            if parts.first().is_some_and(|first| first == "?") {
+                parts.remove(0);
+            }
+        }
+        parts
+    };
+    let (left, right) = (strip(left), strip(right));
+    !left.is_empty() && left == right
 }
 
 fn decimal(bytes: &[u8]) -> Result<u64, WorkspaceError> {
@@ -882,5 +1106,519 @@ mod tests {
         fs::remove_dir(&marker).unwrap();
         drop(ws.lock(LockScope::Workspace).unwrap());
         assert_eq!(fs::read_dir(root.0.join(".ziyuan")).unwrap().count(), 2);
+    }
+
+    /// A record as a real caller stores it: the root in OS form, which is what the
+    /// record codec can represent.
+    fn record(ws: &Workspace, state: RecordState) -> RecoveryRecord {
+        build_record(&os_path(ws.root()), state)
+    }
+
+    /// The record codec accepts only `/` or `X:\` leading bytes, while a canonical
+    /// Windows root is verbatim (`\\?\C:\...`). This mirrors the conversion the
+    /// storage caller must do before publishing; `Workspace` never rewrites the root.
+    fn os_path(canonical: &Path) -> PathBuf {
+        let text = canonical.to_string_lossy();
+        match text.strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => canonical.to_path_buf(),
+        }
+    }
+
+    fn build_record(workspace: &Path, state: RecordState) -> RecoveryRecord {
+        use crate::recovery::{ApplicationSource, EventBatch, FileState, TargetState};
+        use ziyuan_core::{CourtEvent, TaskId};
+        let applied = CourtEvent::ChangesApplied {
+            task: TaskId(7),
+            skipped: Vec::new(),
+        };
+        RecoveryRecord {
+            operation_id: "a1b2c3d4e5f60718293a4b5c6d7e8f90".into(),
+            workspace: workspace.to_path_buf(),
+            generation_before: 0,
+            generation_after: 2,
+            state,
+            application: ApplicationSource {
+                task: 7,
+                changes_version: "v1".into(),
+                skipped: Vec::new(),
+            },
+            events: EventBatch {
+                expected_events: 2,
+                expected_bytes: 64,
+                history_sha256: "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
+                    .into(),
+                encoded_events: vec![
+                    crate::codec::encode_event(&CourtEvent::Clock(1_700_000_000)),
+                    crate::codec::encode_event(&applied),
+                ],
+            },
+            targets: vec![TargetState {
+                path: "docs/notes.md".into(),
+                before: FileState::Absent,
+                after: FileState::Present(
+                    "3b1f0f4d2c5a6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7".into(),
+                ),
+            }],
+        }
+    }
+
+    fn record_path(root: &Temp) -> PathBuf {
+        root.0.join(".ziyuan/recovery.json")
+    }
+
+    /// Raw bytes of a valid record, for corruption and version tests.
+    fn record_bytes(ws: &Workspace, state: RecordState) -> Vec<u8> {
+        crate::recovery::encode_record(&record(ws, state)).unwrap()
+    }
+
+    /// The codec error a corrupted file must surface, without matching on message.
+    enum Expect {
+        Corrupt,
+        TooLarge,
+        Newer,
+    }
+    impl Expect {
+        fn matches(&self, error: &RecoveryError) -> bool {
+            match (self, error) {
+                (Self::Corrupt, RecoveryError::Corrupt(_)) => true,
+                (Self::TooLarge, RecoveryError::TooLarge { limit }) => {
+                    *limit == crate::recovery::MAX_RECORD_BYTES
+                }
+                (Self::Newer, RecoveryError::Newer { found, supported }) => {
+                    (*found, *supported) == (2, 1)
+                }
+                _ => false,
+            }
+        }
+    }
+
+    /// Replace the digest with one that matches the same bytes but altered content:
+    /// keeps length checks happy while failing the checksum.
+    fn tampered_digest(bytes: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let start = text.find("\"sha256\":\"sha256:").unwrap() + "\"sha256\":\"sha256:".len();
+        let mut text = text.into_bytes();
+        let head = text[start];
+        text[start] = if head == b'0' { b'1' } else { b'0' };
+        text
+    }
+
+    #[test]
+    fn absent_record_and_lock_creates_no_record_file() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        assert!(ws.pending_record().unwrap().is_none());
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        assert!(ws.pending_record().unwrap().is_none());
+        assert!(!record_path(&root).exists());
+        assert_eq!(guard.reserve().unwrap(), 1);
+        assert!(!record_path(&root).exists());
+        guard.finish().unwrap();
+        assert!(ws.pending_record().unwrap().is_none());
+        assert!(!record_path(&root).exists());
+    }
+
+    #[test]
+    fn publish_is_single_and_refuses_a_second_operation() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        // Only prepared and published records may be written at all.
+        for state in [RecordState::Completed, RecordState::Abandoned] {
+            assert!(matches!(
+                guard.publish(&record(&ws, state)),
+                Err(WorkspaceError::Unsafe(_))
+            ));
+        }
+        assert!(ws.pending_record().unwrap().is_none());
+        guard.publish(&record(&ws, RecordState::Prepared)).unwrap();
+        let stored = record(&ws, RecordState::Prepared);
+        assert_eq!(ws.pending_record().unwrap().unwrap(), stored);
+        let mut other = record(&ws, RecordState::Published);
+        other.operation_id = "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into();
+        assert!(matches!(
+            guard.publish(&other),
+            Err(WorkspaceError::RecordExists { .. })
+        ));
+        assert_eq!(ws.pending_record().unwrap().unwrap(), stored);
+        // Republishing the same operation still needs complete/abandon, not a rewrite.
+        assert!(matches!(
+            guard.publish(&stored),
+            Err(WorkspaceError::RecordExists { .. })
+        ));
+        assert_eq!(ws.pending_record().unwrap().unwrap(), stored);
+        assert_no_temps(&root);
+        // write.lock, write-protocol and recovery.json.
+        assert_eq!(fs::read_dir(root.0.join(".ziyuan")).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn published_record_blocks_until_completed_finished_and_removed() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        ws.ensure_writable().unwrap();
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        let operation = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        assert!(matches!(
+            guard.complete(operation),
+            Err(WorkspaceError::NoPendingRecord)
+        ));
+        assert!(matches!(
+            guard.abandon(operation),
+            Err(WorkspaceError::NoPendingRecord)
+        ));
+        // Prepare, publish, then reserve the odd generation (spec order).
+        guard.publish(&record(&ws, RecordState::Prepared)).unwrap();
+        ws.ensure_writable().unwrap();
+        assert_eq!(guard.reserve().unwrap(), 1);
+        // Bumping prepared to published goes through abandon + republish, not a rewrite.
+        assert!(matches!(
+            guard.publish(&record(&ws, RecordState::Published)),
+            Err(WorkspaceError::RecordExists { .. })
+        ));
+        assert_eq!(
+            ws.pending_record().unwrap().unwrap().state,
+            RecordState::Prepared
+        );
+        guard.abandon(operation).unwrap();
+        guard.remove_record().unwrap();
+        guard.publish(&record(&ws, RecordState::Published)).unwrap();
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::PendingRecovery { operation_id }) if operation_id == operation
+        ));
+        assert!(matches!(
+            guard.complete("0f1e2d3c4b5a69788796a5b4c3d2e1f0"),
+            Err(WorkspaceError::RecordMismatch { .. })
+        ));
+        assert!(matches!(
+            guard.abandon(operation),
+            Err(WorkspaceError::RecordMismatch { .. })
+        ));
+        let completed = guard.complete(operation).unwrap();
+        assert_eq!(completed.state, RecordState::Completed);
+        assert_eq!(completed.operation_id, operation);
+        assert_eq!(guard.generation().unwrap(), 1, "complete must not advance");
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::FinishPending { operation_id }) if operation_id == operation
+        ));
+        assert_eq!(guard.finish().unwrap(), 2);
+        assert!(ws.ensure_writable().is_ok());
+        assert!(ws.pending_record().unwrap().is_some());
+        guard.remove_record().unwrap();
+        assert!(ws.pending_record().unwrap().is_none());
+        assert!(!record_path(&root).exists());
+        assert_eq!(guard.generation().unwrap(), 2);
+        assert!(ws.ensure_writable().is_ok());
+        // And a new operation may publish again afterwards.
+        guard.publish(&record(&ws, RecordState::Published)).unwrap();
+        assert_eq!(guard.reserve().unwrap(), 3);
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::PendingRecovery { .. })
+        ));
+        assert_no_temps(&root);
+    }
+
+    #[test]
+    fn prepared_record_does_not_block_writes() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        // Private staging: prepared before the odd generation, and it blocks nothing
+        // that a plain writer would need (the generation check still applies).
+        guard.publish(&record(&ws, RecordState::Prepared)).unwrap();
+        ws.ensure_writable().unwrap();
+        assert_eq!(guard.reserve().unwrap(), 1);
+        assert_eq!(guard.generation().unwrap(), 1);
+        let abandoned: RecoveryRecord = guard.abandon("a1b2c3d4e5f60718293a4b5c6d7e8f90").unwrap();
+        assert_eq!(abandoned.state, RecordState::Abandoned);
+        assert_eq!(guard.generation().unwrap(), 1, "abandon must not advance");
+        assert!(matches!(
+            guard.abandon("a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            Err(WorkspaceError::RecordMismatch { .. })
+        ));
+        assert!(matches!(
+            guard.complete("a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            Err(WorkspaceError::RecordMismatch { .. })
+        ));
+        // The terminal abandoned record on an odd generation asks for `finish`.
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::FinishPending { .. })
+        ));
+        assert_eq!(guard.finish().unwrap(), 2);
+        // A terminal record with the generation already even blocks nothing, so a
+        // crashed cleanup can never wedge the workspace; it is still removable.
+        ws.ensure_writable().unwrap();
+        assert_eq!(guard.reserve().unwrap(), 3);
+        guard.finish().unwrap();
+        guard.remove_record().unwrap();
+        assert_eq!(guard.generation().unwrap(), 4);
+        assert_no_temps(&root);
+    }
+
+    #[test]
+    fn odd_generation_blocks_writes_until_finished() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        guard.publish(&record(&ws, RecordState::Published)).unwrap();
+        assert_eq!(guard.reserve().unwrap(), 1);
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::PendingRecovery { .. })
+        ));
+        guard.complete("a1b2c3d4e5f60718293a4b5c6d7e8f90").unwrap();
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::FinishPending { operation_id })
+                if operation_id == "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        ));
+        assert_eq!(guard.finish().unwrap(), 2);
+        ws.ensure_writable().unwrap();
+        guard.remove_record().unwrap();
+        assert_eq!(ws.generation().unwrap() % 2, 0);
+        assert_no_temps(&root);
+    }
+
+    #[test]
+    fn corrupt_and_newer_records_are_reported_and_never_overwritten() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        let path = record_path(&root);
+        let valid = record_bytes(&ws, RecordState::Published);
+        let mut bad_json = valid.clone();
+        bad_json.truncate(valid.len() / 2);
+        let mut oversized = valid.clone();
+        oversized.resize(crate::recovery::MAX_RECORD_BYTES + 1, b' ');
+        let newer = String::from_utf8(valid.clone())
+            .unwrap()
+            .replace("\"format_version\":1", "\"format_version\":2")
+            .into_bytes();
+        let cases: [(&[u8], Expect); 4] = [
+            (&bad_json, Expect::Corrupt),
+            (&tampered_digest(&valid), Expect::Corrupt),
+            (&oversized, Expect::TooLarge),
+            (&newer, Expect::Newer),
+        ];
+        for (bytes, expected) in cases {
+            fs::write(&path, bytes).unwrap();
+            let pending = ws.pending_record().unwrap_err();
+            assert!(
+                matches!(&pending, WorkspaceError::Recovery(e) if expected.matches(e)),
+                "{}",
+                pending
+            );
+            let blocked = ws.ensure_writable().unwrap_err();
+            assert!(
+                matches!(&blocked, WorkspaceError::Recovery(e) if expected.matches(e)),
+                "{}",
+                blocked
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes, "record must not be reset");
+            // An unreadable record is never treated as absent, so the caller cannot
+            // publish over it either way; a decoded-but-corrupt record is refused
+            // outright and anything else fails before the write as well.
+            assert!(guard.publish(&record(&ws, RecordState::Prepared)).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        assert_no_temps(&root);
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            guard.complete("a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            Err(WorkspaceError::NoPendingRecord)
+        ));
+        assert!(matches!(
+            guard.abandon("a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+            Err(WorkspaceError::NoPendingRecord)
+        ));
+        assert!(matches!(
+            guard.remove_record(),
+            Err(WorkspaceError::NoPendingRecord)
+        ));
+        assert_no_temps(&root);
+    }
+
+    #[test]
+    fn record_path_must_be_a_regular_file() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        fs::create_dir(record_path(&root)).unwrap();
+        assert!(matches!(
+            ws.pending_record(),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(matches!(
+            guard.publish(&record(&ws, RecordState::Prepared)),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(matches!(
+            guard.remove_record(),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(record_path(&root).is_dir());
+        fs::remove_dir(record_path(&root)).unwrap();
+        assert_no_temps(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_record_file_is_refused() {
+        use std::os::unix::fs::symlink;
+        let root = Temp::new();
+        let target = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        let outside = target.0.join("outside.json");
+        fs::write(&outside, b"sentinel").unwrap();
+        symlink(&outside, record_path(&root)).unwrap();
+        assert!(matches!(
+            ws.pending_record(),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(matches!(
+            guard.publish(&record(&ws, RecordState::Prepared)),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(matches!(
+            guard.remove_record(),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        fs::remove_file(record_path(&root)).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
+        assert_eq!(fs::read_dir(&target.0).unwrap().count(), 1);
+        assert_no_temps(&root);
+    }
+
+    #[test]
+    fn record_for_another_workspace_is_refused() {
+        let root = Temp::new();
+        let other = Temp::new();
+        let ws = workspace(&root);
+        let other_ws = workspace(&other);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        for state in [RecordState::Prepared, RecordState::Published] {
+            assert!(matches!(
+                guard.publish(&record(&other_ws, state)),
+                Err(WorkspaceError::Unsafe(_))
+            ));
+        }
+        assert!(ws.pending_record().unwrap().is_none());
+        // A relative workspace is rejected by the codec before the root comparison;
+        // either way nothing is written.
+        let mut relative = record(&ws, RecordState::Prepared);
+        relative.workspace = PathBuf::from(".ziyuan");
+        assert!(guard.publish(&relative).is_err());
+        // The comparison is byte-for-byte on the stored path: recovery.rs does not
+        // canonicalize, so a textually different root is refused even when it names
+        // the same directory.
+        let unresolved = root.0.join("..").join(root.0.file_name().unwrap());
+        assert!(
+            unresolved.is_dir(),
+            "the path resolves to the same directory"
+        );
+        assert!(matches!(
+            guard.publish(&build_record(&unresolved, RecordState::Prepared)),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert!(ws.pending_record().unwrap().is_none());
+        assert_no_temps(&root);
+    }
+
+    struct RecoveryChild(Child);
+    impl RecoveryChild {
+        fn publish(root: &Temp) -> Self {
+            // The workspace must exist before the child opens it.
+            drop(Workspace::open(&root.0).unwrap());
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "workspace::tests::child_publishes_a_recovery_record",
+                    "--nocapture",
+                ])
+                .env("ZIYUAN_WORKSPACE_LOCK_TEST_ROOT", &root.0)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut child = Self(Child(child));
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !root.0.join("published").exists() {
+                assert!(
+                    child.0.0.try_wait().unwrap().is_none(),
+                    "child exited before publishing"
+                );
+                assert!(Instant::now() < deadline, "child failed to publish");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            child
+        }
+    }
+
+    #[test]
+    fn child_publishes_a_recovery_record() {
+        let Some(root) = std::env::var_os("ZIYUAN_WORKSPACE_LOCK_TEST_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let ws = Workspace::open(&root).unwrap();
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        guard.publish(&record(&ws, RecordState::Published)).unwrap();
+        guard.reserve().unwrap();
+        fs::write(root.join("published"), "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !root.join("release").exists() {
+            assert!(Instant::now() < deadline, "parent never released child");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        guard.complete("a1b2c3d4e5f60718293a4b5c6d7e8f90").unwrap();
+        guard.finish().unwrap();
+    }
+
+    #[test]
+    fn pending_recovery_from_another_process_blocks_until_finished() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut child = RecoveryChild::publish(&root);
+        assert!(matches!(
+            ws.ensure_writable(),
+            Err(WorkspaceError::PendingRecovery { operation_id })
+                if operation_id == "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        ));
+        fs::write(root.0.join("release"), "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(status) = child.0.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "child failed to exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::remove_file(root.0.join("published")).unwrap();
+        fs::remove_file(root.0.join("release")).unwrap();
+        assert_eq!(ws.generation().unwrap(), 2);
+        ws.ensure_writable().unwrap();
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        assert_eq!(
+            ws.pending_record().unwrap().unwrap().state,
+            RecordState::Completed
+        );
+        guard.remove_record().unwrap();
+        assert_eq!(guard.reserve().unwrap(), 3);
+        assert_no_temps(&root);
     }
 }
