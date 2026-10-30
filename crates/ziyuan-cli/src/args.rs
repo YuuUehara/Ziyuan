@@ -14,6 +14,7 @@ use ziyuan_runtime::Limits;
 
 use crate::backend::DEFAULT_LIMITS;
 use crate::help::Shell;
+use crate::text_commands::{self, TextAction};
 
 pub(crate) enum Command {
     Help,
@@ -142,6 +143,8 @@ pub(crate) enum Command {
     Records(String),
     /// 输出 shell 补全脚本。
     Completions(Shell),
+    /// 离线文本项目：不开朝廷会话。
+    Text(TextAction),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -530,6 +533,7 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             [shell] if shell == "fish" => Command::Completions(Shell::Fish),
             _ => return Err("用法: ziyuan completions <bash|zsh|fish>".into()),
         },
+        "text" => Command::Text(text_commands::parse(args)?),
         "recommend" => match <[String; 1]>::try_from(args) {
             Ok([office]) => Command::Recommend(office.parse()?),
             Err(_) => return Err("用法: ziyuan recommend <官职>".into()),

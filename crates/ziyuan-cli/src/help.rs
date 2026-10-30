@@ -100,7 +100,13 @@ pub(crate) const HELP: &str = concat!(
                                        查看起居注（事件记录）；时间如 30m、2h、3d、2026-10-25、2026-10-25 14:30，
                                        按 ZIYUAN_TZ（如 +08:00，默认 UTC）
   ziyuan records [检索词]              翰林院实录：已结诏令的诏令、回奏与评定（只增不改）；给检索词则查前例
-  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp> --json
+  ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明> [--author …] [--version …] [--date …] [--scope …]
+  ziyuan text import <项目ID> <章节.txt>...
+  ziyuan text show <项目ID>
+  ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]
+                                       离线文本项目：导入 TXT、按段分块、检查候选译稿结构（不需 init，不调用模型；
+                                       只查结构，不评判译文质量）；`ziyuan text help` 查看完整说明
+  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp|text> --json
                                        以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
   ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
   ziyuan help
@@ -222,6 +228,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "review",
     "recommend",
     "completions",
+    "text",
 ];
 
 /// 支持 `--json` 的子命令。
@@ -234,6 +241,7 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "migrate",
     "flags",
     "mcp",
+    "text",
 ];
 
 /// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
@@ -279,6 +287,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
+         text) words="init import show check help --json" ;;
          apply) words="--skip --commit" ;;
          {json_cases}) words="--json" ;;
        esac ;;
@@ -312,6 +321,7 @@ complete -F _ziyuan ziyuan
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
+                format!("{} -a 'init import show check help'", seen("text")),
                 format!("{} -l json", seen(&json)),
                 format!(
                     "{} -l dept -x -a '{departments}'",

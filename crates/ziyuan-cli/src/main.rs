@@ -6,6 +6,7 @@ mod backend;
 mod commands;
 mod help;
 mod output;
+mod text_commands;
 
 use std::env;
 use std::error::Error;
@@ -78,6 +79,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err(Usage(format!("--json 只支持 {}", JSON_COMMANDS.join("、")).into()).into());
     }
     let command = parse(args).map_err(Usage)?;
+    // 文本项目与朝廷无关：在打开事件簿、会话或模型后端之前分派。
+    if let Command::Text(action) = command {
+        return text_commands::run(action, json);
+    }
     let log = EventLog::new(&env::current_dir()?);
     if json && matches!(command, Command::Migrate) {
         // 不经 Session：事件簿读不了时也要给出报告。读不了时退出码为 1。
