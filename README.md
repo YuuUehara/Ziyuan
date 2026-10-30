@@ -4,7 +4,7 @@
 
 > **实验性 Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
 
-**当前版本 v1.0.0-rc.3（预发布）。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
+**当前版本 v1.0.0-rc.4（预发布）。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
 
 ![奉天门：紫垣的 Web 界面](docs/images/web-overview.png)
 
@@ -46,7 +46,7 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 
 发版（推送 `v*` 标签）时，GitHub Actions 会在 Release 上附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
 
-Unreleased 起，Linux GNU 发行包固定在 Ubuntu 22.04 构建，面向 glibc 2.35 或更新环境；常规 CI 与打包前均检查强/弱 GLIBC 需求不超过 2.35，并启动二进制。已发布 rc.3 包保持原样，旧 glibc 上可能出现 `GLIBC_2.39` 弱版本警告；可暂从源码在目标环境构建。此基线不等于已验证所有 Linux 发行版或内核。
+rc.4 起，Linux GNU 发行包固定在 Ubuntu 22.04 构建，面向 glibc 2.35 或更新环境；常规 CI 与打包前均检查强/弱 GLIBC 需求不超过 2.35，并启动二进制。已发布 rc.3 包保持原样，旧 glibc 上可能出现 `GLIBC_2.39` 弱版本警告；可升级 rc.4 或从源码在目标环境构建。此基线不等于已验证所有 Linux 发行版或内核。
 
 CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译、Linux GNU 的 glibc 2.35 基线与启动，并在 macOS 与 Windows 上跑全部测试。
 
