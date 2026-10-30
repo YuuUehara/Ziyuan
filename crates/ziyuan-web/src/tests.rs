@@ -127,6 +127,65 @@ async fn subscriptions_auth_reads_are_side_effect_free_and_writes_are_typed() {
     assert_eq!(call(&base, "/subscriptions/updates", t, None).await.0, 500);
 }
 
+#[test]
+fn subscriptions_frontend_contract() {
+    for expected in [
+        "id=\"hall-subscriptions\"",
+        "id=\"subscription-input\"",
+        "id=\"subscription-add\"",
+        "id=\"subscription-check\"",
+        "id=\"subscription-enabled\"",
+        "id=\"subscription-interval\"",
+        "id=\"subscription-settings\"",
+        "id=\"subscription-status\"",
+        "id=\"subscription-items\"",
+        "id=\"subscription-updates\"",
+        "记录当前状态，之后变化才提醒",
+        "最长约 2 小时",
+        "不下载正文",
+        "settingsDirty",
+        "subscriptionLink",
+        "textContent",
+        "if (hall === \"subscriptions\") loadSubscriptions()",
+        "if (subscriptionBusy || !state || state.viewer) return;",
+        "if (r.failed)",
+        "服务器程序关闭后不自动检查",
+        "min=\"15\"",
+        "for=\"subscription-input\"",
+        "for=\"subscription-interval\"",
+        "body.viewer .write",
+        "overflow-wrap: anywhere",
+    ] {
+        assert!(INDEX_HTML.contains(expected), "missing {expected}");
+    }
+    let subscriptions = INDEX_HTML
+        .split("// ---- 作品关注：")
+        .nth(1)
+        .unwrap()
+        .split("// ---- 分殿：")
+        .next()
+        .unwrap();
+    assert!(
+        !subscriptions.contains("innerHTML"),
+        "source strings must use textContent"
+    );
+    assert!(
+        !subscriptions.contains("item.url"),
+        "links must derive from validated codes"
+    );
+    assert!(subscriptions.contains("/^n[0-9]{4}[a-z]{1,6}$/"));
+    let loader = subscriptions
+        .split("function loadSubscriptions()")
+        .nth(1)
+        .unwrap()
+        .split("async function subscriptionAction")
+        .next()
+        .unwrap();
+    assert!(!loader.contains("POST"));
+    assert!(!loader.contains("/check"));
+    assert!(!loader.contains("/read"));
+}
+
 struct SplitBackend;
 impl WorkerBackend for SplitBackend {
     fn execute(&self, _job: &Job, _hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
