@@ -447,6 +447,16 @@ fn run_recovery(action: RecoveryAction, json: bool) -> Result<(), Box<dyn Error>
                 return Err(format!("记录状态为 {}，不能放弃", state_name(record.state)).into());
             }
             // 核对已全部通过：把结论显式交给存储层，由它按记录状态选对应的入口。
+            // 放弃之前再核一遍目标：锁只挡其他紫垣进程，挡不住外部编辑器。
+            for target in &record.targets {
+                if current_state(workspace.root(), &target.path)? != target.before {
+                    return Err(format!(
+                        "目标 {} 在核对之后被改动，放弃已中止；请先运行 finish 或重新核对。",
+                        target.path
+                    )
+                    .into());
+                }
+            }
             let record = match record.state {
                 RecordState::Published => {
                     guard.abandon_published(&operation_id, Untouched::confirmed())?
@@ -503,25 +513,47 @@ fn finish_recovery(
             }
         }
     }
-    if state == RecordState::Published && recorded {
-        // 事件已经记上，说明这次写入已经完成，只是没来得及收尾。
-    } else if state == RecordState::Published && !pending.is_empty() {
-        // 最关键的一种：记录已发布，但还有目标停在旧内容上，事件也没记。
-        // 这既可能是「一个文件都没写」，也可能是「写到一半」。前者放弃可惜——那是用户
-        // 已经批准过的改动；后者不能当作完成。两种情况都不该由一条命令悄悄抹掉。
+    // 「已发布」是否算完成，以**目标文件**为准；事件簿只当辅证。
+    // 事件簿里有一行长得一样，不等于这一批真的追记过——另一笔内容相同的准奏会写出逐字相同的行。
+    // 所以只要还有目标停在旧内容上，就不能当作写完：那是用户已批准、却还没落盘的改动。
+    if state == RecordState::Published && !pending.is_empty() {
+        let reason = match recorded {
+            // 事件簿对得上、目标却没写：本事务自己走不到这个状态，只能来自外部改动。
+            true => {
+                "事件簿里已有本批记录，目标却仍是旧内容：两边互相矛盾，可能被外部改动过。\n\
+                 请自行核对项目文件后，再决定收尾或放弃。"
+            }
+            // 最常见的一种：一个文件都没写，或写到一半。两者在盘上分不出来。
+            false => {
+                "这既可能是「一个文件都没写」——那是你已批准、却还没落盘的改动；\
+                 也可能是「写到一半」。两者在盘上无法区分。"
+            }
+        };
         return Err(format!(
-            "这次写入没有完成：{} 个目标仍是旧内容（{}），事件也未记入事件簿。\n\
+            "这次写入没有完成：{} 个目标仍是旧内容（{}）。\n\
              已写入的目标：{written} 个。\n\
-             这是你没有替用户做的决定，所以本命令不会自己收尾。请二选一：\n\
-              · 想保留这次批准：重新审阅并再次准奏（目标已是新内容的会自动跳过）；\n\
-              · 确认放弃：ziyuan text recovery abandon {operation_id} --yes（前提是目标全部仍是旧内容）。",
+             {reason}\n\
+             本命令不会替你决定，请二选一：\n\
+             · 想保留这次批准：重新审阅并再次准奏（目标已是新内容的会自动跳过）；\n\
+             · 确认放弃：ziyuan text recovery abandon {operation_id} --yes（前提是目标全部仍是旧内容）。",
             pending.len(),
             pending.join("、")
         )
         .into());
     }
-    // 目标全部已是新内容、或事件已记：这次写入确实发生过，收尾即可。
+    // 目标全部已是新内容：这次写入确实发生过，收尾即可。
     if state == RecordState::Published {
+        // 收尾前在锁内再核一遍：工作目录锁只挡住其他紫垣进程，挡不住外部编辑器。
+        // 核对与推进世代之间仍有极小的窗口，这一点如实记在验收记录的已知限制里。
+        for target in &record.targets {
+            if current_state(workspace.root(), &target.path)? != target.after {
+                return Err(format!(
+                    "目标 {} 在核对之后又被改动，收尾已中止；请稍后重试。",
+                    target.path
+                )
+                .into());
+            }
+        }
         guard.complete(operation_id)?;
     }
     let generation = guard.finish()?;
@@ -565,23 +597,48 @@ fn current_state(
     }
 }
 
-/// 记录里那批事件是否已经进了事件簿：逐行比对最近的若干条，不看时间戳字段。
-/// 读不到事件簿时按「没记」处理，但调用方仍会因目标不符而拒绝，不会误判为完成。
+/// 记录里那批事件是否真的进了事件簿。
+///
+/// 「最近 N 条长得一样」不足以证明这一点：`ChangesApplied` 这类事件很短，另一笔同样内容的
+/// 准奏会写出逐字相同的行。因此不只比对尾部，还须证明本批恰好开始于记录预告的位置——
+/// 即事件簿**前 `base` 条**的摘要等于记录里的 `history_sha256`，随后才是本批。
+/// 读不到事件簿、或摘要对不上时一律按「没记」处理。
 fn events_present(
     root: &std::path::Path,
     record: &ziyuan_storage::RecoveryRecord,
 ) -> Result<bool, Box<dyn Error>> {
-    let log = ziyuan_storage::EventLog::new(root);
-    let mut history = match ziyuan_storage::EventStore::load(&log) {
-        Ok(history) => history,
-        Err(_) => return Ok(false),
+    let lines: Vec<String> =
+        match ziyuan_storage::EventStore::load(&ziyuan_storage::EventLog::new(root)) {
+            Ok(history) => history
+                .iter()
+                .map(ziyuan_storage::encode_event_line)
+                .collect(),
+            Err(_) => return Ok(false),
+        };
+    let batch = &record.events.encoded_events;
+    // 本批之前应有的条数。批次长度取自记录本身，故 base = 预期总数 − 批长。
+    let Some(base) = record
+        .events
+        .expected_events
+        .checked_sub(batch.len() as u64)
+    else {
+        return Ok(false);
     };
-    let batch: Vec<String> = record.events.encoded_events.clone();
-    let lines: Vec<String> = history
-        .drain(..)
-        .map(|event| ziyuan_storage::encode_event_line(&event))
-        .collect();
-    Ok(lines.len() >= batch.len() && lines[lines.len() - batch.len()..] == batch[..])
+    let base = base as usize;
+    if lines.len() < base + batch.len() {
+        return Ok(false);
+    }
+    // 一、本批之前的那段历史必须正是记录写下时看到的那段。
+    // 摘要口径由存储层统一给出（每行以换行符结尾），与写记录时完全一致。
+    let actual = ziyuan_storage::EventStore::history_sha256_at_most(
+        &ziyuan_storage::EventLog::new(root),
+        base,
+    )?;
+    if actual.as_deref() != Some(record.events.history_sha256.as_str()) {
+        return Ok(false);
+    }
+    // 二、紧接着的若干条必须正是本批。
+    Ok(lines[base..base + batch.len()] == batch[..])
 }
 
 fn print_report(report: &ValidationReport) {

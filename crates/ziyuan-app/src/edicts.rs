@@ -619,7 +619,7 @@ impl<S: EventStore> Session<S> {
         skipped: &[u32],
         known: usize,
         event: &CourtEvent,
-    ) -> Result<(RecoveryRecord, Option<u64>), AppError> {
+    ) -> Result<(RecoveryRecord, Option<u64>, usize), AppError> {
         let generation = workspace.generation().map_err(workspace_error)?;
         // 本批要记的时辰在这里一次取定：记录里写什么，实际追加就写什么。
         let pinned_clock = self.upcoming_clock();
@@ -691,6 +691,7 @@ impl<S: EventStore> Session<S> {
                 targets,
             },
             pinned_clock,
+            base,
         ))
     }
 
@@ -726,7 +727,7 @@ impl<S: EventStore> Session<S> {
             .map_err(workspace_error)?;
         workspace.ensure_writable().map_err(unusable)?;
 
-        let (record, pinned_clock) =
+        let (record, pinned_clock, base) =
             self.recovery_record(&workspace, selected, task, &skipped, known, &event)?;
         let operation = record.operation_id.clone();
         // 写前先按落盘方的规矩核一遍（自呈报以来有没有被改动、路径是否越界）：这一关不过就
@@ -783,6 +784,16 @@ impl<S: EventStore> Session<S> {
         // 守卫随函数结束而释放，世代号保持奇数。
         ziyuan_runtime::tools::apply_changes(root, selected)
             .map_err(|e| AppError::Apply(e.to_string()))?;
+        // 记录预告本批紧接在 `base` 之后。会话里的条数若已被别的提交推动（受管事务之外的
+        // 记账，如信使回执），追加就会落在别处，记录与实际从此对不上——此时宁可留下
+        // 「已发布 + 奇数世代」让 `text recovery` 核对，也不写出一批与记录不符的事件。
+        if self.len != base {
+            return Err(AppError::Apply(format!(
+                "记录预告本批接在第 {base} 条之后，会话当前为第 {} 条，无法按记录追加事件；\
+                 请运行 ziyuan text recovery status 核对",
+                self.len
+            )));
+        }
         // 钉死发布记录时算好的时辰：实际追加的事件必须与记录里写的完全一致。
         self.commit_with_clock(|_| Ok(vec![event.clone()]), Some(pinned_clock))?;
 

@@ -63,8 +63,8 @@ fn record(workspace: &Path, state: RecordState) -> RecoveryRecord {
         events: EventBatch {
             expected_events: 1,
             expected_bytes: 0,
-            history_sha256: "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
-                .into(),
+            // 空事件簿的摘要：记录预告本批写在开头，故摘要必须是对得上的一段真实历史。
+            history_sha256: empty_history_sha256(),
             encoded_events: vec![ziyuan_storage::encode_event_line(&applied)],
         },
         targets: vec![TargetState {
@@ -77,6 +77,12 @@ fn record(workspace: &Path, state: RecordState) -> RecoveryRecord {
 
 /// 记录里声明的新内容；测试把它真的写到目标位置，收尾时的摘要核对才能通过。
 const TARGET: &[u8] = b"new bytes";
+
+/// 空事件簿的 SHA-256：没有任何行时摘要就是空输入的摘要。
+fn empty_history_sha256() -> String {
+    // SHA-256 对空输入的公开常量。写成字面量免得测试引入额外依赖。
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()
+}
 
 fn publish(ws: &Workspace, guard: &mut WriteGuard, state: RecordState) {
     let root = record_root(ws.root());
@@ -299,6 +305,42 @@ fn a_published_record_whose_targets_were_written_cannot_be_abandoned() {
 
     let reopened = Workspace::open(temp.path()).expect("重新打开");
     assert!(reopened.pending_record().expect("读记录").is_some());
+}
+
+#[test]
+fn a_lookalike_event_from_another_operation_does_not_count_as_done() {
+    // 回归：曾经只比对事件簿「最近 N 条」，于是另一笔内容相同的准奏写出的逐字相同的一行，
+    // 会被误当成「本批已追记」，让一次根本没写的准奏被报成收尾成功。现在要求
+    // 本批之前的历史摘要与记录相符、且本批紧接着它。
+    let temp = Temp::new("lookalike");
+    let ws = Workspace::open(temp.path()).expect("打开工作目录");
+    let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
+    publish(&ws, &mut guard, RecordState::Published);
+    drop(guard);
+
+    // 外部进程追记一条编码完全相同的事件（同一事件、同一内容）。
+    let mut log = ziyuan_storage::EventLog::new(temp.path());
+    let applied = ziyuan_core::CourtEvent::ChangesApplied {
+        task: ziyuan_core::TaskId(7),
+        skipped: Vec::new(),
+    };
+    ziyuan_storage::EventStore::append(&mut log, 0, &[applied]).expect("追记外部事件");
+
+    // 目标仍未写：不能因为事件簿里有那一行就报成功。
+    let (code, stdout, stderr) = run(
+        temp.path(),
+        &["text", "recovery", "finish", OPERATION, "--yes"],
+    );
+    assert_ne!(code, 0, "目标未写时不应报收尾成功：{stdout}");
+    assert!(stderr.contains("没有完成"), "{stderr}");
+
+    // 放弃同样不能盲目通过：事件簿里已经有那一行，宁可拒绝让人核对，也不擅自抹掉。
+    let (code, _, stderr) = run(
+        temp.path(),
+        &["text", "recovery", "abandon", OPERATION, "--yes"],
+    );
+    assert_ne!(code, 0, "事件簿已有同类事件时不应擅自放弃：{stderr}");
+    assert!(stderr.contains("已经在事件簿中"), "{stderr}");
 }
 
 #[test]

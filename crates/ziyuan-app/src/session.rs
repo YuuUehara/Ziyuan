@@ -214,8 +214,12 @@ impl<S: EventStore> Session<S> {
     pub(crate) fn commit_with_clock(
         &mut self,
         mut propose: impl FnMut(&Court) -> Result<Vec<CourtEvent>, GovernanceError>,
-        mut clock: Option<Option<u64>>,
+        clock: Option<Option<u64>>,
     ) -> Result<Vec<CourtEvent>, AppError> {
+        let pinned = clock.is_some();
+        // 钉死后就固定不变：记录里写的是什么，实际就必须追加什么。
+        let fixed = clock;
+        let mut pending = clock;
         loop {
             let events = propose(&self.court)?;
             if events.is_empty() {
@@ -225,9 +229,15 @@ impl<S: EventStore> Session<S> {
             for event in &events {
                 next.apply(event)?;
             }
-            // 分钟变了才记一条时辰，置于本批之前。受管写入已钉死时照记录来。
-            let at = match clock.take() {
-                Some(pinned) => pinned,
+            // 第一次按调用者的意思取（已钉死则用钉死的值），重试后沿用同一个值。
+            let at = match pending.take() {
+                Some(chosen) => chosen,
+                None if pinned => {
+                    // 钉死却没了取值：不该发生，宁可报错也不写出一批与记录不符的事件。
+                    return Err(AppError::Apply(
+                        "受管写入的时辰已钉死却丢失，拒绝追加事件".into(),
+                    ));
+                }
                 None => self.upcoming_clock(),
             };
             let mut written = Vec::with_capacity(events.len() + 1);
@@ -243,10 +253,11 @@ impl<S: EventStore> Session<S> {
                 }
                 Err(StorageError::Conflict { .. }) => {
                     self.reload()?;
-                    // 重载后仍须沿用钉死的时辰：记录已发布，改写它就等于让记录与实际不符。
-                    clock = match clock.is_some() {
-                        true => clock,
-                        false => Some(at),
+                    // 重载后事件簿变了，但**钉死的时辰仍然有效**：记录已发布，
+                    // 换一个时刻就等于让记录与实际不符。未钉死时才重新看一次分钟。
+                    pending = match pinned {
+                        true => Some(fixed.expect("pinned 为真时必有取值")),
+                        false => None,
                     };
                 }
                 Err(e) => return Err(e.into()),
