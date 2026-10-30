@@ -7,6 +7,9 @@ use std::sync::Mutex;
 use ziyuan_core::CourtEvent;
 
 mod codec;
+pub mod json_file;
+
+pub use json_file::{JsonFile, JsonFileError, Stored};
 
 #[derive(Debug)]
 pub enum StorageError {

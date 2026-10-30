@@ -2432,6 +2432,8 @@ dependencies = [
 name = "ziyuan-storage"
 version = "1.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "ziyuan-core",
 ]
 
