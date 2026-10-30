@@ -107,7 +107,7 @@ pub(crate) const HELP: &str = concat!(
                                        离线文本项目：导入 TXT、按段分块、检查候选译稿结构（不需 init，不调用模型；
                                        只查结构，不评判译文质量）；`ziyuan text help` 查看完整说明
   ziyuan follow add <作品链接|作品代码>
-  ziyuan follow list | remove <作品链接|作品代码> | check | updates [--all] | read <提醒ID>
+  ziyuan follow list | remove <作品链接|作品代码> | check | updates [--all] | read <提醒ID> | queue [on|off]
                                        作品关注：关注 syosetu 作品，手动检查章节更新并列出提醒（不需 init，
                                        不调用模型，只查作品信息不下载正文；不会在后台自动检查）；
                                        `ziyuan follow help` 查看完整说明
@@ -295,7 +295,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
          text) words="init import show check help --json" ;;
-         follow) words="add list remove check updates read help --all --json" ;;
+         follow) words="add list remove check updates read queue on off help --all --json" ;;
          apply) words="--skip --commit" ;;
          {json_cases}) words="--json" ;;
        esac ;;
@@ -331,7 +331,7 @@ complete -F _ziyuan ziyuan
                 format!("{} -l commit", seen("apply")),
                 format!("{} -a 'init import show check help'", seen("text")),
                 format!(
-                    "{} -a 'add list remove check updates read help'",
+                    "{} -a 'add list remove check updates read queue on off help'",
                     seen("follow")
                 ),
                 format!("{} -l all", seen("follow")),

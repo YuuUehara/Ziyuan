@@ -360,3 +360,106 @@ fn help_is_plain_and_offline() {
     assert!(fish.contains("follow"));
     assert!(!root.join(".ziyuan").exists());
 }
+
+#[test]
+fn queue_setting_is_offline_and_check_reports_courier_intake() {
+    let dir = TempDir::new("queue");
+    let root = dir.path();
+    let service = Subscriptions::new(root);
+    service
+        .set_settings(ziyuan_app::subscriptions::Settings {
+            enabled: true,
+            interval_seconds: 900,
+            queue_new_chapters: false,
+        })
+        .unwrap();
+    let shown = ok_json(root, &["follow", "queue", "--json"]);
+    assert_eq!(shown["queue_new_chapters"], false);
+    assert!(stdout(&ok(root, &["follow", "queue"])).contains("关闭"));
+
+    // 未开启：照常检查，不打开朝廷。
+    let t = now() - 1000;
+    service.add("n1234ab", t).unwrap();
+    service
+        .check(&Fake(Ok(vec![work("n1234ab", 10)])), t, CheckMode::Manual)
+        .unwrap();
+    service
+        .check(
+            &Fake(Ok(vec![work("n1234ab", 12)])),
+            now(),
+            CheckMode::Manual,
+        )
+        .unwrap();
+    let report = ok_json(root, &["follow", "check", "--json"]);
+    assert_eq!(report["status"], "not_due");
+    assert_eq!(report["courier"]["status"], "disabled");
+    assert!(!stdout(&ok(root, &["follow", "check"])).contains("驿站"));
+    no_court(root);
+
+    let on = ok_json(root, &["follow", "queue", "on", "--json"]);
+    assert_eq!(on["queue_new_chapters"], true);
+    let settings = service.settings().unwrap();
+    assert!(settings.queue_new_chapters && settings.enabled);
+    assert_eq!(settings.interval_seconds, 900);
+    assert!(stdout(&ok(root, &["follow", "queue"])).contains("开启"));
+
+    // 朝廷尚未建立：检查仍成功，提醒保留，不建朝。
+    let report = ok_json(root, &["follow", "check", "--json"]);
+    assert_eq!(report["courier"]["status"], "not_founded");
+    assert_eq!(report["courier"]["queued"], serde_json::json!([]));
+    let text = stdout(&ok(root, &["follow", "check"]));
+    assert!(
+        text.contains("朝廷尚未建立") && text.contains("ziyuan init"),
+        "{text}"
+    );
+    no_court(root);
+
+    ok(root, &["init"]);
+    let report = ok_json(root, &["follow", "check", "--json"]);
+    assert_eq!(report["status"], "not_due");
+    let courier = &report["courier"];
+    assert_eq!(courier["status"], "done", "{courier}");
+    assert_eq!(courier["queued"][0]["station"], "syosetu:n1234ab#12");
+    assert!(courier["queued"][0]["task"].as_u64().is_some());
+    assert_eq!(
+        courier["queued"][0]["notice"],
+        service.updates(true).unwrap()[0].id.as_str()
+    );
+    assert_eq!(courier["already_queued"], 0);
+    assert_eq!(courier["errors"], serde_json::json!([]));
+    let task = courier["queued"][0]["task"].as_u64().unwrap();
+    let text = stdout(&ok(root, &["follow", "check"]));
+    assert!(text.contains("已入队过 1 件"), "{text}");
+    let report = ok_json(root, &["follow", "check", "--json"]);
+    assert_eq!(report["courier"]["already_queued"], 1);
+    assert_eq!(report["courier"]["queued"], serde_json::json!([]));
+    let tasks = ok_json(root, &["tasks", "--json"]);
+    assert!(
+        tasks.to_string().contains("syosetu:n1234ab#12"),
+        "{tasks} #{task}"
+    );
+    // 入队不把提醒标为已读。
+    assert_eq!(service.updates(true).unwrap().len(), 1);
+
+    let off = ok_json(root, &["follow", "queue", "off", "--json"]);
+    assert_eq!(off["queue_new_chapters"], false);
+    assert!(service.settings().unwrap().enabled);
+}
+
+#[test]
+fn queue_usage_errors_exit_2() {
+    let dir = TempDir::new("queue-usage");
+    let root = dir.path();
+    for args in [
+        &["follow", "queue", "maybe"][..],
+        &["follow", "queue", "on", "off"],
+        &["follow", "queue", "--all"],
+    ] {
+        let out = ziyuan(root, args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    assert!(!root.join(".ziyuan").exists());
+    let help = stdout(&ok(root, &["follow", "help"]));
+    assert!(help.contains("ziyuan follow queue"), "{help}");
+}

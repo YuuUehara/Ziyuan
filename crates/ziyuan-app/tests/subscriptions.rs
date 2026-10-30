@@ -183,13 +183,15 @@ fn scheduler_cooldown_backoff_partial_and_settings() {
     assert!(
         s.set_settings(Settings {
             enabled: true,
-            interval_seconds: 899
+            interval_seconds: 899,
+            queue_new_chapters: false,
         })
         .is_err()
     );
     s.set_settings(Settings {
         enabled: true,
         interval_seconds: 900,
+        queue_new_chapters: false,
     })
     .unwrap();
     let result = check(&s, &src, 100);

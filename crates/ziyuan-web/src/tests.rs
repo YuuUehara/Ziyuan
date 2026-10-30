@@ -130,7 +130,15 @@ async fn subscriptions_auth_reads_are_side_effect_free_and_writes_are_typed() {
 #[test]
 fn subscriptions_frontend_contract() {
     for expected in [
-        "id=\"hall-subscriptions\"",
+        "id=\"subscription-panel\"",
+        "id=\"subscription-queue\"",
+        "for=\"subscription-queue\"",
+        "兵部驿站 · 作品关注",
+        "新章节自动入队（交工部，只入队不执行）",
+        "queue_new_chapters:$(\"subscription-queue\").checked",
+        "\"subscription-queue\"]) $(id).addEventListener(\"input\"",
+        "subscriptionCourier(r.courier)",
+        "history.replaceState(null, \"\", \"#wuying\")",
         "id=\"subscription-input\"",
         "id=\"subscription-add\"",
         "id=\"subscription-check\"",
@@ -146,7 +154,7 @@ fn subscriptions_frontend_contract() {
         "settingsDirty",
         "subscriptionLink",
         "textContent",
-        "if (hall === \"subscriptions\") loadSubscriptions()",
+        "if (hall === \"wuying\") loadSubscriptions()",
         "if (subscriptionBusy || !state || state.viewer) return;",
         "if (r.failed)",
         "服务器程序关闭后不自动检查",
@@ -158,6 +166,39 @@ fn subscriptions_frontend_contract() {
     ] {
         assert!(INDEX_HTML.contains(expected), "missing {expected}");
     }
+    // 作品关注并入武英殿的兵部驿站，排在 GitHub 之后；不再单列一殿。
+    for gone in [
+        "id=\"hall-subscriptions\"",
+        "data-hall=\"subscriptions\"",
+        "\"qiju\", \"subscriptions\"",
+    ] {
+        assert!(!INDEX_HTML.contains(gone), "still has {gone}");
+    }
+    let wuying = INDEX_HTML
+        .split("id=\"hall-wuying\"")
+        .nth(1)
+        .unwrap()
+        .split("id=\"hall-qiju\"")
+        .next()
+        .unwrap();
+    let github = wuying.find("兵部驿站 · GitHub").unwrap();
+    let panel = wuying.find("id=\"subscription-panel\"").unwrap();
+    assert!(github < panel);
+    for id in [
+        "subscription-items",
+        "subscription-updates",
+        "subscription-result",
+    ] {
+        assert!(wuying.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    let settings_form = wuying
+        .split("id=\"subscription-settings-form\"")
+        .nth(1)
+        .unwrap()
+        .split("</form>")
+        .next()
+        .unwrap();
+    assert!(settings_form.contains("id=\"subscription-queue\""));
     let subscriptions = INDEX_HTML
         .split("// ---- 作品关注：")
         .nth(1)

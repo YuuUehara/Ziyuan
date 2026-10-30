@@ -11,6 +11,7 @@ mod courier;
 mod delta;
 mod edicts;
 mod exam;
+mod follow;
 mod history;
 mod huidian;
 mod personnel;
@@ -35,6 +36,10 @@ pub use edicts::{
     reply_text, seal_note, selected_files, skipped_note, stale_files,
 };
 pub use exam::{ExamPaper, exam_papers};
+pub use follow::{
+    FollowCourier, FollowCourierStatus, FollowQueueError, FollowQueued, follow_courier,
+    follow_station,
+};
 pub use history::{HistoryEntry, HistoryFilter, describe_event, history_entries};
 pub use huidian::HUIDIAN_EVERY;
 pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note, vacancies};

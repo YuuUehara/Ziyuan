@@ -1,5 +1,6 @@
 //! `ziyuan follow`：本地的作品关注与更新列表。不开朝廷会话、不读模型配置；
 //! 只有 `follow check` 联网，且只查询固定的 syosetu 官方作品信息 API，不下载正文。
+//! 开启「新章节自动入队」时，`follow check` 之后才打开朝廷，把新章节提醒入兵部驿站。
 
 use serde_json::{Value, json};
 use std::env;
@@ -9,7 +10,7 @@ use ziyuan_app::subscriptions::{
     CheckMode, CheckStatus, CheckSummary, Notice, NoticeKind, ObservedWork, SourceError,
     Subscription, SubscriptionError, Subscriptions, SyosetuSource, WorkSource, normalize_code,
 };
-use ziyuan_app::{format_time, tz_offset};
+use ziyuan_app::{FollowCourier, FollowCourierStatus, follow_courier, format_time, tz_offset};
 
 pub(crate) const FOLLOW_HELP: &str = r#"作品关注（不需要 ziyuan init，不调用模型；只查作品信息，不下载正文）：
   ziyuan follow add <作品链接|作品代码>
@@ -23,6 +24,10 @@ pub(crate) const FOLLOW_HELP: &str = r#"作品关注（不需要 ziyuan init，�
                                        同一作品两次检查至少间隔 60 秒；有作品检查失败时退出码 1
   ziyuan follow updates [--all]        列出未读的更新提醒；--all 连同已读的一起列出
   ziyuan follow read <提醒ID>          把一条提醒标为已读
+  ziyuan follow queue [on|off]         查看或设置「新章节自动入队」（默认关闭）。开启后 follow check
+                                       与 Web 的检查把未读的新章节提醒入兵部驿站（交工部，只入队不执行），
+                                       站名 syosetu:<作品代码>#<章节数>，同一站名只入队一次；
+                                       朝廷尚未建立（ziyuan init）或入队失败时不影响检查，下次检查再补
   取消未关注的作品或标记不存在的提醒时，退出码 1（--json 仍输出 "found": false）。
   以上命令均可加 --json，以 JSON 输出到标准输出。列表存于 .ziyuan/subscriptions/state.json。
   此命令退出后不会在后台检查；需要定时检查时，在运行中的 Web 服务中开启。
@@ -34,14 +39,19 @@ pub(crate) enum FollowAction {
     List,
     Remove(String),
     Check,
-    Updates { all: bool },
+    Updates {
+        all: bool,
+    },
     Read(String),
+    /// `None` 只查看当前设置。
+    Queue(Option<bool>),
 }
 
 const ADD_USAGE: &str = "用法: ziyuan follow add <作品链接|作品代码>";
 const REMOVE_USAGE: &str = "用法: ziyuan follow remove <作品链接|作品代码>";
 const UPDATES_USAGE: &str = "用法: ziyuan follow updates [--all]";
 const READ_USAGE: &str = "用法: ziyuan follow read <提醒ID>";
+const QUEUE_USAGE: &str = "用法: ziyuan follow queue [on|off]";
 /// 与 `subscriptions::check` 的单次上限与手动冷却一致。
 const BATCH: usize = 50;
 const COOLDOWN: u64 = 60;
@@ -68,6 +78,12 @@ pub(crate) fn parse(args: Vec<String>) -> Result<FollowAction, Box<dyn Error>> {
             [flag] if flag == "--all" => FollowAction::Updates { all: true },
             [a, b] if a == "--all" && b == "--all" => return Err("--all 只能给一次".into()),
             _ => return Err(UPDATES_USAGE.into()),
+        },
+        "queue" => match rest {
+            [] => FollowAction::Queue(None),
+            [v] if v == "on" => FollowAction::Queue(Some(true)),
+            [v] if v == "off" => FollowAction::Queue(Some(false)),
+            _ => return Err(QUEUE_USAGE.into()),
         },
         "read" => match rest {
             [id] if id.len() == 32
@@ -109,7 +125,8 @@ pub(crate) fn run(action: FollowAction, json: bool) -> Result<(), Box<dyn Error>
         println!("{FOLLOW_HELP}");
         return Ok(());
     }
-    let service = Subscriptions::new(env::current_dir()?);
+    let root = env::current_dir()?;
+    let service = Subscriptions::new(&root);
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     match action {
         FollowAction::Help => unreachable!("已在上面处理"),
@@ -155,9 +172,18 @@ pub(crate) fn run(action: FollowAction, json: bool) -> Result<(), Box<dyn Error>
         }
         FollowAction::Check => {
             let report = check(&service, &SyosetuSource::new(), now).map_err(failure)?;
+            // 入队的成败只写进报告，不改变检查的退出码。
+            let courier = follow_courier(&root);
             match json {
-                true => print_json(report.to_json())?,
-                false => report.print(),
+                true => {
+                    let mut value = report.to_json();
+                    value["courier"] = serde_json::to_value(&courier)?;
+                    print_json(value)?
+                }
+                false => {
+                    report.print();
+                    print_courier(&courier);
+                }
             }
             if report.summary.failed > 0 {
                 return Err(format!(
@@ -175,6 +201,22 @@ pub(crate) fn run(action: FollowAction, json: bool) -> Result<(), Box<dyn Error>
                     "notices": notices.iter().map(notice_view).collect::<Vec<_>>(),
                 }))?,
                 false => print_updates(&notices, all),
+            }
+        }
+        FollowAction::Queue(value) => {
+            let settings = match value {
+                Some(on) => service
+                    .update_settings(|s| s.queue_new_chapters = on)
+                    .map_err(failure)?,
+                None => service.settings().map_err(failure)?,
+            };
+            let on = settings.queue_new_chapters;
+            match json {
+                true => print_json(json!({ "queue_new_chapters": on }))?,
+                false if on => println!(
+                    "新章节自动入队：开启。检查发现新章节时入兵部驿站，交工部（只入队不执行）。"
+                ),
+                false => println!("新章节自动入队：关闭。开启：ziyuan follow queue on"),
             }
         }
         FollowAction::Read(id) => {
@@ -343,6 +385,45 @@ fn print_updates(notices: &[Notice], all: bool) {
     }
     if !all {
         println!("标为已读：ziyuan follow read <提醒ID>");
+    }
+}
+
+fn print_courier(courier: &FollowCourier) {
+    match courier.status {
+        FollowCourierStatus::Disabled => return,
+        FollowCourierStatus::NotFounded => {
+            println!("驿站未入队：朝廷尚未建立（ziyuan init）；提醒保留，建立后下次检查再入队。");
+            return;
+        }
+        FollowCourierStatus::Error => {
+            println!(
+                "驿站未入队：{}；提醒保留，下次检查再入队。",
+                courier.message.as_deref().unwrap_or("未知错误")
+            );
+            return;
+        }
+        FollowCourierStatus::Done => {}
+    }
+    if !courier.queued.is_empty() {
+        let ids: Vec<_> = courier
+            .queued
+            .iter()
+            .map(|q| format!("#{}", q.task))
+            .collect();
+        println!(
+            "驿站入队 {} 件：{}（交工部，只入队不执行）",
+            courier.queued.len(),
+            ids.join("、")
+        );
+    }
+    if courier.already_queued > 0 {
+        println!("已入队过 {} 件，不再重复入队。", courier.already_queued);
+    }
+    for error in &courier.errors {
+        println!(
+            "  - {} 未入队：{}（下次检查再试）",
+            error.station, error.message
+        );
     }
 }
 

@@ -118,6 +118,15 @@ impl AppState {
         &self,
         f: impl FnOnce(&mut Session<EventLog>) -> Result<T, AppError> + Send + 'static,
     ) -> Result<T, ApiError> {
+        self.session_result(f).await?.map_err(ApiError::from)
+    }
+
+    /// 同 [`with_session`](Self::with_session)，但保留应用层错误（含打不开朝廷的
+    /// `NotFounded`），由调用者自行归类；外层错误只有阻塞线程没有跑完。
+    pub(crate) async fn session_result<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Session<EventLog>) -> Result<T, AppError> + Send + 'static,
+    ) -> Result<Result<T, AppError>, ApiError> {
         let root = self.0.config.root.clone();
         let cached = self.0.cache.lock().expect("锁未中毒").take();
         let (session, result) = tokio::task::spawn_blocking(move || {
@@ -125,22 +134,27 @@ impl AppState {
             let mut session = match refreshed {
                 Some(Ok(session)) => session,
                 // 刷新失败（如事件簿被替换）则重新打开。
-                _ => Session::open(EventLog::new(&root))?,
+                _ => match Session::open(EventLog::new(&root)) {
+                    Ok(session) => session,
+                    Err(e) => return (None, Err(e)),
+                },
             };
             let result = f(&mut session);
             if let Some(note) = session.take_chronicle() {
                 eprintln!("{note}");
             }
-            Ok::<_, AppError>((session, result))
+            (Some(session), result)
         })
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
-        self.0
-            .cache
-            .lock()
-            .expect("锁未中毒")
-            .get_or_insert(session);
-        result.map_err(ApiError::from)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+        if let Some(session) = session {
+            self.0
+                .cache
+                .lock()
+                .expect("锁未中毒")
+                .get_or_insert(session);
+        }
+        Ok(result)
     }
 
     /// 执行变更，成功后通知页面刷新。

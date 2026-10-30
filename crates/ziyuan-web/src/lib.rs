@@ -71,24 +71,33 @@ async fn serve_with_subscriptions(
     config: Config,
     service: subscriptions::Service,
 ) -> io::Result<()> {
-    let _scheduler = timer::Scheduler::start(service.clone());
-    axum::serve(listener, router_with_subscriptions(config, service)).await
+    let app = app_state(config, service);
+    let _scheduler = timer::Scheduler::start(app.clone());
+    axum::serve(listener, router_for(app)).await
 }
 
 pub fn router(config: Config) -> Router {
     let service = subscriptions::Service::new(config.root.clone());
-    router_with_subscriptions(config, service)
+    router_for(app_state(config, service))
 }
 
-fn router_with_subscriptions(config: Config, subscriptions: subscriptions::Service) -> Router {
+fn app_state(config: Config, subscriptions: subscriptions::Service) -> AppState {
     let (events, _) = broadcast::channel(1024);
-    let app = AppState(Arc::new(Inner {
+    AppState(Arc::new(Inner {
         config,
         subscriptions,
         events,
         run: Mutex::new(None),
         cache: Mutex::new(None),
-    }));
+    }))
+}
+
+#[cfg(test)]
+fn router_with_subscriptions(config: Config, subscriptions: subscriptions::Service) -> Router {
+    router_for(app_state(config, subscriptions))
+}
+
+fn router_for(app: AppState) -> Router {
     let api = Router::new()
         .route(
             "/subscriptions",

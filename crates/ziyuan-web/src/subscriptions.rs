@@ -12,9 +12,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use ziyuan_app::subscriptions::{
-    CheckMode, CheckSummary, Settings, SourceError, Subscription, SubscriptionError, Subscriptions,
-    SyosetuSource, WorkSource,
+    CheckMode, CheckStatus, CheckSummary, SourceError, Subscription, SubscriptionError,
+    Subscriptions, SyosetuSource, WorkSource,
 };
+use ziyuan_app::{AppError, FollowCourier};
 
 #[derive(Clone)]
 pub(crate) struct Service {
@@ -65,6 +66,42 @@ impl Service {
         let now = (self.clock)();
         self.store(move |s| s.check(&source, now, mode)).await
     }
+}
+
+/// 检查之后：开启「新章节自动入队」时经缓存的会话入兵部驿站（不在联网期间持会话）。
+/// 出错只写在报告里；有新入队的诏令时通知页面刷新。
+pub(crate) async fn courier(app: &AppState) -> FollowCourier {
+    let failed = |e: ApiError| FollowCourier::from_result(Err(AppError::External(e.1)));
+    match app.0.subscriptions.store(|s| s.settings()).await {
+        Ok(settings) if !settings.queue_new_chapters => return FollowCourier::disabled(),
+        Ok(_) => {}
+        Err(e) => return failed(e),
+    }
+    let root = app.0.subscriptions.root.clone();
+    let report = match app
+        .session_result(move |session| session.follow_intake(&Subscriptions::new(root)))
+        .await
+    {
+        Ok(result) => FollowCourier::from_result(result),
+        Err(e) => failed(e),
+    };
+    if !report.queued.is_empty() {
+        app.emit("changed", json!({}));
+    }
+    report
+}
+
+/// 定时器每一拍：到期的作品检查完后再入队。没有检查任何作品时不打开朝廷。
+pub(crate) async fn scheduled_tick(
+    app: &AppState,
+) -> Result<(CheckSummary, FollowCourier), ApiError> {
+    let summary = app.0.subscriptions.check(CheckMode::Scheduled).await?;
+    let courier = if summary.status == CheckStatus::Complete {
+        courier(app).await
+    } else {
+        FollowCourier::disabled()
+    };
+    Ok((summary, courier))
 }
 
 fn source_error(error: &SourceError) -> &'static str {
@@ -177,9 +214,9 @@ pub(crate) async fn check(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     fields(&body, &[])?;
-    Ok(Json(json!(
-        app.0.subscriptions.check(CheckMode::Manual).await?
-    )))
+    let mut value = json!(app.0.subscriptions.check(CheckMode::Manual).await?);
+    value["courier"] = json!(courier(&app).await);
+    Ok(Json(value))
 }
 pub(crate) async fn read(
     State(app): State<AppState>,
@@ -197,21 +234,34 @@ pub(crate) async fn settings(
     State(app): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    fields(&body, &["enabled", "interval_seconds"])?;
+    fields(
+        &body,
+        &["enabled", "interval_seconds", "queue_new_chapters"],
+    )?;
     let enabled = body["enabled"]
         .as_bool()
         .ok_or_else(|| ApiError::bad("enabled 须为布尔值"))?;
     let interval_seconds = body["interval_seconds"]
         .as_u64()
         .ok_or_else(|| ApiError::bad("interval_seconds 须为正整数"))?;
+    // 未给出时保留原值，旧页面保存检查设置不会关掉入队。
+    let queue = match body.get("queue_new_chapters") {
+        None => None,
+        Some(v) => Some(
+            v.as_bool()
+                .ok_or_else(|| ApiError::bad("queue_new_chapters 须为布尔值"))?,
+        ),
+    };
     app.0
         .subscriptions
         .store(move |s| {
-            let settings = Settings {
-                enabled,
-                interval_seconds,
-            };
-            s.set_settings(settings.clone())?;
+            let settings = s.update_settings(|settings| {
+                settings.enabled = enabled;
+                settings.interval_seconds = interval_seconds;
+                if let Some(queue) = queue {
+                    settings.queue_new_chapters = queue;
+                }
+            })?;
             Ok(json!({"settings":settings}))
         })
         .await

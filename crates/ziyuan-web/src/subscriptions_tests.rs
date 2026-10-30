@@ -61,9 +61,10 @@ async fn scheduler_ticks_without_browser_and_stops_after_drop() {
     s.set_settings(Settings {
         enabled: true,
         interval_seconds: 900,
+        queue_new_chapters: false,
     })
     .unwrap();
-    let scheduler = crate::timer::Scheduler::start(service);
+    let scheduler = crate::timer::Scheduler::start(crate::app_state(config(&service), service));
     tokio::task::yield_now().await;
     assert_eq!(source.calls.load(Ordering::SeqCst), 0);
     tokio::time::advance(std::time::Duration::from_secs(5)).await;
@@ -85,6 +86,7 @@ async fn embedded_router_does_not_start_scheduler_even_if_enabled() {
     s.set_settings(Settings {
         enabled: true,
         interval_seconds: 900,
+        queue_new_chapters: false,
     })
     .unwrap();
     let _router = crate::router_with_subscriptions(config(&service), service);
@@ -145,11 +147,12 @@ async fn subscription_workflow_baseline_unread_errors_and_no_secret_fields() {
     let (_, defaults) = call(&base, "/subscriptions", t, None).await;
     assert_eq!(
         defaults["settings"],
-        json!({"enabled":false,"interval_seconds":1800})
+        json!({"enabled":false,"interval_seconds":1800,"queue_new_chapters":false})
     );
     call(&base, "/subscriptions", t, Some(json!({"input":"n1234ab"}))).await;
     let (status, baseline) = call(&base, "/subscriptions/check", t, Some(json!({}))).await;
     assert_eq!(status, 200);
+    assert_eq!(baseline["courier"]["status"], "disabled");
     assert_eq!(baseline["notices"], 0);
     assert_eq!(baseline["checked"], 1);
     source.chapters.store(2, Ordering::SeqCst);
@@ -214,6 +217,7 @@ async fn scheduled_poll_respects_off_due_backoff_and_disable() {
     s.set_settings(Settings {
         enabled: true,
         interval_seconds: 900,
+        queue_new_chapters: false,
     })
     .unwrap();
     service.check(CheckMode::Scheduled).await.unwrap();
@@ -230,6 +234,7 @@ async fn scheduled_poll_respects_off_due_backoff_and_disable() {
     s.set_settings(Settings {
         enabled: false,
         interval_seconds: 900,
+        queue_new_chapters: false,
     })
     .unwrap();
     clock.store(5000, Ordering::SeqCst);
@@ -296,5 +301,148 @@ async fn dropping_serve_owns_and_stops_scheduler() {
     assert!(
         weak.upgrade().is_none(),
         "serve cancellation must not leave the source owned by a timer"
+    );
+}
+
+fn queue_on(service: &Service) {
+    Subscriptions::new(&service.root)
+        .update_settings(|s| s.queue_new_chapters = true)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_round_trip_queue_flag_and_manual_check_reports_courier() {
+    let (service, source, clock) = fixture("courier-manual");
+    ziyuan_app::Session::found(ziyuan_storage::EventLog::new(&service.root)).unwrap();
+    let (base, server) = start(service.clone()).await;
+    let t = Some(TOKEN);
+    let body = json!({"enabled":false,"interval_seconds":1800,"queue_new_chapters":true});
+    assert_eq!(
+        call(
+            &base,
+            "/subscriptions/settings",
+            Some(VIEWER),
+            Some(body.clone())
+        )
+        .await
+        .0,
+        403
+    );
+    assert!(
+        !Subscriptions::new(&service.root)
+            .settings()
+            .unwrap()
+            .queue_new_chapters
+    );
+    for bad in [
+        json!({"enabled":false,"interval_seconds":1800,"queue_new_chapters":"yes"}),
+        json!({"queue_new_chapters":true}),
+    ] {
+        assert_eq!(
+            call(&base, "/subscriptions/settings", t, Some(bad)).await.0,
+            400
+        );
+    }
+    let (status, saved) = call(&base, "/subscriptions/settings", t, Some(body)).await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["settings"]["queue_new_chapters"], true);
+    // 不带此字段（旧页面）时保留原值。
+    let (_, kept) = call(
+        &base,
+        "/subscriptions/settings",
+        t,
+        Some(json!({"enabled":true,"interval_seconds":900})),
+    )
+    .await;
+    assert_eq!(
+        kept["settings"],
+        json!({"enabled":true,"interval_seconds":900,"queue_new_chapters":true})
+    );
+    let (_, list) = call(&base, "/subscriptions", Some(VIEWER), None).await;
+    assert_eq!(list["settings"]["queue_new_chapters"], true);
+
+    call(&base, "/subscriptions", t, Some(json!({"input":"n1234ab"}))).await;
+    let (_, baseline) = call(&base, "/subscriptions/check", t, Some(json!({}))).await;
+    assert_eq!(baseline["courier"]["status"], "done", "{baseline}");
+    assert_eq!(baseline["courier"]["queued"], json!([]));
+    source.chapters.store(3, Ordering::SeqCst);
+    clock.store(1060, Ordering::SeqCst);
+    let (status, changed) = call(&base, "/subscriptions/check", t, Some(json!({}))).await;
+    assert_eq!(status, 200);
+    assert_eq!(changed["notices"], 1);
+    let courier = &changed["courier"];
+    assert_eq!(courier["status"], "done");
+    assert_eq!(courier["queued"][0]["station"], "syosetu:n1234ab#3");
+    let task = courier["queued"][0]["task"].as_u64().unwrap();
+    let (_, state) = call(&base, "/state", t, None).await;
+    assert!(state.to_string().contains("syosetu:n1234ab#3"), "#{task}");
+    clock.store(1120, Ordering::SeqCst);
+    let (_, again) = call(&base, "/subscriptions/check", t, Some(json!({}))).await;
+    assert_eq!(again["courier"]["already_queued"], 1);
+    assert_eq!(again["courier"]["queued"], json!([]));
+    let (_, updates) = call(&base, "/subscriptions/updates", t, None).await;
+    assert_eq!(updates["updates"][0]["read"], false);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn not_founded_court_keeps_check_successful() {
+    let (service, source, clock) = fixture("courier-unfounded");
+    let s = Subscriptions::new(&service.root);
+    s.add("n1234ab", 1000).unwrap();
+    queue_on(&service);
+    let (base, server) = start(service.clone()).await;
+    let t = Some(TOKEN);
+    call(&base, "/subscriptions/check", t, Some(json!({}))).await;
+    source.chapters.store(2, Ordering::SeqCst);
+    clock.store(1060, Ordering::SeqCst);
+    let (status, checked) = call(&base, "/subscriptions/check", t, Some(json!({}))).await;
+    assert_eq!(status, 200, "{checked}");
+    assert_eq!(checked["notices"], 1);
+    assert_eq!(checked["courier"]["status"], "not_founded");
+    assert!(!service.root.join(".ziyuan/court.log").exists());
+    assert_eq!(s.updates(true).unwrap().len(), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_tick_queues_through_cached_session_and_emits_change() {
+    let (service, source, clock) = fixture("courier-timer");
+    ziyuan_app::Session::found(ziyuan_storage::EventLog::new(&service.root)).unwrap();
+    let s = Subscriptions::new(&service.root);
+    s.add("n1234ab", 1000).unwrap();
+    s.update_settings(|s| {
+        s.enabled = true;
+        s.interval_seconds = 900;
+        s.queue_new_chapters = true;
+    })
+    .unwrap();
+    let app = crate::app_state(config(&service), service.clone());
+    let mut events = app.0.events.subscribe();
+    let (summary, courier) = scheduled_tick(&app).await.unwrap();
+    assert_eq!(summary.checked, 1);
+    assert!(courier.queued.is_empty());
+    assert!(
+        events.try_recv().is_err(),
+        "nothing queued, nothing to refresh"
+    );
+    // 未到期：不联网，也不打开朝廷。
+    let (summary, courier) = scheduled_tick(&app).await.unwrap();
+    assert_eq!(summary.status, CheckStatus::NotDue);
+    assert_eq!(courier.status, ziyuan_app::FollowCourierStatus::Disabled);
+    source.chapters.store(2, Ordering::SeqCst);
+    clock.store(1900, Ordering::SeqCst);
+    let (summary, courier) = scheduled_tick(&app).await.unwrap();
+    assert_eq!(summary.notices, 1);
+    assert_eq!(courier.queued.len(), 1, "{courier:?}");
+    assert_eq!(courier.queued[0].station, "syosetu:n1234ab#2");
+    assert_eq!(events.try_recv().unwrap().0, "changed");
+    let cached = app.0.cache.lock().unwrap();
+    let session = cached.as_ref().expect("会话放回缓存");
+    assert!(
+        session
+            .court()
+            .tasks()
+            .any(|t| t.courier.as_deref() == Some("syosetu:n1234ab#2"))
     );
 }

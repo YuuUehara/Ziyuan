@@ -95,12 +95,16 @@ impl std::error::Error for SubscriptionError {}
 pub struct Settings {
     pub enabled: bool,
     pub interval_seconds: u64,
+    /// 新章节提醒自动入兵部驿站（交工部，只入队不执行）。1.1.0 的状态文件没有此项，读作关闭。
+    #[serde(default)]
+    pub queue_new_chapters: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: false,
             interval_seconds: 1800,
+            queue_new_chapters: false,
         }
     }
 }

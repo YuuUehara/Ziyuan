@@ -435,10 +435,11 @@
   #subscription-input { flex: 1 1 220px; min-width: 0; }
   #subscription-settings-form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 18px; }
   #subscription-settings-form label { margin: 0; }
-  #subscription-settings-form label:first-child { align-self: center; }
+  #subscription-settings-form label.check { align-self: center; }
   #subscription-interval { max-width: 120px; display: block; }
   #subscription-status, #subscription-result { overflow-wrap: anywhere; }
-  #hall-subscriptions .error { color: var(--bad); }
+  #subscription-panel { margin-top: 20px; }
+  #subscription-panel .error { color: var(--bad); }
   @media (max-width: 760px) {
     .subscription-columns { grid-template-columns: minmax(0, 1fr); }
     .subscription-list { max-height: 50vh; }
@@ -514,39 +515,11 @@
     <a href="#fengtian" data-hall="fengtian"><b>奉天殿</b><span>诏令</span><i id="hall-badge-fengtian" hidden></i></a>
     <a href="#huagai" data-hall="huagai"><b>华盖殿</b><span>朝堂</span><i id="hall-badge-huagai" hidden></i></a>
     <a href="#wenhua" data-hall="wenhua"><b>文华殿</b><span>百官</span></a>
-    <a href="#wuying" data-hall="wuying"><b>武英殿</b><span>实录 · 礼部 · 驿站</span></a>
+    <a href="#wuying" data-hall="wuying"><b>武英殿</b><span>实录 · 礼部 · 驿站 · 关注</span></a>
     <a href="#qiju" data-hall="qiju"><b>起居注</b><span>事件簿</span></a>
-    <a href="#subscriptions" data-hall="subscriptions"><b>作品关注</b><span>更新提醒</span></a>
   </nav>
 
   <main>
-    <div class="hall" id="hall-subscriptions" hidden>
-      <section class="card">
-        <h2>作品关注 <small>syosetu · 只查询作品信息</small><span class="viewer-badge">只读：不能添加、检查或改设置</span></h2>
-        <div class="body">
-          <p class="hint">首次检查会记录当前状态，之后变化才提醒。不下载正文、不调用模型、不向外部推送。普通官方接口无法取得 R18 或搜索排除作品；信息反映平均约 5 分钟、最长约 2 小时，不保证实时。</p>
-          <fieldset id="subscription-writes" class="write" disabled>
-            <form id="subscription-add-form">
-              <label for="subscription-input">作品链接或作品代码</label>
-              <div class="row"><input id="subscription-input" type="text" placeholder="https://ncode.syosetu.com/n1234ab/ 或 n1234ab" autocomplete="off" required><button id="subscription-add" type="submit" class="primary shrink">添加关注</button><button id="subscription-check" type="button" class="shrink">立即检查</button></div>
-            </form>
-            <form id="subscription-settings-form">
-              <label for="subscription-enabled"><input id="subscription-enabled" type="checkbox">服务器定时检查</label>
-              <label for="subscription-interval">间隔（分钟，至少 15）<input id="subscription-interval" type="number" min="15" step="1" value="30" required></label>
-              <button id="subscription-settings" type="submit">保存检查设置</button>
-            </form>
-          </fieldset>
-          <p class="hint" id="subscription-schedule">定时检查默认关闭。</p>
-          <p class="hint">只有 Web 服务运行时才会自动检查，与浏览器标签页无关；服务器程序关闭后不自动检查。关闭定时后，已在途的检查最多约 30 秒完成，不再发起后续查询。手动检查也有 60 秒冷却，每批最多 50 部。</p>
-          <p id="subscription-status" role="status" aria-live="polite">尚未加载</p>
-          <p id="subscription-result" role="status" aria-live="polite"></p>
-        </div>
-      </section>
-      <div class="subscription-columns">
-        <section class="card"><h2>关注列表</h2><div id="subscription-items" class="subscription-list" role="region" aria-label="关注列表" tabindex="0"></div></section>
-        <section class="card"><h2>未读提醒 <small>查看不会自动标为已读</small></h2><div id="subscription-updates" class="subscription-list" role="region" aria-label="未读提醒" tabindex="0"></div></section>
-      </div>
-    </div>
     <div class="hall" id="hall-fengtian">
       <div class="edicts">
         <div class="edict-list">
@@ -728,6 +701,35 @@
         </div>
       </div>
     </section>
+    <div id="subscription-panel">
+      <section class="card full" id="subscription-card">
+        <h2>兵部驿站 · 作品关注 <small>syosetu · 只查询作品信息</small><span class="viewer-badge">只读：不能添加、检查或改设置</span></h2>
+        <div class="body">
+          <p class="hint">首次检查会记录当前状态，之后变化才提醒。不下载正文、不调用模型、不向外部推送。普通官方接口无法取得 R18 或搜索排除作品；信息反映平均约 5 分钟、最长约 2 小时，不保证实时。</p>
+          <fieldset id="subscription-writes" class="write" disabled>
+            <form id="subscription-add-form">
+              <label for="subscription-input">作品链接或作品代码</label>
+              <div class="row"><input id="subscription-input" type="text" placeholder="https://ncode.syosetu.com/n1234ab/ 或 n1234ab" autocomplete="off" required><button id="subscription-add" type="submit" class="primary shrink">添加关注</button><button id="subscription-check" type="button" class="shrink">立即检查</button></div>
+            </form>
+            <form id="subscription-settings-form">
+              <label for="subscription-enabled" class="check"><input id="subscription-enabled" type="checkbox">服务器定时检查</label>
+              <label for="subscription-queue" class="check"><input id="subscription-queue" type="checkbox">新章节自动入队（交工部，只入队不执行）</label>
+              <label for="subscription-interval">间隔（分钟，至少 15）<input id="subscription-interval" type="number" min="15" step="1" value="30" required></label>
+              <button id="subscription-settings" type="submit">保存检查设置</button>
+            </form>
+          </fieldset>
+          <p class="hint" id="subscription-schedule">定时检查默认关闭。</p>
+          <p class="hint">开启自动入队后，每次检查把未读的新章节提醒作为驿传诏令交工部，同一作品同一章数只入队一次；须先建立朝廷（ziyuan init），入队失败不影响检查，下次检查再补。诏令仍须批红才执行，本程序不下载正文。</p>
+          <p class="hint">只有 Web 服务运行时才会自动检查，与浏览器标签页无关；服务器程序关闭后不自动检查。关闭定时后，已在途的检查最多约 30 秒完成，不再发起后续查询。手动检查也有 60 秒冷却，每批最多 50 部。</p>
+          <p id="subscription-status" role="status" aria-live="polite">尚未加载</p>
+          <p id="subscription-result" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+      <div class="subscription-columns">
+        <section class="card"><h2>关注列表</h2><div id="subscription-items" class="subscription-list" role="region" aria-label="关注列表" tabindex="0"></div></section>
+        <section class="card"><h2>未读提醒 <small>查看不会自动标为已读</small></h2><div id="subscription-updates" class="subscription-list" role="region" aria-label="未读提醒" tabindex="0"></div></section>
+      </div>
+    </div>
     </div>
 
     <div class="hall" id="hall-qiju" hidden>
@@ -1177,10 +1179,10 @@ function subscriptionTime(seconds) {
 }
 function subscriptionControls() {
   $("subscription-writes").disabled = subscriptionBusy || !subscriptionsLoaded || !state || !!state.viewer;
-  $("hall-subscriptions").querySelectorAll("[data-subscription-write]").forEach((button) => {
+  $("subscription-panel").querySelectorAll("[data-subscription-write]").forEach((button) => {
     button.disabled = subscriptionBusy || !state || !!state.viewer;
   });
-  $("hall-subscriptions").setAttribute("aria-busy", String(subscriptionBusy || !!subscriptionLoad));
+  $("subscription-panel").setAttribute("aria-busy", String(subscriptionBusy || !!subscriptionLoad));
 }
 function subscriptionButton(label, action) {
   const button = subscriptionText("button", label, "small");
@@ -1228,16 +1230,19 @@ function renderSubscriptions(list, updates) {
   if (!settingsDirty) {
     $("subscription-enabled").checked = list.settings.enabled;
     $("subscription-interval").value = list.settings.interval_seconds / 60;
+    $("subscription-queue").checked = !!list.settings.queue_new_chapters;
   }
-  $("subscription-schedule").textContent = list.settings.enabled
+  $("subscription-schedule").textContent = (list.settings.enabled
     ? `服务器定时检查已开启，间隔 ${list.settings.interval_seconds / 60} 分钟；失败时会延后重试。`
-    : "服务器定时检查已关闭，不会自动联网；可手动检查。";
+    : "服务器定时检查已关闭，不会自动联网；可手动检查。")
+    + (list.settings.queue_new_chapters ? "新章节自动入兵部驿站（交工部，只入队不执行）。" : "新章节不自动入队。");
   $("subscription-status").textContent = `已关注 ${list.items.length} 部 · 未读提醒 ${updates.updates.length} 条`;
   $("subscription-status").classList.remove("error");
 }
 function loadSubscriptions() {
   if (subscriptionLoad) return subscriptionLoad;
-  if (subscriptionBusy || !state) return Promise.resolve();
+  // 关注不依赖朝廷：未建朝或 /state 失败时也能查看；写入仍须等 state 判明身份。
+  if (subscriptionBusy) return Promise.resolve();
   const generation = subscriptionGeneration;
   if (!subscriptionsLoaded) $("subscription-status").textContent = "正在加载作品关注…";
   subscriptionLoad = Promise.all([api("/subscriptions"), api("/subscriptions/updates")])
@@ -1281,13 +1286,25 @@ $("subscription-add-form").addEventListener("submit", (event) => {
   event.preventDefault();
   subscriptionAction("/subscriptions", {input:$("subscription-input").value.trim()}, () => "已关注；首次检查记录当前状态，之后变化才提醒。");
 });
-$("subscription-check").addEventListener("click", () => subscriptionAction("/subscriptions/check", {}, (r) => {
+function subscriptionCourier(c) {
+  if (!c || c.status === "disabled") return "";
+  if (c.status === "not_founded") return "朝廷尚未建立，未入队（ziyuan init 后下次检查再入队）。";
+  if (c.status === "error") return `未入队：${c.message || "未知错误"}；提醒保留，下次检查再试。`;
+  const parts = [];
+  if (c.queued.length) parts.push(`驿站入队 ${c.queued.map((q) => "#" + q.task).join("、")}（交工部，只入队不执行）`);
+  if (c.already_queued) parts.push(`已入队过 ${c.already_queued} 件`);
+  for (const e of c.errors) parts.push(`${e.station} 未入队：${e.message}`);
+  return parts.length ? parts.join("；") + "。" : "";
+}
+function subscriptionCheckText(r) {
   if (r.failed) return `检查失败 ${r.failed} 部；成功 ${r.checked - r.failed} 部，新增提醒 ${r.notices} 条。未能判断失败作品是否更新，请查看列表错误。`;
   if (r.status === "empty") return "尚未关注作品，请先添加。";
   if (r.status === "not_due") return "本次未检查：作品在 60 秒冷却中或已有检查进行，请稍后重试。";
   return `已检查 ${r.checked} 部，新增提醒 ${r.notices} 条；首次记录不提醒，之后无变化不重复提醒。跳过 ${r.skipped} 部（冷却中或已有检查），可稍后重试。`;
-}));
-for (const id of ["subscription-enabled", "subscription-interval"]) $(id).addEventListener("input", () => { settingsDirty = true; });
+}
+$("subscription-check").addEventListener("click", () => subscriptionAction("/subscriptions/check", {}, (r) =>
+  [subscriptionCheckText(r), subscriptionCourier(r.courier)].filter(Boolean).join(" ")));
+for (const id of ["subscription-enabled", "subscription-interval", "subscription-queue"]) $(id).addEventListener("input", () => { settingsDirty = true; });
 $("subscription-settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const minutes = Number($("subscription-interval").value);
@@ -1296,20 +1313,25 @@ $("subscription-settings-form").addEventListener("submit", (event) => {
     $("subscription-result").classList.add("error");
     return;
   }
-  subscriptionAction("/subscriptions/settings", {enabled:$("subscription-enabled").checked, interval_seconds:minutes * 60}, () => "检查设置已保存");
+  subscriptionAction("/subscriptions/settings", {enabled:$("subscription-enabled").checked, interval_seconds:minutes * 60, queue_new_chapters:$("subscription-queue").checked}, () => "检查设置已保存");
 });
 
 // ---- 分殿：随地址栏的 # 切换 ----
-const HALLS = ["fengtian", "huagai", "wenhua", "wuying", "qiju", "subscriptions"];
+const HALLS = ["fengtian", "huagai", "wenhua", "wuying", "qiju"];
 let hall = "fengtian";
 function showHall() {
-  const want = location.hash.slice(1);
+  let want = location.hash.slice(1);
+  // 作品关注已并入武英殿的兵部驿站；旧书签仍可用。
+  if (want === "subscriptions") {
+    history.replaceState(null, "", "#wuying");
+    want = "wuying";
+  }
   hall = HALLS.includes(want) ? want : "fengtian";
   for (const h of HALLS) $("hall-" + h).hidden = h !== hall;
   document.querySelectorAll("[data-hall]").forEach((a) => a.classList.toggle("current", a.dataset.hall === hall));
   if (hall === "qiju" && state) loadHistory().catch((e) => toast(e.message, true));
   if (hall === "wuying" && state) loadRecords().catch((e) => toast(e.message, true));
-  if (hall === "subscriptions") loadSubscriptions();
+  if (hall === "wuying") loadSubscriptions();
 }
 window.addEventListener("hashchange", showHall);
 showHall();
@@ -1448,7 +1470,7 @@ async function refresh() {
     showCriteria();
     renderOfficeConfig(state);
     if (hall === "qiju") loadHistory();
-    if (hall === "subscriptions") loadSubscriptions();
+    if (hall === "wuying") loadSubscriptions();
   } catch (e) {
     if (!$("locked").classList.contains("show")) toast(e.message, true);
   }

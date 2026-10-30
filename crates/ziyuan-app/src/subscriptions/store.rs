@@ -84,6 +84,23 @@ impl Subscriptions {
             })
             .map(|(_, result)| result)
     }
+    /// 在同一次保存中读出、修改并校验设置，返回新设置；校验不过时不保存。
+    pub fn update_settings(
+        &self,
+        f: impl FnOnce(&mut Settings),
+    ) -> Result<Settings, SubscriptionError> {
+        self.file
+            .update(|current| {
+                let mut state = current.map(|s| s.value).unwrap_or_default();
+                f(&mut state.settings);
+                if state.settings.interval_seconds < 900 {
+                    return Err(SubscriptionError::InvalidInput);
+                }
+                let settings = state.settings.clone();
+                Ok((state, settings))
+            })
+            .map(|(_, result)| result)
+    }
     pub fn updates(&self, unread_only: bool) -> Result<Vec<Notice>, SubscriptionError> {
         Ok(self
             .load()?
