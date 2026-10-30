@@ -1012,4 +1012,70 @@ async fn delta_rendering_reports_availability_and_needs_changes() {
     assert!(state["delta"].is_boolean(), "{state}");
     let (status, body) = call(&base, "/tasks/9/changes/delta", t, None).await;
     assert_eq!(status, 400, "{body}");
+    let (status, body) = call(&base, "/tasks/9/changes/delta?theme=unknown", t, None).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("主题"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_split_validates_metadata_and_retries_without_duplicate_tasks() {
+    let (base, _root) = start("scheduled").await;
+    let t = Some(TOKEN);
+    let (status, _) = call(
+        &base,
+        "/edicts",
+        t,
+        Some(json!({ "text": "分办调查", "department": "works" })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let plan = json!({ "schedule": [
+        { "worker": 4, "text": "调查甲", "attempts": 2, "budget": 4000,
+          "deadline": 4102444800u64, "artifact": "甲的报告", "idempotency_key": "a" },
+        { "worker": 4, "text": "复核甲", "dependencies": [1], "idempotency_key": "b" }
+    ] });
+    assert_eq!(
+        call(&base, "/tasks/1/split", Some(VIEWER), Some(plan.clone()))
+            .await
+            .0,
+        403
+    );
+    let mut invalid = plan.clone();
+    invalid["schedule"][0]["dependencies"] = json!([2]);
+    let (status, _) = call(&base, "/tasks/1/split", t, Some(invalid)).await;
+    assert_eq!(status, 400, "cyclic submission must not split any tasks");
+    let (_, before) = call(&base, "/state", t, None).await;
+    assert_eq!(before["tasks"].as_array().unwrap().len(), 1);
+    let mut invalid = plan.clone();
+    invalid["schedule"][0]["attemps"] = json!(2);
+    assert_eq!(call(&base, "/tasks/1/split", t, Some(invalid)).await.0, 400);
+    let (status, body) = call(
+        &base,
+        "/tasks/1/split",
+        t,
+        Some(json!({ "scheduel": plan["schedule"] })),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("schedule"));
+
+    let (status, created) = call(&base, "/tasks/1/split", t, Some(plan.clone())).await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["subtasks"], json!([2, 3]));
+    let (status, retried) = call(&base, "/tasks/1/split", t, Some(plan.clone())).await;
+    assert_eq!((status, retried), (200, created));
+    let (_, state) = call(&base, "/state", t, None).await;
+    let tasks = state["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 3);
+    let first = tasks.iter().find(|task| task["id"] == 2).unwrap();
+    assert_eq!(first["dag"]["attempts"], 2);
+    assert_eq!(first["dag"]["budget"], 4000);
+    assert_eq!(first["dag"]["deadline"], 4102444800u64);
+    assert_eq!(first["dag"]["artifact"], "甲的报告");
+    assert_eq!(first["dag"]["idempotency_key"], "a");
+    let second = tasks.iter().find(|task| task["id"] == 3).unwrap();
+    assert_eq!(second["blocked_by"], 2);
+    let mut changed = plan;
+    changed["schedule"][1]["text"] = json!("改变任务内容");
+    assert_eq!(call(&base, "/tasks/1/split", t, Some(changed)).await.0, 400);
 }

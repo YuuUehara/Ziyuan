@@ -320,6 +320,7 @@ impl App {
                 side_by_side,
                 width,
                 light: false,
+                theme: Default::default(),
             };
             hunks
                 .iter()

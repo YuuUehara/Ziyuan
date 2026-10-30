@@ -1,7 +1,10 @@
 //! 内阁：票拟、批红、廷议与分办。
 
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use ziyuan_core::{
-    Agent, AgentId, CourtEvent, Office, Persona, Record, Speech, TaskId, TokenUsage, search_records,
+    Agent, AgentId, CourtEvent, DagNode, Office, Persona, Record, Speech, TaskId, TokenUsage,
+    search_records,
 };
 use ziyuan_governance::{Court, GovernanceError, Task, TaskStatus};
 use ziyuan_runtime::{BoxError, WorkerBackend, guard};
@@ -9,6 +12,96 @@ use ziyuan_storage::EventStore;
 
 use crate::reports::describe_record;
 use crate::{AppError, Session, truncate};
+
+/// Creation-time scheduling input. Dependencies are 1-based positions in this plan,
+/// not task IDs. Keys identify nodes within this parent, not arbitrary tool calls.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledSubtask {
+    pub worker: AgentId,
+    pub text: String,
+    #[serde(default)]
+    pub dependencies: Vec<usize>,
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    #[serde(default)]
+    pub deadline: Option<u64>,
+    #[serde(default)]
+    pub budget: Option<u64>,
+    #[serde(default)]
+    pub artifact: Option<String>,
+    #[serde(default)]
+    pub approval_required: bool,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+fn scheduled_nodes(
+    plan: &[ScheduledSubtask],
+    ids: &[TaskId],
+    writes: bool,
+) -> Result<Vec<DagNode>, GovernanceError> {
+    let invalid = |why: &str| GovernanceError::InvalidDag(why.into());
+    let mut keys = BTreeSet::new();
+    let mut nodes = Vec::new();
+    for (i, sub) in plan.iter().enumerate() {
+        let mut seen = BTreeSet::new();
+        for &dep in &sub.dependencies {
+            if dep == 0 || dep > plan.len() || dep == i + 1 || !seen.insert(dep) {
+                return Err(invalid("依赖须为同批 1-based 索引，不得重复或依赖自身"));
+            }
+        }
+        if sub.attempts == Some(0) || sub.budget == Some(0) {
+            return Err(invalid("尝试次数与度支须为正数"));
+        }
+        if let Some(key) = &sub.idempotency_key
+            && (key.trim().is_empty() || !keys.insert(key))
+        {
+            return Err(invalid("幂等键不得为空或在同一原诏令内重复"));
+        }
+        nodes.push(DagNode {
+            task: ids[i],
+            dependencies: sub.dependencies.iter().map(|d| ids[d - 1]).collect(),
+            attempts: sub.attempts,
+            deadline: sub.deadline,
+            budget: sub.budget,
+            artifact: sub.artifact.clone(),
+            approval_required: sub.approval_required,
+            idempotency_key: sub.idempotency_key.clone(),
+        });
+    }
+    // Stable topological order (lowest submitted index first). Serializing in
+    // array order would introduce cycles for legitimate backwards edges.
+    let mut remaining: BTreeSet<usize> = (0..plan.len()).collect();
+    let mut order = Vec::new();
+    while !remaining.is_empty() {
+        let next = remaining
+            .iter()
+            .copied()
+            .find(|&i| {
+                plan[i]
+                    .dependencies
+                    .iter()
+                    .all(|d| !remaining.contains(&(d - 1)))
+            })
+            .ok_or_else(|| invalid("依赖成环，无从排程"))?;
+        remaining.remove(&next);
+        order.push(next);
+    }
+    if writes {
+        for pair in order.windows(2) {
+            let previous = ids[pair[0]];
+            let deps = &mut nodes[pair[1]].dependencies;
+            if !deps.contains(&previous) {
+                deps.push(previous);
+            }
+        }
+    }
+    for node in &mut nodes {
+        node.dependencies.sort();
+    }
+    Ok(nodes)
+}
 
 /// 从票拟回复中取拟派的官员 ID：「拟派」之后（没有则全文）的第一个 `#数字`。
 pub(crate) fn parse_draft(reply: &str) -> Option<AgentId> {
@@ -388,6 +481,77 @@ impl<S: EventStore> Session<S> {
         self.commit(|court| {
             let note = "御定分办".to_owned();
             court.propose_split_serial_writes(task, plan.clone(), note, None, TokenUsage::default())
+        })?;
+        Ok(self.subtasks_of(task))
+    }
+
+    /// Create an immutable scheduled split. Identical retries on this parent
+    /// return its original IDs without events, even after execution has started.
+    /// Equality compares workers, text and effective scheduling metadata after
+    /// dependency sorting and automatic write serialization; it does not compare
+    /// JSON spelling or redundant safety edges. Keys are optional and parent-local.
+    /// Conflicting retries fail; keys do not deduplicate execution or tool calls.
+    pub fn split_scheduled(
+        &mut self,
+        task: TaskId,
+        plan: Vec<ScheduledSubtask>,
+    ) -> Result<Vec<TaskId>, AppError> {
+        self.reload()?;
+        self.commit(|court| {
+            let parent = court
+                .task(task)
+                .ok_or(GovernanceError::UnknownEdict(task))?;
+            let basic: Vec<_> = plan.iter().map(|s| (s.worker, s.text.clone())).collect();
+            let ids = if let Some(split) = &parent.split {
+                if split.subtasks.len() != plan.len() {
+                    return Err(GovernanceError::InvalidDag("分办重试方案不一致".into()));
+                }
+                split.subtasks.clone()
+            } else {
+                let CourtEvent::EdictSplit { subtasks, .. } = court.propose_split(
+                    task,
+                    basic.clone(),
+                    "御定分办".into(),
+                    None,
+                    TokenUsage::default(),
+                )?
+                else {
+                    unreachable!()
+                };
+                subtasks.iter().map(|s| s.id).collect()
+            };
+            let writes = parent
+                .edict
+                .seal
+                .capabilities
+                .iter()
+                .any(|c| c.is_works_only());
+            let nodes = scheduled_nodes(&plan, &ids, writes)?;
+            if parent.split.is_some() {
+                let identical = plan.iter().zip(&nodes).all(|(sub, node)| {
+                    court.task(node.task).is_some_and(|old| {
+                        old.assignee == Some(sub.worker)
+                            && old.edict.text == sub.text
+                            && match &old.dag {
+                                Some(dag) => dag == node,
+                                None => node.is_trivial(),
+                            }
+                    })
+                });
+                return if identical {
+                    Ok(Vec::new())
+                } else {
+                    Err(GovernanceError::InvalidDag("分办重试方案不一致".into()))
+                };
+            }
+            court.propose_split_dag(
+                task,
+                basic,
+                "御定分办".into(),
+                None,
+                TokenUsage::default(),
+                nodes,
+            )
         })?;
         Ok(self.subtasks_of(task))
     }

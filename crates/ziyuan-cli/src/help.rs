@@ -41,6 +41,7 @@ pub(crate) const HELP: &str = concat!(
   ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] [--mcp <授权>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
   ziyuan split <诏令ID> [官员ID:子诏令]...
+  ziyuan split <诏令ID> --plan <JSON文件>  创建排程；依赖为数组内从 1 起的索引，重试须同案
                                        多官协作：尚书（模型）把待办诏令拆给本部官员分办，或皇帝御定；
                                        子诏令并发执行（写子诏令范围重叠自动串行，上游失败则下游受阻），
                                        全部结束后尚书汇总回奏
@@ -270,11 +271,13 @@ pub(crate) fn completions(shell: Shell) -> String {
   case "$prev" in
     --dept) words="{departments}" ;;
     --tools) words="{tools} none" ;;
+    --plan) COMPREPLY=($(compgen -f -- "$cur")); return ;;
     *) case "${{COMP_WORDS[1]}}" in
          appoint|model|ceiling|nominate|recommend) words="{offices}" ;;
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
+         split) words="--plan" ;;
          apply) words="--skip --commit" ;;
          {json_cases}) words="--json" ;;
        esac ;;
@@ -305,6 +308,7 @@ complete -F _ziyuan ziyuan
                 format!("{} -a '{departments}'", seen("recruit")),
                 format!("{} -a '{modes}'", seen("reform")),
                 format!("{} -a 'bash zsh fish'", seen("completions")),
+                format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
                 format!("{} -l json", seen(&json)),

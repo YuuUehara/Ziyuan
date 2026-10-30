@@ -154,7 +154,8 @@ impl Court {
         })
     }
 
-    /// 子诏令的排程依赖是否已满足（全部完成）。上游失败或撤销即受阻，不再调度：
+    /// 子诏令的排程依赖是否已满足（全部完成，且改动已准奏落盘或无改动）。
+    /// 上游失败、撤销、待决或驳回改动即受阻，不再调度：
     /// 皇帝可撤销受阻的子诏令让尚书汇总，或另行处置。
     fn dependencies_met(&self, task: &Task) -> bool {
         task.dag
@@ -162,18 +163,18 @@ impl Court {
             .is_none_or(|dag| dag.dependencies.iter().all(|dep| self.dep_completed(*dep)))
     }
 
-    /// 一件依赖是否已完成（失败、撤销不算：受阻须由皇帝处置）。
+    /// 一件依赖须已完成且无待决改动；驳回、失败、撤销均不满足依赖。
     fn dep_completed(&self, dep: TaskId) -> bool {
-        matches!(
-            self.tasks.get(&dep),
-            Some(Task {
-                status: TaskStatus::Completed { .. },
-                ..
-            })
-        )
+        self.tasks.get(&dep).is_some_and(|task| {
+            matches!(task.status, TaskStatus::Completed { .. })
+                && task
+                    .changes
+                    .as_ref()
+                    .is_none_or(|changes| changes.state == crate::ChangeState::Applied)
+        })
     }
 
-    /// 排程受阻的依赖：未完成（含失败、撤销）的第一件；无依赖或不受阻为 `None`。
+    /// 排程受阻的第一件依赖（含待决或驳回改动）；无依赖或不受阻为 `None`。
     pub fn blocked_by(&self, task: &Task) -> Option<TaskId> {
         let deps = task.dag.as_ref()?.dependencies.as_slice();
         deps.iter().copied().find(|dep| !self.dep_completed(*dep))

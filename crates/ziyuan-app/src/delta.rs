@@ -19,6 +19,31 @@ pub struct Delta {
     path: PathBuf,
 }
 
+/// 随奉天门总体主题选择的差异配色；CLI 仍沿用用户自己的 git-delta 配置。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DeltaTheme {
+    /// 低饱和全行底色与词级强调。
+    #[default]
+    Tianqing,
+    /// 宣纸底、克制的行号标记与词级强调。
+    Qinglv,
+    /// 灰阶与明确的增删符号，不依赖红绿辨别。
+    Mo,
+}
+
+impl std::str::FromStr for DeltaTheme {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "tianqing" => Ok(Self::Tianqing),
+            "qinglv" => Ok(Self::Qinglv),
+            "mo" => Ok(Self::Mo),
+            _ => Err("未知差异主题：只接受 tianqing、qinglv、mo"),
+        }
+    }
+}
+
 /// 渲染方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeltaStyle {
@@ -27,6 +52,7 @@ pub struct DeltaStyle {
     pub width: u16,
     /// 浅色底（Web 的宣纸主题）。
     pub light: bool,
+    pub theme: DeltaTheme,
 }
 
 const PROBE: &str = "diff --git a/probe.rs b/probe.rs\n--- a/probe.rs\n+++ b/probe.rs\n@@ -1 +1 @@\n-ziyuan_probe_old\n+ziyuan_probe_new\n";
@@ -65,6 +91,7 @@ impl Delta {
             side_by_side: false,
             width: 80,
             light: false,
+            theme: DeltaTheme::default(),
         };
         let out = delta.run(PROBE, style, PROBE_TIMEOUT).ok()?;
         out.contains("ziyuan_probe_new").then_some(delta)
@@ -111,6 +138,9 @@ impl Delta {
                 "--line-numbers",
                 "--file-style=omit",
                 "--hunk-header-style=omit",
+                "--keep-plus-minus-markers",
+                "--line-numbers-left-format={nm:>3} ",
+                "--line-numbers-right-format={np:>3} │ ",
             ])
             .arg(format!("--width={}", style.width.max(20)))
             .env_remove("DELTA_FEATURES")
@@ -123,6 +153,44 @@ impl Delta {
             command.arg("--side-by-side");
         }
         command.arg(if style.light { "--light" } else { "--dark" });
+        let (ink, muted, plus, minus, plus_em, minus_em) = if style.light {
+            match style.theme {
+                DeltaTheme::Tianqing => (
+                    "#1f2826", "#6d7a76", "#e3f0e6", "#f8e8e4", "#bcdcc4", "#efc6bd",
+                ),
+                DeltaTheme::Qinglv => (
+                    "#1b2433", "#6c7380", "normal", "normal", "#d6e8e1", "#edd6cf",
+                ),
+                DeltaTheme::Mo => (
+                    "#1c1b18", "#625c52", "#eeeadf", "#e3ddd2", "#d4cfc3", "#c6bfb2",
+                ),
+            }
+        } else {
+            (
+                "#e1e4df", "#9ba9a3", "#253c32", "#432d2b", "#3b6350", "#704641",
+            )
+        };
+        let syntax = if style.theme == DeltaTheme::Mo {
+            ink
+        } else {
+            "syntax"
+        };
+        let (plus_number, minus_number) = if style.theme == DeltaTheme::Qinglv {
+            ("#2f7f6a", "#a8402c")
+        } else {
+            (muted, muted)
+        };
+        command
+            .arg(format!("--zero-style={syntax}"))
+            .arg(format!("--plus-style={syntax} {plus}"))
+            .arg(format!("--minus-style={syntax} {minus}"))
+            .arg(format!("--plus-emph-style={syntax} {plus_em}"))
+            .arg(format!("--minus-emph-style={syntax} {minus_em}"))
+            .arg(format!("--line-numbers-left-style={muted}"))
+            .arg(format!("--line-numbers-right-style={muted}"))
+            .arg(format!("--line-numbers-zero-style={muted}"))
+            .arg(format!("--line-numbers-plus-style={plus_number}"))
+            .arg(format!("--line-numbers-minus-style={minus_number}"));
         let mut child = command.spawn().map_err(|e| e.to_string())?;
         let mut stdin = child.stdin.take().expect("已设管道");
         let input = input.to_owned();

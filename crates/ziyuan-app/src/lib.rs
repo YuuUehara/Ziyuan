@@ -21,11 +21,12 @@ mod session;
 mod time;
 mod vcs;
 
-pub use cabinet::{criteria_note, debate_minutes};
+pub use cabinet::{ScheduledSubtask, criteria_note, debate_minutes};
 pub use censorate::{ACQUITTAL_NOTE, suspicion_status};
 pub use courier::{PullReport, changelog_commits};
 pub use delta::{
-    AnsiStyle, Delta, DeltaStyle, ansi_html, ansi_lines, delta, unified_diff, unified_hunks,
+    AnsiStyle, Delta, DeltaStyle, DeltaTheme, ansi_html, ansi_lines, delta, unified_diff,
+    unified_hunks,
 };
 pub use edicts::{
     CHANGELOG_NOTE, PROXY_REVIEW_NOTE, base_hash, changelog_text, changes_version, render_diffs,

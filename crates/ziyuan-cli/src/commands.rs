@@ -797,8 +797,14 @@ pub(crate) fn execute(
             }
             println!("纪要已记入事件簿，票拟与承办时附上，供参考；派工与玉玺不变。");
         }
-        Command::Split(task, plan) => {
-            let subtasks = if plan.is_empty() {
+        Command::Split(task, plan, file) => {
+            let subtasks = if let Some(file) = file {
+                let json = std::fs::read_to_string(&file)
+                    .map_err(|e| format!("无法读取排程方案 {file}：{e}"))?;
+                let schedule: Vec<ziyuan_app::ScheduledSubtask> = serde_json::from_str(&json)
+                    .map_err(|e| format!("无效的排程方案 {file}：{e}"))?;
+                session.split_scheduled(task, schedule)?
+            } else if plan.is_empty() {
                 session.plan_split(task, worker_backend()?.as_ref())?
             } else {
                 session.split(task, plan)?

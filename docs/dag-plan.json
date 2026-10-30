@@ -1,0 +1,22 @@
+[
+  {
+    "worker": 4,
+    "text": "读取已授权原文与术语表，列出人物称谓及待确认项；不修改原文。",
+    "dependencies": [],
+    "attempts": 2,
+    "budget": 8000,
+    "artifact": "人物称谓核对清单（回奏）",
+    "approval_required": false,
+    "idempotency_key": "terms-review"
+  },
+  {
+    "worker": 4,
+    "text": "依据前件回奏中的核对清单，只读检查样章术语一致性；明确疑点，不将未经人工确认的建议当作定稿。",
+    "dependencies": [1],
+    "attempts": 2,
+    "budget": 8000,
+    "artifact": "术语一致性复核意见（回奏）",
+    "approval_required": false,
+    "idempotency_key": "consistency-review"
+  }
+]

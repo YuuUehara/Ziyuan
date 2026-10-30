@@ -52,7 +52,8 @@ pub(crate) async fn state(
 const DELTA_MAX_HUNKS: usize = 300;
 
 /// 某诏令呈报的改动经 git-delta 逐段渲染成 HTML：`?side=1` 左右并排，`width` 为列宽
-/// （默认 120），`light=1` 浅色底。段号与预览、逐段准奏一致；`version` 同预览，页面据以确认
+/// （默认 120），`light=1` 浅色底，`theme=tianqing|qinglv|mo` 随总体主题配色。
+/// 段号与预览、逐段准奏一致；`version` 同预览，页面据以确认
 /// 渲染的正是眼前这份改动。
 pub(crate) async fn changes_delta(
     State(app): State<AppState>,
@@ -68,6 +69,12 @@ pub(crate) async fn changes_delta(
             .unwrap_or(120)
             .clamp(40, 400),
         light: flag("light"),
+        theme: query
+            .get("theme")
+            .map(String::as_str)
+            .unwrap_or("tianqing")
+            .parse()
+            .map_err(ApiError::bad)?,
     };
     let files = app
         .with_session(move |s| {

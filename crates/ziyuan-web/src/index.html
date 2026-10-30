@@ -276,6 +276,22 @@
   pre.diff .hunk { color: var(--muted); background: var(--well); margin: 4px 0; padding: 2px 12px; font-family: var(--sans); font-size: 12px; }
   pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; color: var(--ink); cursor: pointer; }
   pre.diff .pick input { margin: 0; }
+  #schedule-dialog { box-sizing: border-box; width: min(760px, calc(100vw - 32px)); max-height: 86vh; overflow: hidden; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
+  #schedule-dialog::backdrop { background: #1f282655; }
+  #schedule-form { display: flex; flex-direction: column; max-height: calc(86vh - 50px); }
+  #schedule-title { flex-shrink: 0; margin: 0 0 12px; }
+  .schedule-content { min-height: 0; overflow: auto; padding: 4px; margin: 0 -4px; }
+  .schedule-node { border: 1px solid var(--line); margin: 14px 0; padding: 12px; min-width: 0; }
+  .schedule-node legend { color: var(--tint-ink); padding: 0 6px; }
+  .schedule-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 10px 16px; }
+  .schedule-node label { display: grid; gap: 4px; margin: 0; min-width: 0; color: var(--muted); font-size: 12px; }
+  .schedule-node > label + label { margin-top: 12px; }
+  .schedule-node input, .schedule-node select { min-width: 0; }
+  .schedule-node label.check { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+  .schedule-node textarea { width: 100%; box-sizing: border-box; min-height: 64px; margin: 8px 0; }
+  .schedule-actions { flex-shrink: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+  .schedule-actions button { flex: 1 1 120px; min-width: 0; }
+  #schedule-error { color: var(--bad); overflow-wrap: anywhere; }
   pre.diff .ln { display: inline-block; width: 3.4em; padding-right: .6em; text-align: right; color: var(--line-strong); user-select: none; }
   pre.diff .ln + .ln { border-right: 1px solid var(--line); }
   pre.diff .sign { display: inline-block; width: 1.8em; text-align: center; user-select: none; color: var(--muted); }
@@ -299,7 +315,7 @@
   /* ---- 表单与按钮：墨色细框，只有「采纳」钤朱 ---- */
   label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
   label:first-child { margin-top: 0; }
-  input[type=text], input[type=number], input[type=password], select, textarea {
+  input[type=text], input[type=number], input[type=password], input[type=datetime-local], select, textarea {
     width: 100%; font: inherit; color: var(--ink); background: var(--sheet);
     border: 1px solid var(--line); border-radius: var(--radius); padding: 7px 9px;
   }
@@ -684,6 +700,23 @@
 </div>
 
 <div id="toast"></div>
+<dialog id="schedule-dialog" aria-labelledby="schedule-title">
+  <form id="schedule-form">
+    <h2 id="schedule-title">御定排程</h2>
+    <div class="schedule-content">
+      <p class="hint">分为 2–8 件。依赖填此表节点序号（如 1,2），不是诏令 ID；写任务自动补齐串行依赖。前件改动须准奏，后件才开工。</p>
+      <p class="hint">提交后排程不可改写；失败不自动重试。幂等键只标识本批节点与方案重试，不保证任意外部工具去重。</p>
+      <div id="schedule-nodes"></div>
+      <p id="schedule-error" role="alert"></p>
+    </div>
+    <div class="actions schedule-actions">
+      <button type="button" id="schedule-add">添加节点</button>
+      <button type="button" id="schedule-remove">移除末项</button>
+      <button type="button" id="schedule-close">取消</button>
+      <button type="submit" id="schedule-submit" class="gold">确认分办</button>
+    </div>
+  </form>
+</dialog>
 <div id="locked"><div>
   <h2>需要访问令牌</h2>
   <p>请打开 <code>ziyuan serve</code> 启动时打印的完整地址，或在此输入令牌（见 <code>.ziyuan/web-token</code>）。</p>
@@ -707,7 +740,7 @@ let palaceLive = null;  // 殿试进行中已推送的答卷
 const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
 // 改动的视图（统一/左右）与渲染（内置/git-delta），记在本机。
 const diffPrefs = (() => { try { return { layout: "unified", engine: "builtin", ...JSON.parse(localStorage.getItem("ziyuan-diff") || "{}") }; } catch { return { layout: "unified", engine: "builtin" }; } })();
-const deltaCache = {};  // "诏令|版本|并排|浅色" → { loading } | { error } | { hunks: 段号 → { html | error } }
+const deltaCache = {};  // 按诏令、版本、布局、主题和列宽缓存。
 
 // git-delta 渲染的结果；未取过则去取，取回后重绘。按改动版本缓存，改动变了自然重取。
 function deltaFor(id, version, side) {
@@ -719,10 +752,11 @@ function deltaFor(id, version, side) {
   ctx.font = `12.5px ${getComputedStyle(document.documentElement).getPropertyValue("--mono")}`;
   const columns = host ? Math.floor((host.clientWidth - 24) / ctx.measureText("0").width / 10) * 10 : 0;
   const width = Math.max(40, columns || (side ? 160 : 120));
-  const key = `${id}|${version}|${side}|${light}|${width}`;
+  const theme = document.documentElement.dataset.theme || "tianqing";
+  const key = `${id}|${version}|${side}|${light}|${width}|${theme}`;
   if (!deltaCache[key]) {
     deltaCache[key] = { loading: true };
-    api(`/tasks/${id}/changes/delta?side=${side ? 1 : 0}&light=${light ? 1 : 0}&width=${width}`)
+    api(`/tasks/${id}/changes/delta?side=${side ? 1 : 0}&light=${light ? 1 : 0}&width=${width}&theme=${encodeURIComponent(theme)}`)
       .then((r) => {
         const hunks = {};
         r.files.forEach((f) => f.hunks.forEach((h) => { hunks[h.number] = h; }));
@@ -830,10 +864,23 @@ function taskHtml(t) {
   } else if (t.status === "failed") {
     body = `<div class="reply error">${esc(t.detail)}</div>`;
   }
+  if (t.dag) {
+    const d = t.dag;
+    const fields = [
+      d.dependencies.length ? `先办 ${d.dependencies.map((id) => "#" + id).join("、")}` : "无依赖",
+      d.attempts != null ? `尝试上限 ${d.attempts}` : "",
+      d.deadline != null ? `期限 ${d.deadline}（Unix 秒）` : "",
+      d.budget != null ? `度支 ${d.budget} tokens` : "",
+      d.artifact ? `约定产出：${d.artifact}` : "",
+      d.approval_required ? "内阁制下另须批红" : "",
+      d.idempotency_key ? `节点键：${d.idempotency_key}` : "",
+    ].filter(Boolean);
+    body += `<div class="meta" aria-label="已保存排程">${fields.map((f) => `<span>${esc(f)}</span>`).join("")}</div>`;
+  }
   if (t.split) {
     const s = t.split;
     const rows = s.subtasks.map((sub) =>
-      `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}${sub.deps && sub.deps.length ? `（先办 ${sub.deps.map((d) => `#${d}`).join("、")}）` : ""}${sub.blocked_by ? ` <span class="badge failed" title="排程依赖未成：上游失败或未结束，不再调度">受 #${sub.blocked_by} 所阻</span>` : ""}</li>`).join("");
+      `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}${sub.deps && sub.deps.length ? `（先办 ${sub.deps.map((d) => `#${d}`).join("、")}）` : ""}${sub.blocked_by ? ` <span class="badge failed" title="上游须完成且改动须已准奏；失败、撤销或驳回会保持受阻">受 #${sub.blocked_by} 所阻</span>` : ""}</li>`).join("");
     const state = t.status === "pending" ? (s.open ? `${s.open} 件未结` : "待尚书汇总") : "已汇总";
     body += `<div class="split"><b>多官分办</b>　${esc(s.note)}（${state}）<ul>${rows}</ul></div>`;
   }
@@ -880,7 +927,7 @@ function taskHtml(t) {
       ? `<span class="hint">执行时由司礼监代批红</span>`
       : t.needs_approval ? `<button class="small gold" data-approve="${t.id}">朱笔批红</button>` : "";
     const split = t.status === "pending" && !t.split && !t.parent
-      ? `<button class="small" data-split="${t.id}" title="尚书把此诏令拆给本部官员分办，事后汇总">尚书分办</button>` : "";
+      ? `<button class="small" data-split="${t.id}" title="尚书把此诏令拆给本部官员分办，事后汇总">尚书分办</button><button class="small" data-schedule="${t.id}">御定排程</button>` : "";
     const debate = t.status === "pending" && !debating[t.id]
       ? `<button class="small" data-debate="${t.id}" title="宰辅、本部长官与御史按各自性格文风轮流辩论两轮">廷议</button>` : "";
     const urgent = t.urgent ? "" : `<button class="small" data-urgent="${t.id}" title="兵部：插队先行，时限加倍">八百里加急</button>`;
@@ -978,7 +1025,7 @@ function taskHtml(t) {
   }
   return `<article class="task ${t.status}">
     <div class="task-head"><span class="task-id">#${t.id}</span>${t.urgent ? '<span class="badge urgent">八百里加急</span>' : ""}${t.courier ? `<span class="badge courier" title="兵部驿站投递的外部事件">驿传 · ${esc(t.courier)}</span>` : ""}${t.template ? `<span class="badge template" title="翰林院模板；都察院复核时逐条核验">模板 · ${esc(t.template.name)}</span>` : ""}<span>${esc(t.department)}</span>
-      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${t.blocked_by ? `<span class="badge failed" title="排程依赖未成：上游失败或未结束，不再调度；撤销受阻的子诏令可让尚书汇总">受 #${t.blocked_by} 所阻</span>` : ""}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
+      ${t.needs_approval ? '<span class="badge awaiting">待批红</span>' : `<span class="badge ${t.status}">${statusLabel[t.status]}</span>`}${t.blocked_by ? `<span class="badge failed" title="上游须完成且改动须已准奏；失败、撤销或驳回会保持受阻，可撤销受阻子诏令让尚书汇总">受 #${t.blocked_by} 所阻</span>` : ""}${review}${t.missing_sections.length ? `<span class="badge failed" title="礼部回奏体例：结论、依据、未办之事；发回重写后仍缺，照收">体例不合 · 缺${esc(t.missing_sections.join("、"))}</span>` : ""}${seal}${t.parent ? `<span class="badge seal">分办自 #${t.parent}</span>` : ""}</div>
     <div class="task-text">${esc(t.text)}</div>${t.template ? `<ol class="criteria" title="验收标准">${t.template.criteria.map((c) => `<li>${esc(c)}</li>`).join("")}</ol>` : ""}
     <div class="meta">${meta}</div>${body}${actions}</article>`;
 }
@@ -1079,7 +1126,10 @@ function setTheme(theme) {
 }
 document.querySelector(".themes").addEventListener("click", (event) => {
   const b = event.target.closest("button[data-theme]");
-  if (b) setTheme(b.dataset.theme);
+  if (b) {
+    setTheme(b.dataset.theme);
+    if (state) preserve(render);
+  }
 });
 setTheme((() => { try { return localStorage.getItem("ziyuan-theme"); } catch { return null; } })() || "tianqing");
 
@@ -1390,6 +1440,68 @@ $("hf-clear").addEventListener("click", () => {
   loadHistory().catch((e) => toast(e.message, true));
 });
 
+let schedulingTask = null;
+function addScheduleNode() {
+  const nodes = $("schedule-nodes");
+  const number = nodes.children.length + 1;
+  if (number > 8) return;
+  const task = state.tasks.find((t) => t.id === schedulingTask);
+  const staff = state.officials.filter((o) => o.office && o.speciality.label === task.department && !o.office.code.startsWith("minister:"));
+  nodes.insertAdjacentHTML("beforeend", `<fieldset class="schedule-node"><legend>节点 ${number}</legend>
+    <label>承办官员<select name="worker" required>${staff.map((o) => `<option value="${o.id}">#${o.id} ${esc(o.name)} · ${esc(o.office.label)}</option>`).join("")}</select></label>
+    <label>子诏令内容<textarea name="text" required maxlength="2000" placeholder="明确本件任务与产出"></textarea></label>
+    <div class="schedule-grid">
+      <label>依赖节点序号<input name="dependencies" type="text" placeholder="如 1,2；空为无依赖" pattern="[0-9 ,，]*"></label>
+      <label>尝试次数上限<input name="attempts" type="number" min="1" max="4294967295" step="1" placeholder="不限"></label>
+      <label>期限（本地时间）<input name="deadline" type="datetime-local" step="1"></label>
+      <label>度支（tokens）<input name="budget" type="number" min="1" step="1" placeholder="沿用上级限额"></label>
+      <label>约定产出<input name="artifact" type="text" placeholder="如 docs/report.md"></label>
+      <label>节点幂等键<input name="idempotency_key" type="text" placeholder="可选；本批内唯一"></label>
+    </div>
+    <label class="check"><input name="approval_required" type="checkbox">内阁制下另行批红</label>
+  </fieldset>`);
+}
+$("schedule-add").addEventListener("click", addScheduleNode);
+$("schedule-remove").addEventListener("click", () => {
+  if ($("schedule-nodes").children.length > 2) $("schedule-nodes").lastElementChild.remove();
+});
+$("schedule-close").addEventListener("click", () => $("schedule-dialog").close());
+$("schedule-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("schedule-error").textContent = "";
+  $("schedule-submit").disabled = true;
+  try {
+    const schedule = [...$("schedule-nodes").children].map((node) => {
+      const field = (name) => node.querySelector(`[name="${name}"]`);
+      const integer = (name) => {
+        const value = field(name).value;
+        if (!value) return null;
+        const n = Number(value);
+        if (!Number.isSafeInteger(n) || n < 1) throw new Error("次数与度支须为正整数");
+        return n;
+      };
+      const dependencies = field("dependencies").value.split(/[,，]/).map((v) => v.trim()).filter(Boolean).map((v) => {
+        if (!/^\d+$/.test(v) || !Number.isSafeInteger(Number(v))) throw new Error("依赖须为节点序号，以逗号分隔");
+        return Number(v);
+      });
+      const deadline = field("deadline").value;
+      return { worker: Number(field("worker").value), text: field("text").value.trim(), dependencies,
+        attempts: integer("attempts"), deadline: deadline ? Math.floor(new Date(deadline).getTime() / 1000) : null,
+        budget: integer("budget"), artifact: field("artifact").value.trim() || null,
+        approval_required: field("approval_required").checked, idempotency_key: field("idempotency_key").value.trim() || null };
+    });
+    const result = await api(`/tasks/${schedulingTask}/split`, { schedule });
+    $("schedule-dialog").close();
+    toast(`已分办为 ${result.subtasks.map((id) => "#" + id).join("、")}`);
+    await refresh();
+  } catch (e) {
+    $("schedule-error").textContent = e.message;
+    $("schedule-error").scrollIntoView({ block: "nearest" });
+  } finally {
+    $("schedule-submit").disabled = false;
+  }
+});
+
 document.addEventListener("click", (event) => {
   const el = event.target.closest("button");
   if (!el) return;
@@ -1430,6 +1542,14 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.draft}/draft`, {})).then((r) => r && toast(`诏令 #${d.draft} 票拟：拟派 ${r.name}`));
   } else if (d.redraft) {
     act(api(`/tasks/${d.redraft}/redraft`, { worker: Number($("redraft-" + d.redraft).value) }), "已御笔改票");
+  } else if (d.schedule) {
+    schedulingTask = Number(d.schedule);
+    $("schedule-title").textContent = `诏令 #${schedulingTask} · 御定排程`;
+    $("schedule-nodes").innerHTML = "";
+    $("schedule-error").textContent = "";
+    addScheduleNode();
+    addScheduleNode();
+    $("schedule-dialog").showModal();
   } else if (d.split) {
     el.disabled = true;
     el.textContent = "尚书拆分中…";

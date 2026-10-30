@@ -87,7 +87,7 @@ pub(crate) enum Command {
     /// 诏令、左右并排、不经 delta。
     Diff(TaskId, bool, bool),
     /// 空列表表示由尚书拆分。
-    Split(TaskId, Vec<(AgentId, String)>),
+    Split(TaskId, Vec<(AgentId, String)>, Option<String>),
     /// 诏令、与议官员（空为默认人选）、轮数。
     Debate(TaskId, Vec<AgentId>, usize),
     /// `None` 表示全部已完成、未复核的诏令。
@@ -363,9 +363,18 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             }
         }
         "split" => {
-            const USAGE: &str = "用法: ziyuan split <诏令ID> [官员ID:子诏令]...";
+            const USAGE: &str =
+                "用法: ziyuan split <诏令ID> [官员ID:子诏令]... | --plan <JSON文件>";
             let (id, parts) = args.split_first().ok_or(USAGE)?;
             let task = TaskId(id.parse().map_err(|_| USAGE)?);
+            if parts.iter().any(|part| part.starts_with("--")) {
+                return match parts {
+                    [flag, file] if flag == "--plan" && !file.starts_with("--") => {
+                        Ok(Command::Split(task, Vec::new(), Some(file.clone())))
+                    }
+                    _ => Err(USAGE.into()),
+                };
+            }
             let plan = parts
                 .iter()
                 .map(|part| {
@@ -373,7 +382,7 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                     Ok((agent_id(agent)?, text.to_owned()))
                 })
                 .collect::<Result<_, Box<dyn Error>>>()?;
-            Command::Split(task, plan)
+            Command::Split(task, plan, None)
         }
         "debate" => {
             const USAGE: &str = "用法: ziyuan debate <诏令ID> [--rounds 1-3] [官员ID]...";
@@ -862,4 +871,36 @@ pub(crate) fn parse_capabilities(value: &str) -> Result<BTreeSet<Capability>, Bo
         .split(',')
         .map(str::parse::<Capability>)
         .collect::<Result<_, _>>()?)
+}
+
+#[cfg(test)]
+mod scheduled_tests {
+    use super::*;
+
+    fn command(args: &[&str]) -> Result<Command, Box<dyn Error>> {
+        parse(args.iter().map(|s| (*s).to_owned()).collect())
+    }
+
+    #[test]
+    fn split_forms_are_exclusive_and_legacy_forms_remain() {
+        assert!(
+            matches!(command(&["split", "7"]).unwrap(), Command::Split(TaskId(7), p, None) if p.is_empty())
+        );
+        assert!(
+            matches!(command(&["split", "7", "4:first", "4：second"]).unwrap(), Command::Split(TaskId(7), p, None) if p.len() == 2)
+        );
+        assert!(
+            matches!(command(&["split", "7", "--plan", "plan.json"]).unwrap(), Command::Split(TaskId(7), p, Some(f)) if p.is_empty() && f == "plan.json")
+        );
+        for args in [
+            vec!["split", "7", "--plan"],
+            vec!["split", "7", "--plan", "p.json", "4:x"],
+            vec!["split", "7", "4:x", "--plan", "p.json"],
+            vec!["split", "7", "--plan", "p.json", "--plan", "q.json"],
+            vec!["split", "7", "--other", "p.json"],
+            vec!["split", "7", "--plan", "--plan"],
+        ] {
+            assert!(command(&args).is_err(), "{args:?}");
+        }
+    }
 }

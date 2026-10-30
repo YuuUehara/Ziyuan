@@ -52,7 +52,7 @@ pub struct DagNode {
     /// 此子诏令须皇帝另行批红，不随原诏令（只有内阁制下才有批红）。
     #[serde(default)]
     pub approval_required: bool,
-    /// 外部副作用的幂等键；目前只持久化，内置执行器不据此去重。
+    /// 原诏令内的节点标识；应用层据完整方案识别分办重试，不据此去重工具调用或外部副作用。
     #[serde(default)]
     pub idempotency_key: Option<String>,
 }

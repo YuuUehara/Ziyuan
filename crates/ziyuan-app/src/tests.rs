@@ -3121,25 +3121,33 @@ fn real_git_delta_renders_hunks_when_configured() {
     }];
     let diff = &unified_hunks(&files)[0][0];
     for side_by_side in [false, true] {
-        let style = DeltaStyle {
-            side_by_side,
-            width: 100,
-            light: true,
-        };
-        let lines = ansi_lines(&delta.render(diff, style).unwrap());
-        let text: Vec<String> = lines
-            .iter()
-            .map(|l| l.iter().map(|(t, _)| t.as_str()).collect())
-            .collect();
-        assert!(text.iter().any(|l| l.contains("new();")), "{text:?}");
-        assert!(text.iter().any(|l| l.contains("old();")), "{text:?}");
-        // 带行号；并排时新旧在同一行。
-        assert!(text.iter().any(|l| l.contains('2')), "{text:?}");
-        assert_eq!(
-            text.iter()
-                .any(|l| l.contains("old();") && l.contains("new();")),
-            side_by_side,
-            "{text:?}"
-        );
+        for (theme, light) in [
+            (DeltaTheme::Tianqing, true),
+            (DeltaTheme::Qinglv, true),
+            (DeltaTheme::Mo, true),
+            (DeltaTheme::Tianqing, false),
+        ] {
+            let style = DeltaStyle {
+                side_by_side,
+                width: 100,
+                light,
+                theme,
+            };
+            let lines = ansi_lines(&delta.render(diff, style).unwrap());
+            let text: Vec<String> = lines
+                .iter()
+                .map(|l| l.iter().map(|(t, _)| t.as_str()).collect())
+                .collect();
+            assert!(text.iter().any(|l| l.contains("new();")), "{text:?}");
+            assert!(text.iter().any(|l| l.contains("old();")), "{text:?}");
+            // 带行号；并排时新旧在同一行。
+            assert!(text.iter().any(|l| l.contains('2')), "{text:?}");
+            assert_eq!(
+                text.iter()
+                    .any(|l| l.contains("old();") && l.contains("new();")),
+                side_by_side,
+                "{text:?}"
+            );
+        }
     }
 }
