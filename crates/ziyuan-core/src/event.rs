@@ -165,6 +165,9 @@ pub struct TranslationLink {
     pub context_version: u32,
     /// 译稿的输出路径（项目内相对、`/` 分隔）；审校为空。
     pub output_path: String,
+    /// 下诏时该块朱批（逐段条目，不含项目级版本）的 SHA-256；审校为空。
+    /// 定稿时须仍为此值：下诏后才添的朱批须经修订才作数。
+    pub zhupi_hash: String,
 }
 
 /// Event Sourcing: 朝廷状态由此事件列表重放而来。
@@ -423,6 +426,7 @@ pub enum CourtEvent {
         source_hash: String,
         context_version: u32,
         output_path: String,
+        zhupi_hash: String,
     },
     /// 御览定稿：皇帝签署一块的译稿（`translation_hash` 为定稿 zh.json 的 SHA-256），
     /// 并记下当时的上下文版本与朱批版本。

@@ -380,7 +380,7 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             verdict.code(),
             to_hex(note)
         ),
-        // 字符串字段一律 hex（治理层已限定格式，编码不依赖之）；审校的输出路径为空。
+        // 字符串字段一律 hex（治理层已限定格式，编码不依赖之）；审校的输出路径与朱批哈希为空。
         TranslationLinked {
             task,
             project,
@@ -389,14 +389,16 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             source_hash,
             context_version,
             output_path,
+            zhupi_hash,
         } => format!(
-            "v1\tTRANSLINK\t{}\t{}\t{}\t{}\t{}\t{context_version}\t{}",
+            "v1\tTRANSLINK\t{}\t{}\t{}\t{}\t{}\t{context_version}\t{}\t{}",
             task.0,
             to_hex(project),
             to_hex(block),
             kind.code(),
             to_hex(source_hash),
-            to_hex(output_path)
+            to_hex(output_path),
+            to_hex(zhupi_hash)
         ),
         TranslationFinalized {
             project,
@@ -1031,6 +1033,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             source_hash: from_hex(field(6)?)?,
             context_version: version(7)?,
             output_path: from_hex(field(8)?)?,
+            zhupi_hash: from_hex(field(9)?)?,
         },
         "TRANSFINAL" => TranslationFinalized {
             project: from_hex(field(2)?)?,
@@ -1095,7 +1098,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         Clock(_) => 3,
         EdictIssued(_) => 7,
         ToolInvoked { .. } | SuspicionRaised { .. } => 6,
-        TranslationLinked { .. } => 9,
+        TranslationLinked { .. } => 10,
         TranslationFinalized { .. } => 7,
         TranslationReopened { .. } => 5,
     };
@@ -1657,6 +1660,7 @@ mod tests {
                 context_version: 7,
                 output_path: "translations/0123456789abcdef0123456789abcdef/c0001-b0001/zh.json"
                     .into(),
+                zhupi_hash: "c".repeat(64),
             },
             CourtEvent::TranslationLinked {
                 task,
@@ -1666,6 +1670,7 @@ mod tests {
                 source_hash: "a".repeat(64),
                 context_version: 0,
                 output_path: String::new(),
+                zhupi_hash: String::new(),
             },
             CourtEvent::TranslationFinalized {
                 project: "0123456789abcdef0123456789abcdef".into(),

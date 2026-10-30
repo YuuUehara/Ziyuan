@@ -689,6 +689,7 @@ impl Court {
                 source_hash,
                 context_version,
                 output_path,
+                zhupi_hash,
             } => {
                 let link = TranslationLink {
                     project: project.clone(),
@@ -697,6 +698,7 @@ impl Court {
                     source_hash: source_hash.clone(),
                     context_version: *context_version,
                     output_path: output_path.clone(),
+                    zhupi_hash: zhupi_hash.clone(),
                 };
                 self.check_translation_link(*task, &link)?;
                 self.tasks.get_mut(task).expect("已确认存在").translation = Some(link);

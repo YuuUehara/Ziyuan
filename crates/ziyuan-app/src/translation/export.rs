@@ -1,7 +1,7 @@
 //! 每次下诏前导出的只读材料：`translations/<项目>/<块>/`。从不触碰 `zh.json` 与 `proposals/`。
 use super::{
-    ContextSnapshot, Result, Translations, all_blocks, ensure_plain_dirs, find_block, pretty_json,
-    sha256_hex, write_plain,
+    ContextSnapshot, Result, Translations, all_blocks, chapter_rank, ensure_plain_dirs, find_block,
+    pretty_json, read_plain_opt, sha256_hex, write_plain,
 };
 use crate::text_project::{BlockParagraph, Project};
 use serde::Serialize;
@@ -19,9 +19,8 @@ pub struct Exported {
     pub files: Vec<String>,
 }
 
-/// 修订时另导出的两份材料（已序列化）。
+/// 修订时另附的审校回奏（已序列化）。朱批每次下诏都导出，见 [`Translations::export_with`]。
 pub(crate) struct ReviseMaterials {
-    pub zhupi: Vec<u8>,
     pub reviews: Vec<u8>,
 }
 
@@ -37,11 +36,12 @@ fn prior_summaries<'a>(
     context: Option<&'a ContextSnapshot>,
     chapter: &str,
 ) -> BTreeMap<&'a str, &'a str> {
+    let rank = chapter_rank(chapter);
     context
         .map(|c| {
             c.summaries
                 .iter()
-                .filter(|(id, _)| id.as_str() < chapter)
+                .filter(|(id, _)| chapter_rank(id) < rank)
                 .map(|(id, text)| (id.as_str(), text.as_str()))
                 .collect()
         })
@@ -99,11 +99,20 @@ impl Translations {
         write_plain(&dir.join("neighbors.json"), &pretty_json(&neighbors)?)?;
         files.push(rel("neighbors.json"));
 
+        // 朱批每次下诏都导出：定稿时核对的是同一份逐段条目（见 `block_zhupi_hash`），
+        // 下诏后才写的朱批不会白写，御览会要求先修订。
+        write_plain(&dir.join("zhupi.json"), &self.zhupi_export(project, block)?)?;
+        files.push(rel("zhupi.json"));
+
         if let Some(revise) = revise {
-            write_plain(&dir.join("zhupi.json"), &revise.zhupi)?;
-            files.push(rel("zhupi.json"));
             write_plain(&dir.join("reviews.json"), &revise.reviews)?;
             files.push(rel("reviews.json"));
+        } else {
+            // 非修订不带上一轮的审校回奏，免得模型把它们当作本轮的要求。
+            let path = dir.join("reviews.json");
+            if read_plain_opt(&path)?.is_some() {
+                std::fs::remove_file(&path)?;
+            }
         }
         Ok(Exported {
             project: project.id.clone(),

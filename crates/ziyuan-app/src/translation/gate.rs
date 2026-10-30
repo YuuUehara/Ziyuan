@@ -1,8 +1,10 @@
 //! 准奏门控：带初译或修订关联的诏令，按逐段取舍后的最终字节检查，不过即不落盘。
-use super::{Translations, block_source_hash, output_rel, proposals_rel};
+use super::status::previous_output;
+use super::{Translations, block_source_hash, output_rel, proposals_rel, sha256_hex};
 use crate::AppError;
 use std::path::Path;
-use ziyuan_core::{FileChange, TranslationLink};
+use ziyuan_core::{FileChange, TranslationKind, TranslationLink};
+use ziyuan_governance::{Court, Task};
 
 fn under_proposals(path: &str, prefix: &str) -> bool {
     path.strip_prefix(prefix).is_some_and(|rest| {
@@ -18,6 +20,8 @@ fn under_proposals(path: &str, prefix: &str) -> bool {
 /// 门控发现的问题（空即通过）。`selected` 是逐段取舍后实际要写的文件。
 pub(crate) fn gate_problems(
     root: &Path,
+    court: &Court,
+    task: &Task,
     link: &TranslationLink,
     selected: &[FileChange],
 ) -> Vec<String> {
@@ -36,21 +40,43 @@ pub(crate) fn gate_problems(
         }
     }
     let translations = Translations::new(root);
-    match selected.iter().find(|f| f.path == output) {
-        None => problems.push(format!("逐段取舍后没有写译稿 {output}")),
-        Some(file) => {
-            match translations
-                .texts()
-                .check(&link.project, &link.block, file.after.as_bytes())
-            {
-                Err(e) => problems.push(format!("无法核对原文项目：{e}")),
-                Ok(report) => {
-                    problems.extend(report.issues.iter().map(|i| match &i.paragraph_id {
-                        Some(id) => format!("{id}：{}", i.message),
-                        None => i.message.clone(),
-                    }))
+    let after = match selected.iter().find(|f| f.path == output) {
+        Some(file) => Some(file.after.clone()),
+        // 修订可以不改译稿（如只补建议）：此时磁盘上的稿须仍是此前已准奏的译文。
+        None if link.kind == TranslationKind::Revise => match previous_output(court, task) {
+            Some(previous) => match translations.read_translation(&link.project, &link.block) {
+                Ok(Some(disk)) if sha256_hex(&disk) == sha256_hex(previous.as_bytes()) => {
+                    Some(previous)
                 }
+                Ok(_) => {
+                    problems.push("修订未写译稿，且磁盘上的译稿已不是此前已准奏的译文".into());
+                    None
+                }
+                Err(e) => {
+                    problems.push(format!("无法读取译稿：{e}"));
+                    None
+                }
+            },
+            None => {
+                problems.push(format!("逐段取舍后没有写译稿 {output}"));
+                None
             }
+        },
+        None => {
+            problems.push(format!("逐段取舍后没有写译稿 {output}"));
+            None
+        }
+    };
+    if let Some(bytes) = after {
+        match translations
+            .texts()
+            .check(&link.project, &link.block, bytes.as_bytes())
+        {
+            Err(e) => problems.push(format!("无法核对原文项目：{e}")),
+            Ok(report) => problems.extend(report.issues.iter().map(|i| match &i.paragraph_id {
+                Some(id) => format!("{id}：{}", i.message),
+                None => i.message.clone(),
+            })),
         }
     }
     match translations
@@ -75,10 +101,12 @@ pub(crate) fn gate_problems(
 /// 门控不过时返回 [`AppError::Apply`]，列出全部问题；一处也不写，不留记录。
 pub(crate) fn check_gate(
     root: &Path,
+    court: &Court,
+    task: &Task,
     link: &TranslationLink,
     selected: &[FileChange],
 ) -> Result<(), AppError> {
-    let problems = gate_problems(root, link, selected);
+    let problems = gate_problems(root, court, task, link, selected);
     if problems.is_empty() {
         return Ok(());
     }

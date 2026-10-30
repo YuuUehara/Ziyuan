@@ -35,9 +35,10 @@ pub(crate) use gate::check_gate;
 use crate::AppError;
 use crate::text_project::{Project, PromptBlock, TextProjectError, TextProjects};
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use ziyuan_governance::GovernanceError;
 use ziyuan_storage::JsonFileError;
 
@@ -81,10 +82,16 @@ impl From<serde_json::Error> for TranslationError {
         Self::Invalid(e.to_string())
     }
 }
-/// 译书的前置条件与材料错误都在事件簿之外，归为翰林院不准（不留记录）。
+/// 译书的前置条件与材料错误都在事件簿之外：磁盘与存储故障照实报，其余归为翰林院不准（不留记录）。
 impl From<TranslationError> for AppError {
     fn from(e: TranslationError) -> Self {
-        AppError::Governance(GovernanceError::Translation(e.to_string()))
+        match e {
+            TranslationError::Io(e) => AppError::Storage(ziyuan_storage::StorageError::Io(e)),
+            TranslationError::Storage(JsonFileError::Io(e)) => {
+                AppError::Storage(ziyuan_storage::StorageError::Io(e))
+            }
+            other => AppError::Governance(GovernanceError::Translation(other.to_string())),
+        }
     }
 }
 
@@ -224,12 +231,83 @@ pub(crate) fn read_plain_opt(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 /// 写普通文件（已存在的须为普通文件）；内容未变时不写。
+/// 先写同目录临时文件、刷盘，再改名覆盖：崩溃不会留下写了一半的草稿。
 pub(crate) fn write_plain(path: &Path, bytes: &[u8]) -> Result<()> {
     if read_plain_opt(path)?.as_deref() == Some(bytes) {
         return Ok(());
     }
-    fs::write(path, bytes)?;
-    Ok(())
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().ok_or_else(|| invalid("路径没有上级目录"))?;
+    let name = path.file_name().ok_or_else(|| invalid("路径没有文件名"))?;
+    let (tmp, mut file) = loop {
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let tmp = dir.join(tmp_name);
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    match written.and_then(|()| fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
+}
+
+/// 草稿目录的排他锁：读改写期间不让另一个进程同时改。超出 [`LOCK_TIMEOUT`] 即报错。
+pub(crate) struct DirLock {
+    _file: fs::File,
+}
+
+const LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+impl DirLock {
+    /// 锁 `dir/.lock`；锁文件本身留在目录里（无内容）。
+    pub(crate) fn acquire(dir: &Path) -> Result<Self> {
+        let path = dir.join(".lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let started = std::time::Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+            let waited = started.elapsed();
+            if waited >= LOCK_TIMEOUT {
+                return Err(invalid(format!(
+                    "{} 被占用超过 {} 秒",
+                    path.display(),
+                    LOCK_TIMEOUT.as_secs()
+                )));
+            }
+            std::thread::sleep(LOCK_POLL.min(LOCK_TIMEOUT - waited));
+        }
+    }
+}
+
+/// 章 ID 的排序键：取 `c` 后的数字；不合格式的按最大，排在最后。
+pub(crate) fn chapter_rank(id: &str) -> u64 {
+    id.strip_prefix('c')
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 /// 读 UTF-8 文本（不存在为 `None`），超过 `limit` 字节报错。

@@ -2,7 +2,7 @@
 //! 不写事件簿，不随诏令自动交给模型；可并入某项目的上下文草稿（之后照常批准才生效）。
 //! 不需要朝廷即可使用。
 use crate::translation::{
-    GLOSSARY_FILE, GlossaryEntry, Result, STYLE_FILE, TranslationError, Translations,
+    DirLock, GLOSSARY_FILE, GlossaryEntry, Result, STYLE_FILE, TranslationError, Translations,
     context_dir_rel, find_block, invalid, parse_glossary, pretty_json, read_text_opt, write_plain,
 };
 use ring::rand::{SecureRandom, SystemRandom};
@@ -339,6 +339,8 @@ impl Notes {
         let t = Translations::new(&self.root);
         t.ensure_context_draft(project)?;
         let dir = self.root.join(context_dir_rel(project));
+        // 草稿是读改写：先加锁，免得两个进程同时并入时丢条目。
+        let _lock = DirLock::acquire(&dir)?;
         match note.kind {
             NoteKind::Word => {
                 let path = dir.join(GLOSSARY_FILE);

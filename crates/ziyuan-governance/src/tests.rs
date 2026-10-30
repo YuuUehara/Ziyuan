@@ -1285,6 +1285,11 @@ fn translation_link(kind: TranslationKind, output_path: &str) -> TranslationLink
         source_hash: "a".repeat(64),
         context_version: 0,
         output_path: output_path.into(),
+        zhupi_hash: if kind.writes() {
+            "b".repeat(64)
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -1416,6 +1421,7 @@ fn translation_links_are_validated_and_folded_into_tasks() {
             source_hash: "a".repeat(64),
             context_version: 0,
             output_path: out.clone(),
+            zhupi_hash: "b".repeat(64),
         }
     );
     court.apply(&event).unwrap();

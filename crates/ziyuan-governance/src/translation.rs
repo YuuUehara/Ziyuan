@@ -103,6 +103,7 @@ impl Court {
             source_hash,
             context_version,
             output_path,
+            zhupi_hash,
         } = link;
         Ok(CourtEvent::TranslationLinked {
             task,
@@ -112,6 +113,7 @@ impl Court {
             source_hash,
             context_version,
             output_path,
+            zhupi_hash,
         })
     }
 
@@ -143,6 +145,7 @@ impl Court {
                 )));
             }
             check_output_path(link)?;
+            check_hash("朱批哈希", &link.zhupi_hash)?;
         } else {
             if seal.capabilities.iter().any(|c| c.is_works_only()) {
                 return Err(invalid(format!(
@@ -150,8 +153,8 @@ impl Court {
                     link.kind.label()
                 )));
             }
-            if !link.output_path.is_empty() {
-                return Err(invalid(format!("{}不写译稿", link.kind.label())));
+            if !link.output_path.is_empty() || !link.zhupi_hash.is_empty() {
+                return Err(invalid(format!("{}不写译稿、不附朱批", link.kind.label())));
             }
         }
         Ok(())

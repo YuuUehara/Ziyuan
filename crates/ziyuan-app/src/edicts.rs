@@ -439,7 +439,7 @@ impl<S: EventStore> Session<S> {
         let files = &entry.changes.as_ref().expect("已确认有待决改动").files;
         let selected = selected_files(files, skipped);
         if let Some(link) = entry.translation.as_ref().filter(|l| l.kind.writes()) {
-            crate::translation::check_gate(root, link, &selected)?;
+            crate::translation::check_gate(root, &self.court, entry, link, &selected)?;
         }
         ziyuan_runtime::tools::apply_changes(root, &selected)
             .map_err(|e| AppError::Apply(e.to_string()))?;

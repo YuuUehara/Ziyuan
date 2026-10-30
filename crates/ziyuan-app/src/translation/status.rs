@@ -1,5 +1,5 @@
 //! 每块的译书状态：由事件回放与磁盘实际译稿得出（纯计算，便于单测），及续做计划。
-use super::sha256_hex;
+use super::{chapter_rank, sha256_hex};
 use crate::edicts::selected_files;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -90,7 +90,7 @@ impl BlockState {
             Self::AwaitingYulan { .. } => "待御览",
             Self::Finalized { .. } => "已定稿",
             Self::Failed { .. } => "失败",
-            Self::Cancelled { .. } => "撤销",
+            Self::Cancelled { .. } => "已撤销",
             Self::Stale { .. } => "版本失效",
             Self::Uncertain { .. } => "不确定",
         }
@@ -117,6 +117,8 @@ pub struct BlockFacts {
     pub source_hash: String,
     /// 磁盘上 `zh.json` 的哈希；不存在为 `None`。
     pub disk_hash: Option<String>,
+    /// 该块现行朱批条目的哈希（[`Translations::block_zhupi_hash`]）。
+    pub zhupi_hash: String,
 }
 
 /// 上下文现状：现行版本，及各版本的前情摘要哈希（章 ID → 哈希；版本 0 为空）。
@@ -127,16 +129,31 @@ pub struct ContextFacts {
 }
 
 /// 已准奏改动中译稿的最终内容（逐段取舍之后）。
-pub(crate) fn applied_output(task: &Task) -> Option<String> {
+/// 修订未改动 `zh.json`（如只补建议）时，译稿仍是此前最近一件已准奏的译文。
+pub(crate) fn applied_output(court: &Court, task: &Task) -> Option<String> {
     let link = task.translation.as_ref()?;
     let changes = task.changes.as_ref()?;
     if changes.state != ChangeState::Applied {
         return None;
     }
-    selected_files(&changes.files, &changes.skipped)
+    if let Some(file) = selected_files(&changes.files, &changes.skipped)
         .into_iter()
         .find(|f| f.path == link.output_path)
-        .map(|f| f.after)
+    {
+        return Some(file.after);
+    }
+    previous_output(court, task)
+}
+
+/// `task` 之前最近一件已准奏的初译或修订所写的译稿。
+pub(crate) fn previous_output(court: &Court, task: &Task) -> Option<String> {
+    let link = task.translation.as_ref()?;
+    court
+        .translation_tasks(&link.project, &link.block)
+        .filter(|t| t.edict.id < task.edict.id && writes(t))
+        .filter(|t| t.changes.as_ref().map(|c| c.state) == Some(ChangeState::Applied))
+        .last()
+        .and_then(|t| applied_output(court, t))
 }
 
 pub(crate) fn writes(task: &Task) -> bool {
@@ -184,10 +201,11 @@ fn summary_changes(context: &ContextFacts, used: u32, chapter: &str) -> Vec<Stri
     let empty = BTreeMap::new();
     let old = context.summaries.get(&used).unwrap_or(&empty);
     let new = context.summaries.get(&context.current).unwrap_or(&empty);
+    let rank = chapter_rank(chapter);
     let mut chapters: Vec<String> = old
         .keys()
         .chain(new.keys())
-        .filter(|c| c.as_str() < chapter && old.get(*c) != new.get(*c))
+        .filter(|c| chapter_rank(c) < rank && old.get(*c) != new.get(*c))
         .cloned()
         .collect();
     chapters.sort();
@@ -280,7 +298,7 @@ fn one_block(
                 f.label()
             )
         });
-    let Some(applied_bytes) = applied_output(applied) else {
+    let Some(applied_bytes) = applied_output(court, applied) else {
         return status(
             BlockState::Uncertain {
                 reason: format!("诏令 #{id} 已准奏的改动中没有译稿"),
@@ -336,7 +354,15 @@ fn one_block(
                 next: NextStep::Revise,
             }
         }
-        None if link.kind == TranslationKind::Revise => BlockState::AwaitingYulan { task: id },
+        None if link.kind == TranslationKind::Revise => {
+            if facts.zhupi_hash != link.zhupi_hash {
+                note = Some(match note {
+                    Some(n) => format!("朱批自下诏后有变，御览前须再下修订；{n}"),
+                    None => "朱批自下诏后有变，御览前须再下修订".into(),
+                });
+            }
+            BlockState::AwaitingYulan { task: id }
+        }
         None => {
             let reviewed = |k: TranslationKind| {
                 tasks.iter().any(|t| {

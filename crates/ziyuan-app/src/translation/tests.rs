@@ -178,7 +178,20 @@ fn export_writes_materials_and_never_touches_zh_or_proposals() {
     let p = t.project(&fx.project).unwrap();
     assert_eq!(block_source_hash(&p, B2).unwrap(), exported.source_hash);
     assert_eq!(exported.context_version, 0);
-    assert_eq!(exported.files.len(), 3);
+    // 原文、上下文、衔接段，以及（可为空的）朱批：定稿核对的就是这份逐段条目。
+    assert_eq!(
+        exported.files,
+        [
+            "source.json",
+            "context.json",
+            "neighbors.json",
+            "zhupi.json"
+        ]
+        .map(|name| format!("translations/{}/{B2}/{name}", fx.project))
+    );
+    let zhupi: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("zhupi.json")).unwrap()).unwrap();
+    assert_eq!(zhupi["items"], serde_json::json!([]));
     let context: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("context.json")).unwrap()).unwrap();
     assert_eq!(context["version"], 0);
@@ -325,6 +338,7 @@ fn issue_translation_commits_edict_and_link_together() {
             source_hash: block_source_hash(&p, B1).unwrap(),
             context_version: 0,
             output_path: output_rel(&fx.project, B1),
+            zhupi_hash: fx.t().block_zhupi_hash(&p, B1).unwrap(),
         }
     );
     assert!(
@@ -477,6 +491,7 @@ fn gate_rejects_changed_source_hash() {
         source_hash: "0".repeat(64),
         context_version: 0,
         output_path: output_rel(&fx.project, B1),
+        zhupi_hash: "0".repeat(64),
     };
     let seal = ziyuan_core::Seal {
         capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
@@ -689,10 +704,231 @@ fn zhupi_is_versioned_and_checks_paragraphs() {
 }
 
 #[test]
+fn a_failed_revise_does_not_stall_the_block() {
+    let fx = Fx::new("failed-revise");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let revise = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    // 呈报改动后才失败：改动无处准奏（治理层只准已完成的诏令），不得因此卡住块。
+    let worker = s
+        .court()
+        .route(&s.court().task(revise.id).unwrap().edict)
+        .unwrap()
+        .worker;
+    let half = fx.candidate(B1, |ps| ps[0].text = "半成品".into());
+    s.commit(|_| {
+        Ok(vec![
+            CourtEvent::TaskAssigned {
+                task: revise.id,
+                worker,
+                model: None,
+            },
+            CourtEvent::ChangesProposed {
+                task: revise.id,
+                changes: vec![fx.zh_change(B1, half.clone())],
+            },
+            CourtEvent::TaskFailed {
+                task: revise.id,
+                reason: "模型不可用".into(),
+            },
+        ])
+    })
+    .unwrap();
+    assert_ne!(fs::read_to_string(fx.zh_path(B1)).unwrap(), half);
+    let status = fx.status(&s, B1);
+    assert_eq!(
+        status.state,
+        BlockState::Applied {
+            task: task.0,
+            next: NextStep::Review
+        }
+    );
+    assert!(status.note.unwrap().contains("未成"));
+    // 修订未成：可再下修订、下审校，也可御览定稿。
+    let again = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    s.cancel(again.id).unwrap();
+    let reviews = s.issue_review(&fx.root, &fx.project, B1).unwrap();
+    for edict in &reviews {
+        complete(&mut s, edict.id, vec![], "无可指摘");
+    }
+    let hash = s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+    assert_eq!(
+        fx.status(&s, B1).state,
+        BlockState::Finalized {
+            task: task.0,
+            translation_hash: hash
+        }
+    );
+}
+
+#[test]
+fn a_revise_that_leaves_zh_json_alone_keeps_the_translation() {
+    let fx = Fx::new("revise-no-change");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let kept = fs::read_to_string(fx.zh_path(B1)).unwrap();
+    let revise = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    // 只补建议、不改译稿。
+    complete(
+        &mut s,
+        revise.id,
+        vec![FileChange {
+            path: format!("{}terms.json", proposals_rel(&fx.project, B1)),
+            before: None,
+            after: "{}\n".into(),
+        }],
+        "译稿无需改",
+    );
+    s.apply_changes(revise.id, &fx.root, vec![]).unwrap();
+    assert_eq!(fs::read_to_string(fx.zh_path(B1)).unwrap(), kept);
+    assert_eq!(
+        fx.status(&s, B1).state,
+        BlockState::AwaitingYulan { task: revise.id.0 }
+    );
+    let hash = s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+    assert_eq!(hash, sha256_hex(kept.as_bytes()));
+}
+
+#[test]
+fn revise_exports_only_reviews_after_the_current_translation() {
+    let fx = Fx::new("revise-rounds");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let reviews = s.issue_review(&fx.root, &fx.project, B1).unwrap();
+    complete(&mut s, reviews[0].id, vec![], "忠实：c0001-p0002 漏译");
+    complete(&mut s, reviews[1].id, vec![], "文风：c0001-p0003 生硬");
+    let revise = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    let reviews_json =
+        || fs::read_to_string(fx.t().block_dir(&fx.project, B1).join("reviews.json")).unwrap();
+    assert!(reviews_json().contains("漏译"));
+    complete(
+        &mut s,
+        revise.id,
+        vec![fx.zh_change(B1, fx.candidate(B1, |ps| ps[1].text = "改后".into()))],
+        "修订毕",
+    );
+    s.apply_changes(revise.id, &fx.root, vec![]).unwrap();
+    // 上一轮的审校意见不再交给下一轮修订。
+    let next = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    assert!(
+        !reviews_json().contains("漏译") && !reviews_json().contains("生硬"),
+        "{}",
+        reviews_json()
+    );
+    s.cancel(next.id).unwrap();
+}
+
+#[test]
+fn exporting_for_review_drops_the_previous_review_replies() {
+    let fx = Fx::new("revise-cleanup");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let revise = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    let dir = fx.t().block_dir(&fx.project, B1);
+    assert!(dir.join("zhupi.json").is_file() && dir.join("reviews.json").is_file());
+    // 修订未结：换下审校时不再带上一轮的审校回奏；朱批仍随材料导出。
+    s.cancel(revise.id).unwrap();
+    s.issue_review(&fx.root, &fx.project, B1).unwrap();
+    assert!(dir.join("zhupi.json").is_file() && !dir.join("reviews.json").exists());
+}
+
+#[test]
+fn zhupi_written_before_the_first_translation_reaches_the_model() {
+    let fx = Fx::new("zhupi-early");
+    let mut s = fx.session();
+    fx.t()
+        .set_zhupi(&fx.project, B1, "c0001-p0002", "此处用敬语")
+        .unwrap();
+    let edict = s.issue_translation(&fx.root, &fx.project, B1).unwrap();
+    assert!(edict.text.contains("zhupi.json"));
+    let dir = fx.t().block_dir(&fx.project, B1);
+    let zhupi = fs::read_to_string(dir.join("zhupi.json")).unwrap();
+    assert!(
+        zhupi.contains("此处用敬语") && zhupi.contains("c0001-p0002"),
+        "{zhupi}"
+    );
+    // 下诏后添的朱批不在模型所见之内，御览会拒签。
+    complete(
+        &mut s,
+        edict.id,
+        vec![fx.zh_change(B1, fx.candidate(B1, |_| {}))],
+        "译毕",
+    );
+    s.apply_changes(edict.id, &fx.root, vec![]).unwrap();
+    fx.t()
+        .set_zhupi(&fx.project, B1, "c0001-p0003", "再短些")
+        .unwrap();
+    let err = s
+        .finalize_translation(&fx.root, &fx.project, B1)
+        .unwrap_err();
+    assert!(err.to_string().contains("朱批"), "{err}");
+}
+
+#[test]
+fn review_refuses_a_hand_edited_translation() {
+    let fx = Fx::new("review-edited");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    fs::write(
+        fx.zh_path(B1),
+        fx.candidate(B1, |ps| ps[0].text = "人改".into()),
+    )
+    .unwrap();
+    let err = s.issue_review(&fx.root, &fx.project, B1).unwrap_err();
+    assert!(err.to_string().contains("不同"), "{err}");
+}
+
+#[test]
+fn finalize_refuses_while_a_revise_awaits_approval() {
+    let fx = Fx::new("finalize-pending");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let revise = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    complete(
+        &mut s,
+        revise.id,
+        vec![fx.zh_change(B1, fx.candidate(B1, |ps| ps[0].text = "改后".into()))],
+        "修订毕",
+    );
+    let err = s
+        .finalize_translation(&fx.root, &fx.project, B1)
+        .unwrap_err();
+    assert!(err.to_string().contains("待准奏"), "{err}");
+}
+
+#[test]
+fn a_finalized_block_takes_no_new_writer_until_reopened() {
+    let fx = Fx::new("finalized-locked");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+    for err in [
+        s.issue_revise(&fx.root, &fx.project, B1).unwrap_err(),
+        s.issue_translation(&fx.root, &fx.project, B1).unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("退回"), "{err}");
+    }
+    s.reopen_translation(&fx.root, &fx.project, B1, "再润色")
+        .unwrap();
+    let revise = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    s.cancel(revise.id).unwrap();
+}
+#[test]
 fn finalize_requires_the_applied_translation_and_reopen_returns_it() {
     let fx = Fx::new("finalize");
     let mut s = fx.session();
     assert!(s.finalize_translation(&fx.root, &fx.project, B1).is_err());
+    // 朱批须在下诏前写好，才会被初译/修订采纳。
+    fx.t()
+        .set_zhupi(&fx.project, B1, "c0001-p0001", "好")
+        .unwrap();
     let task = translated(&fx, &mut s, B1);
     assert!(
         s.finalize_translation(&fx.root, &fx.project, B1).is_err(),
@@ -710,9 +946,15 @@ fn finalize_requires_the_applied_translation_and_reopen_returns_it() {
         .unwrap_err();
     assert!(err.to_string().contains("不同"), "{err}");
     fs::write(fx.zh_path(B1), &good).unwrap();
+    // 下诏后才添朱批：御览时拒签，须先修订。
     fx.t()
-        .set_zhupi(&fx.project, B1, "c0001-p0001", "好")
+        .set_zhupi(&fx.project, B1, "c0001-p0002", "再口语些")
         .unwrap();
+    let err = s
+        .finalize_translation(&fx.root, &fx.project, B1)
+        .unwrap_err();
+    assert!(err.to_string().contains("朱批"), "{err}");
+    fx.t().clear_zhupi(&fx.project, B1, "c0001-p0002").unwrap();
     let hash = s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
     assert_eq!(hash, sha256_hex(good.as_bytes()));
     assert_eq!(
@@ -720,7 +962,7 @@ fn finalize_requires_the_applied_translation_and_reopen_returns_it() {
         Some(&ziyuan_governance::Signoff::Finalized {
             translation_hash: hash.clone(),
             context_version: 0,
-            zhupi_version: 1,
+            zhupi_version: 3,
         })
     );
     assert_eq!(
@@ -994,4 +1236,10 @@ fn resume_plan_only_takes_flagged_states() {
         ),
         ["a", "f"]
     );
+}
+
+/// 块的「撤销」与诏令状态同名：Web、CLI 的诏令都说「已撤销」。
+#[test]
+fn cancelled_block_label_matches_task_status() {
+    assert_eq!(BlockState::Cancelled { task: 1 }.label(), "已撤销");
 }

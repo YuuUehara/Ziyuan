@@ -461,6 +461,7 @@ mod tests {
             source_hash: "a".repeat(64),
             context_version: 0,
             output_path: "translations/0123456789abcdef0123456789abcdef/c0001-b0001/zh.json".into(),
+            zhupi_hash: "b".repeat(64),
         };
         assert_eq!(event_tasks(&linked), [TaskId(12)]);
         assert_eq!(describe_event(&linked), "译书关联：#12 初译 c0001-b0001");
@@ -472,6 +473,7 @@ mod tests {
             source_hash: "a".repeat(64),
             context_version: 0,
             output_path: String::new(),
+            zhupi_hash: String::new(),
         };
         assert_eq!(
             describe_event(&review),

@@ -137,15 +137,15 @@ impl Translations {
             .map_or(0, |s| s.value.version))
     }
 
-    /// 修订时导出的 `zhupi.json`：按块内段落顺序列出。
-    pub(crate) fn zhupi_export(
+    /// 一块朱批的逐段条目，按块内段落顺序；无朱批的段不列。条目文字与段号即模型所见，供哈希与导出。
+    pub(crate) fn block_zhupi_items(
         &self,
         project: &crate::text_project::Project,
         block: &str,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Vec<serde_json::Value>> {
         let (_, _, prompt) = find_block(project, block)?;
         let zhupi = self.zhupi(&project.id, block)?;
-        let items: Vec<_> = prompt
+        Ok(prompt
             .paragraphs
             .iter()
             .filter_map(|p| {
@@ -154,12 +154,32 @@ impl Translations {
                     .get(&p.id)
                     .map(|n| serde_json::json!({ "id": p.id, "zhupi": n.text }))
             })
-            .collect();
+            .collect())
+    }
+
+    /// 该块朱批条目内容的 SHA-256（不含项目级版本，别的块改动不影响）。
+    pub(crate) fn block_zhupi_hash(
+        &self,
+        project: &crate::text_project::Project,
+        block: &str,
+    ) -> Result<String> {
+        Ok(super::sha256_hex(&pretty_json(
+            &self.block_zhupi_items(project, block)?,
+        )?))
+    }
+
+    /// 修订时导出的 `zhupi.json`：按块内段落顺序列出。
+    pub(crate) fn zhupi_export(
+        &self,
+        project: &crate::text_project::Project,
+        block: &str,
+    ) -> Result<Vec<u8>> {
+        let version = self.zhupi(&project.id, block)?.version;
         pretty_json(&serde_json::json!({
             "note": "皇帝朱批：修订时优先遵从；与审校意见冲突时按朱批改。",
-            "version": zhupi.version,
+            "version": version,
             "block_id": block,
-            "items": items,
+            "items": self.block_zhupi_items(project, block)?,
         }))
     }
 }
