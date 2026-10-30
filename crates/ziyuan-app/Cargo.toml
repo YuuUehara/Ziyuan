@@ -17,6 +17,7 @@ serde_json.workspace = true
 similar.workspace = true
 syntect.workspace = true
 tokio = { workspace = true, features = ["macros", "time"] }
+ureq.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

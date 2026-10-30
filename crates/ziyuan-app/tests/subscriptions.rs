@@ -302,3 +302,55 @@ fn batch_is_at_most_fifty_and_save_limit_preserves_old_state() {
     assert!(bounded.add("n9999z", 200).is_err());
     assert_eq!(std::fs::read(s.state_path()).unwrap(), before);
 }
+
+#[test]
+fn idle_checks_do_not_fetch_or_rewrite_state() {
+    struct Never;
+    impl WorkSource for Never {
+        fn fetch(&self, _: &[String]) -> Result<Vec<ObservedWork>, SourceError> {
+            panic!("idle check fetched");
+        }
+    }
+    let t = Temp::new();
+    let s = t.service();
+    assert_eq!(
+        s.check(&Never, 100, CheckMode::Scheduled).unwrap().status,
+        CheckStatus::Disabled
+    );
+    assert!(!s.state_path().exists());
+    assert_eq!(check(&s, &Never, 100).status, CheckStatus::Empty);
+    s.add("n1234ab", 0).unwrap();
+    check(&s, &Source::new(), 100);
+    let before = std::fs::read(s.state_path()).unwrap();
+    assert_eq!(check(&s, &Never, 120).status, CheckStatus::NotDue);
+    assert_eq!(std::fs::read(s.state_path()).unwrap(), before);
+}
+
+#[test]
+fn one_malformed_work_does_not_stop_valid_results_and_failed_save_keeps_baseline() {
+    let t = Temp::new();
+    let s = t.service();
+    s.add("n1234ab", 0).unwrap();
+    s.add("n9999a", 0).unwrap();
+    let src = Source::new();
+    src.set(Ok(vec![
+        work(),
+        ObservedWork {
+            code: "n9999a".into(),
+            chapter_count: 0,
+            ..work()
+        },
+    ]));
+    let summary = check(&s, &src, 100);
+    assert_eq!((summary.checked, summary.failed), (2, 1));
+    assert!(s.list().unwrap()[0].baseline.is_some());
+    let before = std::fs::read(s.state_path()).unwrap();
+    let bounded = Subscriptions::with_max_bytes(&t.0, before.len() as u64 + 512);
+    src.set(Ok(vec![ObservedWork {
+        title: "x".repeat(5000),
+        ..work()
+    }]));
+    assert!(bounded.check(&src, 160, CheckMode::Manual).is_err());
+    assert_eq!(s.list().unwrap()[0].baseline, Some(work()));
+    assert!(s.updates(false).unwrap().is_empty());
+}

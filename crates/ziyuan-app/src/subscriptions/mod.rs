@@ -4,6 +4,8 @@
 mod check;
 mod model;
 mod store;
+mod syosetu;
 
 pub use model::*;
 pub use store::Subscriptions;
+pub use syosetu::SyosetuSource;

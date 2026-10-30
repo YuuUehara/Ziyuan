@@ -1,6 +1,22 @@
 use super::{model::*, store::Subscriptions};
 use std::collections::{HashMap, HashSet};
 
+// Returning an error from JsonFile's transaction avoids publishing unchanged state.
+enum ClaimError {
+    Idle(CheckSummary),
+    Error(SubscriptionError),
+}
+impl From<ziyuan_storage::JsonFileError> for ClaimError {
+    fn from(error: ziyuan_storage::JsonFileError) -> Self {
+        Self::Error(error.into())
+    }
+}
+impl From<SubscriptionError> for ClaimError {
+    fn from(error: SubscriptionError) -> Self {
+        Self::Error(error)
+    }
+}
+
 impl Subscriptions {
     /// No state lock is held while calling the source. At most one batch of 50 per invocation.
     /// Manual checks bypass scheduling, but not the 60 second per-work cooldown or live leases.
@@ -11,7 +27,7 @@ impl Subscriptions {
         now: u64,
         mode: CheckMode,
     ) -> Result<CheckSummary, SubscriptionError> {
-        let (_, (claims, mut summary)) = self.file.update::<_, SubscriptionError>(|current| {
+        let claimed = self.file.update::<_, ClaimError>(|current| {
             let mut state = current.map(|s| s.value).unwrap_or_default();
             let mut summary = CheckSummary::default();
             let mut claims = Vec::new();
@@ -41,11 +57,16 @@ impl Subscriptions {
                     summary.status = CheckStatus::NotDue;
                 }
             }
+            if claims.is_empty() {
+                return Err(ClaimError::Idle(summary));
+            }
             Ok((state, (claims, summary)))
-        })?;
-        if claims.is_empty() {
-            return Ok(summary);
-        }
+        });
+        let (claims, mut summary) = match claimed {
+            Ok((_, result)) => result,
+            Err(ClaimError::Idle(summary)) => return Ok(summary),
+            Err(ClaimError::Error(error)) => return Err(error),
+        };
         let codes: Vec<_> = claims.iter().map(|i| i.code.clone()).collect();
         let response = source.fetch(&codes).and_then(|works| {
             let requested: HashSet<_> = codes.iter().collect();

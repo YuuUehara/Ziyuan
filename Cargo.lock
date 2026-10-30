@@ -2359,6 +2359,7 @@ dependencies = [
  "similar",
  "syntect",
  "tokio",
+ "ureq",
  "ziyuan-core",
  "ziyuan-github",
  "ziyuan-governance",
