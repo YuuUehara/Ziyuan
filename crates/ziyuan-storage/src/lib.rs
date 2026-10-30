@@ -12,6 +12,7 @@ pub mod recovery;
 pub mod workspace;
 
 pub use json_file::{JsonFile, JsonFileError, Stored};
+pub use recovery::{RecordState, RecoveryError, RecoveryRecord};
 pub use workspace::{LockScope, Workspace, WorkspaceError, WriteGuard};
 
 #[derive(Debug)]
@@ -80,6 +81,11 @@ pub trait EventStore {
         }
         Ok(events.split_off(known))
     }
+    /// 目前已知的事件条数：按 `load_since` 的增量读取语义，是调用方已有的条数。
+    /// 实现在读的同时得知这个数；报不出时为 `None`。
+    fn known_events(&self) -> Result<Option<usize>, StorageError> {
+        Ok(None)
+    }
     /// 前 `upto` 条事件中 `keep` 选中的，按写入顺序。只为查几条事件时用：逐条解码、
     /// 只留选中的，不把整本事件簿留在内存里，也不动增量读取的位置。
     fn load_where(
@@ -116,6 +122,24 @@ pub trait EventStore {
     ) -> Result<bool, StorageError> {
         Ok(false)
     }
+    /// 已提交事件的字节长度；`None` 表示这一实现报不出（内存事件簿、嵌入场景）。
+    /// 恢复记录据此记下事件簿在追记前的确切长度。
+    fn history_bytes(&self) -> Result<Option<u64>, StorageError> {
+        Ok(None)
+    }
+    /// 事件簿前 `events` 条事件的 SHA-256（小写十六进制）。调用方保证 `events` 不超过
+    /// 已提交的条数；实现报不出时为 `None`。
+    fn history_sha256(&self, events: usize) -> Result<Option<String>, StorageError> {
+        let _ = events;
+        Ok(None)
+    }
+    /// 前至多 `events` 条已提交事件的 SHA-256（小写十六进制），末尾没有换行的残行不计。
+    /// 调用方用「可能的批次上限」来问，因此少于 `events` 条不算错误、按实际条数算。
+    /// 实现报不出时为 `None`。
+    fn history_sha256_at_most(&self, events: usize) -> Result<Option<String>, StorageError> {
+        let _ = events;
+        Ok(None)
+    }
 }
 
 /// 会典（快照）：调用者序列化的状态，涵盖事件簿的前 `events` 条。
@@ -128,6 +152,21 @@ pub struct Snapshot {
 /// 事件类型的代码（事件簿中的类型字段，小写），如 `edict`、`tool`、`usage`。
 pub fn event_kind(event: &CourtEvent) -> String {
     codec::kind_of(event).to_lowercase()
+}
+
+/// 事件在事件簿中的那一行（不含换行符）。恢复记录按它记下将要追记的事件。
+pub fn encode_event_line(event: &CourtEvent) -> String {
+    codec::encode_event(event)
+}
+
+/// 恢复记录里目标摘要的格式：64 位小写十六进制（不带 `sha256:` 前缀）。
+pub fn content_sha256(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 impl<T: EventStore + ?Sized> EventStore for &mut T {
@@ -150,6 +189,9 @@ impl<T: EventStore + ?Sized> EventStore for &mut T {
     ) -> Result<Vec<CourtEvent>, StorageError> {
         (**self).load_where(upto, keep)
     }
+    fn known_events(&self) -> Result<Option<usize>, StorageError> {
+        (**self).known_events()
+    }
     fn save_snapshot(
         &mut self,
         tag: &str,
@@ -161,6 +203,26 @@ impl<T: EventStore + ?Sized> EventStore for &mut T {
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError> {
         (**self).append(expected, events)
     }
+    fn history_bytes(&self) -> Result<Option<u64>, StorageError> {
+        (**self).history_bytes()
+    }
+    fn history_sha256(&self, events: usize) -> Result<Option<String>, StorageError> {
+        (**self).history_sha256(events)
+    }
+    fn history_sha256_at_most(&self, events: usize) -> Result<Option<String>, StorageError> {
+        (**self).history_sha256_at_most(events)
+    }
+}
+
+/// 摘要的小写十六进制。
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// `<root>/.ziyuan/court.log` 文本事件簿，可由多个进程共用。
@@ -296,6 +358,9 @@ impl EventStore for EventLog {
         true
     }
 
+    fn known_events(&self) -> Result<Option<usize>, StorageError> {
+        Ok(Some(self.cursor.lock().expect("锁未中毒").events))
+    }
     fn load(&self) -> Result<Vec<CourtEvent>, StorageError> {
         self.set_cursor(Cursor::default());
         self.load_since(0)
@@ -446,6 +511,56 @@ impl EventStore for EventLog {
         out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
         fs::rename(&tmp, &path)?;
         Ok(true)
+    }
+
+    fn history_bytes(&self) -> Result<Option<u64>, StorageError> {
+        match File::open(&self.path) {
+            Ok(file) => {
+                file.lock_shared()?;
+                let mut reader = io::BufReader::with_capacity(1 << 16, file);
+                let mut line = Vec::new();
+                let mut bytes = 0u64;
+                loop {
+                    line.clear();
+                    let n = reader.read_until(b'\n', &mut line)?;
+                    // 末尾没有换行的残行不计入已提交的字节。
+                    if n == 0 || line.last() != Some(&b'\n') {
+                        return Ok(Some(bytes));
+                    }
+                    bytes += n as u64;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Some(0)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn history_sha256(&self, events: usize) -> Result<Option<String>, StorageError> {
+        self.history_sha256_at_most(events)
+    }
+
+    fn history_sha256_at_most(&self, events: usize) -> Result<Option<String>, StorageError> {
+        // 与游标无关：调用方给的是「前至多 `events` 条事件」，这里每次都从文件开头数。
+        // （调用方的会话与恢复记录可能各持一个 `EventLog`，彼此的游标并不相同。）
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(hex_digest(&[]))),
+            Err(e) => return Err(e.into()),
+        };
+        file.lock_shared()?;
+        let mut reader = io::BufReader::with_capacity(1 << 16, file);
+        let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut line = Vec::new();
+        for _ in 0..events {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line)?;
+            // 末尾残行不计，也不报错：只算到已提交的条数为止。
+            if n == 0 || line.last() != Some(&b'\n') {
+                break;
+            }
+            ctx.update(&line);
+        }
+        Ok(Some(hex_digest(ctx.finish().as_ref())))
     }
 
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError> {

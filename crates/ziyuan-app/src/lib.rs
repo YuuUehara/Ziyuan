@@ -127,3 +127,5 @@ fn truncate(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_txn_tests;

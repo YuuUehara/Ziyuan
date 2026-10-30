@@ -23,10 +23,15 @@ struct Fx {
 impl Fx {
     fn new(name: &str) -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
+        // 与其他测试共用同一个临时目录时，别的测试进程留下的事件簿与受管写入记录会让本测试
+        // 打不开或写不进去：用一个只属于本测试的目录名。
         let root = std::env::temp_dir().join(format!(
-            "ziyuan-translation-{name}-{}-{}",
+            "ziyuan-translation-{name}-{}-{}-{}",
             std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
+            N.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();

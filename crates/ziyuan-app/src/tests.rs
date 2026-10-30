@@ -2033,7 +2033,13 @@ async fn watch_runs_the_queue_censors_and_notes_a_neglectful_emperor() {
 
 #[tokio::test]
 async fn hunks_are_numbered_across_files_and_can_be_rejected_one_by_one() {
-    let root = std::env::temp_dir().join(format!("ziyuan-app-hunks-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "ziyuan-app-hunks-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let original: String = (1..=20).map(|i| format!("l{i}\n")).collect();
@@ -2150,7 +2156,11 @@ async fn hunks_are_numbered_across_files_and_can_be_rejected_one_by_one() {
         git(&["show", "--name-only", "--format=", "HEAD"]),
         "a.txt\n"
     );
-    assert_eq!(git(&["status", "--porcelain"]), " M c.txt\n");
+    // 受管写入在项目里建了 `.ziyuan`（世代号、写锁与恢复记录），与 git 无关，不算工作区改动。
+    assert_eq!(
+        git(&["status", "--porcelain"]).replace("?? .ziyuan/\n", ""),
+        " M c.txt\n"
+    );
     let message = git(&["log", "-1", "--format=%B"]);
     assert!(
         message.starts_with("紫垣诏令 #1：改两处\n")
@@ -2171,7 +2181,14 @@ async fn hunks_are_numbered_across_files_and_can_be_rejected_one_by_one() {
 
 #[tokio::test]
 async fn works_changes_are_proposed_then_applied_or_discarded_by_the_emperor() {
-    let root = std::env::temp_dir().join(format!("ziyuan-app-changes-{}", std::process::id()));
+    // 与其他测试共用同一个临时目录时，别的测试进程留下的受管写入记录会让本测试写不进去：
+    // 用只属于本次调用的目录名，并清掉上次（多半是失败时）留下的残骸。
+    static NEXT_TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "ziyuan-app-changes-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("README.md"), "old\nkeep\n").unwrap();
@@ -2254,6 +2271,15 @@ async fn works_changes_are_proposed_then_applied_or_discarded_by_the_emperor() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("已被改动"), "{err}");
+    // 被拒时一处也不写，也不留恢复记录（工作区此后仍可写）。
+    assert_eq!(
+        std::fs::read_to_string(root.join("README.md")).unwrap(),
+        "他人改动\n"
+    );
+    let workspace = ziyuan_storage::Workspace::open(&root).unwrap();
+    assert!(workspace.pending_record().unwrap().is_none());
+    assert!(workspace.ensure_writable().is_ok());
+    assert_eq!(workspace.generation().unwrap(), 0);
     std::fs::write(root.join("README.md"), "old\nkeep\n").unwrap();
 
     session

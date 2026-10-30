@@ -1,13 +1,17 @@
 //! 诏令：下诏、入队、评定、准奏落盘与回报。
 
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use ziyuan_core::{
     AgentId, CHANGELOG, Capability, CourtEvent, Department, Edict, FileChange, Seal, TaskId,
     Template, Threat, TokenUsage, Verdict,
 };
 use ziyuan_governance::{ChangeState, Court, GovernanceError, Suspicion, Task, TaskStatus};
 use ziyuan_runtime::guard;
-use ziyuan_storage::EventStore;
+use ziyuan_storage::recovery::{
+    ApplicationSource, EventBatch, FileState, RecoveryRecord, TargetState,
+};
+use ziyuan_storage::{EventStore, LockScope, RecordState, Workspace, WorkspaceError};
 
 use crate::cabinet::precedent;
 use crate::{AppError, Session, truncate};
@@ -117,6 +121,11 @@ pub fn selected_files(files: &[FileChange], skipped: &[u32]) -> Vec<FileChange> 
 }
 
 fn sha256(parts: &[&[u8]]) -> String {
+    format!("sha256:{}", sha256_hex(parts))
+}
+
+/// 与 [`sha256`] 相同的摘要，但不带 `sha256:` 前缀。
+fn sha256_hex(parts: &[&[u8]]) -> String {
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     for part in parts {
         ctx.update(part);
@@ -127,7 +136,7 @@ fn sha256(parts: &[&[u8]]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    format!("sha256:{hex}")
+    hex
 }
 
 /// 呈报时原文的内容版本（`sha256:` 加十六进制）；新建文件为 `None`。
@@ -402,6 +411,10 @@ impl<S: EventStore> Session<S> {
     /// 准奏：把诏令呈报的改动写入 `root` 下的项目，再记入事件簿。`skipped` 为逐段准奏时
     /// 驳回的段号（见 [`render_diffs`]），空即全部准奏。写入前逐一核对文件自呈报以来
     /// 未被改动，否则一处也不写、不留记录。
+    ///
+    /// 写入是一笔受管事务：先取工作区锁、推进世代号、写下「已发布」的恢复记录，再写文件、
+    /// 记事件，最后收尾（见 [`Session::write_transaction`]）。真的动到文件之后失败时，
+    /// 记录与奇数世代号留在盘上，之后的写入一律被拒，须先经 `ziyuan text recovery` 收尾。
     pub fn apply_changes(
         &mut self,
         task: TaskId,
@@ -435,19 +448,19 @@ impl<S: EventStore> Session<S> {
         let CourtEvent::ChangesApplied { skipped, .. } = &event else {
             unreachable!("准奏只产生 ChangesApplied");
         };
+        let skipped = skipped.clone();
         let entry = self.court.task(task).expect("已确认存在");
         let files = &entry.changes.as_ref().expect("已确认有待决改动").files;
-        let selected = selected_files(files, skipped);
+        let selected = selected_files(files, &skipped);
         if let Some(link) = entry.translation.as_ref().filter(|l| l.kind.writes()) {
             crate::translation::check_gate(root, &self.court, entry, link, &selected)?;
         }
-        ziyuan_runtime::tools::apply_changes(root, &selected)
-            .map_err(|e| AppError::Apply(e.to_string()))?;
-        self.commit(|_| Ok(vec![event.clone()]))?;
+        // 事件的条数与内容取自既有的事件簿：追记后应得的条数即已知条数加这一条。
+        let known = self.len;
+        self.write_transaction(root, &selected, task, skipped, known, event)?;
         Ok(())
     }
 
-    /// 驿站回报前的校验（见 `Court::propose_courier_reply`），以免先发到外界、再记不进事件簿。
     pub fn check_reply(&mut self, task: TaskId, pull_request: bool) -> Result<(), AppError> {
         self.reload()?;
         self.court
@@ -521,6 +534,243 @@ impl<S: EventStore> Session<S> {
             events.push(cancel);
             Ok(events)
         })?;
+        Ok(())
+    }
+}
+
+/// 新的恢复操作编号（32 位小写十六进制）：两次随机哈希，共 128 位。
+fn new_operation() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let half = |salt: u64| {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(salt);
+        hasher.write_u128(stamp);
+        hasher.write_u32(std::process::id());
+        hasher.finish()
+    };
+    format!("{:016x}{:016x}", half(0), half(1))
+}
+
+/// 记录里存的工作区路径：Windows 上 canonical 的根带 `\\?\` 前缀，恢复记录的编解码器不认它，
+/// 这里去掉前缀。`Workspace` 比对记录时两种写法都接受。
+fn record_path(root: &Path) -> PathBuf {
+    match root.to_string_lossy().strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => root.to_path_buf(),
+    }
+}
+
+/// 文件当前的内容哈希；不存在为 [`FileState::Absent`]。
+fn digest_of(path: &Path) -> io::Result<FileState> {
+    Ok(match std::fs::read(path) {
+        Ok(bytes) => FileState::Present(sha256_hex(&[&bytes])),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => FileState::Absent,
+        Err(e) => return Err(e),
+    })
+}
+
+/// 之后各项写入拒绝的说明：指的是同一件事，给出可执行的下一步。
+fn blocked(requirement: String) -> String {
+    format!("此工作区上次受管写入未收尾（{requirement}），已拒绝写入：一处也不写、不留记录")
+}
+
+/// 工作区控制文件的错误一律转成可执行的 [`AppError::Apply`]，不回显内部路径细节。
+fn workspace_error(error: WorkspaceError) -> AppError {
+    AppError::Apply(match error {
+        WorkspaceError::Timeout { .. } => "另一进程正在写入此工作区，请稍候重试".to_string(),
+        other => format!("工作区不可用：{other}"),
+    })
+}
+
+impl<S: EventStore> Session<S> {
+    /// 本次准奏要落的文件在磁盘上的现状与改后内容：逐文件的路径、前后哈希。
+    /// 已等于改后内容的文件视为已写（`apply_changes` 同样跳过），不必再写，也不入记录。
+    fn target_states(
+        &self,
+        workspace: &Workspace,
+        selected: &[FileChange],
+    ) -> Result<Vec<TargetState>, AppError> {
+        let failed = |e: io::Error| AppError::Apply(format!("无法读取待写的文件：{e}"));
+        let mut targets = Vec::with_capacity(selected.len());
+        for change in selected {
+            let path = workspace.root().join(Path::new(&change.path));
+            let before = digest_of(&path).map_err(failed)?;
+            let after = FileState::Present(sha256_hex(&[change.after.as_bytes()]));
+            if before != after {
+                targets.push(TargetState {
+                    path: change.path.clone(),
+                    before,
+                    after,
+                });
+            }
+        }
+        Ok(targets)
+    }
+
+    /// 本次准奏的恢复记录：本次写入的文件前后哈希，以及追加事件后事件簿应有的样子。
+    fn recovery_record(
+        &self,
+        workspace: &Workspace,
+        selected: &[FileChange],
+        task: TaskId,
+        skipped: &[u32],
+        known: usize,
+        event: &CourtEvent,
+    ) -> Result<RecoveryRecord, AppError> {
+        let generation = workspace.generation().map_err(workspace_error)?;
+        let targets = self.target_states(workspace, selected)?;
+        // 记录所覆盖的是追加之后事件簿的前若干条：基础条数取事件簿本身报出的已知条数；
+        // 报不出时退而用本次准奏开头的条数 `known`（`reload` 刚读过，二者通常相同）。
+        let base = self
+            .store
+            .known_events()
+            .map_err(|e| AppError::Apply(e.to_string()))?
+            .unwrap_or(known);
+        // 这一批还可能多记一条时辰（见 `commit`），故按可能的最长批次算。
+        let expected_events = base as u64 + 2;
+        // 文件事件簿报得出前至多 `expected_events` 条的摘要与整本长度；内存事件簿报不出，
+        // 此时记 0 与本次已知历史的摘要（`history` 与事件簿前 `base` 条一致，见 `Session::history`），
+        // 记录仍自洽，只是不足以核对文件。
+        let history_sha256 = match self
+            .store
+            .history_sha256_at_most(expected_events as usize)
+            .map_err(|e| AppError::Apply(e.to_string()))?
+        {
+            Some(sha) => sha,
+            None => {
+                // 与文件事件簿的摘要口径一致：每行以换行符结尾。
+                let history = self.history()?;
+                let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+                for recorded in history.iter().take(base) {
+                    ctx.update(ziyuan_storage::encode_event_line(recorded).as_bytes());
+                    ctx.update(b"\n");
+                }
+                ctx.finish()
+                    .as_ref()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            }
+        };
+        let expected_bytes = self
+            .store
+            .history_bytes()
+            .map_err(|e| AppError::Apply(e.to_string()))?
+            .unwrap_or(0);
+        let mut encoded_events = Vec::with_capacity(2);
+        if self.store.stamps_time() {
+            let at = crate::time::now();
+            if self.clock.is_none_or(|t| t / 60 != at / 60) {
+                encoded_events.push(ziyuan_storage::encode_event_line(&CourtEvent::Clock(at)));
+            }
+        }
+        encoded_events.push(ziyuan_storage::encode_event_line(event));
+        Ok(RecoveryRecord {
+            operation_id: new_operation(),
+            workspace: record_path(workspace.root()),
+            generation_before: generation,
+            generation_after: generation + 2,
+            state: RecordState::Published,
+            application: ApplicationSource {
+                task: task.0,
+                changes_version: "v1".into(),
+                skipped: skipped.to_vec(),
+            },
+            events: EventBatch {
+                expected_events,
+                expected_bytes,
+                history_sha256,
+                encoded_events,
+            },
+            targets,
+        })
+    }
+
+    /// 一笔受管事务的写入：工作区锁 → 世代号 → 恢复记录 → 写文件 → 记事件 → 收尾。
+    ///
+    /// 顺序是有意为之：恢复记录先于任何文件落地，所以只要文件可能被写过，盘上就有一份
+    /// 带校验和、写着前后内容的记录可供核对。写文件或记事件失败时**不作任何修补**——
+    /// 「已发布」的记录与奇数世代号原样留下，之后的写入一律被拒（见 `ensure_writable`），
+    /// 由 `ziyuan text recovery` 收尾。反之，在还没动到任何文件之前就能断定的失败
+    /// （工作区不可写、先前供改动、路径越界）一律在此之前返回：世代号不推进，也不留记录，
+    /// 免得一次本来就没写的准奏把工作区锁死。
+    fn write_transaction(
+        &mut self,
+        root: &Path,
+        selected: &[FileChange],
+        task: TaskId,
+        skipped: Vec<u32>,
+        known: usize,
+        event: CourtEvent,
+    ) -> Result<(), AppError> {
+        // 根目录尚不存在时，既有行为会在写文件时建出目录；工作区须先有根才能打开。
+        if !root.is_dir() {
+            std::fs::create_dir_all(root).map_err(|e| AppError::Apply(e.to_string()))?;
+        }
+        // 工作区不可用（如给的不是目录）时，沿用落盘失败的说法。
+        let workspace = Workspace::open(root).map_err(|e| AppError::Apply(e.to_string()))?;
+        // 锁外先查一次：已有未收尾的写入时立刻拒绝，不必等锁；
+        // 锁内再查一次：锁外到锁内之间记录或世代号可能已被别的进程改动。
+        let unusable = |e: WorkspaceError| AppError::Apply(blocked(e.to_string()));
+        workspace.ensure_writable().map_err(unusable)?;
+        let mut guard = workspace
+            .lock(LockScope::Workspace)
+            .map_err(workspace_error)?;
+        workspace.ensure_writable().map_err(unusable)?;
+
+        let record = self.recovery_record(&workspace, selected, task, &skipped, known, &event)?;
+        let operation = record.operation_id.clone();
+        // 写前先按落盘方的规矩核一遍（自呈报以来有没有被改动、路径是否越界）：这一关不过就
+        // 一处也不会写，因此连世代号都不必推进，更不留恢复记录——不会因此把工作区卡住。
+        // 真正的写入仍由下面的 `apply_changes` 负责，这里只是让必然的失败发生在发布记录之前。
+        let preflight = selected.iter().try_for_each(|change| {
+            match ziyuan_runtime::tools::base_state(root, change) {
+                Ok(ziyuan_runtime::tools::BaseState::Changed) => {
+                    Err(format!("{} 自呈报以来已被改动，拒绝落盘", change.path))
+                }
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        });
+        if let Err(reason) = preflight {
+            return Err(AppError::Apply(reason));
+        }
+        // 清掉上次崩溃留下的「已收尾」记录（世代号已回偶数，不挡写入），免得发布时相撞。
+        let swept = workspace
+            .pending_record()
+            .map_err(workspace_error)?
+            .is_some();
+        if swept {
+            guard.remove_record().map_err(workspace_error)?;
+        }
+        // 先推进世代号，再发布记录：崩溃留下的定是「记录已发布、世代号为奇数」。
+        guard.reserve().map_err(workspace_error)?;
+        if let Err(error) = guard.publish(&record) {
+            // 发布失败：尽力把世代号推回偶数，免得一个没写成的记录把工作区卡死。
+            let _ = guard.finish();
+            return Err(AppError::Apply(match swept {
+                // 已清掉「已收尾」的记录：上一次收尾不完整，须核对后再写。
+                true => format!(
+                    "收尾上次受管写入后发布本次恢复记录失败（{error}），已恢复世代号；请核对项目文件后重试"
+                ),
+                false => format!("无法写入恢复记录：{error}"),
+            }));
+        }
+
+        // 从这里起，盘上已有「已发布」的记录；真的动到文件之后失败（写不进去、记事件不成）
+        // 即原样留下，不作修补：下一次写入会因之被拒，须先经 `ziyuan text recovery` 核对并收尾。
+        // 守卫随函数结束而释放，世代号保持奇数。
+        ziyuan_runtime::tools::apply_changes(root, selected)
+            .map_err(|e| AppError::Apply(e.to_string()))?;
+        self.commit(|_| Ok(vec![event.clone()]))?;
+
+        // 收尾：记录转为「已完成」、世代号回偶数、删掉记录。
+        guard.complete(&operation).map_err(workspace_error)?;
+        guard.finish().map_err(workspace_error)?;
+        guard.remove_record().map_err(workspace_error)?;
         Ok(())
     }
 }
