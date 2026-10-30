@@ -1,4 +1,5 @@
 /target/
+/.worktrees/
 /.ziyuan/
 **/*.rs.bk
 .DS_Store
