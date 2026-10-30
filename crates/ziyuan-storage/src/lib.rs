@@ -8,8 +8,10 @@ use ziyuan_core::CourtEvent;
 
 mod codec;
 pub mod json_file;
+pub mod workspace;
 
 pub use json_file::{JsonFile, JsonFileError, Stored};
+pub use workspace::{LockScope, Workspace, WorkspaceError, WriteGuard};
 
 #[derive(Debug)]
 pub enum StorageError {

@@ -20,6 +20,8 @@
 
 ## Chunk 1: 存储层工作目录写锁与提交世代号
 
+**执行状态：已实现并通过 Windows 验证及两阶段代码审查。** 下方复选框保留原计划步骤，实际执行结果及测试先行偏差以文末执行记录为准；未据此声明 Unix 验收完成。
+
 **Files:**
 - Create: `crates/ziyuan-storage/src/workspace.rs`（写锁、世代号、协议标记及其测试）
 - Modify: `crates/ziyuan-storage/src/lib.rs:8-11`（声明模块并导出）
@@ -841,3 +843,14 @@ mod fault {
 - Create: `docs/acceptance/1.2.1.md`（版本号在此确定）
 
 任务：写明支持边界（本地磁盘、遵守协议的紫垣进程、外部改动检测后拒绝、不与旧版本混用）、新参数与状态码、恢复步骤与人工停机恢复；Windows 本机全量检查，Linux／macOS 以 CI 结果记录，未覆盖的场景如实列为未测。
+
+## 执行记录（2026-10-31）
+
+- main 的既有 CI `41100667588` 已完成且成功，对应 `3a910d4bad87728d56a072c62d59bc376e4a0091`；不是本次未推送改动的 CI 结果。
+- Chunk 1 实现采用 `Arc<PathBuf>` 共享规范化根路径，持锁句柄拥有 Workspace；`begin`／`finish` 接收可变句柄，显式表达写入动作。规格审查认为不改变协议。
+- 工作目录根身份仍使用标准库 canonicalize，后续版本摘要必须复用同一路径；静态 Windows reparse point 也拒绝，不只检查符号链接。
+- 测试先行过程的实际限制：根／锁 API 首轮 RED 为缺少 API 的编译失败；世代号有真实行为断言失败再通过的记录。跨进程、压力、路径防护等补充测试对前一轮实现直接通过，不能声称每项补充测试均见证过失败。保留这些覆盖，不用事后伪造历史来满足计划文字。
+- 定向验证：Windows 的存储单元测试 37 通过（其中工作目录模块 13 个），doc-tests 0；格式检查与 `cargo clippy -p ziyuan-storage --all-targets --locked -- -D warnings` 通过。日志位于 `D:/rust-project/ziyuan/target/workspace-lock-{test,clippy,fmt}.log`。
+- Windows 全工作区验证通过：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked --no-fail-fast` 均退出 0；28 组结果合计 314 个测试通过、0 失败，包含 0 个用例的 doc-tests 组。日志位于 `D:/rust-project/ziyuan/target/workspace-lock-full-{fmt,clippy,test}.log`。
+- 规格审查与随后独立的代码质量审查均批准，未发现阻塞性问题；Unix 专用符号链接测试已编写但在本机未运行，尚不能据此声称 Linux／macOS 验收通过。
+- 目前只实现基础设施；恢复记录、通用准奏、译书材料写入、CLI／Web 版本与错误映射及向量记忆库仍未实现。
