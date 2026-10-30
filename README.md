@@ -2,98 +2,67 @@
 
 [![CI](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/YuuUehara/Ziyuan)](https://github.com/YuuUehara/Ziyuan/releases/latest)
 
-> **Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
+> 用 Rust 编写的多智能体协作工具：你提出任务、分配权限、审阅结果，再决定是否把改动写入文件。界面和角色借用了中国古代朝廷的称呼。
 
-**当前版本 v1.0.0（稳定版）。** 沿用 rc.4 已验收的运行时，不新增功能；兼容承诺限于[稳定性约定](docs/stability.md)列出的接口，ChatGPT 订阅与 HTTP MCP 仍为实验性，内部 Rust API 与 Web 页面不在冻结范围内。CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
+**当前稳定版为 v1.0.0。** 可以用命令行、Web 或终端界面管理任务，查看执行记录，并在批准前审阅文件差异。
+
+- **先试用，不必先配置模型**：未设置 `ZIYUAN_LLM_MODEL` 时只演示派工，不会真的分析或修改文件。
+- **接入模型后才执行真实工作**：支持 OpenAI 兼容接口，已有 DeepSeek 实测。默认只能读取项目；修改文件和运行测试要另行授权。
+- **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅后执行 `apply`。
+
+本文中的“皇帝”指用户，“官员”指执行任务的智能体，“诏令”就是任务，“准奏”是批准写入文件。命令名称保持这些约定，不需要先熟悉官制才能使用。
 
 ![奉天门：紫垣的 Web 界面](docs/images/web-overview.png)
 
-## 组件命名
-
-| 名称 | 职能 | 当前状态 |
-| --- | --- | --- |
-| 紫垣 ZiYuan | 项目和整体框架 | Rust Workspace |
-| 廷枢 Tingshu | Agent Runtime / Scheduler | `ziyuan-runtime`：Tokio 调度器（并发上限、超时、撤销）+ Tool Calling |
-| 玉玺 Yuxi | 职权、审批、审计 | `Seal`：每件诏令的工具与查阅范围，随事件簿审计 |
-| 诏令 ZhaoLing | 任务入口 | `Edict` 数据模型 + CLI |
-| 吏部 LiBu | 考绩、升迁 | `review` 评定、`examine` 考绩、`recommend` 荐举（只采信皇帝评定） |
-| 紫禁城 Forbidden City | 可视化与角色扮演 UI | `ziyuan serve`：奉天门 Web 界面；`ziyuan tui`：紫禁城终端界面 |
-
-## 项目结构
-
-```text
-crates/
-  ziyuan-core/        官员、官职、部门、诏令、事件等领域类型
-  ziyuan-governance/  朝廷状态重放、改制、任免与任务路由（规则唯一来源）
-  ziyuan-runtime/     Scheduler、WorkerBackend（Demo / Agent）、Tool Calling Loop、工作区工具（只读与工部受控写）
-  ziyuan-llm/         OpenAI 兼容 Chat Completions Adapter（ureq + serde_json）
-  ziyuan-github/      兵部驿站 · GitHub：issue/PR 入队、回奏写回评论、草稿 PR（凭据只在此使用）
-  ziyuan-storage/     EventStore 接口；文件事件簿与内存事件簿
-  ziyuan-app/         Session 用例层：提议 → 校验 → 持久化 → 更新状态
-  ziyuan-web/         奉天门 Web 界面（axum + 内嵌单页，SSE 实时推送）
-  ziyuan-tui/         紫禁城终端界面（ratatui）
-  ziyuan-cli/         `ziyuan` 命令行（仅解析参数与呈现结果）
-
-docs/                 架构决策与扩展路线
-```
-
 ## 安装
+
+可从 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases/latest) 下载适合系统的压缩包，解压后运行其中的 `ziyuan`（Windows 为 `ziyuan.exe`）。Linux 预编译包需要 glibc 2.35 或更新版本。
+
+也可以从源码安装，需要 Rust 1.89 或更新版本：
 
 ```bash
 cargo install --git https://github.com/YuuUehara/Ziyuan ziyuan-cli --locked   # 安装 `ziyuan` 到 ~/.cargo/bin
 cargo install --path crates/ziyuan-cli --locked                               # 或在本仓库中
 ```
 
-发版（推送 `v*` 标签）时，GitHub Actions 先创建草稿 Release，附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。各包上传后重新下载、核对字节，再在对应原生 runner 验收版本、帮助、离线执行、无效上下文配置拒绝与事件回放；全部通过才公开 Release。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
-
-rc.4 起，Linux GNU 发行包固定在 Ubuntu 22.04 构建，面向 glibc 2.35 或更新环境；常规 CI 与打包前均检查强/弱 GLIBC 需求不超过 2.35，并启动二进制。已发布 rc.3 包保持原样，旧 glibc 上可能出现 `GLIBC_2.39` 弱版本警告；可升级 1.0.0 或从源码在目标环境构建。此基线不等于已验证所有 Linux 发行版或内核。
-
-CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译、Linux GNU 的 glibc 2.35 基线与启动，并在 macOS 与 Windows 上跑全部测试。
+尚未发布到 crates.io；不能直接用 `cargo install ziyuan-cli` 安装正式发行版。
 
 ### 平台支持
 
-| 平台 | 常规功能（下诏、执行、审阅、准奏、驿站、Web/TUI） | 号舍（`run_tests` 与外藩的沙箱） |
+| 平台 | 任务、审阅、GitHub 对接、Web/TUI | 测试命令的隔离环境（“号舍”） |
 | --- | --- | --- |
 | Linux | 支持 | bubblewrap（另装；按域名放行还要 socat） |
 | macOS | 支持 | 系统自带的 Seatbelt |
-| Windows | 支持 | 暂缺：需隔离的执行一律拒绝（fail closed），显式设 `ZIYUAN_SANDBOX=off` 才不入号舍运行，见 [ADR-0001](docs/adr-0001-windows-sandbox.md) |
+| Windows | 支持 | 暂缺，默认拒绝运行需要隔离的命令。设 `ZIYUAN_SANDBOX=off` 会取消隔离，风险见 [ADR-0001](docs/adr-0001-windows-sandbox.md) |
 
 ## 快速开始
 
-要求：Rust 1.89 或更新的稳定版工具链（Rust 2024 edition；事件簿文件锁需要 1.89）。主要第三方依赖：`ureq`、`serde`/`serde_json`、`tokio`，Web 界面的 `axum`、`futures-util`，终端界面的 `ratatui`，ChatGPT 订阅登录校验签名的 `ring`。
+安装后，在一个独立目录试用。下面的命令可在 PowerShell 或常见 Linux/macOS shell 中逐行执行；使用已有目录时不要重新运行 `mkdir`。
 
 ```bash
-cargo fmt --all -- --check
-cargo check --workspace --all-targets --all-features
-cargo test --workspace
-cargo build --workspace
-./scripts/smoke.sh  # 综合验收：改制、任免、派工与持久化
-
-# 建议在单独的演示目录运行，事件日志保存在当前目录
-mkdir -p /tmp/ziyuan-demo
-cd /tmp/ziyuan-demo
-/path/to/ziyuan/target/debug/ziyuan init
-/path/to/ziyuan/target/debug/ziyuan court
-/path/to/ziyuan/target/debug/ziyuan officials
-/path/to/ziyuan/target/debug/ziyuan recruit "新工" works
-/path/to/ziyuan/target/debug/ziyuan appoint 11 clerk:works   # 开国已有 #1–#10，新人为 #11
-/path/to/ziyuan/target/debug/ziyuan edict --dept works "检查 Rust 项目中的 unsafe 代码"
-
-# 朱元璋式：撤销丞相，六部直接承接任务
-/path/to/ziyuan/target/debug/ziyuan reform direct
-/path/to/ziyuan/target/debug/ziyuan edict --dept works "再检查一次"
-
-# 转换为内阁制；新首辅必须由皇帝任命
-/path/to/ziyuan/target/debug/ziyuan reform cabinet
-/path/to/ziyuan/target/debug/ziyuan dismiss 6
-/path/to/ziyuan/target/debug/ziyuan appoint 6 first-secretary
-/path/to/ziyuan/target/debug/ziyuan edict --dept works "请首辅协调调查"
-/path/to/ziyuan/target/debug/ziyuan history
+mkdir ziyuan-demo
+cd ziyuan-demo
+ziyuan init
+ziyuan court
+ziyuan officials
+ziyuan edict --dept works "概述当前目录的文件"
+ziyuan tasks
+ziyuan history
 ```
 
-## 为什么改制不是换一段 Prompt？
+记录保存在当前目录的 `.ziyuan/`。未配置模型时，结果会注明只是演示；若已配置模型，上述任务会读取授权范围内的文件并产生模型费用。
 
-`Court::route` 由确定性代码执行：
+想用图形界面，执行 `ziyuan serve`，再打开终端打印的本机地址。不要把带令牌的地址发给他人。终端界面用 `ziyuan tui` 启动。
+
+接下来可按需要阅读：
+
+- [接入真实模型](docs/guide.md#接入真实模型)：设置模型名称、服务地址和密钥。
+- [让模型修改文件](docs/guide.md#工部动手受控写权限)：授权后先看 `ziyuan diff <任务ID>`，确认后再 `ziyuan apply <任务ID>`。将占位的任务 ID 替换为实际数字，不要直接输入尖括号。
+- [权限与安全](SECURITY.md)：哪些文件会交给模型，哪些操作需要你批准。
+
+## 任务如何分配？
+
+三种制度决定任务经过哪些角色。这些规则由程序执行，不是只在提示中要求模型遵守：
 
 | 制度 | 仿照 | 路线 | 品级（尚书 / 侍郎 / 郎中） |
 |---|---|---|---|
@@ -109,16 +78,36 @@ cd /tmp/ziyuan-demo
 
 内阁制下诏令须先「票拟」再由皇帝「批红」，丞相制下丞相自行派工；详见[内阁、皇权与昏君模式](docs/guide.md#内阁皇权与昏君模式)。
 
-## 关键边界
+## 使用前需要知道
 
-1. **用户是皇帝，官员是 Agent**：皇帝并非一个可由 Prompt 假扮的 Worker，`reform` / `appoint` / `dismiss` 只接受用户 CLI 发出的显式操作。
-2. **身份与官职分开**：官员 ID 在升迁/罢免后不变；Office 表示角色，不是人格，也不是 Runtime 本体。
-3. **治理与执行分开**：`ziyuan-governance` 给出路由，`ziyuan-runtime` 执行。废相不会关闭 Scheduler。
-4. **系统权限不由模型授予**：LLM 以后可以建言，但授权变化必须通过受控接口。
+1. **你决定权限和任免**：模型不能靠一句话把自己变成用户；改制、任免必须通过程序提供的操作入口。
+2. **官员和官职不是一回事**：官员换职后编号不变，便于追查同一执行者的记录。
+3. **改制不等于停止任务**：改制调整分配路线，执行机制仍然保留；停止或撤销任务要用相应操作。
+4. **权限不能由模型自行扩大**：模型可以提出建议，但不能自行授予新的系统权限。
 5. **演示后端不是代码分析**：`DemoBackend` 只验证调度线路，绝不声称已完成真实分析。
-6. **事件簿是版本化文本日志**：`.ziyuan/court.log` 多进程读写由文件锁与乐观并发保护，崩溃留下的残行会被忽略并截掉。常驻进程（TUI、Web）与追加写入只读新增的部分；冷启动从《大明会典》快照（`.ziyuan/huidian`）接着回放其后的事件，整本事件簿只在看起居注等需要时读入；会典只是缓存，对不上就以事件簿为准重修。新版总能读旧事件簿；旧版读到新版写入的事件时，v0.4 起提示升级，更早的版本只报解码失败（已发布的版本改不了），`ziyuan migrate` 由新版查明一本事件簿至少要哪个版本才能打开。
+6. **记录保存在本地**：`.ziyuan/court.log` 保存任务和操作记录，多个进程的写入会协调。`.ziyuan/huidian` 只是加快启动的缓存，损坏时会按记录重建。新版可读旧记录；旧版未必认识新事件，先用 `ziyuan migrate` 检查最低版本要求。
+
+1.0 起的兼容承诺见[稳定性约定](docs/stability.md)。ChatGPT 订阅与 HTTP MCP 仍为实验性；内部 Rust 接口和 Web 页面不在兼容承诺范围内。
 
 支持 `recruit` 动态扩充官员；同部门多个郎中按任务量均衡派工。择优任用通过 `recommend` 给出建议，由皇帝决定是否任命。
+
+## 开发与发布
+
+源码分为十个 crate：`core` 定义任务与角色，`governance` 执行分配规则，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互。完整说明见[体系结构](docs/architecture.md)。
+
+在仓库根目录检查和构建：
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --all-features
+cargo test --workspace
+cargo build --workspace
+bash scripts/smoke.sh
+```
+
+最后一条需要 Bash 及脚本所需的运行环境。常规 CI 还检查 Rust 1.89、Linux glibc 2.35 基线，并在 macOS 和 Windows 上运行测试；具体流程见 `.github/workflows/ci.yml`。
+
+推送与 `Cargo.toml` 版本一致的 `v*` 标签会触发发布：先建草稿，上传四个平台的包，再在对应平台重新下载验证，全部通过才公开。说明取 CHANGELOG 中对应版本一节。Linux GNU 包从 rc.4 起在 Ubuntu 22.04 构建；这不是所有 Linux 发行版都经过验证的承诺。旧 rc.3 包可能在旧 glibc 上提示 `GLIBC_2.39` 警告，请升级或在目标环境从源码构建。
 
 ## 文档
 
@@ -133,7 +122,7 @@ cd /tmp/ziyuan-demo
 - [稳定性约定](docs/stability.md)：1.0 起冻结哪些接口。
 - [CHANGELOG](CHANGELOG.md)：各版变化。
 - [路线图](docs/roadmap.md)：下一版的规划。
-- [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；长篇分块、断点续做与文学质量验收仍属 1.1 计划，不是 1.0 承诺。
+- [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；文本工具正在开发，长篇自动翻译、中断续做和文学质量验收仍是后续安排。
 
 ## 许可
 

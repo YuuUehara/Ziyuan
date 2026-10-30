@@ -1,10 +1,19 @@
 # 紫垣使用指南
 
-README 的「快速开始」之后，各项功能的详细用法都在这里；当前稳定版为 v1.0.0，兼容范围见[稳定性约定](stability.md)。Web 总览、工部奏本（内置与 git-delta 的统一/左右视图）与 DAG 受阻截图来自 v1.0.0-rc.2（2026-10-30）；其余截图保留自 v0.7–v0.10，作相应功能示意，不代表最新界面。上述截图用隔离的演示朝廷与模拟模型生成，不作为真实模型验收证据；rc.3 补图来源另述于下，未为 1.0 重新拍摄。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
+从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。当前稳定版为 v1.0.0，兼容范围见[稳定性约定](stability.md)。
 
-本轮沿用既有截图方法：本机 OpenAI 兼容 SSE 模拟服务经真实 `read_file` / `write_file` 工具暂存两个文件，不直接篡改页面数据；DAG 状态取自 Web 集成测试 `state_exposes_write_dag_dependencies_and_blockers` 的演示事件簿。agent-browser 以天青主题、1500×1000（总览 1500×1200）、2× 像素密度拍摄，再裁剪、缩半为 PNG8（256 色、无抖色、去元数据）。模拟模型名为 `docs-mock`，不含真实密钥。内置图拍于安装 delta 前（按钮不可用）；delta 图使用官方 git-delta 0.20.1 的 Linux x86_64 发行包，以 `ZIYUAN_DELTA` 指定路径后重启服务，确认实际渲染成功、没有回退。
+先记住四个对应关系：**诏令是任务，玉玺是权限设置，回奏是执行结果，准奏是批准把改动写入文件**。界面保留这些名称，操作步骤会同时说明实际作用。
 
-rc.3 另补三主题 delta 对比与「御定排程」截图（2026-10-30）：使用真实 rc.2 验收朝廷的隔离副本，delta 展示保留的基线提案（仅供比较样式，不代表依赖交接修复），排程为经真实 Web API 提交的人工示例，不调用模型。仍用 agent-browser、2× 密度和 PNG8 后处理；桌面与 390px 窄窗口均检查框体、滚动和按钮边界。真实模型交接结果另见 [rc.2 验收记录](rc2-acceptance.md)。
+| 你想做什么 | 先看这里 |
+| --- | --- |
+| 让模型处理真实任务 | [接入真实模型](#接入真实模型) |
+| 用浏览器操作 | [Web 界面](#奉天门web-界面) |
+| 修改文件前先审阅 | [受控写权限](#工部动手受控写权限) |
+| 限制费用和调用量 | [预算与限额](#户部度支预算与限额) |
+| 理解哪些内容可能发给外部服务 | [安全说明](../SECURITY.md) |
+| 翻译日文或英文 | [小说翻译指南](novel-translation.md) |
+
+代码结构和实现取舍见 [architecture.md](architecture.md)。本指南主要用 Bash 示例；PowerShell 设置变量要用 `$env:变量名 = '值'`，不要直接照抄 `export`。示例中的任务 ID 都要换成当前项目的实际编号；同一任务的 `apply`、`discard` 等操作是不同选择，不要依次全执行。
 
 ## 接入真实模型
 
@@ -16,6 +25,19 @@ export ZIYUAN_LLM_PRICE=2,8                              # 可选：每百万 to
 cd /path/to/your/project && ziyuan init
 ziyuan edict --dept works "找出所有 unsafe 代码并说明用途"
 ```
+
+PowerShell 中可以这样设置。密钥请在本机私下输入，不要复制进共享脚本、任务描述或截图：
+
+```powershell
+$env:ZIYUAN_LLM_MODEL = 'deepseek-flash'
+$env:ZIYUAN_LLM_BASE_URL = 'https://api.deepseek.com/v1'
+# 在本机设置 ZIYUAN_LLM_API_KEY 后，再运行任务；不要把真实密钥提交到仓库。
+Set-Location 'D:/你的项目'
+ziyuan init
+ziyuan edict --dept works '找出所有 unsafe 代码并说明用途'
+```
+
+已有 `.ziyuan/` 的项目不需要再 `init`。未设置模型时只是演示；设置后会发送真实请求，可能产生费用。
 
 **实测情况（2026-10）：** 已用 DeepSeek `deepseek-flash`（默认思考模式）与 `deepseek-v4-pro` 端到端实测：多轮工具调用、流式输出、玉玺越权拦截、超时与 Ctrl-C 撤销均正常；v0.7.0 又跑通了工部改代码的全程（改动暂存并跑测试 → 都察院背书 → `apply --commit` 落盘提交 → 评定），一件约 1.4 万 tokens。思考模式的思维链（`reasoning_content`）不显示，但会按 DeepSeek 要求在后续请求中回传。
 
@@ -64,16 +86,16 @@ ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 
 单件诏令最多 12 步模型调用（`ZIYUAN_MAX_STEPS` 可改）。模型调用失败、超时或被撤销都会记入事件簿（`TaskFailed` / `TaskCancelled`），每次工具调用也记为 `ToolInvoked`（参数与成败，不含输出），可用 `ziyuan history` 审计。
 
-**Agent Loop 的生产化处理：**
+**调用失败、调用次数与上下文：**
 
 - **重试与退避**：网络错误、429 与 5xx 最多重试 3 次（`ZIYUAN_LLM_RETRIES`），间隔 1、2、4 秒，服务端给了 `Retry-After` 就照办（最长 30 秒），退避中也能撤销。4xx 与已开始的流式响应不重试，以免回奏重复。
-- **trace ID**：每次模型调用带请求头 `X-Client-Request-Id: zy-…`（重试沿用）；失败原因里附上 trace ID、服务端的请求 ID 与已重试次数，便于对照服务商日志。
+- **请求编号**：每次模型调用带请求头 `X-Client-Request-Id: zy-…`（重试沿用）；失败原因里附上编号和已重试次数，便于向服务商查询。
 - **步数**：用尽时不直接判失败，而是收回工具，请官员据已查阅的内容回奏，回奏以「〔步数用尽，据已查阅的内容回奏〕」开头，没查完的列入「未办之事」。
-- **度支预判**：每次调用前预计输入（首次按字数估算，之后按服务端报告的上次用量加上新增内容，另留两成余量）。余额不够就不发请求（「度支将尽」），余额将尽时向 API 传输出上限（OpenAI 用 `max_completion_tokens`，其他服务用 `max_tokens`），输出不会超支。
+- **预算预估**：调用前估算输入用量，余额不够就不发请求，余额将尽时尽量限制输出长度。估算不一定准确，服务商也可能不按输出限制执行，所以这不是账单硬上限，实际用量仍会照实记账。并发预留规则见[预算与限额](#户部度支预算与限额)。
 - **节略**：默认对话估算超过 48000 tokens 时，从最早的起把工具输出压成开头 200 字加一行说明（仍在外来文书边界内），最近 4 份不动。不调用模型。rc.4 起可设 `ZIYUAN_CONTEXT_TOKENS` 为正整数覆盖触发阈值；CLI、Web、TUI 启动时读取，服务须重启才生效。它不是模型硬窗口、输出上限或度支预算，最近四份输出保留也意味着节略后未必低于阈值；按所选模型能力留出提示、工具与输出余量。
 - **参数校验**：工具参数须是合法 JSON，并合乎工具声明的 JSON Schema（类型、必填、不许多余字段）；不合的不执行，作为工具错误退回模型，审计记为失败。
 
-小说分块、日语/英语真实小样、术语核验和人工校对流程见 [小说翻译场景指南](novel-translation.md)。短样本已实测，长篇项目、断点续做与连续章节文学验收仍为 1.1 计划；软件的 MIT / Apache-2.0 许可不授权第三方原文、译文或书库品牌，上传与再分发权利须另行核对。
+小说翻译的日语／英语短样本、术语检查和人工校对流程见[场景指南](novel-translation.md)。1.1.0 首批计划是本地文本整理与检查，不包含自动翻译长篇或断点续做。上传原文与再分发译文的权利须另行核对。
 
 ## 奉天门：Web 界面
 
@@ -119,7 +141,7 @@ cd /path/to/your/project && ziyuan tui
 ## 命令行：JSON 与补全
 
 ```bash
-ziyuan officials --json | jq '.[] | select(.office) | .name'   # 与 Web /api/state 同构
+ziyuan officials --json | jq '.[] | select(.office) | .name'   # 在官员列表中筛选；完整状态用 court --json
 ziyuan history --json | jq -r '.[-1].text'                     # [{seq, text}]
 ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan
 ziyuan completions zsh > ~/.ziyuan.zsh   # 借 bashcompinit；在 ~/.zshrc 的 compinit 之后加一行 source ~/.ziyuan.zsh
@@ -478,7 +500,7 @@ jj git fetch && jj rebase -d main@origin
 jj bookmark set my-feature -r @- && jj git push -b my-feature
 ```
 
-提交前请运行上方的 fmt / check / test 与 `scripts/smoke.sh`。
+提交前请运行 README 中[开发与发布](../README.md#开发与发布)列出的格式检查、编译与测试；`scripts/smoke.sh` 需要 Bash 环境。
 
 也可以进入项目根目录并使用 `cargo run -p ziyuan-cli -- <子命令>`，但请注意：**事件簿创建在当前工作目录**，不是源码自动定位的目录。
 
@@ -507,3 +529,11 @@ jj bookmark set my-feature -r @- && jj git push -b my-feature
 - 考成簿多出一行「御前：怠政」，记着代批了多少件。史官记取材嘉靖修玄、万历三十年不上朝；回朝时轮到海瑞的《治安疏》。
 
 **史官记：** 改制时附一段史事（彩蛋）。改为内阁制是「侄儿，四叔来看你了」；从内阁改回丞相制是土木堡之变，「大元，杀回来了」；从亲政复设丞相要先看《皇明祖训》。
+
+## 截图来源与验证范围
+
+Web 总览、文件审阅与任务依赖截图来自 v1.0.0-rc.2（2026-10-30）；其余部分截图来自 v0.7–v0.10，不代表最新界面。这些演示截图不是实际模型能力的证明，1.0 发布时没有重新拍摄。
+
+rc.2 截图使用本机模拟服务，通过真实 `read_file` / `write_file` 工具暂存两个文件；依赖状态取自集成测试 `state_exposes_write_dag_dependencies_and_blockers` 的演示记录。模拟模型名为 `docs-mock`，无真实密钥。使用 agent-browser、天青主题、1500×1000（总览 1500×1200）与 2× 像素密度；裁剪缩半后转为 PNG8。内置预览图拍于安装 delta 前；delta 图使用官方 git-delta 0.20.1 Linux 包，设置 `ZIYUAN_DELTA` 后重启并确认没有回退到内置预览。
+
+rc.3 的三主题 delta 与“御定排程”截图（2026-10-30）来自真实验收记录的隔离副本。delta 使用保留的基线提案，仅供比较样式；排程是人工通过真实 API 提交的示例，不调用模型。桌面与 390px 窄窗口检查过框体、滚动及按钮，采用同样的截图处理。真实模型的任务交接结果另见 [rc.2 验收记录](rc2-acceptance.md)。
