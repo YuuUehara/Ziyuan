@@ -6,6 +6,7 @@ mod backend;
 mod commands;
 mod help;
 mod output;
+mod subscription_commands;
 mod text_commands;
 
 use std::env;
@@ -82,6 +83,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     // 文本项目与朝廷无关：在打开事件簿、会话或模型后端之前分派。
     if let Command::Text(action) = command {
         return text_commands::run(action, json);
+    }
+    // 作品关注同样与朝廷无关，也不读模型配置。
+    if let Command::Follow(action) = command {
+        return subscription_commands::run(action, json);
     }
     let log = EventLog::new(&env::current_dir()?);
     if json && matches!(command, Command::Migrate) {

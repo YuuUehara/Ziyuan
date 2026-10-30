@@ -106,7 +106,12 @@ pub(crate) const HELP: &str = concat!(
   ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]
                                        离线文本项目：导入 TXT、按段分块、检查候选译稿结构（不需 init，不调用模型；
                                        只查结构，不评判译文质量）；`ziyuan text help` 查看完整说明
-  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp|text> --json
+  ziyuan follow add <作品链接|作品代码>
+  ziyuan follow list | remove <作品链接|作品代码> | check | updates [--all] | read <提醒ID>
+                                       作品关注：关注 syosetu 作品，手动检查章节更新并列出提醒（不需 init，
+                                       不调用模型，只查作品信息不下载正文；不会在后台自动检查）；
+                                       `ziyuan follow help` 查看完整说明
+  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp|text|follow> --json
                                        以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
   ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
   ziyuan help
@@ -229,6 +234,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "recommend",
     "completions",
     "text",
+    "follow",
 ];
 
 /// 支持 `--json` 的子命令。
@@ -242,6 +248,7 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "flags",
     "mcp",
     "text",
+    "follow",
 ];
 
 /// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
@@ -288,6 +295,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
          text) words="init import show check help --json" ;;
+         follow) words="add list remove check updates read help --all --json" ;;
          apply) words="--skip --commit" ;;
          {json_cases}) words="--json" ;;
        esac ;;
@@ -322,6 +330,11 @@ complete -F _ziyuan ziyuan
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
                 format!("{} -a 'init import show check help'", seen("text")),
+                format!(
+                    "{} -a 'add list remove check updates read help'",
+                    seen("follow")
+                ),
+                format!("{} -l all", seen("follow")),
                 format!("{} -l json", seen(&json)),
                 format!(
                     "{} -l dept -x -a '{departments}'",
