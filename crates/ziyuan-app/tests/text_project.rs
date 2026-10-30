@@ -367,3 +367,30 @@ fn original_tamper_and_newer_manifest_refuse_show_and_candidate_check() {
     );
     assert!(f.service().check(&p.id, "c0001-b0001", b"{}").is_err());
 }
+
+#[test]
+fn rejects_text_too_large_for_one_project_before_staging() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let body = (0..400)
+        .map(|i| format!("第{i}段。"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let src = f.file("long.txt", body);
+    let service = TextProjects::new(&f.0).with_manifest_limit(16 * 1024);
+    let err = service.import(&p.id, &[src]).unwrap_err().to_string();
+    assert!(err.contains("拆成多个项目"), "{err}");
+    let dir = service.project_dir(&p.id).unwrap();
+    let staged = fs::read_dir(&dir)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".import-")
+        })
+        .count();
+    assert_eq!(staged, 0);
+    assert!(service.show(&p.id).unwrap().chapters.is_empty());
+}

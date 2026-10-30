@@ -18,13 +18,20 @@ const MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct TextProjects {
     root: PathBuf,
+    manifest_bytes: u64,
 }
 impl TextProjects {
     /// `workspace` is the user's project/workspace directory, not `.ziyuan` itself.
     pub fn new(workspace: impl AsRef<Path>) -> Self {
         Self {
             root: workspace.as_ref().join(".ziyuan/text-projects"),
+            manifest_bytes: MANIFEST_BYTES,
         }
+    }
+    #[doc(hidden)]
+    pub fn with_manifest_limit(mut self, bytes: u64) -> Self {
+        self.manifest_bytes = bytes;
+        self
     }
     pub fn project_dir(&self, id: &str) -> Result<PathBuf> {
         valid_id(id)?;
@@ -37,7 +44,11 @@ impl TextProjects {
         {
             return Err(invalid("项目路径必须为普通目录"));
         }
-        Ok(JsonFile::new(dir.join("project.json"), 1, MANIFEST_BYTES))
+        Ok(JsonFile::new(
+            dir.join("project.json"),
+            1,
+            self.manifest_bytes,
+        ))
     }
     pub fn create(&self, metadata: NewProject) -> Result<Project> {
         validate_metadata(&metadata)?;
@@ -97,19 +108,41 @@ impl TextProjects {
                     return Err(invalid("无效分块上限"));
                 }
                 let bundle = format!(".import-{}", random_id()?);
-                let stage = dir.join(&bundle);
-                fs::create_dir(&stage)?;
-                fs::create_dir(stage.join("originals"))?;
-                fs::create_dir(stage.join("blocks"))?;
                 let mut snapshots = Vec::new();
                 for (i, path) in sources.iter().enumerate() {
                     let chapter_id = format!("c{:04}", i + 1);
                     let source = Source::read(path)?;
                     let paragraphs = split_paragraphs(&chapter_id, &source.bytes)?;
                     let blocks = chunk_paragraphs(&chapter_id, &paragraphs, limit)?;
-                    let original_path = format!("{bundle}/originals/{chapter_id}.txt");
-                    write_new(&dir.join(&original_path), &source.bytes)?;
-                    for block in &blocks {
+                    project.chapters.push(Chapter {
+                        original_path: format!("{bundle}/originals/{chapter_id}.txt"),
+                        id: chapter_id,
+                        source_name: path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        sha256: sha256(&source.bytes),
+                        byte_len: source.bytes.len(),
+                        paragraphs,
+                        blocks,
+                    });
+                    snapshots.push(source);
+                }
+                // Checked before staging so an oversized import leaves no hidden copy behind.
+                if estimated_manifest_bytes(&project)? > self.manifest_bytes {
+                    return Err(invalid(format!(
+                        "这些原文合计太长，项目记录会超过 {} MiB 上限；请按卷或章节范围拆成多个项目分别导入",
+                        self.manifest_bytes / (1024 * 1024)
+                    )));
+                }
+                let stage = dir.join(&bundle);
+                fs::create_dir(&stage)?;
+                fs::create_dir(stage.join("originals"))?;
+                fs::create_dir(stage.join("blocks"))?;
+                for (chapter, source) in project.chapters.iter().zip(&snapshots) {
+                    write_new(&dir.join(&chapter.original_path), &source.bytes)?;
+                    for block in &chapter.blocks {
                         write_new(
                             &stage
                                 .join("blocks")
@@ -117,20 +150,6 @@ impl TextProjects {
                             &block.serialized()?,
                         )?;
                     }
-                    project.chapters.push(Chapter {
-                        id: chapter_id,
-                        source_name: path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        original_path,
-                        sha256: sha256(&source.bytes),
-                        byte_len: source.bytes.len(),
-                        paragraphs,
-                        blocks,
-                    });
-                    snapshots.push(source);
                 }
                 // Recheck every source, including earlier chapters, immediately before publication.
                 for snapshot in &mut snapshots {
@@ -188,6 +207,13 @@ impl TextProjects {
     }
 }
 
+/// Upper bound for the stored envelope: it nests `project` one level deeper (two more spaces
+/// per line) and adds a few header fields.
+fn estimated_manifest_bytes(project: &Project) -> Result<u64> {
+    let body = serde_json::to_vec_pretty(project).map_err(|e| invalid(e.to_string()))?;
+    let lines = body.iter().filter(|&&b| b == b'\n').count() + 1;
+    Ok((body.len() + lines * 2 + 256) as u64)
+}
 fn validate_metadata(m: &NewProject) -> Result<()> {
     if m.title.trim().is_empty() {
         return Err(invalid("标题不能为空"));
