@@ -1,0 +1,44 @@
+# 1.0.0-rc.4 发布包验收
+
+2026-10-30 完成。验收对象是从 GitHub Release 下载的 Linux GNU 包，不是本地替代构建；仍为候选版，不宣称完成长篇小说质量验收。
+
+## 发布与身份
+
+- [v1.0.0-rc.4](https://github.com/YuuUehara/Ziyuan/releases/tag/v1.0.0-rc.4) 为 prerelease，未替换 rc.3 或提升为稳定版。
+- 标签指向 [e462683825b0](https://github.com/YuuUehara/Ziyuan/commit/e462683825b0039d93d69975b82e8c3b798229ec)，包含发布版本和版权边界说明。
+- [最终提交 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41026728010) 六项通过；[Release 工作流](https://github.com/YuuUehara/Ziyuan/actions/runs/41027040121) 创建和四个平台构建全部通过。
+- 四个非空资产：Linux x86_64 GNU、macOS x86_64、macOS aarch64、Windows x86_64 MSVC。macOS / Windows 有 CI 测试和构建记录，但本次没有在本地执行其下载包。
+- Linux 压缩包 SHA-256：`a39b4ae2597d45170dac0934f7542c9b4f4c6a90655c0ec5d907daa424becc6f`，与 GitHub asset digest 完全一致；包内二进制 SHA-256：`11209e6aac5ce5ed75cdd818323071ffa7de33ff0830ad068c5542380eec6b1d`。
+
+## glibc：旧包失败，新包通过
+
+同一 `scripts/check-linux-compat.sh` 用 `readelf --wide --version-info` 检查全部数字 GLIBC 引用，包括 WEAK，再实际执行 `--version`。
+
+- 对照 rc.3 官方包：检查退出 1，最高引用 `GLIBC_2.39`，超过 2.35 基线。旧包即使启动退出 0，也会在本 orb 的 glibc 2.36 环境报告弱版本缺失；因此只测启动退出码不足以验收。
+- rc.4 官方下载包：最高强／弱引用 `GLIBC_2.34`，无 `GLIBC_2.39`，检查退出 0。`--version` 精确输出 `ziyuan 1.0.0-rc.4`，stderr 为空。
+- Release 的 Ubuntu 22.04 runner 对打包前的同一二进制执行检查和启动，均通过；本地下载后在 Debian glibc 2.36 上再次通过。支持声明仍采用已固定的 glibc 2.35 基线，不因最高符号是 2.34 就扩大兼容范围。
+
+## 上下文：下载包经真实 CLI 和工具执行
+
+在临时隔离工作区执行 `init` → `edict --queue` → `run` → `court --json`。仅模型端替换为本地确定性 SSE 服务，不调用付费模型；真实二进制、后端、工具和事件簿全部参与。服务要求连续六次 `read_file`，每次返回 12,000 个汉字，直接检查下一次模型请求实际收到的六份工具输出，而不是只看配置日志。
+
+- 未设置阈值（默认 48000）：收到的正文长度为 `[200, 200, 12000, 12000, 12000, 12000]`。
+- `ZIYUAN_CONTEXT_TOKENS=96000`：六份均保留 12,000 字；同一脚本对 rc.3 官方包的 96000 用例失败，旧包仍节略前两份。
+- 阈值 `1`：前两份节略为 200 字，最近四份仍完整，验证低阈值不能覆盖近期输出保护。
+- 最大 u64 `18446744073709551615`：后端接受并完成执行，六份完整。四组任务均完成，每组六次工具调用、零失败。
+- 空值、`0`、`-1`、`1.5`、`abc`、u64 溢出值：有待办任务的 `run` 均在执行前退出 1，已持久化文件内容不变；`serve` / `tui` 用 `0` 启动也拒绝，事件簿不变。Web 启动可先创建本地令牌文件，此检查不宣称所有前端配置文件均不变。
+- 下载包的 `--help` 包含环境变量和默认值；每组后端日志给出的阈值与输入一致。
+
+这验证的是**旧工具输出的节略触发阈值**，不是模型硬窗口、token 预算或输入上限；不保证节略后低于阈值，也不证明长篇翻译无损。Web / TUI 本次只检查非法值的启动拒绝，未做正向界面交互验收。
+
+## 翻译指南版权边界
+
+[小说翻译指南](novel-translation.md#发布前版权核对2026-10-30) 已核对青空图书卡／利用规准、Gutenberg #11 文件内完整许可及现行许可说明，补齐底本、输入／校对署名与再分发边界。仓库只提交指南和短定位引文，没有提交原文、完整译文或模型校对报告；Linux 包仅含程序、README 和软件许可证。
+
+当前指南范围内未发现明显的第三方现代译本侵权问题，不作全球零风险保证或法律意见。不同地区的保护期、现代附加内容、书库品牌条款、模型上传权限及商业出版仍需逐项核对；软件的 MIT / Apache 许可不能授权第三方文学作品。
+
+## 本地证据与复核
+
+本次证据在被 Git 忽略的 `.amp/in/artifacts/rc4-acceptance/`，不是发行包附带文件：`release-metadata.json`、`release-result.json`、`ci-final.json`、`download-glibc.log`、`linux-release-runner.log`、`download-context.log`、`result.json`、`invalid-config.json` 和两个 `rc3-*-control.log`。
+
+`context-download.py` 的参数为待测二进制绝对路径，重跑会覆盖同目录的结果；脚本自动关闭 SSE 服务并清理临时工作区。初次本地校验曾因证据快照键路径错误产生 `KeyError`，已修正并保留失败日志；它不是产品失败，正式下载包的验收在修正后重新完整执行。
