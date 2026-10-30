@@ -1198,7 +1198,10 @@ mod tests {
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");
         assert_eq!(crate::release_name(12), "1.0.0-rc.2");
-        assert_eq!(crate::release_name(12), env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            crate::RELEASES.last().copied(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
     }
     #[test]
     fn event_round_trip_chinese_and_tabs() {
