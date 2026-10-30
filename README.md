@@ -123,7 +123,8 @@ bash scripts/smoke.sh
 - [CHANGELOG](CHANGELOG.md)：各版变化。
 - [路线图](docs/roadmap.md)：下一版的规划。
 - [整理原文与检查译稿](docs/text-projects.md)：1.1 开发分支的离线文本工具，已发布的 1.0.0 不包含这些命令。
-- [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；文本工具正在开发，长篇自动翻译、中断续做和文学质量验收仍是后续安排。
+- [作品更新提醒](docs/subscriptions.md)：1.1 开发分支的 syosetu 关注列表、检查与 Web 定时设置，不下载正文。
+- [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；开发分支新增文本整理工具，长篇自动翻译、中断续做和文学质量验收仍是后续安排。
 
 ## 许可
 

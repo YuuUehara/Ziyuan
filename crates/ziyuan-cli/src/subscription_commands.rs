@@ -25,7 +25,8 @@ pub(crate) const FOLLOW_HELP: &str = r#"作品关注（不需要 ziyuan init，�
   ziyuan follow read <提醒ID>          把一条提醒标为已读
   取消未关注的作品或标记不存在的提醒时，退出码 1（--json 仍输出 "found": false）。
   以上命令均可加 --json，以 JSON 输出到标准输出。列表存于 .ziyuan/subscriptions/state.json。
-  不会在后台自动检查；官方信息约有数分钟至两小时的延迟，R18 与被搜索排除的作品查不到。"#;
+  此命令退出后不会在后台检查；需要定时检查时，在运行中的 Web 服务中开启。
+  官方信息约有数分钟至两小时的延迟，R18 与被搜索排除的作品查不到。"#;
 
 pub(crate) enum FollowAction {
     Help,
