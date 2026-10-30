@@ -6,11 +6,12 @@ use crate::edicts::{ChangeState, Changes, check_criteria};
 use crate::exam::{ExamRecord, PalaceExam};
 use crate::offices::validate_edict_seal;
 use crate::templates::TemplateUse;
+use crate::translation::Signoff;
 use crate::{Court, GovernanceError, Task, TaskStatus};
 use std::collections::{BTreeMap, BTreeSet};
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, CourtEvent, Department, Edict, GovernanceMode, Office, TaskId,
-    TokenUsage,
+    TokenUsage, TranslationLink,
 };
 
 /// 开局（丞相制）：丞相一人；吏部、工部各有尚书与郎中，户、礼、兵、刑四部各有尚书一人（本部无郎中时
@@ -106,6 +107,7 @@ impl Court {
             canings: BTreeMap::new(),
             courtesy_names: BTreeMap::new(),
             art_names: BTreeMap::new(),
+            translation_signoffs: BTreeMap::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -260,6 +262,7 @@ impl Court {
                         pull_request_op: None,
                         urgent: false,
                         template: None,
+                        translation: None,
                     },
                 );
             }
@@ -410,6 +413,7 @@ impl Court {
                             debates: Vec::new(),
                             budget: None,
                             suspicions: Vec::new(),
+                            translation: None,
                         },
                     );
                 }
@@ -676,6 +680,64 @@ impl Court {
             CourtEvent::TaskCancelled { task } => {
                 self.propose_cancellation(*task)?;
                 self.set_status(*task, TaskStatus::Cancelled);
+            }
+            CourtEvent::TranslationLinked {
+                task,
+                project,
+                block,
+                kind,
+                source_hash,
+                context_version,
+                output_path,
+            } => {
+                let link = TranslationLink {
+                    project: project.clone(),
+                    block: block.clone(),
+                    kind: *kind,
+                    source_hash: source_hash.clone(),
+                    context_version: *context_version,
+                    output_path: output_path.clone(),
+                };
+                self.check_translation_link(*task, &link)?;
+                self.tasks.get_mut(task).expect("已确认存在").translation = Some(link);
+            }
+            CourtEvent::TranslationFinalized {
+                project,
+                block,
+                translation_hash,
+                context_version,
+                zhupi_version,
+            } => {
+                self.propose_translation_finalized(
+                    project.clone(),
+                    block.clone(),
+                    translation_hash.clone(),
+                    *context_version,
+                    *zhupi_version,
+                )?;
+                self.record_signoff(
+                    project,
+                    block,
+                    Signoff::Finalized {
+                        translation_hash: translation_hash.clone(),
+                        context_version: *context_version,
+                        zhupi_version: *zhupi_version,
+                    },
+                );
+            }
+            CourtEvent::TranslationReopened {
+                project,
+                block,
+                reason,
+            } => {
+                self.propose_translation_reopened(project.clone(), block.clone(), reason.clone())?;
+                self.record_signoff(
+                    project,
+                    block,
+                    Signoff::Reopened {
+                        reason: reason.clone(),
+                    },
+                );
             }
         }
         Ok(())

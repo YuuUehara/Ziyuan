@@ -2,7 +2,7 @@
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, DagNode, Department, Edict,
     Evidence, FileChange, GovernanceMode, Nomination, Office, Seal, Speech, Subtask, TaskId,
-    Template, Threat, TokenUsage, Verdict,
+    Template, Threat, TokenUsage, TranslationKind, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -380,6 +380,46 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             verdict.code(),
             to_hex(note)
         ),
+        // 字符串字段一律 hex（治理层已限定格式，编码不依赖之）；审校的输出路径为空。
+        TranslationLinked {
+            task,
+            project,
+            block,
+            kind,
+            source_hash,
+            context_version,
+            output_path,
+        } => format!(
+            "v1\tTRANSLINK\t{}\t{}\t{}\t{}\t{}\t{context_version}\t{}",
+            task.0,
+            to_hex(project),
+            to_hex(block),
+            kind.code(),
+            to_hex(source_hash),
+            to_hex(output_path)
+        ),
+        TranslationFinalized {
+            project,
+            block,
+            translation_hash,
+            context_version,
+            zhupi_version,
+        } => format!(
+            "v1\tTRANSFINAL\t{}\t{}\t{}\t{context_version}\t{zhupi_version}",
+            to_hex(project),
+            to_hex(block),
+            to_hex(translation_hash)
+        ),
+        TranslationReopened {
+            project,
+            block,
+            reason,
+        } => format!(
+            "v1\tTRANSREOPEN\t{}\t{}\t{}",
+            to_hex(project),
+            to_hex(block),
+            to_hex(reason)
+        ),
     }
 }
 /// 玉玺占两个字段：工具代码列表、hex 编码的路径列表。
@@ -630,6 +670,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
     let field = |i: usize| parts.get(i).copied().ok_or_else(|| format!("缺少字段 {i}"));
     let id =
         |i: usize| -> Result<u64, String> { field(i)?.parse::<u64>().map_err(|e| e.to_string()) };
+    let version =
+        |i: usize| -> Result<u32, String> { field(i)?.parse::<u32>().map_err(|e| e.to_string()) };
     let event = match field(1)? {
         "FOUNDED" => Founded(
             field(2)?
@@ -979,6 +1021,29 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             verdict: field(3)?.parse::<Verdict>().map_err(|e| e.to_string())?,
             note: from_hex(field(4)?)?,
         },
+        "TRANSLINK" => TranslationLinked {
+            task: TaskId(id(2)?),
+            project: from_hex(field(3)?)?,
+            block: from_hex(field(4)?)?,
+            kind: field(5)?
+                .parse::<TranslationKind>()
+                .map_err(|e| e.to_string())?,
+            source_hash: from_hex(field(6)?)?,
+            context_version: version(7)?,
+            output_path: from_hex(field(8)?)?,
+        },
+        "TRANSFINAL" => TranslationFinalized {
+            project: from_hex(field(2)?)?,
+            block: from_hex(field(3)?)?,
+            translation_hash: from_hex(field(4)?)?,
+            context_version: version(5)?,
+            zhupi_version: version(6)?,
+        },
+        "TRANSREOPEN" => TranslationReopened {
+            project: from_hex(field(2)?)?,
+            block: from_hex(field(3)?)?,
+            reason: from_hex(field(4)?)?,
+        },
         other => return Err(DecodeError::Newer(format!("事件类型 {other}"))),
     };
     let expected_fields = match &event {
@@ -1030,6 +1095,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         Clock(_) => 3,
         EdictIssued(_) => 7,
         ToolInvoked { .. } | SuspicionRaised { .. } => 6,
+        TranslationLinked { .. } => 9,
+        TranslationFinalized { .. } => 7,
+        TranslationReopened { .. } => 5,
     };
     if parts.len() != expected_fields {
         return Err("字段数量不正确".into());
@@ -1087,6 +1155,9 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         TemplateApplied { .. } => "TEMPLATED",
         ModelUsage { .. } => "USAGE",
         TaskReviewed { .. } => "REVIEWED",
+        TranslationLinked { .. } => "TRANSLINK",
+        TranslationFinalized { .. } => "TRANSFINAL",
+        TranslationReopened { .. } => "TRANSREOPEN",
     }
 }
 
@@ -1166,6 +1237,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
             5
         }
         AgentRenamed { .. } => 7,
+        TranslationLinked { .. } | TranslationFinalized { .. } | TranslationReopened { .. } => 17,
     })
 }
 
@@ -1194,7 +1266,8 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 45, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 48, "每种事件类型至少一条样本");
+        assert_eq!(crate::release_name(17), "1.2.0");
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");
         assert_eq!(crate::release_name(12), "1.0.0-rc.2");
@@ -1574,6 +1647,37 @@ mod tests {
                 task,
                 verdict: Verdict::Rejected,
                 note: "结论有误\t需重查".into(),
+            },
+            CourtEvent::TranslationLinked {
+                task,
+                project: "0123456789abcdef0123456789abcdef".into(),
+                block: "c0001-b0001".into(),
+                kind: TranslationKind::Revise,
+                source_hash: "a".repeat(64),
+                context_version: 7,
+                output_path: "translations/0123456789abcdef0123456789abcdef/c0001-b0001/zh.json"
+                    .into(),
+            },
+            CourtEvent::TranslationLinked {
+                task,
+                project: "0123456789abcdef0123456789abcdef".into(),
+                block: "c0001-b0001".into(),
+                kind: TranslationKind::ReviewStyle,
+                source_hash: "a".repeat(64),
+                context_version: 0,
+                output_path: String::new(),
+            },
+            CourtEvent::TranslationFinalized {
+                project: "0123456789abcdef0123456789abcdef".into(),
+                block: "c0001-b0001".into(),
+                translation_hash: "b".repeat(64),
+                context_version: u32::MAX,
+                zhupi_version: 0,
+            },
+            CourtEvent::TranslationReopened {
+                project: "0123456789abcdef0123456789abcdef".into(),
+                block: "c0001-b0001".into(),
+                reason: "人名\t前后不一，\n重译".into(),
             },
         ];
         for original in events {

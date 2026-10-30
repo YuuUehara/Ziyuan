@@ -170,3 +170,16 @@ fn seal_within_ceiling_narrows_tools_and_scope() {
         Some(seal(&[ReadFile], &["src"]))
     );
 }
+
+#[test]
+fn translation_kinds_parse_from_their_codes() {
+    for kind in TranslationKind::ALL {
+        assert_eq!(kind.code().parse::<TranslationKind>(), Ok(kind));
+    }
+    assert!(TranslationKind::Translate.writes() && TranslationKind::Revise.writes());
+    assert!(!TranslationKind::ReviewFidelity.writes() && !TranslationKind::ReviewStyle.writes());
+    assert_eq!(
+        "polish".parse::<TranslationKind>(),
+        Err(ParseError::UnknownTranslationKind("polish".into()))
+    );
+}

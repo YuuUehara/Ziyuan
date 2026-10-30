@@ -9,7 +9,7 @@ use crate::office::{BudgetScope, Department, GovernanceMode, Office};
 use crate::review::{CensorVerdict, Evidence, Threat, Verdict};
 use crate::seal::Seal;
 use crate::usage::TokenUsage;
-use crate::{AgentId, TaskId};
+use crate::{AgentId, ParseError, TaskId};
 
 /// 廷议中一位官员的一段发言。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,75 @@ pub struct Template {
     pub seal: Seal,
     /// 验收标准，各条单行。
     pub criteria: Vec<String>,
+}
+
+/// 译书诏令的种类：初译、忠实审校、文风审校、修订（统稿）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationKind {
+    Translate,
+    ReviewFidelity,
+    ReviewStyle,
+    Revise,
+}
+
+impl TranslationKind {
+    pub const ALL: [Self; 4] = [
+        Self::Translate,
+        Self::ReviewFidelity,
+        Self::ReviewStyle,
+        Self::Revise,
+    ];
+
+    /// 事件簿与 JSON 中的代码，与 serde 名一致。
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Translate => "translate",
+            Self::ReviewFidelity => "review_fidelity",
+            Self::ReviewStyle => "review_style",
+            Self::Revise => "revise",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Translate => "初译",
+            Self::ReviewFidelity => "忠实审校",
+            Self::ReviewStyle => "文风审校",
+            Self::Revise => "修订",
+        }
+    }
+
+    /// 初译与修订写译稿（工部、write_file）；审校只读。
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Translate | Self::Revise)
+    }
+}
+
+impl std::str::FromStr for TranslationKind {
+    type Err = ParseError;
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|k| k.code() == input)
+            .ok_or_else(|| ParseError::UnknownTranslationKind(input.into()))
+    }
+}
+
+/// 诏令与译书块的关联（见 [`CourtEvent::TranslationLinked`]）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranslationLink {
+    /// 文本项目 ID（32 位小写十六进制）。
+    pub project: String,
+    /// 块 ID，如 `c0001-b0001`。
+    pub block: String,
+    pub kind: TranslationKind,
+    /// 下诏时块原文的 SHA-256（小写十六进制）。
+    pub source_hash: String,
+    /// 所用已批准上下文快照的版本；0 为未批准任何上下文。
+    pub context_version: u32,
+    /// 译稿的输出路径（项目内相对、`/` 分隔）；审校为空。
+    pub output_path: String,
 }
 
 /// Event Sourcing: 朝廷状态由此事件列表重放而来。
@@ -343,5 +412,31 @@ pub enum CourtEvent {
         task: TaskId,
         verdict: Verdict,
         note: String,
+    },
+    /// 译书：诏令关联到文本项目的一块，与该诏令的 `EdictIssued` 一同记录（1.2.0 起）。
+    /// 字段见 [`TranslationLink`]。
+    TranslationLinked {
+        task: TaskId,
+        project: String,
+        block: String,
+        kind: TranslationKind,
+        source_hash: String,
+        context_version: u32,
+        output_path: String,
+    },
+    /// 御览定稿：皇帝签署一块的译稿（`translation_hash` 为定稿 zh.json 的 SHA-256），
+    /// 并记下当时的上下文版本与朱批版本。
+    TranslationFinalized {
+        project: String,
+        block: String,
+        translation_hash: String,
+        context_version: u32,
+        zhupi_version: u32,
+    },
+    /// 退回重修：撤回一块的定稿（或拒绝定稿），附理由。
+    TranslationReopened {
+        project: String,
+        block: String,
+        reason: String,
     },
 }

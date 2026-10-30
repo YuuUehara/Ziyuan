@@ -546,7 +546,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 16] = [
+pub const RELEASES: [&str; 17] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -563,6 +563,7 @@ pub const RELEASES: [&str; 16] = [
     "1.0.0-rc.4",
     "1.0.0",
     "1.1.0",
+    "1.2.0",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。
@@ -880,6 +881,28 @@ mod tests {
             "{r:?}"
         );
         assert_eq!((r.events, r.readable_since), (2, 1));
+    }
+
+    #[test]
+    fn translation_events_need_release_1_2_0() {
+        let root = temp_root("inspect-translation");
+        let log = EventLog::new(&root);
+        let path = root.join(".ziyuan/court.log");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let reopen = codec::encode_event(&CourtEvent::TranslationReopened {
+            project: "0123456789abcdef0123456789abcdef".into(),
+            block: "c0001-b0001".into(),
+            reason: "重译".into(),
+        });
+        fs::write(&path, format!("v1\tFOUNDED\tchancellor\n{reopen}\n")).unwrap();
+        let r = log.inspect().unwrap();
+        assert!(r.problem.is_none(), "{r:?}");
+        assert_eq!(
+            (r.readable_since, r.first_needing),
+            (17, Some((2, "transreopen".into())))
+        );
+        assert_eq!(release_name(r.readable_since), "1.2.0");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

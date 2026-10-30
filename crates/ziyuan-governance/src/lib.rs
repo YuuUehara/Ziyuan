@@ -10,6 +10,7 @@ mod personnel;
 mod query;
 mod replay;
 mod templates;
+mod translation;
 mod treasury;
 
 pub use cabinet::{Draft, Split};
@@ -19,6 +20,7 @@ pub use exam::{ExamRecord, PalaceExam};
 pub use personnel::{Candidate, Caning, NominationBallot};
 pub use replay::founding_events;
 pub use templates::{TemplateUse, builtin_templates};
+pub use translation::Signoff;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,7 +28,7 @@ use std::fmt;
 use std::sync::Arc;
 use ziyuan_core::{
     Agent, AgentId, CHANGELOG, Capability, DagNode, Department, Edict, GovernanceMode, Nomination,
-    Office, Seal, Speech, TaskId, Template, TokenUsage, Verdict,
+    Office, Seal, Speech, TaskId, Template, TokenUsage, TranslationLink, Verdict,
 };
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +118,8 @@ pub enum GovernanceError {
     InvalidBudget,
     /// 改名、改字号不合规矩（说明原因）。
     InvalidName(String),
+    /// 翰林院译书（关联、定稿、退回）不合规矩。
+    Translation(String),
     /// 朝廷度支（tokens）已用尽。
     TreasuryExhausted(u64),
     /// 诏令已用尽其度支（tokens）。
@@ -215,6 +219,7 @@ impl fmt::Display for GovernanceError {
             Self::InvalidExam(why) => write!(f, "礼部不准：{why}"),
             Self::Military(why) => write!(f, "兵部不准：{why}"),
             Self::Template(why) => write!(f, "翰林院不准：{why}"),
+            Self::Translation(why) => write!(f, "翰林院译书不准：{why}"),
             Self::Court(why) => write!(f, "{why}"),
             Self::Changes(why) => write!(f, "逐段准奏不成：{why}"),
             Self::Suspicion(why) => write!(f, "刑部不准：{why}"),
@@ -277,6 +282,9 @@ pub struct Court {
     courtesy_names: BTreeMap<AgentId, String>,
     #[serde(default)]
     art_names: BTreeMap<AgentId, String>,
+    /// 译书各块最近一次御览（定稿或退回），按项目、块 ID。
+    #[serde(default)]
+    translation_signoffs: BTreeMap<String, BTreeMap<String, Signoff>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +340,9 @@ pub struct Task {
     pub urgent: bool,
     /// 按翰林院模板下达时的模板名与验收标准。
     pub template: Option<TemplateUse>,
+    /// 关联的译书块（`TranslationLinked`）。
+    #[serde(default)]
+    pub translation: Option<TranslationLink>,
 }
 
 impl Task {

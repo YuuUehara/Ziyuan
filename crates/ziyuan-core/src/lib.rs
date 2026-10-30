@@ -10,7 +10,10 @@ mod usage;
 
 pub use agent::{Agent, NO_ART, Persona, default_styles};
 pub use changes::{FileChange, Hunk};
-pub use event::{CourtEvent, DagNode, Edict, Nomination, Speech, Subtask, Template};
+pub use event::{
+    CourtEvent, DagNode, Edict, Nomination, Speech, Subtask, Template, TranslationKind,
+    TranslationLink,
+};
 pub use office::{BudgetScope, Department, GovernanceMode, Office};
 pub use records::{Record, find_records, search_records};
 pub use review::{
@@ -32,6 +35,7 @@ pub enum ParseError {
     UnknownCapability(String),
     UnknownVerdict(String),
     UnknownThreat(String),
+    UnknownTranslationKind(String),
 }
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -42,6 +46,10 @@ impl fmt::Display for ParseError {
             Self::MalformedOffice(s) => write!(f, "官职格式无效: {s}"),
             Self::UnknownVerdict(s) => write!(f, "未知评定: {s}（可用：accept/reject）"),
             Self::UnknownThreat(s) => write!(f, "未知可疑类别: {s}"),
+            Self::UnknownTranslationKind(s) => write!(
+                f,
+                "未知译书种类: {s}（可用：translate、review_fidelity、review_style、revise）"
+            ),
             Self::UnknownCapability(s) => {
                 write!(
                     f,

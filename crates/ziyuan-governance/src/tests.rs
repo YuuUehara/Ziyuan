@@ -1,7 +1,7 @@
 use super::*;
 use ziyuan_core::{
     Agent, AgentId, Capability, CensorVerdict, CourtEvent, DagNode, Department, Edict, Evidence,
-    GovernanceMode, Office, Seal, TaskId, TokenUsage, Verdict,
+    GovernanceMode, Office, Seal, TaskId, TokenUsage, TranslationKind, TranslationLink, Verdict,
 };
 #[test]
 fn reform_changes_route() {
@@ -1272,4 +1272,299 @@ fn renaming_changes_only_the_given_parts_and_shows_in_routes() {
             })
             .is_err()
     );
+}
+
+const PROJECT: &str = "0123456789abcdef0123456789abcdef";
+const BLOCK: &str = "c0001-b0001";
+
+fn translation_link(kind: TranslationKind, output_path: &str) -> TranslationLink {
+    TranslationLink {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        kind,
+        source_hash: "a".repeat(64),
+        context_version: 0,
+        output_path: output_path.into(),
+    }
+}
+
+fn issue(court: &mut Court, department: Department, seal: Seal) -> TaskId {
+    let edict = court.new_edict(department, "译书".into(), seal).unwrap();
+    let id = edict.id;
+    court
+        .apply(&CourtEvent::EdictIssued(Box::new(edict)))
+        .unwrap();
+    id
+}
+
+fn translation_seal(write: bool) -> Seal {
+    let mut capabilities: std::collections::BTreeSet<Capability> = [Capability::ReadFile].into();
+    if write {
+        capabilities.insert(Capability::WriteFile);
+    }
+    Seal {
+        capabilities,
+        scope: vec![format!("translations/{PROJECT}/{BLOCK}/")],
+        mcp: Default::default(),
+    }
+}
+
+#[test]
+fn translation_links_are_validated_and_folded_into_tasks() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let mut log = founding_events(1);
+    let translate = issue(&mut court, Department::Works, translation_seal(true));
+    log.push(CourtEvent::EdictIssued(Box::new(
+        court.task(translate).unwrap().edict.clone(),
+    )));
+    let out = format!("translations/{PROJECT}/{BLOCK}/zh.json");
+    let invalid = |court: &Court, task: TaskId, link: TranslationLink| {
+        matches!(
+            court.propose_translation_link(task, link),
+            Err(GovernanceError::Translation(_))
+        )
+    };
+    let with = |f: &dyn Fn(&mut TranslationLink)| {
+        let mut link = translation_link(TranslationKind::Translate, &out);
+        f(&mut link);
+        link
+    };
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.project = "ABCDEF".into())
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.project = PROJECT.to_uppercase())
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.block = "c1-b1".into())
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.block = "c0001/b0001".into())
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.source_hash = "A".repeat(64))
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.source_hash = "a".repeat(63))
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.output_path = String::new())
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| l.output_path = "zh.json".into())
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| { l.output_path = format!("translations/{PROJECT}/c0001-b0002/zh.json") })
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| { l.output_path = format!("translations/{PROJECT}/{BLOCK}/../zh.json") })
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| { l.output_path = format!("translations\\{PROJECT}\\{BLOCK}\\zh.json") })
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        with(&|l| { l.output_path = format!("translations/{PROJECT}/{BLOCK}/") })
+    ));
+    assert!(invalid(
+        &court,
+        translate,
+        translation_link(TranslationKind::ReviewFidelity, "")
+    ));
+    assert_eq!(
+        court.propose_translation_link(
+            TaskId(99),
+            translation_link(TranslationKind::Translate, &out)
+        ),
+        Err(GovernanceError::UnknownEdict(TaskId(99)))
+    );
+
+    let link = translation_link(TranslationKind::Translate, &out);
+    let event = court
+        .propose_translation_link(translate, link.clone())
+        .unwrap();
+    assert_eq!(
+        event,
+        CourtEvent::TranslationLinked {
+            task: translate,
+            project: PROJECT.into(),
+            block: BLOCK.into(),
+            kind: TranslationKind::Translate,
+            source_hash: "a".repeat(64),
+            context_version: 0,
+            output_path: out.clone(),
+        }
+    );
+    court.apply(&event).unwrap();
+    log.push(event.clone());
+    assert_eq!(
+        court.task(translate).unwrap().translation,
+        Some(link.clone())
+    );
+    // 一件诏令只关联一次。
+    assert!(invalid(&court, translate, link.clone()));
+    assert!(matches!(
+        court.apply(&event),
+        Err(GovernanceError::Translation(_))
+    ));
+
+    // 审校须只读，且不写译稿。
+    let review = issue(&mut court, Department::Works, translation_seal(false));
+    log.push(CourtEvent::EdictIssued(Box::new(
+        court.task(review).unwrap().edict.clone(),
+    )));
+    assert!(invalid(
+        &court,
+        review,
+        translation_link(TranslationKind::ReviewStyle, &out)
+    ));
+    assert!(invalid(
+        &court,
+        review,
+        translation_link(TranslationKind::Revise, &out)
+    ));
+    let event = court
+        .propose_translation_link(review, translation_link(TranslationKind::ReviewStyle, ""))
+        .unwrap();
+    court.apply(&event).unwrap();
+    log.push(event);
+    let writing = issue(&mut court, Department::Works, translation_seal(true));
+    assert!(invalid(
+        &court,
+        writing,
+        translation_link(TranslationKind::ReviewFidelity, "")
+    ));
+    // 初译、修订须为工部诏令。
+    let rites = issue(&mut court, Department::Rites, Seal::default());
+    assert!(invalid(
+        &court,
+        rites,
+        translation_link(TranslationKind::Revise, &out)
+    ));
+    // 已结束的诏令不得关联。
+    court
+        .apply(&CourtEvent::TaskCancelled { task: writing })
+        .unwrap();
+    assert_eq!(
+        court.propose_translation_link(writing, translation_link(TranslationKind::Revise, &out)),
+        Err(GovernanceError::TaskFinished(writing))
+    );
+
+    let linked: Vec<TaskId> = court
+        .translation_tasks(PROJECT, BLOCK)
+        .map(|t| t.edict.id)
+        .collect();
+    assert_eq!(linked, [translate, review]);
+    assert_eq!(court.translation_tasks(PROJECT, "c0001-b0002").count(), 0);
+
+    // 回放得同一结果。
+    let replayed = Court::replay(&log).unwrap();
+    assert_eq!(replayed.task(translate).unwrap().translation, Some(link));
+    assert_eq!(replayed.translation_tasks(PROJECT, BLOCK).count(), 2);
+}
+
+#[test]
+fn translation_signoff_follows_the_last_finalize_or_reopen() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    assert_eq!(court.translation_signoff(PROJECT, BLOCK), None);
+    let bad =
+        |r: Result<CourtEvent, GovernanceError>| matches!(r, Err(GovernanceError::Translation(_)));
+    let hash = "b".repeat(64);
+    assert!(bad(court.propose_translation_finalized(
+        "x".into(),
+        BLOCK.into(),
+        hash.clone(),
+        1,
+        2
+    )));
+    assert!(bad(court.propose_translation_finalized(
+        PROJECT.into(),
+        "b0001".into(),
+        hash.clone(),
+        1,
+        2
+    )));
+    assert!(bad(court.propose_translation_finalized(
+        PROJECT.into(),
+        BLOCK.into(),
+        "zz".into(),
+        1,
+        2
+    )));
+    assert!(bad(court.propose_translation_reopened(
+        PROJECT.into(),
+        BLOCK.into(),
+        "  ".into()
+    )));
+    assert!(bad(court.propose_translation_reopened(
+        PROJECT.into(),
+        BLOCK.into(),
+        "一\n二".into()
+    )));
+    assert!(bad(court.propose_translation_reopened(
+        PROJECT.into(),
+        BLOCK.into(),
+        "长".repeat(501)
+    )));
+
+    let finalize = court
+        .propose_translation_finalized(PROJECT.into(), BLOCK.into(), hash.clone(), 3, 2)
+        .unwrap();
+    court.apply(&finalize).unwrap();
+    assert_eq!(
+        court.translation_signoff(PROJECT, BLOCK),
+        Some(&Signoff::Finalized {
+            translation_hash: hash.clone(),
+            context_version: 3,
+            zhupi_version: 2,
+        })
+    );
+    let reopen = court
+        .propose_translation_reopened(PROJECT.into(), BLOCK.into(), "人名前后不一".into())
+        .unwrap();
+    court.apply(&reopen).unwrap();
+    assert_eq!(
+        court.translation_signoff(PROJECT, BLOCK),
+        Some(&Signoff::Reopened {
+            reason: "人名前后不一".into()
+        })
+    );
+    assert_eq!(court.translation_signoff(PROJECT, "c0001-b0002"), None);
+    let signed: Vec<&str> = court
+        .translation_signoffs(PROJECT)
+        .map(|(b, _)| b)
+        .collect();
+    assert_eq!(signed, [BLOCK]);
+    // 回放时同样校验。
+    assert!(matches!(
+        court.apply(&CourtEvent::TranslationReopened {
+            project: PROJECT.into(),
+            block: BLOCK.into(),
+            reason: String::new(),
+        }),
+        Err(GovernanceError::Translation(_))
+    ));
 }

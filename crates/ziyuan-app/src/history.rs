@@ -118,7 +118,8 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         | EdictExpedited { task }
         | TemplateApplied { task, .. }
         | ModelUsage { task, .. }
-        | TaskReviewed { task, .. } => vec![*task],
+        | TaskReviewed { task, .. }
+        | TranslationLinked { task, .. } => vec![*task],
         Founded(_)
         | Clock(_)
         | AgentRegistered(_)
@@ -138,7 +139,9 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         | OfficialCaned { .. }
         | OfficialPardoned { .. }
         | TemplateSaved { .. }
-        | TemplateRemoved { .. } => Vec::new(),
+        | TemplateRemoved { .. }
+        | TranslationFinalized { .. }
+        | TranslationReopened { .. } => Vec::new(),
     }
 }
 
@@ -433,5 +436,65 @@ pub fn describe_event(event: &CourtEvent) -> String {
             };
             format!("诏令 #{} 评定为{}{note}", task.0, verdict.label())
         }
+        CourtEvent::TranslationLinked {
+            task, kind, block, ..
+        } => format!("译书关联：#{} {} {block}", task.0, kind.label()),
+        CourtEvent::TranslationFinalized { block, .. } => format!("御览定稿：{block}"),
+        CourtEvent::TranslationReopened { block, reason, .. } => {
+            format!("退回重修：{block}（{reason}）")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ziyuan_core::TranslationKind;
+
+    #[test]
+    fn translation_events_are_described_and_linked_to_their_task() {
+        let linked = CourtEvent::TranslationLinked {
+            task: TaskId(12),
+            project: "0123456789abcdef0123456789abcdef".into(),
+            block: "c0001-b0001".into(),
+            kind: TranslationKind::Translate,
+            source_hash: "a".repeat(64),
+            context_version: 0,
+            output_path: "translations/0123456789abcdef0123456789abcdef/c0001-b0001/zh.json".into(),
+        };
+        assert_eq!(event_tasks(&linked), [TaskId(12)]);
+        assert_eq!(describe_event(&linked), "译书关联：#12 初译 c0001-b0001");
+        let review = CourtEvent::TranslationLinked {
+            task: TaskId(12),
+            project: "0123456789abcdef0123456789abcdef".into(),
+            block: "c0001-b0001".into(),
+            kind: TranslationKind::ReviewFidelity,
+            source_hash: "a".repeat(64),
+            context_version: 0,
+            output_path: String::new(),
+        };
+        assert_eq!(
+            describe_event(&review),
+            "译书关联：#12 忠实审校 c0001-b0001"
+        );
+        let finalized = CourtEvent::TranslationFinalized {
+            project: "0123456789abcdef0123456789abcdef".into(),
+            block: "c0001-b0001".into(),
+            translation_hash: "b".repeat(64),
+            context_version: 3,
+            zhupi_version: 2,
+        };
+        assert!(event_tasks(&finalized).is_empty());
+        assert_eq!(describe_event(&finalized), "御览定稿：c0001-b0001");
+        let reopened = CourtEvent::TranslationReopened {
+            project: "0123456789abcdef0123456789abcdef".into(),
+            block: "c0001-b0001".into(),
+            reason: "人名前后不一".into(),
+        };
+        assert!(event_tasks(&reopened).is_empty());
+        assert_eq!(
+            describe_event(&reopened),
+            "退回重修：c0001-b0001（人名前后不一）"
+        );
     }
 }
