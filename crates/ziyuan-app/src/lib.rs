@@ -18,6 +18,7 @@ mod preview;
 mod reports;
 mod run;
 mod session;
+pub mod subscriptions;
 pub mod text_project;
 mod time;
 mod vcs;
