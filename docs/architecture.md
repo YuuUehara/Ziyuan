@@ -1,4 +1,6 @@
-# ZiYuan 设计文档（v1.0.0-rc.2）
+# ZiYuan 设计文档
+
+本文写于 1.0.0-rc.2，描述朝廷、事件簿与权限的内部设计。1.1.0 新增的文本项目与作品关注独立于事件簿，存于 `.ziyuan/text-projects/` 与 `.ziyuan/subscriptions/`，用法见[文本整理与检查](text-projects.md)和[作品更新提醒](subscriptions.md)。
 
 ## 1. 核心目标
 

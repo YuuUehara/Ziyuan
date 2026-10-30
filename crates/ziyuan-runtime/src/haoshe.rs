@@ -3,7 +3,7 @@
 //! 取贡院号舍之意：考生锁入单间，与外界隔绝。测试命令可能运行模型写入的代码，入号舍后
 //! 不能联网，只能写测试副本所在的临时目录，读不到家目录下常见的凭据（`.ssh`、`.aws` 等）
 //! 与项目的 `.ziyuan`。Linux 用 bubblewrap（`bwrap`），macOS 用系统自带的 Seatbelt
-//! （`sandbox-exec`）；Windows 暂无（见 `docs/adr-0001-windows-sandbox.md`）。
+//! （`sandbox-exec`）；Windows 暂无（见 `docs/adr/0001-windows-sandbox.md`）。
 //!
 //! 由 `ZIYUAN_SANDBOX` 决定：`auto`（默认）与 `require` 都是有则用、无则拒绝运行
 //! （[`SandboxUnavailable`]），绝不悄悄退化为未入号舍执行；`off` 为皇帝确认风险后不入号舍，

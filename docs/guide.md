@@ -198,7 +198,7 @@ ziyuan discard 3    # 或驳回
 - **只暂存，不落盘**：`write_file` 的改动留在内存里，同一诏令内 `read_file` 读到的是新内容；诏令完成时作为奏本（`ChangesProposed`）记入事件簿，项目文件不变。
 - **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。核对逐字节进行：只改了行尾（CRLF/LF）、改成非 UTF-8 或二进制内容都算改动。原文已变的文件在 Web 与 TUI 的奏本中标「原文已变」（`--json` 中为 `stale: true`），Web 不给准奏按钮，只能驳回后重下诏令。Web 准奏时回传预览所示的改动版本（`changes.version`），与服务端记下的不符即拒绝，以免照着别的项目或旧页面准奏。工部只能新建与改写文件，不能删除、改名或写二进制文件；符号链接按其指向判断，指向项目之外或禁区的一律拒绝。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
 - **测试在副本里跑**：`run_tests` 把项目复制到临时目录（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与 `target`），叠加暂存改动，运行 `ZIYUAN_TEST_COMMAND`。子进程只继承 `PATH`、`HOME` 等少数环境变量，API Key 不会传进去；时限 10 分钟，返回退出码与输出末尾。
-- **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt。号舍里不能联网，只能写测试副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认）与 `require` 相同，没有号舍（如 Windows、未装 bubblewrap）则拒绝运行，报「号舍不可用」；`off` 不入号舍照常运行，结果中注明，须皇帝自担风险（Windows 政策见 [ADR-0001](adr-0001-windows-sandbox.md)）。号舍默认全断网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`；或用 `ZIYUAN_SANDBOX_ALLOW` 按域名放行，如 `ZIYUAN_SANDBOX_ALLOW="index.crates.io,static.crates.io"`。放行时号舍仍断网，只留一个本机代理（门吏），它只转递名单上域名的 HTTP(S)，其余回 403，被拦下的域名记在测试结果里。`example.com` 只放行其本身，`*.example.com` 只放行其子域。Linux 上按域名放行另须装 socat（`apt install socat`）。
+- **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt。号舍里不能联网，只能写测试副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认）与 `require` 相同，没有号舍（如 Windows、未装 bubblewrap）则拒绝运行，报「号舍不可用」；`off` 不入号舍照常运行，结果中注明，须皇帝自担风险（Windows 政策见 [ADR-0001](adr/0001-windows-sandbox.md)）。号舍默认全断网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`；或用 `ZIYUAN_SANDBOX_ALLOW` 按域名放行，如 `ZIYUAN_SANDBOX_ALLOW="index.crates.io,static.crates.io"`。放行时号舍仍断网，只留一个本机代理（门吏），它只转递名单上域名的 HTTP(S)，其余回 403，被拦下的域名记在测试结果里。`example.com` 只放行其本身，`*.example.com` 只放行其子域。Linux 上按域名放行另须装 socat（`apt install socat`）。
 - **逐段准奏**：diff 按段编号（`@@ 第 n 段 · 原第 m 行 @@`，跨文件连续编号；相隔不超过 6 行的改动并为一段）。`--skip` 驳回所列各段，其余照原样写入，行尾与末行换行逐字节保留；新建文件整段驳回即不建。各段都驳回请直接 `discard`。驳回了哪些段记入事件簿（`ChangesApplied` 附段号）。Web 奏本每段有「准此段」勾选框，TUI 按 `W` 输入要驳回的段号。
 - **落盘进版本库**：`ziyuan apply --commit`、Web 的「准奏并提交」、TUI 的 `m`。落盘后只提交本诏令写入的文件（项目在 jj 版本库中用 `jj commit <文件>`，否则 `git commit --only`），工作区里别的改动原样留着；文件若在准奏前就有你自己未提交的改动，会一并提交。提交说明首行为「紫垣诏令 #n：…」，附承办者与驳回的段号，末行 `Ziyuan-Edict: n`；`ziyuan github pr` 开的草稿 PR 用同样的标题与提交说明，两边对得上。提交失败（如未设提交者）时改动仍已落盘，可自行提交。重试时若最近 200 个提交里已有带本诏令尾注的，就认作已提交、不再提交一次；落盘中断后重试，已写成改后内容的文件跳过，其余照常核对原文再写。
 - **审阅视图**：Web 奏本可切换「统一」与「左右」两种视图；多文件时先列文件树（新建/改写、`+N −N`、原文已变），点文件名跳到该处；各文件标出呈报时原文的 `base_hash`（准奏时据以核对），每段标明待准、已准或驳回。
@@ -254,7 +254,7 @@ ziyuan run                              # 子诏令并发执行，全部结束�
 - 分为 2–8 件子诏令，承办者限本部在任官员；尚书不领子诏令，汇总是尚书之责。子诏令沿用原诏令的部门与玉玺，各自记入事件簿（`EdictSplit`），可单独评定、复核。
 - 子诏令全部结束（完成、失败或撤销）后，原诏令派给尚书汇总：附上各份回奏，只留只读工具，不得把未办成的说成已办成。撤销原诏令时，未结束的子诏令一并撤销。
 - 有写权的子诏令自动按稳定拓扑顺序串行，无自定义依赖时按提交顺序；只读子诏令照旧并行。依赖须已完成且无改动或改动已准奏落盘。上游失败、撤销或改动驳回不会自动重试或降级，须由皇帝处置。`ziyuan court --json` 与 Web `/api/state` 给出 `dag.dependencies`、`blocked_by`，TUI 标「受阻」。
-- rc.3 起可用 `ziyuan split 3 --plan docs/dag-plan.json` 或 Web「御定排程」在创建时配置依赖、期限、尝试次数、度支、约定产出、批红要求和节点键；依赖填本批节点序号，不是任务 ID。期限已过或尝试次数已尽时直接记失败，不自动重试；约定产出仅为提示。相同方案重试不重复建任务，冲突方案拒绝；创建后不可改写。节点键不保证任意工具调用去重。输入示例、字段与恢复边界见 [DAG 修改速查表](phase3-dag-review.md)。
+- rc.3 起可用 `ziyuan split 3 --plan docs/examples/dag-plan.json` 或 Web「御定排程」在创建时配置依赖、期限、尝试次数、度支、约定产出、批红要求和节点键；依赖填本批节点序号，不是任务 ID。期限已过或尝试次数已尽时直接记失败，不自动重试；约定产出仅为提示。相同方案重试不重复建任务，冲突方案拒绝；创建后不可改写。节点键不保证任意工具调用去重。输入示例、字段与恢复边界见 [DAG 修改速查表](dag.md)。
 - 内阁制下子诏令随原诏令批红。演示后端不能拆分，可用御定分办。Web 的「尚书分办」，TUI 的 `f`。拆分的 token 单独计价，计入原诏令的花费。
 
 ![rc.3 · 御定排程沿用细框与主题，标题及操作栏固定，正文独立滚动](images/web-dag-schedule.png)
@@ -538,4 +538,4 @@ Web 总览、文件审阅与任务依赖截图来自 v1.0.0-rc.2（2026-10-30）
 
 rc.2 截图使用本机模拟服务，通过真实 `read_file` / `write_file` 工具暂存两个文件；依赖状态取自集成测试 `state_exposes_write_dag_dependencies_and_blockers` 的演示记录。模拟模型名为 `docs-mock`，无真实密钥。使用 agent-browser、天青主题、1500×1000（总览 1500×1200）与 2× 像素密度；裁剪缩半后转为 PNG8。内置预览图拍于安装 delta 前；delta 图使用官方 git-delta 0.20.1 Linux 包，设置 `ZIYUAN_DELTA` 后重启并确认没有回退到内置预览。
 
-rc.3 的三主题 delta 与“御定排程”截图（2026-10-30）来自真实验收记录的隔离副本。delta 使用保留的基线提案，仅供比较样式；排程是人工通过真实 API 提交的示例，不调用模型。桌面与 390px 窄窗口检查过框体、滚动及按钮，采用同样的截图处理。真实模型的任务交接结果另见 [rc.2 验收记录](rc2-acceptance.md)。
+rc.3 的三主题 delta 与“御定排程”截图（2026-10-30）来自真实验收记录的隔离副本。delta 使用保留的基线提案，仅供比较样式；排程是人工通过真实 API 提交的示例，不调用模型。桌面与 390px 窄窗口检查过框体、滚动及按钮，采用同样的截图处理。真实模型的任务交接结果另见 [rc.2 验收记录](acceptance/1.0.0-rc.2.md)。

@@ -1,4 +1,4 @@
-# 1.0-RC Phase 3 DAG 修改速查表
+# DAG 排程速查
 
 本文记录候选期 DAG 设计及已交付边界，供 1.0 使用时查阅；rc.2 引入事件与基础调度，rc.3 补齐自定义创建和准奏交接，1.0 不再增加功能。
 
@@ -29,11 +29,11 @@
 ```bash
 ziyuan split 3
 ziyuan split 3 4:改 storage 7:改 runtime
-ziyuan split 3 --plan docs/dag-plan.json
+ziyuan split 3 --plan docs/examples/dag-plan.json
 ziyuan run
 ```
 
-`--plan` 读 JSON 数组，示例见 [dag-plan.json](dag-plan.json)；不要与自动分办或 `官员:内容` 混用。Web 选择待办、尚未分办的父诏令，点「御定排程」，提交 2–8 个节点。两者都直接进入同一治理校验；循环、重复/越界/自身依赖、不合法官员、零次数/预算与空/重复键均拒绝，不留下部分子任务。输入字段拼写错误会报错，不会当作模型分办。
+`--plan` 读 JSON 数组，示例见 [examples/dag-plan.json](examples/dag-plan.json)；不要与自动分办或 `官员:内容` 混用。Web 选择待办、尚未分办的父诏令，点「御定排程」，提交 2–8 个节点。两者都直接进入同一治理校验；循环、重复/越界/自身依赖、不合法官员、零次数/预算与空/重复键均拒绝，不留下部分子任务。输入字段拼写错误会报错，不会当作模型分办。
 
 字段：`worker` 为本部在任非尚书官员 ID，`text` 为任务内容，`dependencies` 是**当前数组中从 1 开始的节点序号，不是诏令 ID**；可向后引用，但不可成环。可选字段为 `attempts`（正整数次数上限）、`deadline`（Unix 秒；Web 输入本地时间后转换）、`budget`（正整数 tokens 软限额）、`artifact`（约定产出提示，不是文件存在性保证）、`approval_required`（内阁制下另须批红）及 `idempotency_key`（父任务内唯一的非空节点键）。写权限计划会按拓扑顺序补齐串行安全边，不强制数组正向依赖；只读计划可并行。`court --json`、`tasks --json` 和 Web `/api/state` 可查询保存结果。
 
@@ -58,4 +58,4 @@ API：`POST /api/tasks/{id}/split` 的正文为 `{ "schedule": [...] }`，返回
 - `cargo fmt --all`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
-- 真实模型复验与未验收边界见 [rc.2 验收记录](rc2-acceptance.md)。
+- 真实模型复验与未验收边界见 [rc.2 验收记录](acceptance/1.0.0-rc.2.md)。

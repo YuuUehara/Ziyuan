@@ -2,7 +2,7 @@
 
 - 状态：已采纳（方案 A）
 - 日期：2026-10-29
-- 相关：[SECURITY.md](../SECURITY.md)、[roadmap.md](roadmap.md)「1.0 之后·号舍」
+- 相关：[SECURITY.md](../../SECURITY.md)、[roadmap.md](../roadmap.md)「1.0 之后·号舍」
 
 ## 背景
 
