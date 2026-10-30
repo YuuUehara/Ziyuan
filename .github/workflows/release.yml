@@ -23,7 +23,7 @@ jobs:
             echo "标签 $GITHUB_REF_NAME 与 Cargo.toml 的版本 $version 不符" >&2
             exit 1
           fi
-      - name: 建 Release（有 CHANGELOG.md 时取本版一节作说明）
+      - name: 建草稿 Release（全部包验收后才公开）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -34,9 +34,9 @@ jobs:
           # 节标题须恰为「## 版本」（或其后跟空格），1.0.0 不会误收 1.0.0-rc.1 一节。
           if [ -f CHANGELOG.md ] && grep -qE "^## $version( |$)" CHANGELOG.md; then
             awk -v v="## $version" '$0 ~ "^## " { on = ($0 == v || index($0, v " ") == 1); if (!on && seen) exit; seen = seen || on; next } on' CHANGELOG.md > notes.md
-            gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" --notes-file notes.md
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag $pre --title "$GITHUB_REF_NAME" --notes-file notes.md
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag $pre --title "$GITHUB_REF_NAME" --generate-notes
           fi
 
   build:
@@ -48,7 +48,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15-intel
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
@@ -81,3 +81,31 @@ jobs:
             asset="$name.tar.gz"
           fi
           gh release upload "$GITHUB_REF_NAME" "$asset"
+          # 验收实际上传的包，不只验收构建目录里的二进制。
+          mkdir downloaded
+          gh release download "$GITHUB_REF_NAME" --pattern "$asset" --dir downloaded
+          cmp "$asset" "downloaded/$asset"
+          if [ "${{ runner.os }}" = Windows ]; then
+            7z x "downloaded/$asset" -odownloaded > /dev/null
+            binary="$PWD/downloaded/$name/ziyuan.exe"
+          else
+            tar xzf "downloaded/$asset" -C downloaded
+            binary="$PWD/downloaded/$name/ziyuan"
+          fi
+          bash scripts/check-package.sh "$binary" "${GITHUB_REF_NAME#v}"
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-gnu ]; then
+            bash scripts/check-linux-compat.sh "$binary"
+          fi
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 所有平台下载包验收通过后发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          latest=true
+          case "${GITHUB_REF_NAME#v}" in *-*) latest=false ;; esac
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest="$latest"

@@ -1,6 +1,6 @@
-# 稳定性约定（1.0 起生效）
+# 稳定性约定（1.0.0 已生效）
 
-1.0 起，下列对外接口只增不改：可以加新的子命令、参数、字段与事件，但已有的不改名、不改义、不删除。确需破坏兼容时只在下一个主版本（2.0）进行，并在 CHANGELOG 的「兼容性」一节写明。1.0 之前仍可调整，但每次都写进 CHANGELOG。
+1.0 起，下列对外接口只增不改：可以加新的子命令、参数、字段与事件，但已有的不改名、不改义、不删除。确需破坏兼容时只在下一个主版本（2.0）进行，并在 CHANGELOG 的「兼容性」一节写明。实验性功能及内部实现的例外见下文。
 
 ## 冻结的接口
 
@@ -13,8 +13,10 @@
 | CLI 子命令与参数 | 见 `ziyuan help`。「恢复默认」统一写 `default`，「一件不授」统一写 `none`；`all` 只用于票拟、批红、复核、复勘、回报等可逐件重做的批量操作，落盘、评定、撤销必须逐件进行。 |
 | `--json` 输出 | `court`、`officials`、`tasks`、`history`、`records`、`migrate`、`flags`、`mcp`。字段只增不删、不改义；键的顺序不作保证。`court` 与 Web 的 `/api/state` 同构。 |
 | 退出码 | 0 成功；1 运行中出错（如诏令不存在、事件簿读不了、模型调用失败）；2 用法错误（未知命令、参数不对）。管道提前关闭与 Ctrl-C 退朝视为成功。 |
-| 环境变量 | `ZIYUAN_LLM_MODEL`、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`、`ZIYUAN_LLM_PROVIDER`、`ZIYUAN_LLM_PRICE`、`ZIYUAN_LLM_RETRIES`、`ZIYUAN_MAX_STEPS`、`ZIYUAN_TEST_COMMAND`、`ZIYUAN_SANDBOX`、`ZIYUAN_SANDBOX_ALLOW`、`ZIYUAN_TZ`、`ZIYUAN_GITHUB_REPO`、`ZIYUAN_GITHUB_TOKEN`、`ZIYUAN_CONFIG_DIR`。 |
+| 环境变量 | `ZIYUAN_LLM_MODEL`、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`、`ZIYUAN_LLM_PROVIDER`、`ZIYUAN_LLM_PRICE`、`ZIYUAN_LLM_RETRIES`、`ZIYUAN_MAX_STEPS`、`ZIYUAN_CONTEXT_TOKENS`、`ZIYUAN_TEST_COMMAND`、`ZIYUAN_SANDBOX`、`ZIYUAN_SANDBOX_ALLOW`、`ZIYUAN_DELTA`、`ZIYUAN_TZ`、`ZIYUAN_GITHUB_REPO`、`ZIYUAN_GITHUB_TOKEN`、`ZIYUAN_CONFIG_DIR`。 |
 | Web 驿站 `POST /api/courier` | 凭令牌（`Authorization: Bearer`）投递 `{ text, department?, station?, urgent? }`，只入队。 |
+
+`ZIYUAN_CONTEXT_TOKENS` 为旧工具输出的节略触发阈值（正整数，默认 48000），不是模型硬窗口或度支预算；最近四份输出仍受保护。`ZIYUAN_DELTA` 指定可选 git-delta 可执行文件；未设置时查 PATH，不可用时回退内置预览，不改变逐段审批语义。
 
 ## 实验性
 

@@ -40,6 +40,10 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - run: cargo build --release --locked -p ziyuan-cli --target x86_64-unknown-linux-gnu
       - run: bash scripts/check-linux-compat.sh target/x86_64-unknown-linux-gnu/release/ziyuan
+      - name: 离线包验收
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          bash scripts/check-package.sh target/x86_64-unknown-linux-gnu/release/ziyuan "$version"
 
   audit:
     name: 依赖审计
@@ -79,3 +83,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: ${{ matrix.command }}
+      - name: 原生平台离线包验收
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          binary=target/debug/ziyuan
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          bash scripts/check-package.sh "$binary" "$version"

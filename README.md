@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/YuuUehara/Ziyuan)](https://github.com/YuuUehara/Ziyuan/releases/latest)
 
-> **实验性 Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
+> **Rust Multi-Agent 框架**：以中国古代朝廷为角色模型，支持可变治理结构、官职任免、诏令派工、事件日志。
 
-**当前版本 v1.0.0-rc.4（预发布）。** CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
+**当前版本 v1.0.0（稳定版）。** 沿用 rc.4 已验收的运行时，不新增功能；兼容承诺限于[稳定性约定](docs/stability.md)列出的接口，ChatGPT 订阅与 HTTP MCP 仍为实验性，内部 Rust API 与 Web 页面不在冻结范围内。CLI 默认使用明确标记的 `DemoBackend`，只模拟 Worker 收到任务。设置 `ZIYUAN_LLM_MODEL` 后，诏令由真实模型（OpenAI 兼容 API）执行，官员默认只能用只读工具 `read_file`、`list_files`、`search_code` 查阅当前目录；工部诏令可另授写文件与跑测试，改动须皇帝准奏才落盘（见下文「工部动手」）。
 
 ![奉天门：紫垣的 Web 界面](docs/images/web-overview.png)
 
@@ -44,9 +44,9 @@ cargo install --git https://github.com/YuuUehara/Ziyuan ziyuan-cli --locked   # 
 cargo install --path crates/ziyuan-cli --locked                               # 或在本仓库中
 ```
 
-发版（推送 `v*` 标签）时，GitHub Actions 会在 Release 上附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
+发版（推送 `v*` 标签）时，GitHub Actions 先创建草稿 Release，附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。各包上传后重新下载、核对字节，再在对应原生 runner 验收版本、帮助、离线执行、无效上下文配置拒绝与事件回放；全部通过才公开 Release。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
 
-rc.4 起，Linux GNU 发行包固定在 Ubuntu 22.04 构建，面向 glibc 2.35 或更新环境；常规 CI 与打包前均检查强/弱 GLIBC 需求不超过 2.35，并启动二进制。已发布 rc.3 包保持原样，旧 glibc 上可能出现 `GLIBC_2.39` 弱版本警告；可升级 rc.4 或从源码在目标环境构建。此基线不等于已验证所有 Linux 发行版或内核。
+rc.4 起，Linux GNU 发行包固定在 Ubuntu 22.04 构建，面向 glibc 2.35 或更新环境；常规 CI 与打包前均检查强/弱 GLIBC 需求不超过 2.35，并启动二进制。已发布 rc.3 包保持原样，旧 glibc 上可能出现 `GLIBC_2.39` 弱版本警告；可升级 1.0.0 或从源码在目标环境构建。此基线不等于已验证所有 Linux 发行版或内核。
 
 CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译、Linux GNU 的 glibc 2.35 基线与启动，并在 macOS 与 Windows 上跑全部测试。
 
@@ -133,6 +133,7 @@ cd /tmp/ziyuan-demo
 - [稳定性约定](docs/stability.md)：1.0 起冻结哪些接口。
 - [CHANGELOG](CHANGELOG.md)：各版变化。
 - [路线图](docs/roadmap.md)：下一版的规划。
+- [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；长篇分块、断点续做与文学质量验收仍属 1.1 计划，不是 1.0 承诺。
 
 ## 许可
 
@@ -142,3 +143,5 @@ cd /tmp/ziyuan-demo
 - [Apache License 2.0](LICENSE-APACHE)
 
 除非另有明确说明，你有意提交并被本项目接纳的贡献也将按上述双许可证授权。
+
+软件的 MIT / Apache-2.0 许可不授权第三方文学原文、译文或书库品牌；模型上传、再分发与商业出版仍须逐项核对权利，见[小说翻译版权边界](docs/novel-translation.md#发布前版权核对2026-10-30)。

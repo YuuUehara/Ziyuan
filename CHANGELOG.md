@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 1.0.0
+
+首个稳定版：以已测试的 rc.4 运行时为最终基线，不新增功能。汇总候选期已交付的受控写入与逐段审批、预算预留、外发恢复、DAG 分办和 CLI / Web / TUI 审阅；真实模型及发布包证据见 [rc.2 历史验收与后续解决](docs/rc2-acceptance.md)和 [rc.4 发布包验收](docs/rc4-acceptance.md)，不把候选版测试冒充本版下载包测试。
+
+发布流程先保留草稿；Linux、Intel / Apple Silicon macOS、Windows 各自在原生 runner 重新下载上传包并验收，全部通过才公开。常规 CI 也运行共享离线验收脚本，Linux 保留强／弱 GLIBC 引用与启动检查。
+
+### 兼容性
+
+- [稳定性约定](docs/stability.md)正式生效：CLI 子命令与参数、列明的 `--json` 字段、退出码、环境变量和配置／事件格式只增不改；包括 `ZIYUAN_CONTEXT_TOKENS` 与 `ZIYUAN_DELTA`。库 crate 的 Rust API、Web 页面及其内部 API、缓存和人类可读措辞不在冻结范围内。
+- 事件簿仍为 v1，新版可读旧事件簿；本版无新增事件或必填字段，含 DAG 的事件簿最低读取版本仍为 `1.0.0-rc.2`，不会仅因用 1.0 打开就要求升级。正式版登记独立发布序号，不重编号历史版本。
+- ChatGPT 订阅登录与 HTTP MCP（Streamable HTTP）继续为实验性，仅模拟服务测试，不承诺其行为或凭据格式兼容；本地 stdio MCP 不受此例外影响。OpenAI 真实账号仍未经实测。
+- Rust 最低版本仍为 1.89；Linux GNU 发布包沿用 Ubuntu 22.04 / glibc 2.35 基线，rc.4 已解决 rc.3 的 `GLIBC_2.39` 弱引用警告。macOS 与 Windows 保留现有支持范围；Windows 需隔离的执行仍 fail closed，只有显式 `ZIYUAN_SANDBOX=off` 才绕开号舍，见 [ADR-0001](docs/adr-0001-windows-sandbox.md)。
+
+### 已知风险与范围
+
+- 已记录的 `cargo audit` 结果为零已知漏洞，但间接依赖 `bincode 1.3.3`（由语法着色依赖 `syntect` 引入）仍有停止维护警告 [RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html)。警告未忽略；零漏洞不等于零风险，后续须跟踪上游维护与替换评估，本版不为消除提示而冒险改动依赖。
+- DAG 创建后不可改写，不保证任意工具调用恰好一次；上游失败或驳回不自动重试，下游只读取准奏后的产物。多日停机、任意并发竞争、系统断电和所有 Linux 发行版均未获全面验证。
+- 日／英小说翻译已有短样本实测；长篇分块、断点续做和连续章节文学质量验收仍为 1.1 计划。软件的 MIT / Apache-2.0 许可不授权第三方文学原文、译文或书库品牌，上传与再分发权利须另行核对，见[场景指南](docs/novel-translation.md)。crates.io 仍未发布。
+
 ## 1.0.0-rc.4
 
 第四个 1.0 候选版：修复 Linux GNU 发布构建基线，开放上下文节略阈值配置，并补充日英小说翻译场景指南。事件格式与最低读取版本不变；仍为预发布，不替代稳定版。

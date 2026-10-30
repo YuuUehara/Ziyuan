@@ -1,5 +1,7 @@
 # rc.2 继续验收记录（2026-10-30）
 
+> **后续解决（1.0 发布准备，2026-10-30）：** 以下保留 rc.2 基线上的原始执行与当时结论，不是 1.0 下载包验收。rc.3 已发布本文的 DAG 创建与准奏交接修复；rc.4 已解决 Linux GNU 的弱 GLIBC_2.39 警告，官方下载包复核见 [rc.4 验收](rc4-acceptance.md)。后续提交 [`a83cb754`](https://github.com/YuuUehara/Ziyuan/commit/a83cb754ced1cbaa6fd43e724e100187dd5e1232) 的 [CI 41029538611](https://github.com/YuuUehara/Ziyuan/actions/runs/41029538611) 六项全部成功，覆盖 fmt/clippy/测试/smoke、依赖审计、Rust 1.89、Linux glibc 基线、macOS 与 Windows。1.0 沿用 rc.4 运行时；这些证据不扩大原测试的场景或平台范围。日／英短样本翻译已后续实测，见[场景指南](novel-translation.md)，长篇与文学质量验收仍属 1.1 计划。
+
 **状态：本地交接修复、新增入口与真实 GitHub 外发/恢复通过；不是正式版全量验收完成。** 已发布基线为 `v1.0.0-rc.2`，本次为其上的 Unreleased 工作区改动，未发布新版本。
 
 ## 同脚本真实模型对照
@@ -44,7 +46,7 @@ Linux orb、DeepSeek `deepseek-flash`、真实 `read_file` / `write_file` 与都
 
 补验证据在本线程 `.amp/in/artifacts/rc2-final-acceptance/`：`reproduce.py`、`interruption.py`、逐条命令、结果 JSON、fmt/clippy/test/smoke、MSRV 与审计日志。脚本只在隔离本地目录执行，不创建 GitHub 资源。
 
-## 仍需完成
+## 当时仍需完成（历史状态，后续解决见页首）
 
 正式发布前仍须对应新提交的跨平台 CI；本地 MSRV/审计与上述边界补验已通过。多日停机、任意并发竞争或系统断电不在本轮证据范围。本轮 GitHub 外发是单件写任务，DAG 依赖交接是上节独立场景，不宣称已支持将多件子任务改动自动合并为一份 PR。TUI 深色渲染通过真实 delta 测试，但本轮未单独录制 TUI；不以 Web 截图代替其视觉证据。release Linux 二进制在 orb glibc 2.36 可运行，但出现弱 GLIBC_2.39 符号警告，跨旧发行版适用范围尚未验证。
 
