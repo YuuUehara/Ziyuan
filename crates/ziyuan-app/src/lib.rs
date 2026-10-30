@@ -14,6 +14,7 @@ mod exam;
 mod follow;
 mod history;
 mod huidian;
+pub mod notes;
 mod personnel;
 mod preview;
 mod reports;
@@ -22,6 +23,7 @@ mod session;
 pub mod subscriptions;
 pub mod text_project;
 mod time;
+pub mod translation;
 mod vcs;
 
 pub use cabinet::{ScheduledSubtask, criteria_note, debate_minutes};

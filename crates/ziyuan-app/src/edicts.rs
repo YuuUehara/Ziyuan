@@ -435,9 +435,12 @@ impl<S: EventStore> Session<S> {
         let CourtEvent::ChangesApplied { skipped, .. } = &event else {
             unreachable!("准奏只产生 ChangesApplied");
         };
-        let files = &self.court.task(task).expect("已确认存在");
-        let files = &files.changes.as_ref().expect("已确认有待决改动").files;
+        let entry = self.court.task(task).expect("已确认存在");
+        let files = &entry.changes.as_ref().expect("已确认有待决改动").files;
         let selected = selected_files(files, skipped);
+        if let Some(link) = entry.translation.as_ref().filter(|l| l.kind.writes()) {
+            crate::translation::check_gate(root, link, &selected)?;
+        }
         ziyuan_runtime::tools::apply_changes(root, &selected)
             .map_err(|e| AppError::Apply(e.to_string()))?;
         self.commit(|_| Ok(vec![event.clone()]))?;
