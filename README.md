@@ -122,6 +122,7 @@ bash scripts/smoke.sh
 - [稳定性约定](docs/stability.md)：1.0 起冻结哪些接口。
 - [CHANGELOG](CHANGELOG.md)：各版变化。
 - [路线图](docs/roadmap.md)：下一版的规划。
+- [整理原文与检查译稿](docs/text-projects.md)：1.1 开发分支的离线文本工具，已发布的 1.0.0 不包含这些命令。
 - [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；文本工具正在开发，长篇自动翻译、中断续做和文学质量验收仍是后续安排。
 
 ## 许可
