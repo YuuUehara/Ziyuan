@@ -8,6 +8,7 @@ use ziyuan_core::CourtEvent;
 
 mod codec;
 pub mod json_file;
+pub mod recovery;
 pub mod workspace;
 
 pub use json_file::{JsonFile, JsonFileError, Stored};

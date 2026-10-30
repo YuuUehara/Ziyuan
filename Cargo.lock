@@ -2433,6 +2433,7 @@ dependencies = [
 name = "ziyuan-storage"
 version = "1.2.0"
 dependencies = [
+ "ring",
  "serde",
  "serde_json",
  "ziyuan-core",
