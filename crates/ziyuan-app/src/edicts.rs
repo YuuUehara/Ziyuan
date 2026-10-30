@@ -624,13 +624,24 @@ impl<S: EventStore> Session<S> {
         // 本批要记的时辰在这里一次取定：记录里写什么，实际追加就写什么。
         let pinned_clock = self.upcoming_clock();
         let targets = self.target_states(workspace, selected)?;
-        // 记录所覆盖的是追加之后事件簿的前若干条：基础条数取事件簿本身报出的已知条数；
-        // 报不出时退而用本次准奏开头的条数 `known`（`reload` 刚读过，二者通常相同）。
-        let base = self
+        // 记录所覆盖的是追加之后事件簿的前若干条：基础条数取事件簿本身报出的已知条数。
+        // 与本次准奏开头的条数 `known` 不一致时要出声：后面的追加位置对账
+        // （`self.len == base`）依赖二者是同一个数，悄悄取其一就会让记录与实际错位。
+        let base = match self
             .store
             .known_events()
             .map_err(|e| AppError::Apply(e.to_string()))?
-            .unwrap_or(known);
+        {
+            Some(events) if events != known => {
+                return Err(AppError::Apply(format!(
+                    "事件簿报称已知 {events} 条，会话却有 {known} 条，无法确定恢复记录的基础位置；\
+                     请重新打开工作目录后重试"
+                )));
+            }
+            Some(events) => events,
+            // 报不出条数的事件簿（如内存事件簿）用本次准奏开头的条数。
+            None => known,
+        };
         // 摘要口径：事件簿**前 `base` 条**（即本批追加之前）的完整内容摘要。恒为「写入前」，
         // 不含本批，因而不随批次长短变化；核对时按同样口径重算即可。
         // 文件事件簿与内存事件簿都用这一口径，故两条路径写出的字段含义一致。

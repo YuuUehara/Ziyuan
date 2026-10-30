@@ -544,7 +544,12 @@ impl EventStore for EventLog {
         // （调用方的会话与恢复记录可能各持一个 `EventLog`，彼此的游标并不相同。）
         let file = match File::open(&self.path) {
             Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(hex_digest(&[]))),
+            // 事件簿尚未创建，等同于零条已提交事件：摘要须与「存在但为空」的文件一致，
+            // 即空输入的 SHA-256，而不是空字符串——否则记录通不过 `is_sha256` 的校验。
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let empty = ring::digest::digest(&ring::digest::SHA256, &[]);
+                return Ok(Some(hex_digest(empty.as_ref())));
+            }
             Err(e) => return Err(e.into()),
         };
         file.lock_shared()?;
@@ -876,6 +881,22 @@ mod tests {
         );
         assert_eq!(MemoryEventLog::default().load_where(9, &keep).unwrap(), []);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_log_hashes_like_an_empty_log() {
+        // 恢复记录要存 `history_sha256`，它必须是 64 位十六进制。事件簿尚未创建时
+        // 若返回空字符串，记录就无法通过校验；两种「没有事件」的情形须给出同一个值。
+        let root = temp_root("missing-log");
+        let mut log = EventLog::new(&root);
+        let missing = log.history_sha256_at_most(0).unwrap().unwrap();
+        assert_eq!(
+            missing, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "不存在的日志应等于空输入的 SHA-256"
+        );
+        // 建一个存在但零事件的文件，摘要必须相同。
+        log.append(0, &[]).unwrap();
+        assert_eq!(log.history_sha256_at_most(0).unwrap().unwrap(), missing);
     }
 
     #[test]
