@@ -13,6 +13,8 @@ mod json;
 mod personnel;
 mod run;
 mod state;
+mod subscriptions;
+mod timer;
 mod views;
 
 pub use auth::{load_or_create_token, load_or_create_viewer_token, random_token};
@@ -60,18 +62,46 @@ pub struct Config {
 
 /// 在 `listener` 上提供 Web 界面，直到出错。
 pub async fn serve(listener: TcpListener, config: Config) -> io::Result<()> {
-    axum::serve(listener, router(config)).await
+    let service = subscriptions::Service::new(config.root.clone());
+    serve_with_subscriptions(listener, config, service).await
+}
+
+async fn serve_with_subscriptions(
+    listener: TcpListener,
+    config: Config,
+    service: subscriptions::Service,
+) -> io::Result<()> {
+    let _scheduler = timer::Scheduler::start(service.clone());
+    axum::serve(listener, router_with_subscriptions(config, service)).await
 }
 
 pub fn router(config: Config) -> Router {
+    let service = subscriptions::Service::new(config.root.clone());
+    router_with_subscriptions(config, service)
+}
+
+fn router_with_subscriptions(config: Config, subscriptions: subscriptions::Service) -> Router {
     let (events, _) = broadcast::channel(1024);
     let app = AppState(Arc::new(Inner {
         config,
+        subscriptions,
         events,
         run: Mutex::new(None),
         cache: Mutex::new(None),
     }));
     let api = Router::new()
+        .route(
+            "/subscriptions",
+            get(crate::subscriptions::list).post(crate::subscriptions::add),
+        )
+        .route("/subscriptions/updates", get(crate::subscriptions::updates))
+        .route("/subscriptions/remove", post(crate::subscriptions::remove))
+        .route("/subscriptions/check", post(crate::subscriptions::check))
+        .route("/subscriptions/read", post(crate::subscriptions::read))
+        .route(
+            "/subscriptions/settings",
+            post(crate::subscriptions::settings),
+        )
         .route("/state", get(state))
         .route("/history", get(history))
         .route("/recommend", get(recommend))

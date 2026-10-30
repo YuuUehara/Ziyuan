@@ -17,6 +17,7 @@ pub(crate) struct AppState(pub(crate) Arc<Inner>);
 
 pub(crate) struct Inner {
     pub(crate) config: Config,
+    pub(crate) subscriptions: crate::subscriptions::Service,
     /// (SSE 事件名, JSON 数据)。
     pub(crate) events: broadcast::Sender<(&'static str, String)>,
     /// 本进程正在进行的执行及其是否为常朝；`Some` 时拒绝再次启动。
@@ -25,6 +26,7 @@ pub(crate) struct Inner {
     pub(crate) cache: Mutex<Option<Session<EventLog>>>,
 }
 
+#[derive(Debug)]
 pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
 impl ApiError {

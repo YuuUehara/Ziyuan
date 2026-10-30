@@ -12,8 +12,120 @@ use ziyuan_storage::EventLog;
 use std::time::Duration;
 use ziyuan_runtime::DemoBackend;
 
-const TOKEN: &str = "test-token";
-const VIEWER: &str = "viewer-token";
+pub(crate) const TOKEN: &str = "test-token";
+pub(crate) const VIEWER: &str = "viewer-token";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subscriptions_auth_reads_are_side_effect_free_and_writes_are_typed() {
+    let (base, root) = start("subscriptions-auth").await;
+    let dir = root.join(".ziyuan/subscriptions");
+    for path in ["/subscriptions", "/subscriptions/updates"] {
+        assert_eq!(call(&base, path, None, None).await.0, 401);
+        let (status, body) = call(&base, path, Some(VIEWER), None).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    for path in [
+        "/subscriptions",
+        "/subscriptions/remove",
+        "/subscriptions/check",
+        "/subscriptions/read",
+        "/subscriptions/settings",
+    ] {
+        assert_eq!(call(&base, path, None, Some(json!({}))).await.0, 401);
+        assert_eq!(
+            call(&base, path, Some(VIEWER), Some(json!({}))).await.0,
+            403
+        );
+    }
+    assert!(
+        !dir.exists(),
+        "GET and rejected writes must not initialize files"
+    );
+    let t = Some(TOKEN);
+    for body in [
+        json!({"enabled":"false","interval_seconds":900}),
+        json!({"enabled":true,"interval_seconds":899}),
+        json!({"enabled":true,"interval_seconds":900,"mode":"evil"}),
+    ] {
+        assert_eq!(
+            call(&base, "/subscriptions/settings", t, Some(body))
+                .await
+                .0,
+            400
+        );
+    }
+    assert_eq!(
+        call(
+            &base,
+            "/subscriptions/check",
+            t,
+            Some(json!({"mode":"scheduled"}))
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        call(&base, "/subscriptions", t, Some(json!({"input":true})))
+            .await
+            .0,
+        400
+    );
+    let (status, added) = call(&base, "/subscriptions", t, Some(json!({"input":"N1234AB"}))).await;
+    assert_eq!(status, 200, "{added}");
+    assert_eq!(added["item"]["code"], "n1234ab");
+    assert!(added["item"].get("lease").is_none());
+    assert_eq!(
+        call(
+            &base,
+            "/subscriptions/settings",
+            t,
+            Some(json!({"enabled":true,"interval_seconds":900}))
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, list) = call(&base, "/subscriptions", t, None).await;
+    assert_eq!(list["settings"]["enabled"], true);
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        call(
+            &base,
+            "/subscriptions/remove",
+            t,
+            Some(json!({"code":"n1234ab"}))
+        )
+        .await
+        .1["found"],
+        true
+    );
+    assert_eq!(
+        call(
+            &base,
+            "/subscriptions/remove",
+            t,
+            Some(json!({"input":"n1234ab"}))
+        )
+        .await
+        .1["found"],
+        false
+    );
+    assert_eq!(
+        call(
+            &base,
+            "/subscriptions/read",
+            t,
+            Some(json!({"id":"missing"}))
+        )
+        .await
+        .1["found"],
+        false
+    );
+    std::fs::write(dir.join("state.json"), "corrupted").unwrap();
+    assert_eq!(call(&base, "/subscriptions", t, None).await.0, 500);
+    assert_eq!(call(&base, "/subscriptions/updates", t, None).await.0, 500);
+}
 
 struct SplitBackend;
 impl WorkerBackend for SplitBackend {
@@ -57,12 +169,20 @@ async fn start_with_backend(name: &str, backend: Arc<dyn WorkerBackend>) -> (Str
         },
         github: None,
     };
-    tokio::spawn(serve(listener, config));
+    // Embedding is deliberately timer-free: tests never contact the production source.
+    tokio::spawn(async move {
+        axum::serve(listener, router(config)).await.unwrap();
+    });
     (base, root)
 }
 
 /// 阻塞地发送请求，返回 (状态码, JSON)。`token` 为 `None` 时不带令牌。
-async fn call(base: &str, path: &str, token: Option<&str>, body: Option<Value>) -> (u16, Value) {
+pub(crate) async fn call(
+    base: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
     let url = format!("{base}/api{path}");
     let token = token.map(|t| format!("Bearer {t}"));
     tokio::task::spawn_blocking(move || {
