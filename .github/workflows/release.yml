@@ -109,3 +109,32 @@ jobs:
           latest=true
           case "${GITHUB_REF_NAME#v}" in *-*) latest=false ;; esac
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest="$latest"
+
+  crates:
+    # 下载包全部验收、Release 公开后才发 crates.io；crates.io 不可删除版本，只能 yank。
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 换取 crates.io 短期令牌（可信发布）
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: 按依赖顺序发布，已有的版本跳过
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for crate in ziyuan-core ziyuan-governance ziyuan-storage ziyuan-runtime ziyuan-github \
+                       ziyuan-llm ziyuan-app ziyuan-web ziyuan-tui ziyuan-cli; do
+            status="$(curl -s -o /dev/null -w '%{http_code}' -A 'ziyuan-release (https://github.com/YuuUehara/Ziyuan)' \
+              "https://crates.io/api/v1/crates/$crate/$version")"
+            if [ "$status" = 200 ]; then
+              echo "$crate $version 已在 crates.io，跳过"
+              continue
+            fi
+            cargo publish --locked -p "$crate"
+          done
