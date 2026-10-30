@@ -144,8 +144,10 @@ pub(crate) enum Command {
     Records(String),
     /// 输出 shell 补全脚本。
     Completions(Shell),
-    /// 离线文本项目：不开朝廷会话。
+    /// 文本项目与译书。
     Text(TextAction),
+    /// 御笔札记：不开朝廷会话。
+    Note(crate::note_commands::NoteAction),
     /// 作品关注与更新列表：不开朝廷会话。
     Follow(FollowAction),
 }
@@ -537,6 +539,7 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             _ => return Err("用法: ziyuan completions <bash|zsh|fish>".into()),
         },
         "text" => Command::Text(text_commands::parse(args)?),
+        "note" => Command::Note(crate::note_commands::parse(args)?),
         "follow" => Command::Follow(subscription_commands::parse(args)?),
         "recommend" => match <[String; 1]>::try_from(args) {
             Ok([office]) => Command::Recommend(office.parse()?),

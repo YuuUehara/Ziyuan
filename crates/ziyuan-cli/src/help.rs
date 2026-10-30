@@ -106,12 +106,18 @@ pub(crate) const HELP: &str = concat!(
   ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]
                                        离线文本项目：导入 TXT、按段分块、检查候选译稿结构（不需 init，不调用模型；
                                        只查结构，不评判译文质量）；`ziyuan text help` 查看完整说明
+  ziyuan text translate|review|revise|zhupi|finalize|reopen <项目ID> <块ID> ...
+  ziyuan text context approve <项目ID> | status <项目ID> | resume <项目ID> [--yes]
+                                       翰林院译书：下诏入队、逐段朱批、上下文批准、御览与续做；text help 查看参数
+  ziyuan note add|list|show|edit|remove|promote ...
+                                       御笔札记（不需 init）；promote 仅并入草稿，须 text context approve 才生效；
+                                       `ziyuan note help` 查看参数
   ziyuan follow add <作品链接|作品代码>
   ziyuan follow list | remove <作品链接|作品代码> | check | updates [--all] | read <提醒ID> | queue [on|off]
                                        作品关注：关注 syosetu 作品，手动检查章节更新并列出提醒（不需 init，
                                        不调用模型，只查作品信息不下载正文；不会在后台自动检查）；
                                        `ziyuan follow help` 查看完整说明
-  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp|text|follow> --json
+  ziyuan <court|officials|tasks|history|records|migrate|flags|mcp|text|follow|note> --json
                                        以 JSON 输出（court 与 Web 的 /api/state 同构），便于脚本使用
   ziyuan completions <bash|zsh|fish>   输出 shell 补全脚本（如 `ziyuan completions bash > ~/.local/share/bash-completion/completions/ziyuan`）
   ziyuan help
@@ -235,6 +241,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "completions",
     "text",
     "follow",
+    "note",
 ];
 
 /// 支持 `--json` 的子命令。
@@ -249,6 +256,7 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "mcp",
     "text",
     "follow",
+    "note",
 ];
 
 /// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
@@ -286,6 +294,7 @@ pub(crate) fn completions(shell: Shell) -> String {
   fi
   case "$prev" in
     --dept) words="{departments}" ;;
+    --kind) words="word passage" ;;
     --tools) words="{tools} none" ;;
     --plan) COMPREPLY=($(compgen -f -- "$cur")); return ;;
     *) case "${{COMP_WORDS[1]}}" in
@@ -294,7 +303,8 @@ pub(crate) fn completions(shell: Shell) -> String {
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
-         text) words="init import show check help --json" ;;
+         text) words="init import show check translate review revise zhupi finalize reopen context approve status resume help --dept --reason --clear --show --yes --json" ;;
+         note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
          apply) words="--skip --commit" ;;
          {json_cases}) words="--json" ;;
@@ -329,7 +339,20 @@ complete -F _ziyuan ziyuan
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
-                format!("{} -a 'init import show check help'", seen("text")),
+                format!("{} -a 'init import show check translate review revise zhupi finalize reopen context approve status resume help'", seen("text")),
+                format!("{} -a 'add list show edit remove promote help'", seen("note")),
+                format!("{} -l kind -x -a 'word passage'", seen("note")),
+                format!("{} -l source -r", seen("note")),
+                format!("{} -l zh -r", seen("note")),
+                format!("{} -l remark -r", seen("note")),
+                format!("{} -l project -r", seen("note")),
+                format!("{} -l block -r", seen("note text")),
+                format!("{} -l para -r", seen("note")),
+                format!("{} -l search -r", seen("note")),
+                format!("{} -l reason -r", seen("text")),
+                format!("{} -l clear", seen("text")),
+                format!("{} -l show", seen("text")),
+                format!("{} -l yes", seen("text")),
                 format!(
                     "{} -a 'add list remove check updates read queue on off help'",
                     seen("follow")
@@ -338,7 +361,7 @@ complete -F _ziyuan ziyuan
                 format!("{} -l json", seen(&json)),
                 format!(
                     "{} -l dept -x -a '{departments}'",
-                    seen("edict post template")
+                    seen("edict post template text")
                 ),
                 format!(
                     "{} -l tools -x -a '{tools} none'",

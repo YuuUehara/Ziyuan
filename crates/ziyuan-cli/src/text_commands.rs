@@ -1,4 +1,4 @@
-//! `ziyuan text`：独立的离线文本项目。不开朝廷会话、不读模型配置、不联网。
+//! `ziyuan text`：离线文本项目与译书命令分派。不读模型配置、不联网。
 
 use std::env;
 use std::error::Error;
@@ -21,6 +21,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
 
 pub(crate) enum TextAction {
     Help,
+    Translation(crate::translation_commands::TranslationAction),
     Init(NewProject),
     Import(String, Vec<PathBuf>),
     Show(String),
@@ -60,6 +61,10 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
             _ => return Err(SHOW_USAGE.into()),
         },
         "check" => parse_check(rest)?,
+        "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
+        | "status" | "resume" => {
+            TextAction::Translation(crate::translation_commands::parse(&args)?)
+        }
         other => {
             return Err(
                 format!("未知的 text 子命令：{other}。运行 ziyuan text help 查看用法").into(),
@@ -141,12 +146,16 @@ fn parse_check(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
 
 pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> {
     if let TextAction::Help = action {
-        println!("{TEXT_HELP}");
+        println!(
+            "{TEXT_HELP}\n\n{}",
+            crate::translation_commands::TRANSLATION_HELP
+        );
         return Ok(());
     }
     let projects = TextProjects::new(env::current_dir()?);
     match action {
         TextAction::Help => unreachable!("已在上面处理"),
+        TextAction::Translation(action) => return crate::translation_commands::run(action, json),
         TextAction::Init(metadata) => {
             let project = projects.create(metadata)?;
             match json {

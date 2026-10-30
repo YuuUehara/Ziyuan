@@ -481,3 +481,146 @@ fn text_help_shows_usage_without_a_project() {
     assert!(bash.contains("text"));
     assert!(!root.join(".ziyuan").exists());
 }
+
+#[test]
+fn notes_and_context_are_offline_and_json_round_trip() {
+    let dir = TempDir::new("notes");
+    let root = dir.path();
+    let id = init_json(root, "Tale", "en");
+    let note = ok_json(
+        root,
+        &[
+            "note",
+            "add",
+            "--source",
+            "moon",
+            "--zh",
+            "月亮",
+            "--remark",
+            "认可",
+            "--project",
+            &id,
+            "--json",
+        ],
+    );
+    let n = note["id"].as_str().unwrap();
+    assert_eq!(note["kind"], "word");
+    assert!(note["created"].is_u64());
+    let listed = ok_json(
+        root,
+        &[
+            "note",
+            "list",
+            "--project",
+            &id,
+            "--search",
+            "MOON",
+            "--kind",
+            "word",
+            "--json",
+        ],
+    );
+    assert_eq!(listed, json!([note]));
+    assert_eq!(ok_json(root, &["note", "show", n, "--json"]), note);
+    assert_eq!(
+        ok_json(root, &["note", "edit", n, "--remark", "", "--json"])["remark"],
+        ""
+    );
+    let promoted = ok_json(root, &["note", "promote", n, "--project", &id, "--json"]);
+    assert_eq!(promoted["added"], true);
+    assert_eq!(promoted["requires_context_approval"], true);
+    assert_eq!(
+        ok_json(root, &["note", "promote", n, "--project", &id, "--json"])["added"],
+        false
+    );
+    assert_eq!(
+        ok_json(root, &["text", "context", "approve", &id, "--json"]),
+        json!({"project":id,"version":1})
+    );
+    assert_eq!(ok_json(root, &["note", "remove", n, "--json"])["id"], n);
+    assert_eq!(ok_json(root, &["note", "list", "--json"]), json!([]));
+    no_court(root);
+}
+
+#[test]
+fn translation_status_zhupi_and_queued_issuance() {
+    let dir = TempDir::new("translation");
+    let root = dir.path();
+    let id = init_json(root, "Tale", "en");
+    let source = dir.write("one.txt", "Alpha.\n\nBeta.\n");
+    let p = ok_json(
+        root,
+        &["text", "import", &id, source.to_str().unwrap(), "--json"],
+    );
+    let b = p["chapters"][0]["blocks"][0]["block_id"].as_str().unwrap();
+    let para = p["chapters"][0]["blocks"][0]["paragraphs"][0]["id"]
+        .as_str()
+        .unwrap();
+    ok(root, &["text", "zhupi", &id, b, para, "平实一些"]);
+    let z = ok_json(root, &["text", "zhupi", &id, b, para, "--show", "--json"]);
+    assert_eq!(z["items"][para]["text"], "平实一些");
+    assert_eq!(
+        ok_json(root, &["text", "zhupi", &id, b, para, "--clear", "--json"])["version"],
+        2
+    );
+    no_court(root);
+    ok(root, &["init"]);
+    let s = ok_json(root, &["text", "status", &id, "--json"]);
+    assert_eq!(s[0]["state"]["state"], "not_started");
+    let issued = ok_json(
+        root,
+        &["text", "translate", &id, b, "--dept", "works", "--json"],
+    );
+    assert!(issued["task"].is_u64());
+    assert_eq!(
+        ok_json(root, &["text", "status", &id, "--json"])[0]["state"]["state"],
+        "running"
+    );
+    assert_eq!(
+        ok_json(root, &["text", "resume", &id, "--yes", "--json"])["issued"],
+        json!([])
+    );
+    for action in ["translate", "review", "revise", "finalize"] {
+        assert_eq!(code(root, &["text", action, &id, b]), Some(1));
+    }
+}
+
+#[test]
+fn new_cli_usage_and_completions() {
+    let dir = TempDir::new("new-usage");
+    let root = dir.path();
+    for args in [
+        vec!["note", "add"],
+        vec!["note", "add", "--source", "x", "--zh", "y", "--kind", "bad"],
+        vec!["note", "list", "--search"],
+        vec!["note", "show"],
+        vec!["note", "edit", "id"],
+        vec!["note", "promote", "id"],
+        vec!["note", "remove", "id", "extra"],
+        vec!["note", "list", "--kind", "word", "--kind", "passage"],
+        vec!["text", "translate", "p"],
+        vec!["text", "translate", "p", "b", "--dept", "rites"],
+        vec!["text", "review", "p", "b", "extra"],
+        vec!["text", "reopen", "p", "b"],
+        vec!["text", "reopen", "p", "b", "--reason", ""],
+        vec!["text", "resume", "p", "--yes", "--yes"],
+        vec!["text", "context", "approve"],
+        vec!["text", "zhupi", "p", "b", "para", "--clear", "text"],
+    ] {
+        assert_eq!(code(root, &args), Some(2), "{args:?}");
+    }
+    assert!(stdout(&ok(root, &["note", "--help"])).contains("text context approve"));
+    for shell in ["bash", "zsh", "fish"] {
+        let c = stdout(&ok(root, &["completions", shell]));
+        for word in [
+            "note",
+            "promote",
+            "translate",
+            "zhupi",
+            "finalize",
+            "resume",
+        ] {
+            assert!(c.contains(word), "{shell}: {word}");
+        }
+    }
+}

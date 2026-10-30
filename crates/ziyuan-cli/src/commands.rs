@@ -36,6 +36,7 @@ pub(crate) fn execute(
         | Command::Tui
         | Command::Completions(_)
         | Command::Text(_)
+        | Command::Note(_)
         | Command::Follow(_) => {
             unreachable!("在 run 中处理")
         }
