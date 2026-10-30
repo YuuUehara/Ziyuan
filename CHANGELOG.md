@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.2.0
+
+新增完整的小说翻译闭环（初译、审校、修订、朱批、御览、断点续做与 Web 审阅），以及独立的御笔札记；作品关注并入武英殿，并可把新章节提醒自动入兵部驿站。发布流程增加 crates.io 可信发布。验收结果与未测项目见 [1.2.0 验收记录](docs/acceptance/1.2.0.md)；长篇连续翻译的文学质量不在本轮验收范围，文档不据此声称出版质量。
+
+### 兼容性
+
+- 事件簿仍为 v1，新增 `TranslationLinked`、`TranslationFinalized`、`TranslationReopened` 三种事件，`readable_since` 为 1.2.0（独立发布序号 17）。1.1.0 及更早的二进制打开含这些事件的事件簿会拒绝并提示升级；旧事件簿照常可读，无需迁移。`ziyuan migrate` 报出最先要求 1.2.0 的行。
+- 新增 `note` 子命令与 `text translate|review|revise|zhupi|finalize|reopen|context approve|status|resume`、`follow queue`；全部为新增，已冻结的子命令、参数、退出码与既有 `--json` 字段不变。
+- `text`、`note` 的 `--json` 字段与 `.ziyuan/notes.json`、`.ziyuan/text-projects/` 的内部格式暂不冻结，变化会写进本文件；`translations/<项目>/` 是用户可见材料，不是内部格式承诺。
+- 旧版本不认识这些新命令与新文件，不能用这些功能；不要把它理解成旧版能安全忽略译书数据。
+
+### 新增
+
+- 译书命令行：`text translate <项目> <块> [--dept works]` 导出本块材料并下工部初译诏令（只入队）；`text review <项目> <块>` 在同一批次下两件礼部只读审校（忠实度、文风）；`text revise <项目> <块>` 按朱批优先下工部统稿诏令；`text finalize` 御览定稿；`text reopen --reason` 退回重修；`text context approve` 把 `translations/<项目>/context/` 草稿校验为不可变快照 v<N>；`text status` 列出各块状态、失效原因与对账提示；`text resume [--yes]` 只为未开始的块下初译，`--yes` 才重试失败/撤销。全部支持 `--json`；初译、审校、修订等须先 `ziyuan init`，朱批与上下文批准不需要。
+- 逐段朱批：`text zhupi <项目> <块> <段号> <意见>`，可用 `--clear` 清除、`--show` 查看单段或全块；按段存于 `.ziyuan/text-projects/<项目>/zhupi.json`，带版本，下诏时导出为 `zhupi.json` 并优先于审校意见。
+- 御笔札记：`ziyuan note add|list|show|edit|remove|promote`，记录词语或段落的认可译法、备注与可选出处，存于 `.ziyuan/notes.json`，不需要朝廷；`promote` 只并入上下文草稿（word 进术语表，passage 进文体范例），须 `text context approve` 才生效，重复并入不重复写。
+- 作品关注自动入队：`follow queue [on|off]` 默认关闭；开启后 `follow check` 与 Web 定时检查把未读新章节提醒按站名 `syosetu:<作品代码>#<章节数>` 入兵部驿站（交工部，只入队不执行），按站名去重。未建立朝廷时为 `not_founded`，入队失败不中断检查，下次再补。`follow check --json` 新增 `courier{status, queued[{notice,station,task}], already_queued, errors}`。
+- Web：武英殿新增「翰林院 · 译书」卡片，按项目→章→块导航，原文、已准奏译文、待准修订三栏对照，附上下文依据、检查问题与失效原因，并可发起初译、审校、修订、逐段朱批、御览定稿、退回重修、上下文批准；只读令牌看得见但不能写，写请求回 403。卡片内另有「御笔札记」栏，可新增、搜索、并入，并注明须上下文批准。长段落在各自栏内滚动，390px 下改为上下堆叠，选中的项目与块在刷新后保持。
+- 作品关注移入武英殿：`#subscription-queue` 勾选框配合「保存检查设置」开关新章节自动入队，旧书签重定向到 `#wuying`。
+- TUI：诏令详情显示只读的译书关联（项目与块），不在此下诏或朱批。
+- Web 字体：只用 SIL OFL 1.1 开源字体。译书原文、译文与朱批用霞鹜文楷（系统语言为日文时优先 Klee One 与日文字形），标题用思源宋体，界面文字用思源黑体，代码用内置的 JetBrains Mono（许可证随发行包附上）；中日文字体不内置，未安装时回落到系统字体，安装方法见[使用指南 · 字体](docs/guide.md#字体)。
+
+### 内部
+
+- 译书材料导出到 `translations/<项目>/<块>/`：`source.json`、`context.json`、`neighbors.json` 与 `zhupi.json`（本块朱批，可为空），修订另有 `reviews.json`；模型玉玺限该块目录，准奏只允许写 `zh.json` 与 `proposals/`。导出不碰 `zh.json` 与 `proposals/`，其他上述导出文件会重写，不应用于保存手改内容。
+- 准奏门控接入共用 `apply` 路径：只准写 `zh.json` 与 `proposals/`；按逐段取舍后的最终字节复查结构（漏段、重复、乱序、未知段号、空译文、块声明不符），并核对原文哈希与已批准上下文版本。任何一项不过即整件拒绝，不写任何文件；修订可以只写 `proposals/`，此时要求磁盘译稿仍是此前已准奏的译文。
+- 审校只取最近一轮：`reviews.json` 从上一次准奏之后下的审校中，两路各取最近一件已完成的回奏，没有则为空；非修订下诏会清掉上一轮的 `reviews.json`。
+- 朱批每块按下诏时的逐段条目登记哈希（`TranslationLinked.zhupi_hash`）：初译与修订都能看到事先写好的朱批；下诏后新增或修改朱批不会被静默忽略，御览会拒绝并要求再下修订。修订稿待准奏时不能定稿；已定稿的块须先退回才能再下初译或修订。定稿事件记录当时的译稿哈希、上下文版本与朱批版本。
+- 修订失败、撤销或改动被驳回不阻塞块：最近一件已准奏译文仍为现行稿，可继续审校、修订或御览；修订未改 `zh.json` 时允许准奏，块进入待御览。
+- 札记并入上下文草稿时使用目录排他锁、临时文件刷盘后原子替换；并发并入不丢条目。上下文批准写入新快照，最后写清单才视为批准完成；内容未变时沿用现行版本。错误映射：磁盘与存储故障照实报为存储错误，其余前置条件与材料问题归为翰林院不准（`Translation`），不写事件簿。
+- `text` 相关命令沿用退出码 0/1/2；状态与检查报告的 `--json` 输出含原因或问题，其他运行失败可能只向 stderr 输出文字错误，脚本仍须检查退出码。
+
+### 文档
+
+- 重写[小说翻译指南](docs/novel-translation.md)：以 1.2.0 工作流为主，说明上下文批准、初译/审校/修订、朱批时机、御览、状态与续做、模型可见材料与准奏门控；把 1.0.0 试点明确标为历史，并新增「还没验证」一节。补充作品关注只是更新提醒、不是翻译授权，以及上传模型是独立的权利审查。
+- 新增 [1.2.0 验收记录](docs/acceptance/1.2.0.md)；新增[发布指南](docs/releasing.md)，说明标签、四平台验收、公开 Release 与 crates.io 可信发布。
+- 更新[文本工具](docs/text-projects.md)的「下一步：翻译」、[作品更新提醒](docs/subscriptions.md)的自动入队、[使用指南](docs/guide.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、README 与[文档目录](docs/README.md)。
+- 发布：`release.yml` 增加 `crates` 作业，在全部平台下载包验收且 Release 公开后，用 GitHub OIDC 换取短期 crates.io 令牌，按依赖顺序发布十个 crate，已在 crates.io 的版本跳过。crates.io 不能删除版本，只能 yank；可信发布须逐 crate 先在 crates.io 配置，且要求 crate 已存在，故首个版本须手工用 API token 发布。若 1.1.0 从未发布，需先手工补发；该作业只发布当前标签的版本，不回溯旧版本。
+
 ## 1.1.0
 
 新增两组独立工具：本地原文整理与候选译稿结构检查（`ziyuan text`），以及 syosetu 作品更新提醒（`ziyuan follow` 与 Web「作品关注」页）。它们不需要朝廷或模型配置，不下载正文、不自动翻译、不向外推送。原有命令、事件簿和 `--json` 字段不变。验收结果与未测项目见 [1.1.0 验收记录](docs/acceptance/1.1.0.md)；本机程序连接真实 syosetu 接口时曾超时，联网只经独立工具确认接口字段。

@@ -24,6 +24,14 @@
 
 新工具遇到损坏或更新版本的文件会报错，不会重置为空。请勿手动编辑内部清单或改写原件副本。1.0 忽略这些文件不代表它能使用新功能；新命令及其输出见[文本工具](text-projects.md)和[关注教程](subscriptions.md)。`text` 与 `follow` 的命令、参数和退出码按上表约定只增不改；它们 `--json` 输出的字段和内部 JSON 文件格式暂不冻结，变化会写进 CHANGELOG。
 
+## 1.2.0 新增
+
+- **事件簿**：仍为格式 v1，新增三种事件 `TranslationLinked`、`TranslationFinalized`、`TranslationReopened`，`readable_since` 为 1.2.0（独立发布序号 17）。1.1.0 及更早的二进制打开含这些事件的事件簿时**拒绝打开并提示升级**，与此前新增事件的规则相同；`ziyuan migrate` 会指出最先要求 1.2.0 的行。旧事件簿照常可读，本版不要求迁移。
+- **CLI**：新增 `ziyuan note` 子命令（札记），以及 `text translate`、`text review`、`text revise`、`text zhupi`、`text finalize`、`text reopen`、`text context approve`、`text status`、`text resume` 与 `follow queue`。全部是新增，没有改名、改义或删去已有子命令与参数。`--json` 的冻结清单在原有子命令上不变，另支持 `note`（以及已有的 `text`、`follow`）。
+- **`--json` 字段**：冻结清单仍是上表列出的那些命令；`text`、`note`（以及 1.1.0 的 `follow`）的 `--json` 字段不冻结，变化会写进 CHANGELOG。`court`、`tasks` 等既有命令的字段只增不改，译书关联只表现为任务上新增的 `translation` 字段。
+- **文件**：`translations/<项目>/` 是给用户阅读、备份的材料（上下文草稿、导出的原文与上下文、译稿），不属于内部格式承诺；`.ziyuan/notes.json` 与 `.ziyuan/text-projects/`（上下文快照、朱批、项目清单）是内部状态，格式暂不冻结，新版遇到更新版本写入的文件会报错而不会重置为空。
+- **旧版不能使用这些功能**：旧版本不认识 `note` / `text` 新子命令，也读不了 `translations/` 的译稿状态与朱批。不要把“旧版不会动这些文件”说成兼容；它只是用不了这些功能。升级后用 `ziyuan migrate` 检查事件簿即可。
+
 ## 实验性
 
 下列功能可用，但只用模拟服务测过，1.0 起不承诺兼容：行为、参数与凭据格式都可能调整，变化写进 CHANGELOG。用真实服务实测通过后转为冻结。

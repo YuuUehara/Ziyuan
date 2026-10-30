@@ -1,6 +1,6 @@
 # 紫垣使用指南
 
-从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。当前稳定版为 v1.1.0，兼容范围见[稳定性约定](stability.md)。
+从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。当前稳定版为 v1.2.0，兼容范围见[稳定性约定](stability.md)。
 
 先记住四个对应关系：**诏令是任务，玉玺是权限设置，回奏是执行结果，准奏是批准把改动写入文件**。界面保留这些名称，操作步骤会同时说明实际作用。
 
@@ -11,9 +11,9 @@
 | 修改文件前先审阅 | [受控写权限](#工部动手受控写权限) |
 | 限制费用和调用量 | [预算与限额](#户部度支预算与限额) |
 | 理解哪些内容可能发给外部服务 | [安全说明](../SECURITY.md) |
-| 翻译日文或英文 | [小说翻译指南](novel-translation.md) |
+| 逐块初译、审校、朱批与御览（1.2.0 起） | [小说翻译指南](novel-translation.md) |
 | 整理原文、检查漏段（1.1.0 起） | [文本工具](text-projects.md) |
-| 关注作品更新（1.1.0 起） | [作品更新提醒](subscriptions.md) |
+| 关注作品更新（1.1.0 起，1.2.0 可自动入队） | [作品更新提醒](subscriptions.md) |
 
 代码结构和实现取舍见 [architecture.md](architecture.md)。本指南主要用 Bash 示例；PowerShell 设置变量要用 `$env:变量名 = '值'`，不要直接照抄 `export`。示例中的任务 ID 都要换成当前项目的实际编号；同一任务的 `apply`、`discard` 等操作是不同选择，不要依次全执行。
 
@@ -39,7 +39,7 @@ ziyuan init
 ziyuan edict --dept works '找出所有 unsafe 代码并说明用途'
 ```
 
-已有 `.ziyuan/` 的项目不需要再 `init`。未设置模型时只是演示；设置后会发送真实请求，可能产生费用。
+已有朝廷事件簿 `.ziyuan/court.log` 的项目不需要再 `init`；只有文本、札记或关注文件的 `.ziyuan/` 目录不代表已经建立朝廷。未设置模型时只是演示；设置后会发送真实请求，可能产生费用。
 
 **实测情况（2026-10）：** 已用 DeepSeek `deepseek-flash`（默认思考模式）与 `deepseek-v4-pro` 端到端实测：多轮工具调用、流式输出、玉玺越权拦截、超时与 Ctrl-C 撤销均正常；v0.7.0 又跑通了工部改代码的全程（改动暂存并跑测试 → 都察院背书 → `apply --commit` 落盘提交 → 评定），一件约 1.4 万 tokens。思考模式的思维链（`reasoning_content`）不显示，但会按 DeepSeek 要求在后续请求中回传。
 
@@ -97,7 +97,7 @@ ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 - **节略**：默认对话估算超过 48000 tokens 时，从最早的起把工具输出压成开头 200 字加一行说明（仍在外来文书边界内），最近 4 份不动。不调用模型。rc.4 起可设 `ZIYUAN_CONTEXT_TOKENS` 为正整数覆盖触发阈值；CLI、Web、TUI 启动时读取，服务须重启才生效。它不是模型硬窗口、输出上限或度支预算，最近四份输出保留也意味着节略后未必低于阈值；按所选模型能力留出提示、工具与输出余量。
 - **参数校验**：工具参数须是合法 JSON，并合乎工具声明的 JSON Schema（类型、必填、不许多余字段）；不合的不执行，作为工具错误退回模型，审计记为失败。
 
-小说翻译的日语／英语短样本、术语检查和人工校对流程见[场景指南](novel-translation.md)。1.1.0 首批计划是本地文本整理与检查，不包含自动翻译长篇或断点续做。上传原文与再分发译文的权利须另行核对。
+小说翻译的逐块流程见[小说翻译指南](novel-translation.md)：1.2.0 起可用 `text translate`、`text review`、`text revise`、`text zhupi`、`text finalize` 与 `text status` / `text resume`，写入仍须准奏。上传原文与再分发译文的权利须另行核对；长篇连续翻译的文学质量尚未验证。
 
 ## 奉天门：Web 界面
 
@@ -114,6 +114,18 @@ cd /path/to/your/project && ziyuan serve --port 8080
 - 在浏览器中下诏（含玉玺）、执行与中止、撤销、评定、改制、招募、任免与荐举。
 - 执行中官员的回答实时流式显示；页面每 5 秒刷新一次，以反映 CLI 等其他进程的变更。诏令只列待理会的（未结束、待评定、改动待准奏）与最近 50 件，「全部列出」可看全部；起居注只列最近 500 条，更早的用筛选查。
 - 与 CLI 对齐：页首「开常朝」即 `run --watch`（常驻执行、办完自动请都察院复核，「散朝」停止）；下诏表单与官职上限可授外藩 MCP；武英殿可检索实录、一键请礼部修 CHANGELOG、收 GitHub 来件（启动前设 `ZIYUAN_GITHUB_REPO` / `ZIYUAN_GITHUB_TOKEN`）；驿传诏令评定后可在诏令上「回报 GitHub」，准奏落盘后可「开草稿 PR」。
+- 武英殿（1.2.0）另有「翰林院 · 译书」卡片：按项目→章→块选择，原文、已准奏译文、待准修订三栏对照，附上下文依据、检查问题与失效原因；可发起初译、审校、修订、逐段朱批、御览定稿、退回重修与上下文批准。长段落在各自栏内滚动，窄屏（约 390px）改为上下堆叠，刷新后保持选中的项目与块。观政令牌能看不能写，写请求回 403。用法与限制见[小说翻译指南](novel-translation.md)。
+
+  ![1.2.0 翰林院译书：左侧选择项目与块，右侧对照原文、已准奏译文和待准修订，段下显示朱批](images/web-text-translation.png)
+
+- 同一卡片的「御笔札记」栏可新增、搜索札记并并入项目上下文草稿；并入只写草稿，须再执行 `ziyuan text context approve` 才生效。
+
+  ![1.2.0 御笔札记：词语与段落译法、备注和并入草稿按钮，右侧可记下新札记](images/web-text-notes.png)
+
+- 「兵部驿站 · 作品关注」现在也在武英殿，可勾选「新章节自动入队」；旧书签会重定向到 `#wuying`。详见[作品更新提醒](subscriptions.md)。
+
+  ![1.2.0 兵部驿站作品关注：两个虚构作品代码，定时检查与新章节自动入队均关闭](images/web-follow.png)
+
 - Web 界面代表皇帝，每个 API 请求都须带令牌。令牌存于 `.ziyuan/web-token`（仅本人可读），重启不变；`ziyuan serve --new-token` 重新生成，旧令牌作废。
 - 观政令牌：`ziyuan serve --viewer` 另发一个只读令牌（存于 `.ziyuan/web-viewer-token`，启动时打印其地址），便于给旁人观政。凭它只能查看朝廷、诏令、起居注、实录与考成、度支等报告，页面不显示写操作；下诏、批红、准奏、改制、任免、执行等一切写请求都回 403。`--new-token` 同时重新生成两个令牌。
 
@@ -121,6 +133,22 @@ cd /path/to/your/project && ziyuan serve --port 8080
 - 打开带 `?token=` 的地址后，服务器种下 HttpOnly、SameSite=Strict 的 Cookie 并跳转到不含令牌的地址；也可在页面登录框输入令牌。脚本可用 `Authorization: Bearer <令牌>`。
 - 默认只监听 127.0.0.1。`--bind 0.0.0.0` 可供其他机器访问，但 HTTP 是明文，请只在可信网络中使用，或置于 HTTPS 反向代理、SSH 隧道之后。
 - 与 CLI 共用事件簿与多进程规则：执行时取得执行者锁，CLI 正在执行时页面会提示稍后再试。
+
+### 字体
+
+页面只用开源字体（均为 SIL Open Font License 1.1，可免费商用与再分发），不联网下载：
+
+| 用途 | 字体 | 是否随程序附带 |
+| --- | --- | --- |
+| 译书原文、译文与朱批 | [霞鹜文楷 LXGW WenKai](https://github.com/lxgw/LxgwWenKai)；系统语言为日文时优先 [Klee One](https://github.com/fontworks-fonts/Klee) | 否，需自行安装 |
+| 标题与正文 | [思源宋体 Source Han Serif](https://github.com/adobe-fonts/source-han-serif) / Noto Serif CJK | 否，需自行安装 |
+| 按钮、提示等界面文字 | [思源黑体 Source Han Sans](https://github.com/adobe-fonts/source-han-sans) / Noto Sans CJK | 否，需自行安装 |
+| 代码、诏令号、路径 | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)（西文）；中文回落到[更纱等宽 Sarasa Mono SC](https://github.com/be5invis/Sarasa-Gothic) 或思源等宽 | JetBrains Mono 已内置；许可证见发行包中的 `JetBrainsMono-OFL.txt` |
+
+页面按浏览器的系统语言选字形：系统为日文时用日文字形（Klee One、思源 JP），其余用简体中文字形；不按原文语种预设。中文与日文字体每套数十 MB，所以不内置。没装时浏览器会改用系统自带的衬线、无衬线或等宽字体，页面照常可用，只是观感不同。安装方法：
+
+- **Windows / macOS**：从上表链接的发布页下载字体文件，双击安装后重启浏览器。
+- **Linux**：思源/Noto 字体多数发行版有现成的包（如 Debian/Ubuntu 的 `fonts-noto-cjk`）；霞鹜文楷等其余字体从发布页下载，放进 `~/.local/share/fonts/` 后运行 `fc-cache -f`，再重启浏览器。
 
 ## 紫禁城：终端界面
 
@@ -136,6 +164,7 @@ cd /path/to/your/project && ziyuan tui
 ```
 
 - 三个页签：诏令（列表 + 详情，执行中实时流式输出）、百官（考绩与各部派工路线）、起居注（事件记录）。
+- 译书诏令的详情另有一行只读的译书关联（项目与块），不在此下诏或朱批；译书操作仍走 CLI 或 Web。
 - 键盘操作：`n` 下诏/招募，`r` 执行、`s` 停止，`c` 撤销，`a`/`d` 采纳/驳回，`p`/`d` 任命/罢免，`m` 易名，`g` 改制，`q` 退出。
 - 刑部与实录：诏令页 `x` 请刑部复勘密报、`X` 平反复勘判为误报的各处；`R` 检索翰林院实录（留空看最近 10 件）。底栏列出全部按键。
 - 每秒重新加载事件簿，与 CLI、Web 共用多进程规则。
@@ -150,7 +179,8 @@ ziyuan completions zsh > ~/.ziyuan.zsh   # 借 bashcompinit；在 ~/.zshrc 的 c
 ziyuan completions fish > ~/.config/fish/completions/ziyuan.fish
 ```
 
-- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）。1.1.0 起另支持 [`text`](text-projects.md) 和 [`follow`](subscriptions.md) 的操作；帮助仍显示普通文字。其他命令带 `--json` 会报错。兼容约定见 [稳定性约定](stability.md)。
+- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）。1.1.0 起另支持 [`text`](text-projects.md) 和 [`follow`](subscriptions.md) 的操作，1.2.0 起支持 `note` 与新增的 `text` 子命令；帮助仍显示普通文字。其他命令带 `--json` 会报错。兼容约定见 [稳定性约定](stability.md)。
+- 译书与札记（1.2.0）：`text translate|review|revise|zhupi|finalize|reopen|context approve|status|resume`、`note add|list|show|edit|remove|promote`、`follow queue on|off`。初译与修订只入队，须 `ziyuan run` 执行、`ziyuan apply` 准奏；参数见 `ziyuan text help` 与 `ziyuan note help`，流程与限制见[小说翻译指南](novel-translation.md)。
 - 退出码：0 成功，1 运行中出错，2 用法错误（未知命令、参数不对）。
 - 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名，以及 `apply` 的 `--skip`、`--commit`；官职代码含冒号也能正常补全。
 - 实测（2026-10）：bash 5.2、zsh 5.9、fish 3.6 中实际加载并按 Tab 补全过（官职代码、部门、子命令选项）。zsh 起初加载即报错（`${COMP_LINE:0:COMP_POINT}` 在 zsh 中被当作修饰符），且含冒号的官职代码补不出，均已修正。
@@ -534,8 +564,10 @@ jj bookmark set my-feature -r @- && jj git push -b my-feature
 
 ## 截图来源与验证范围
 
-Web 总览、文件审阅与任务依赖截图来自 v1.0.0-rc.2（2026-10-30）；其余部分截图来自 v0.7–v0.10，不代表最新界面。这些演示截图不是实际模型能力的证明，1.0 发布时没有重新拍摄。
+Web 总览、译书、御笔札记与作品关注截图拍于 2026-10-31，使用 1.2.0、本机无真实密钥的模拟模型 `docs-stub` 与自写虚构数据。Chrome 浏览器语言为 zh-CN，采用汝窑天青（tianqing）主题、1500×1000 视口与 2× 像素密度，裁剪缩半后转为 PNG8。实际渲染字体为霞鹜文楷 LXGW WenKai（译书、朱批与札记）、Noto Serif SC（标题）、Noto Sans SC（界面）和内置 JetBrains Mono（代码与段号）。待准修订来自真实 CLI 下诏、工具读写与准奏流程；作品代码只加入关注，未联网检查，定时检查关闭。这些截图只展示界面与流程，不是模型能力的证明。
 
-rc.2 截图使用本机模拟服务，通过真实 `read_file` / `write_file` 工具暂存两个文件；依赖状态取自集成测试 `state_exposes_write_dag_dependencies_and_blockers` 的演示记录。模拟模型名为 `docs-mock`，无真实密钥。使用 agent-browser、天青主题、1500×1000（总览 1500×1200）与 2× 像素密度；裁剪缩半后转为 PNG8。内置预览图拍于安装 delta 前；delta 图使用官方 git-delta 0.20.1 Linux 包，设置 `ZIYUAN_DELTA` 后重启并确认没有回退到内置预览。
+文件审阅与任务依赖截图来自 v1.0.0-rc.2（2026-10-30）；其余部分截图来自 v0.7–v0.10，不代表最新界面。这些演示截图不是实际模型能力的证明，1.0 发布时没有重新拍摄。
+
+rc.2 截图使用本机模拟服务，通过真实 `read_file` / `write_file` 工具暂存两个文件；依赖状态取自集成测试 `state_exposes_write_dag_dependencies_and_blockers` 的演示记录。模拟模型名为 `docs-mock`，无真实密钥。使用 agent-browser、天青主题、1500×1000 与 2× 像素密度；裁剪缩半后转为 PNG8。内置预览图拍于安装 delta 前；delta 图使用官方 git-delta 0.20.1 Linux 包，设置 `ZIYUAN_DELTA` 后重启并确认没有回退到内置预览。
 
 rc.3 的三主题 delta 与“御定排程”截图（2026-10-30）来自真实验收记录的隔离副本。delta 使用保留的基线提案，仅供比较样式；排程是人工通过真实 API 提交的示例，不调用模型。桌面与 390px 窄窗口检查过框体、滚动及按钮，采用同样的截图处理。真实模型的任务交接结果另见 [rc.2 验收记录](acceptance/1.0.0-rc.2.md)。

@@ -4,11 +4,12 @@
 
 > 用 Rust 编写的多智能体协作工具：你提出任务、分配权限、审阅结果，再决定是否把改动写入文件。界面和角色借用了中国古代朝廷的称呼。
 
-**当前稳定版为 v1.1.0。** 新增本地原文整理、译稿结构检查和 syosetu 作品更新提醒。 可以用命令行、Web 或终端界面管理任务，查看执行记录，并在批准前审阅文件差异。
+**当前稳定版为 v1.2.0。** 新增逐块小说翻译闭环（初译、审校、朱批、修订、御览、断点续做与 Web 审阅）、御笔札记，以及新章节提醒自动入队。 可以用命令行、Web 或终端界面管理任务，查看执行记录，并在批准前审阅文件差异。
 
 - **先试用，不必先配置模型**：未设置 `ZIYUAN_LLM_MODEL` 时只演示派工，不会真的分析或修改文件。
 - **接入模型后才执行真实工作**：支持 OpenAI 兼容接口，已有 DeepSeek 实测。默认只能读取项目；修改文件和运行测试要另行授权。
 - **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅后执行 `apply`。
+- **逐块翻译小说**：导入日文或英文原文后，按块下诏初译、请只读审校、逐段朱批、修订并御览定稿；所有译稿仍须准奏才落盘，长篇文学质量须人审。另可记下自己的认可译法（御笔札记），不必先建朝廷。
 
 本文中的“皇帝”指用户，“官员”指执行任务的智能体，“诏令”就是任务，“准奏”是批准写入文件。命令名称保持这些约定，不需要先熟悉官制才能使用。
 
@@ -25,7 +26,7 @@ cargo install --git https://github.com/YuuUehara/Ziyuan ziyuan-cli --locked   # 
 cargo install --path crates/ziyuan-cli --locked                               # 或在本仓库中
 ```
 
-尚未发布到 crates.io；不能直接用 `cargo install ziyuan-cli` 安装正式发行版。
+正式发行版会通过标签触发的可信发布流程上传到 crates.io；首次发布须先手工完成，之后由发布作业自动跟进。是否可用、有哪些版本，以 crates.io 上显示的内容为准。若该版本尚未出现在 crates.io，请用上面的 `cargo install --git` 安装。
 
 ### 平台支持
 
@@ -107,7 +108,7 @@ bash scripts/smoke.sh
 
 最后一条需要 Bash 及脚本所需的运行环境。常规 CI 还检查 Rust 1.89、Linux glibc 2.35 基线，并在 macOS 和 Windows 上运行测试；具体流程见 `.github/workflows/ci.yml`。
 
-推送与 `Cargo.toml` 版本一致的 `v*` 标签会触发发布：先建草稿，上传四个平台的包，再在对应平台重新下载验证，全部通过才公开。说明取 CHANGELOG 中对应版本一节。Linux GNU 包从 rc.4 起在 Ubuntu 22.04 构建；这不是所有 Linux 发行版都经过验证的承诺。旧 rc.3 包可能在旧 glibc 上提示 `GLIBC_2.39` 警告，请升级或在目标环境从源码构建。
+推送与 `Cargo.toml` 版本一致的 `v*` 标签会触发发布：先建草稿，上传四个平台的包，再在对应平台重新下载验证，全部通过才公开；公开后另有一个作业按依赖顺序把十个 crate 发布到 crates.io（已存在的版本跳过）。说明取 CHANGELOG 中对应版本一节。crates.io 不能删除版本，只能 yank；可信发布须逐 crate 预先配置，首个版本只能手工发布，详见[发布指南](docs/releasing.md)。Linux GNU 包从 rc.4 起在 Ubuntu 22.04 构建；这不是所有 Linux 发行版都经过验证的承诺。旧 rc.3 包可能在旧 glibc 上提示 `GLIBC_2.39` 警告，请升级或在目标环境从源码构建。
 
 ## 文档
 
@@ -123,9 +124,10 @@ bash scripts/smoke.sh
 - [稳定性约定](docs/stability.md)：1.0 起冻结哪些接口。
 - [CHANGELOG](CHANGELOG.md)：各版变化。
 - [路线图](docs/roadmap.md)：下一版的规划。
-- [整理原文与检查译稿](docs/text-projects.md)：1.1.0 新增的离线文本工具，1.0.0 没有这些命令。
-- [作品更新提醒](docs/subscriptions.md)：1.1.0 新增的 syosetu 关注列表、检查与 Web 定时设置，不下载正文。
-- [小说翻译场景指南](docs/novel-translation.md)：已有日／英短样本实测；1.1.0 新增文本整理工具，长篇自动翻译、中断续做和文学质量验收仍是后续安排。
+- [整理原文与检查译稿](docs/text-projects.md)：导入原文、分块与检查候选译稿，1.1.0 起可用。
+- [作品更新提醒](docs/subscriptions.md)：syosetu 关注列表、检查、Web 定时设置与 1.2.0 的自动入队，不下载正文。
+- [小说翻译指南](docs/novel-translation.md)：1.2.0 的逐块初译、审校、朱批、修订与御览流程；1.0.0 的日／英短样本保留为历史试点，长篇文学质量仍须人审。
+- [发布指南](docs/releasing.md)：标签发布、四平台验收、crates.io 可信发布的设置与注意事项。
 
 ## 许可
 
@@ -135,5 +137,7 @@ bash scripts/smoke.sh
 - [Apache License 2.0](LICENSE-APACHE)
 
 除非另有明确说明，你有意提交并被本项目接纳的贡献也将按上述双许可证授权。
+
+Web 界面内置的 [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) 字体按 SIL Open Font License 1.1 随附，许可证见 [`crates/ziyuan-web/src/fonts/JetBrainsMono-OFL.txt`](crates/ziyuan-web/src/fonts/JetBrainsMono-OFL.txt)（发行包中为 `JetBrainsMono-OFL.txt`）。界面推荐的中文、日文字体也都是 OFL 1.1，不随程序附带，见[使用指南 · 字体](docs/guide.md#字体)。
 
 软件的 MIT / Apache-2.0 许可不授权第三方文学原文、译文或书库品牌；模型上传、再分发与商业出版仍须逐项核对权利，见[小说翻译版权边界](docs/novel-translation.md#发布前版权核对2026-10-30)。
