@@ -30,6 +30,17 @@ jobs:
       # smoke.sh 先跑 cargo test --workspace，再以演示后端走一遍 CLI。
       - run: bash scripts/smoke.sh
 
+  linux-compat:
+    name: Linux GNU · glibc 2.35 基线与启动
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - run: cargo build --release --locked -p ziyuan-cli --target x86_64-unknown-linux-gnu
+      - run: bash scripts/check-linux-compat.sh target/x86_64-unknown-linux-gnu/release/ziyuan
+
   audit:
     name: 依赖审计
     runs-on: ubuntu-latest

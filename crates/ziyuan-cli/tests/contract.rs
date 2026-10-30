@@ -321,6 +321,7 @@ fn version_and_help_list_the_frozen_commands_and_environment() {
         "ZIYUAN_LLM_PRICE",
         "ZIYUAN_LLM_RETRIES",
         "ZIYUAN_MAX_STEPS",
+        "ZIYUAN_CONTEXT_TOKENS",
         "ZIYUAN_TEST_COMMAND",
         "ZIYUAN_TZ",
         "ZIYUAN_GITHUB_REPO",
@@ -330,4 +331,30 @@ fn version_and_help_list_the_frozen_commands_and_environment() {
     ] {
         assert!(help.contains(var), "help 未列出 {var}");
     }
+}
+
+#[test]
+fn invalid_context_threshold_does_not_start_or_change_tasks() {
+    let dir = temp_court("context");
+    ok(&dir, &["edict", "--queue", "检查上下文"]);
+    let before = EventLog::new(&dir).load().unwrap();
+    for value in ["", "0", "-1", "1.5", "abc", "18446744073709551616"] {
+        let mut command = Command::new(BIN);
+        command.current_dir(&dir).arg("run");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("ZIYUAN_") {
+                command.env_remove(key);
+            }
+        }
+        let out = command
+            .env("ZIYUAN_LLM_MODEL", "context-test")
+            .env("ZIYUAN_LLM_BASE_URL", "http://127.0.0.1:9/v1")
+            .env("ZIYUAN_CONTEXT_TOKENS", value)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{value:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("ZIYUAN_CONTEXT_TOKENS 须为正整数"));
+        assert_eq!(EventLog::new(&dir).load().unwrap(), before);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

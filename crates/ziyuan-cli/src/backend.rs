@@ -103,8 +103,19 @@ pub(crate) fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>>
             .ok_or("ZIYUAN_MAX_STEPS 须为正整数")?,
         Err(_) => MAX_AGENT_STEPS,
     };
+    let context_tokens = match env::var("ZIYUAN_CONTEXT_TOKENS") {
+        Ok(n) => n
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or("ZIYUAN_CONTEXT_TOKENS 须为正整数（旧工具输出的节略阈值）")?,
+        Err(env::VarError::NotPresent) => ziyuan_runtime::agent_loop::CONTEXT_TOKENS,
+        Err(_) => return Err("ZIYUAN_CONTEXT_TOKENS 须为有效 Unicode 正整数".into()),
+    };
+    eprintln!("上下文节略阈值：{context_tokens} tokens（不是模型窗口上限）");
     Ok(Arc::new(
         AgentBackend::new(Box::new(model), env::current_dir()?, steps)
+            .with_context_tokens(context_tokens)
             .with_catalog(catalog)
             .with_test_command(env::var("ZIYUAN_TEST_COMMAND").ok()),
     ))

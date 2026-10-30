@@ -135,6 +135,7 @@ pub(crate) const HELP: &str = concat!(
                        deepseek-flash / deepseek-v4-pro 内置官方高峰价（估算上限）
   ZIYUAN_LLM_RETRIES   网络错误、429、5xx 时的重试次数（默认 3，指数退避，遵守 Retry-After）
   ZIYUAN_MAX_STEPS     单件诏令最多的模型调用步数（默认 12）；用尽后官员不带工具据已查阅的内容回奏
+  ZIYUAN_CONTEXT_TOKENS 旧工具输出的节略阈值（正整数，默认 48000）；不是模型窗口或度支上限
   ZIYUAN_LLM_PROVIDER  设为 chatgpt 时改用 ChatGPT 订阅（先 `ziyuan login`），走 Responses API
   ZIYUAN_TZ            起居注显示与筛选时间所用的时区，如 +08:00（默认 UTC）
   ZIYUAN_CONFIG_DIR    用户配置目录（存 ChatGPT 订阅凭据；默认 $XDG_CONFIG_HOME/ziyuan 或 ~/.config/ziyuan）

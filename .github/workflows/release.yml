@@ -46,7 +46,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -60,6 +60,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --locked -p ziyuan-cli --target ${{ matrix.target }}
+      - name: 检查 Linux GNU glibc 2.35 基线与启动
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: bash scripts/check-linux-compat.sh target/${{ matrix.target }}/release/ziyuan
       - name: 打包并上传
         shell: bash
         env:

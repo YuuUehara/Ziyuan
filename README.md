@@ -46,7 +46,9 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 
 发版（推送 `v*` 标签）时，GitHub Actions 会在 Release 上附预编译的 `ziyuan`：Linux x86_64、macOS x86_64 与 Apple Silicon、Windows x86_64。Release 说明取 `CHANGELOG.md` 中本版一节（可用 `ziyuan changelog` 起草），没有则自动生成；标签须与 `Cargo.toml` 的版本一致。尚未发布到 crates.io。
 
-CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译，并在 macOS 与 Windows 上跑全部测试。
+Unreleased 起，Linux GNU 发行包固定在 Ubuntu 22.04 构建，面向 glibc 2.35 或更新环境；常规 CI 与打包前均检查强/弱 GLIBC 需求不超过 2.35，并启动二进制。已发布 rc.3 包保持原样，旧 glibc 上可能出现 `GLIBC_2.39` 弱版本警告；可暂从源码在目标环境构建。此基线不等于已验证所有 Linux 发行版或内核。
+
+CI（`.github/workflows/ci.yml`）在每次推送 main 与 PR 时跑 fmt、clippy、`scripts/smoke.sh`（含全部测试），另查 Rust 1.89 能否编译、Linux GNU 的 glibc 2.35 基线与启动，并在 macOS 与 Windows 上跑全部测试。
 
 ### 平台支持
 

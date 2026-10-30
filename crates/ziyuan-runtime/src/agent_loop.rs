@@ -374,10 +374,32 @@ pub const UNCHECKED_SEND_BACK: &str = "发回重办：你尚未调用任何工�
 pub fn run(
     model: &dyn ModelProvider,
     tools: &[Box<dyn Tool>],
+    messages: Vec<Message>,
+    max_steps: usize,
+    nonce: &str,
+    hooks: &dyn ExecutionHooks,
+) -> Result<String, LoopError> {
+    run_with_context(
+        model,
+        tools,
+        messages,
+        max_steps,
+        nonce,
+        hooks,
+        CONTEXT_TOKENS,
+    )
+}
+
+/// 同 [`run`]，但允许指定旧工具输出的节略触发阈值。
+/// 这不是模型的硬性窗口上限；最近四份工具输出始终保留。
+pub fn run_with_context(
+    model: &dyn ModelProvider,
+    tools: &[Box<dyn Tool>],
     mut messages: Vec<Message>,
     max_steps: usize,
     nonce: &str,
     hooks: &dyn ExecutionHooks,
+    context_tokens: u64,
 ) -> Result<String, LoopError> {
     let specs: Vec<ToolSpec> = tools.iter().map(|tool| tool.spec()).collect();
     let hooks = &Metered {
@@ -391,7 +413,7 @@ pub fn run(
             .iter()
             .any(|m| matches!(m, Message::ToolOutput { .. }));
     for _ in 0..max_steps {
-        abridge(&mut messages, &specs, CONTEXT_TOKENS, nonce);
+        abridge(&mut messages, &specs, context_tokens, nonce);
         match hooks.call(model, &messages, &specs)? {
             ModelTurn::Final(answer) if unchecked => {
                 unchecked = false;
@@ -453,7 +475,7 @@ pub fn run(
     messages.push(Message::User(format!(
         "已用尽 {max_steps} 步，不能再调用工具。请就已查阅的内容按体例回奏，没查完的列入「未办之事」。"
     )));
-    abridge(&mut messages, &[], CONTEXT_TOKENS, nonce);
+    abridge(&mut messages, &[], context_tokens, nonce);
     match hooks.call(model, &messages, &[]) {
         Ok(ModelTurn::Final(answer)) => Ok(format!(
             "{STEP_LIMIT_NOTE}\n{}",
@@ -897,6 +919,52 @@ mod tests {
             assert!(
                 matches!(&messages[i + 3], Message::ToolOutput { output, .. } if *output == long(c))
             );
+        }
+    }
+
+    #[test]
+    fn configured_context_applies_to_normal_and_step_limit_reports() {
+        struct ReportLengths;
+        impl ModelProvider for ReportLengths {
+            fn next_turn(
+                &self,
+                messages: &[Message],
+                _: &[ToolSpec],
+                _: &dyn ExecutionHooks,
+            ) -> Result<ModelTurn, BoxError> {
+                let lengths = messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        Message::ToolOutput { output, .. } => {
+                            Some(output.chars().filter(|&c| c == '甲').count().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Ok(ModelTurn::Final(lengths))
+            }
+        }
+        let opening = || {
+            (0..6)
+                .map(|i| Message::ToolOutput {
+                    call_id: i.to_string(),
+                    output: guard::fence(&"甲".repeat(12_000), "n"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            run(&ReportLengths, &[], opening(), 1, "n", &()).unwrap(),
+            "200,200,12000,12000,12000,12000"
+        );
+        for (steps, limit, expected) in [
+            (1, 61_000, "200,12000,12000,12000,12000,12000"),
+            (0, 96_000, "12000,12000,12000,12000,12000,12000"),
+            (0, 1, "200,200,12000,12000,12000,12000"),
+        ] {
+            let reply =
+                run_with_context(&ReportLengths, &[], opening(), steps, "n", &(), limit).unwrap();
+            assert!(reply.ends_with(expected), "{reply}");
         }
     }
 

@@ -100,6 +100,7 @@ pub struct AgentBackend {
     catalog: Option<Box<dyn ModelCatalog>>,
     root: PathBuf,
     max_steps: usize,
+    context_tokens: u64,
     /// 皇帝设定的测试命令（`run_tests` 用）。
     test_command: Option<String>,
 }
@@ -118,8 +119,15 @@ impl AgentBackend {
             catalog: None,
             root,
             max_steps,
+            context_tokens: agent_loop::CONTEXT_TOKENS,
             test_command: None,
         }
+    }
+
+    /// 旧工具输出的节略阈值，不改变服务商的模型窗口或度支限额。
+    pub fn with_context_tokens(mut self, tokens: u64) -> Self {
+        self.context_tokens = tokens;
+        self
     }
 
     pub fn with_test_command(mut self, command: Option<String>) -> Self {
@@ -225,13 +233,14 @@ impl WorkerBackend for AgentBackend {
             agent_loop::Message::System(system),
             agent_loop::Message::User(edict.text.clone()),
         ];
-        let summary = agent_loop::run(
+        let summary = agent_loop::run_with_context(
             model,
             &sealed.tools,
             opening.clone(),
             self.max_steps,
             &nonce,
             hooks,
+            self.context_tokens,
         )?;
         // 礼部核对体例：不合者发回重写一次（不能重写时照收原奏，由各前端标注体例不合）。
         let missing = missing_sections(&summary);
@@ -246,7 +255,16 @@ impl WorkerBackend for AgentBackend {
                 missing.join("」「")
             )));
             // 只改格式：不给工具（也就不会因「未查阅」被发回）。
-            agent_loop::run(model, &[], messages, 2, &nonce, hooks).unwrap_or(summary)
+            agent_loop::run_with_context(
+                model,
+                &[],
+                messages,
+                2,
+                &nonce,
+                hooks,
+                self.context_tokens,
+            )
+            .unwrap_or(summary)
         };
         let changes = sealed.changes();
         if !changes.is_empty() {
