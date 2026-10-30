@@ -1,0 +1,226 @@
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+use ziyuan_app::text_project::*;
+
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "ziyuan-text-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&p).unwrap();
+        Self(p)
+    }
+    fn service(&self) -> TextProjects {
+        TextProjects::new(&self.0)
+    }
+    fn file(&self, name: &str, bytes: impl AsRef<[u8]>) -> PathBuf {
+        let p = self.0.join(name);
+        fs::write(&p, bytes).unwrap();
+        p
+    }
+    fn create(&self, language: &str) -> Project {
+        self.service()
+            .create(NewProject {
+                title: "作品".into(),
+                source_language: language.into(),
+                target_language: "zh-CN".into(),
+                provenance: Provenance {
+                    author: "作者".into(),
+                    version: "初版".into(),
+                    source: "手元".into(),
+                    date: "2026-10-30".into(),
+                    rights: "user statement".into(),
+                    scope: "private translation".into(),
+                },
+            })
+            .unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn preserves_raw_order_layout_unicode_and_duplicate_paragraphs() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let a = f.file("a.txt", "\r\n　\r\n猫。\r\n次の行。\r\n \t\r\n猫。\r\n\r\n");
+    let b = f.file("b.txt", "English first.\n\nSecond.");
+    let p = f.service().import(&p.id, &[a.clone(), b.clone()]).unwrap();
+    assert_eq!(p.chapters.len(), 2);
+    assert_eq!(p.chapters[0].paragraphs[0].text, "猫。\n次の行。");
+    assert_eq!(p.chapters[0].paragraphs[1].text, "猫。");
+    assert_eq!(p.chapters[0].paragraphs[0].id, "c0001-p0001");
+    assert_eq!(p.chapters[0].paragraphs[1].id, "c0001-p0002");
+    assert_eq!(p.chapters[1].paragraphs[0].id, "c0002-p0001");
+    for (c, path) in p.chapters.iter().zip([a, b]) {
+        let raw = fs::read(path).unwrap();
+        assert_eq!(
+            fs::read(
+                f.service()
+                    .project_dir(&p.id)
+                    .unwrap()
+                    .join(&c.original_path)
+            )
+            .unwrap(),
+            raw
+        );
+        for paragraph in &c.paragraphs {
+            let slice = &raw[paragraph.byte_start..paragraph.byte_end];
+            assert_eq!(
+                String::from_utf8(slice.to_vec())
+                    .unwrap()
+                    .replace("\r\n", "\n"),
+                paragraph.text
+            );
+        }
+        for block in &c.blocks {
+            assert!(block.serialized().unwrap().len() <= DEFAULT_BLOCK_BYTES);
+        }
+    }
+    assert_eq!(f.service().show(&p.id).unwrap(), p);
+    assert!(f.service().import(&p.id, &[]).is_err());
+    assert!(
+        f.service()
+            .import(&p.id, &[f.file("again.txt", "same")])
+            .is_err()
+    );
+}
+
+#[test]
+fn rejects_invalid_registration_ids_and_sources_without_partial_visibility() {
+    let f = Fixture::new();
+    let mut spec = NewProject {
+        title: "x".into(),
+        source_language: "fr".into(),
+        target_language: "zh-CN".into(),
+        provenance: Provenance::default(),
+    };
+    assert!(f.service().create(spec.clone()).is_err());
+    spec.source_language = "en".into();
+    spec.target_language = "ja".into();
+    assert!(f.service().create(spec).is_err());
+    for id in ["../x", "/x", "x\\y", ".", ""] {
+        assert!(f.service().show(id).is_err());
+    }
+    let p = f.create("en");
+    let good = f.file("good.txt", "First\n\nSecond");
+    for bad in [
+        f.file("empty.txt", ""),
+        f.file("white.txt", " \r\n　\t\n"),
+        f.file("invalid.txt", [0xff]),
+        f.0.clone(),
+        f.file("wrong.md", "text"),
+    ] {
+        assert!(f.service().import(&p.id, &[good.clone(), bad]).is_err());
+        assert!(f.service().show(&p.id).unwrap().chapters.is_empty());
+        assert_eq!(fs::read(&good).unwrap(), b"First\n\nSecond");
+    }
+    assert_eq!(
+        f.service().import(&p.id, &[good]).unwrap().chapters.len(),
+        1
+    );
+}
+
+#[test]
+fn serialized_exact_boundary_and_rechunking_preserve_paragraph_ids() {
+    let paragraphs = split_paragraphs("c0001", "猫\r\n\r\n猫\r\n\r\n三".as_bytes()).unwrap();
+    let blocks = chunk_paragraphs("c0001", &paragraphs, DEFAULT_BLOCK_BYTES).unwrap();
+    let exact = blocks[0].serialized().unwrap().len();
+    assert_eq!(
+        chunk_paragraphs("c0001", &paragraphs, exact).unwrap().len(),
+        1
+    );
+    let small = chunk_paragraphs("c0001", &paragraphs, exact - 1).unwrap();
+    assert!(small.len() > 1);
+    assert_eq!(
+        small
+            .iter()
+            .flat_map(|b| b.paragraphs.iter().map(|p| &p.id))
+            .collect::<Vec<_>>(),
+        paragraphs.iter().map(|p| &p.id).collect::<Vec<_>>()
+    );
+    assert!(small.iter().all(|b| b.serialized().unwrap().len() < exact));
+    let huge = split_paragraphs("c0002", "界".repeat(DEFAULT_BLOCK_BYTES).as_bytes()).unwrap();
+    let error = chunk_paragraphs("c0002", &huge, DEFAULT_BLOCK_BYTES)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("c0002-p0001"), "{error}");
+    assert!(chunk_paragraphs("c0001", &paragraphs, 65536).is_err());
+}
+
+#[test]
+fn preserves_non_crlf_carriage_return_and_indentation() {
+    let p = split_paragraphs("c0001", b"  First\r\ncontinued\r\n\r\nLast\r").unwrap();
+    assert_eq!(p[0].text, "  First\ncontinued");
+    assert_eq!(p[1].text, "Last\r");
+}
+
+#[test]
+fn failed_oversized_import_preserves_manifest_and_can_retry() {
+    let f = Fixture::new();
+    let p = f.create("en");
+    let path = f.service().project_dir(&p.id).unwrap().join("project.json");
+    let before = fs::read(&path).unwrap();
+    let good = f.file("good.txt", "First");
+    let huge = f.file("huge.txt", "界".repeat(DEFAULT_BLOCK_BYTES));
+    assert!(f.service().import(&p.id, &[good.clone(), huge]).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(f.service().show(&p.id).unwrap().chapters.is_empty());
+    assert_eq!(
+        f.service().import(&p.id, &[good]).unwrap().chapters.len(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_symlink_sources_rejected_when_supported() {
+    let f = Fixture::new();
+    let p = f.create("en");
+    let a = f.file("a.txt", "One");
+    let link = f.0.join("link.txt");
+    match std::os::windows::fs::symlink_file(a, &link) {
+        Ok(()) => assert!(f.service().import(&p.id, &[link]).is_err()),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                || e.raw_os_error() == Some(1314) => {}
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn concurrent_import_has_one_winner_and_preserves_original() {
+    let f = Fixture::new();
+    let p = f.create("en");
+    let a = f.file("a.txt", "One\n\nTwo");
+    let results = std::thread::scope(|s| {
+        let run = || f.service().import(&p.id, std::slice::from_ref(&a));
+        let x = s.spawn(run);
+        let y = s.spawn(run);
+        [x.join().unwrap(), y.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(f.service().show(&p.id).unwrap().chapters.len(), 1);
+    assert_eq!(fs::read(a).unwrap(), b"One\n\nTwo");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_sources_rejected() {
+    let f = Fixture::new();
+    let p = f.create("en");
+    let a = f.file("a.txt", "One");
+    let link = f.0.join("link.txt");
+    std::os::unix::fs::symlink(a, &link).unwrap();
+    assert!(f.service().import(&p.id, &[link]).is_err());
+}
