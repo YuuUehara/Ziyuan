@@ -1,6 +1,6 @@
 # 紫垣使用指南
 
-从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。当前稳定版为 v1.0.0，兼容范围见[稳定性约定](stability.md)。
+从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。当前稳定版为 v1.1.0，兼容范围见[稳定性约定](stability.md)。
 
 先记住四个对应关系：**诏令是任务，玉玺是权限设置，回奏是执行结果，准奏是批准把改动写入文件**。界面保留这些名称，操作步骤会同时说明实际作用。
 
@@ -12,8 +12,8 @@
 | 限制费用和调用量 | [预算与限额](#户部度支预算与限额) |
 | 理解哪些内容可能发给外部服务 | [安全说明](../SECURITY.md) |
 | 翻译日文或英文 | [小说翻译指南](novel-translation.md) |
-| 整理原文、检查漏段（1.1 开发分支） | [文本工具](text-projects.md) |
-| 关注作品更新（1.1 开发分支） | [作品更新提醒](subscriptions.md) |
+| 整理原文、检查漏段（1.1.0 起） | [文本工具](text-projects.md) |
+| 关注作品更新（1.1.0 起） | [作品更新提醒](subscriptions.md) |
 
 代码结构和实现取舍见 [architecture.md](architecture.md)。本指南主要用 Bash 示例；PowerShell 设置变量要用 `$env:变量名 = '值'`，不要直接照抄 `export`。示例中的任务 ID 都要换成当前项目的实际编号；同一任务的 `apply`、`discard` 等操作是不同选择，不要依次全执行。
 
@@ -150,7 +150,7 @@ ziyuan completions zsh > ~/.ziyuan.zsh   # 借 bashcompinit；在 ~/.zshrc 的 c
 ziyuan completions fish > ~/.config/fish/completions/ziyuan.fish
 ```
 
-- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）。1.1 开发分支另支持 [`text`](text-projects.md) 和 [`follow`](subscriptions.md) 的操作；帮助仍显示普通文字。其他命令带 `--json` 会报错。兼容约定见 [稳定性约定](stability.md)。
+- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）。1.1.0 起另支持 [`text`](text-projects.md) 和 [`follow`](subscriptions.md) 的操作；帮助仍显示普通文字。其他命令带 `--json` 会报错。兼容约定见 [稳定性约定](stability.md)。
 - 退出码：0 成功，1 运行中出错，2 用法错误（未知命令、参数不对）。
 - 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名，以及 `apply` 的 `--skip`、`--commit`；官职代码含冒号也能正常补全。
 - 实测（2026-10）：bash 5.2、zsh 5.9、fish 3.6 中实际加载并按 Tab 补全过（官职代码、部门、子命令选项）。zsh 起初加载即报错（`${COMP_LINE:0:COMP_POINT}` 在 zsh 中被当作修饰符），且含冒号的官职代码补不出，均已修正。
