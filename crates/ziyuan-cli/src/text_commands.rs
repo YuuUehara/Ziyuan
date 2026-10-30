@@ -5,6 +5,18 @@ use std::error::Error;
 use std::io::Read;
 use std::path::PathBuf;
 use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects, ValidationReport};
+use ziyuan_storage::{LockScope, RecordState, Workspace};
+
+/// `text recovery status` 发现未收尾的受管写入：状态本身读成功，但退出码仍为 1，
+/// 好让脚本据此判断还能不能写入。
+#[derive(Debug)]
+pub(crate) struct RecoveryPending;
+impl std::fmt::Display for RecoveryPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("工作目录仍有未收尾的受管写入，写入会被拒绝")
+    }
+}
+impl Error for RecoveryPending {}
 
 pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan init，不调用模型或网络）：
   ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明>
@@ -17,11 +29,20 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        检查候选译稿的结构（漏段、重复、顺序、陌生段号、空文本）；
                                        提示块默认取自译稿的 block_id。只查结构，不评判译文质量；
                                        未通过时仍输出报告，退出码 1
+  ziyuan text recovery status [--json]
+                                       只读报告工作目录的受管写入世代号与恢复记录；
+                                       仍有未收尾的写入时退出码 1
+  ziyuan text recovery finish <操作ID> --yes
+                                       推进世代并清理已完成（或仅发布未落盘）的恢复记录；
+                                       不重做业务写入，也不重算目标文件
+  ziyuan text recovery abandon <操作ID> --yes
+                                       仅在目标仍是旧状态、未落盘任何字节时放弃那次写入
   以上命令均可加 --json，以 JSON 输出到标准输出。项目存于 .ziyuan/text-projects/<项目ID>/。"#;
 
 pub(crate) enum TextAction {
     Help,
     Translation(crate::translation_commands::TranslationAction),
+    Recovery(RecoveryAction),
     Init(NewProject),
     Import(String, Vec<PathBuf>),
     Show(String),
@@ -37,6 +58,14 @@ const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <章节.txt>..
 const SHOW_USAGE: &str = "用法: ziyuan text show <项目ID>";
 const CHECK_USAGE: &str =
     "用法: ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]";
+const RECOVERY_USAGE: &str = "用法: ziyuan text recovery status [--json] | ziyuan text recovery finish <操作ID> --yes | ziyuan text recovery abandon <操作ID> --yes";
+
+/// 受管写入（准奏落盘）的恢复操作：只处理先前遗留的恢复记录，不执行业务写入。
+pub(crate) enum RecoveryAction {
+    Status,
+    Finish { operation_id: String },
+    Abandon { operation_id: String },
+}
 /// 候选译稿的读取上限：远大于单个提示块（48 KiB），只为挡住误给的巨型文件。
 const CANDIDATE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -61,6 +90,7 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
             _ => return Err(SHOW_USAGE.into()),
         },
         "check" => parse_check(rest)?,
+        "recovery" => parse_recovery(rest)?,
         "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
         | "status" | "resume" => {
             TextAction::Translation(crate::translation_commands::parse(&args)?)
@@ -144,6 +174,25 @@ fn parse_check(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
     })
 }
 
+fn parse_recovery(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
+    let action = match args {
+        [action] if action == "status" => RecoveryAction::Status,
+        // 收尾与放弃都会改变状态，必须显式带 `--yes`，避免误敲一次就解锁。
+        [action, id, yes] if !id.starts_with("--") && yes == "--yes" && action == "finish" => {
+            RecoveryAction::Finish {
+                operation_id: id.clone(),
+            }
+        }
+        [action, id, yes] if !id.starts_with("--") && yes == "--yes" && action == "abandon" => {
+            RecoveryAction::Abandon {
+                operation_id: id.clone(),
+            }
+        }
+        _ => return Err(RECOVERY_USAGE.into()),
+    };
+    Ok(TextAction::Recovery(action))
+}
+
 pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> {
     if let TextAction::Help = action {
         println!(
@@ -156,6 +205,7 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
     match action {
         TextAction::Help => unreachable!("已在上面处理"),
         TextAction::Translation(action) => return crate::translation_commands::run(action, json),
+        TextAction::Recovery(action) => return run_recovery(action, json),
         TextAction::Init(metadata) => {
             let project = projects.create(metadata)?;
             match json {
@@ -293,6 +343,174 @@ fn print_chapters(projects: &TextProjects, project: &Project) -> Result<(), Box<
         }
     }
     Ok(())
+}
+
+/// 只读报告或收尾一次先前遗留的受管写入。这里不执行业务写入，也不再落盘任何项目文件。
+fn run_recovery(action: RecoveryAction, json: bool) -> Result<(), Box<dyn Error>> {
+    let workspace = Workspace::open(env::current_dir()?)?;
+    match action {
+        RecoveryAction::Status => {
+            let generation = workspace.generation()?;
+            let record = workspace.pending_record()?;
+            let state = match &record {
+                None => "idle",
+                Some(record) => match record.state {
+                    RecordState::Prepared => "prepared",
+                    RecordState::Published => "published",
+                    RecordState::Completed => "completed",
+                    RecordState::Abandoned => "abandoned",
+                },
+            };
+            let next = match &record {
+                None => "无待处理的受管写入",
+                Some(record) => match record.state {
+                    RecordState::Prepared | RecordState::Abandoned => {
+                        "可用 text recovery finish <操作ID> --yes 收尾（若目标仍是旧状态，也可 abandon）"
+                    }
+                    RecordState::Published => {
+                        "须核对目标后 text recovery finish <操作ID> --yes，目标被改过时不可 abandon"
+                    }
+                    RecordState::Completed => {
+                        "text recovery finish <操作ID> --yes 推进世代并清理记录"
+                    }
+                },
+            };
+            if json {
+                let value = match &record {
+                    None => serde_json::json!({ "generation": generation, "state": state }),
+                    Some(record) => serde_json::json!({
+                        "generation": generation,
+                        "state": state,
+                        "operation_id": record.operation_id,
+                        "task": record.application.task,
+                        "skipped": record.application.skipped,
+                        "targets": record.targets.iter().map(|t| t.path.clone()).collect::<Vec<_>>(),
+                        "next": next,
+                    }),
+                };
+                print_json(value)?;
+            } else {
+                println!("世代号：{generation}（{}）", even_odd(generation));
+                println!("恢复记录：{state}");
+                if let Some(record) = &record {
+                    println!("  操作 ID：{}", record.operation_id);
+                    println!("  任务：#{}", record.application.task);
+                    println!("  目标：{} 个", record.targets.len());
+                    for target in &record.targets {
+                        println!("    {}", target.path);
+                    }
+                }
+                println!("下一步：{next}");
+            }
+            // 尚未收尾（世代为奇数）或仍有未清理的记录时，退出码 1：脚本据此判断还能不能写入。
+            let unfinished = generation % 2 != 0 || record.is_some();
+            if unfinished {
+                return Err(RecoveryPending.into());
+            }
+        }
+        RecoveryAction::Finish { operation_id } => {
+            finish_recovery(&workspace, &operation_id, json)?;
+        }
+        RecoveryAction::Abandon { operation_id } => {
+            let mut guard = workspace.lock(LockScope::Workspace)?;
+            let record = guard.abandon(&operation_id)?;
+            guard.finish()?;
+            guard.remove_record()?;
+            match json {
+                true => print_json(serde_json::json!({
+                    "operation_id": record.operation_id,
+                    "state": "abandoned",
+                }))?,
+                false => println!("已放弃操作 {operation_id}：目标未被改动，世代号已推进。"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 收尾：只推进世代并清理记录，绝不重做业务写入。
+fn finish_recovery(
+    workspace: &Workspace,
+    operation_id: &str,
+    json: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut guard = workspace.lock(LockScope::Workspace)?;
+    let record = workspace
+        .pending_record()?
+        .ok_or("没有待收尾的恢复记录；用 ziyuan text recovery status 查看")?;
+    if record.operation_id != operation_id {
+        return Err(format!(
+            "操作 ID 不符：磁盘上是 {}，不是 {operation_id}",
+            record.operation_id
+        )
+        .into());
+    }
+    let state = record.state;
+    // 收尾前核对每个目标的实际摘要：只有「已改成记录中的新内容」或「仍是旧内容」才算对得上。
+    // 中途又被别人改过的文件不能靠「收尾」盖过去，否则等于替一次不完整的写入做担保。
+    let drift = target_drift(workspace.root(), &record)?;
+    if let Some(path) = drift {
+        return Err(format!(
+            "目标 {path} 的当前内容既不是记录中的旧内容、也不是新内容：写入可能只完成了一部分。\n\
+             请先自行核对并修正该文件，再重试；不要用 finish 把不确定的状态盖过去。"
+        )
+        .into());
+    }
+    if state == RecordState::Prepared {
+        // 记录只到「已准备」：没有发布过，目标理应仍是旧状态，核对已在上一步做过。
+        println_if_human(json, || {
+            println!("记录为「已准备」，目标与原记录一致；收尾只推进世代并清理记录。");
+        });
+    }
+    // 「已发布」须先转成「已完成」才能删记录：核对过目标与记录一致，等于确认这次写入的结果。
+    if state == RecordState::Published {
+        guard.complete(operation_id)?;
+    }
+    let generation = guard.finish()?;
+    guard.remove_record()?;
+    match json {
+        true => print_json(serde_json::json!({
+            "operation_id": operation_id,
+            "generation": generation,
+        }))?,
+        false => println!("已收尾操作 {operation_id}：世代号推进到 {generation}，恢复记录已清理。"),
+    }
+    Ok(())
+}
+
+fn even_odd(generation: u64) -> &'static str {
+    match generation % 2 {
+        0 => "无进行中的受管写入",
+        _ => "上次受管写入未完成",
+    }
+}
+
+/// 返回第一个既非旧内容、也非新内容的目标路径；全部对得上时为 `None`。
+fn target_drift(
+    root: &std::path::Path,
+    record: &ziyuan_storage::RecoveryRecord,
+) -> Result<Option<String>, Box<dyn Error>> {
+    use ziyuan_storage::recovery::FileState;
+    for target in &record.targets {
+        let path = root.join(&target.path);
+        let actual = match std::fs::read(&path) {
+            Ok(bytes) => FileState::Present(ziyuan_storage::content_sha256(&bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileState::Absent,
+            Err(e) => {
+                return Err(format!("读不了目标 {}：{e}", target.path).into());
+            }
+        };
+        if actual != target.before && actual != target.after {
+            return Ok(Some(target.path.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn println_if_human(json: bool, print: impl FnOnce()) {
+    if !json {
+        print();
+    }
 }
 
 fn print_report(report: &ValidationReport) {
