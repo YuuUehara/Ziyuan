@@ -32,15 +32,11 @@ impl<S: EventStore> Session<S> {
         for issue in &issues {
             let comments = hub.comments(issue.number).map_err(external)?;
             for d in intake(hub.repo(), issue, &comments) {
-                self.reload()?;
-                let known = self
-                    .court()
-                    .tasks()
-                    .any(|t| t.courier.as_deref() == Some(d.station.as_str()));
-                if known {
+                let Some(edict) =
+                    self.post_unique(department, d.text, seal.clone(), &d.station, false)?
+                else {
                     continue;
-                }
-                let edict = self.post(department, d.text, seal.clone(), &d.station, false)?;
+                };
                 let flags = self
                     .court()
                     .task(edict.id)

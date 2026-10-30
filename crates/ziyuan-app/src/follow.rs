@@ -95,18 +95,10 @@ impl<S: EventStore> Session<S> {
                 continue;
             };
             let station = follow_station(&notice.code, notice.observation.chapter_count);
-            self.reload()?;
-            let known = self
-                .court()
-                .tasks()
-                .any(|t| t.courier.as_deref() == Some(station.as_str()));
-            if known {
-                report.already_queued += 1;
-                continue;
-            }
             let text = follow_text(notice, observed_increase);
-            match self.post(Department::Works, text, Seal::default(), &station, false) {
-                Ok(edict) => report.queued.push(FollowQueued {
+            match self.post_unique(Department::Works, text, Seal::default(), &station, false) {
+                Ok(None) => report.already_queued += 1,
+                Ok(Some(edict)) => report.queued.push(FollowQueued {
                     notice: notice.id.clone(),
                     station,
                     task: edict.id.0,

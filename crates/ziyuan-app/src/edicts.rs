@@ -324,7 +324,36 @@ impl<S: EventStore> Session<S> {
         station: &str,
         urgent: bool,
     ) -> Result<Edict, AppError> {
+        let posted = self.post_inner(department, text, seal, station, urgent, false)?;
+        Ok(posted.expect("post 不去重，总会入队"))
+    }
+
+    /// 同 [`post`](Self::post)，但已有来自同一驿站 `station` 的诏令时不入队，返回 `None`。
+    /// 去重在提交内检查，写入冲突重试时基于最新状态重新检查，因此并发入队也只入一次。
+    pub fn post_unique(
+        &mut self,
+        department: Department,
+        text: String,
+        seal: Seal,
+        station: &str,
+        urgent: bool,
+    ) -> Result<Option<Edict>, AppError> {
+        self.post_inner(department, text, seal, station, urgent, true)
+    }
+
+    fn post_inner(
+        &mut self,
+        department: Department,
+        text: String,
+        seal: Seal,
+        station: &str,
+        urgent: bool,
+        unique: bool,
+    ) -> Result<Option<Edict>, AppError> {
         let committed = self.commit(|court| {
+            if unique && court.tasks().any(|t| t.courier.as_deref() == Some(station)) {
+                return Ok(Vec::new());
+            }
             let edict = court.new_edict(department, text.clone(), seal.clone())?;
             court.route(&edict)?;
             let issued = CourtEvent::EdictIssued(Box::new(edict.clone()));
@@ -347,7 +376,8 @@ impl<S: EventStore> Session<S> {
             Ok(events)
         })?;
         match committed.into_iter().next() {
-            Some(CourtEvent::EdictIssued(edict)) => Ok(*edict),
+            None => Ok(None),
+            Some(CourtEvent::EdictIssued(edict)) => Ok(Some(*edict)),
             _ => unreachable!("post 先记 EdictIssued"),
         }
     }

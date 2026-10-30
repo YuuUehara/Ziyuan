@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use ziyuan_app::subscriptions::*;
 use ziyuan_app::{FollowCourierStatus, Session, follow_courier, follow_station};
-use ziyuan_core::{AgentId, Department, GovernanceMode, Office};
+use ziyuan_core::{AgentId, Department, GovernanceMode, Office, Seal};
 use ziyuan_storage::EventLog;
 
 struct Temp(PathBuf);
@@ -255,6 +255,55 @@ fn session_intake_reports_into_existing_session() {
     assert_eq!(session.court().tasks().count(), 1);
 }
 
+#[test]
+fn concurrent_sessions_queue_one_edict_per_station() {
+    let t = Temp::new("race");
+    t.found();
+    let s = new_chapters(t.root(), &["n1234ab"]);
+    // 两个会话（如 Web 手动检查与定时检查）都在入队前打开，都看不到该站名的诏令。
+    let mut first = t.session();
+    let mut second = t.session();
+    assert_eq!(second.court().tasks().count(), 0);
+    let a = first.follow_intake(&s).unwrap();
+    let b = second.follow_intake(&s).unwrap();
+    assert_eq!((a.queued.len(), a.already_queued), (1, 0), "{a:?}");
+    assert!(b.queued.is_empty() && b.errors.is_empty(), "{b:?}");
+    assert_eq!(b.already_queued, 1);
+    assert_eq!(t.session().court().tasks().count(), 1);
+}
+
+#[test]
+fn post_unique_rechecks_station_after_storage_conflict() {
+    let t = Temp::new("post-unique");
+    t.found();
+    let mut first = t.session();
+    let mut stale = t.session();
+    let station = "syosetu:n1234ab#12";
+    let posted = first
+        .post_unique(
+            Department::Works,
+            "甲".into(),
+            Seal::default(),
+            station,
+            false,
+        )
+        .unwrap();
+    assert!(posted.is_some());
+    // `stale` 未重载：首次提交基于旧状态，写入冲突后重载，重新检查站名而不再入队。
+    assert_eq!(stale.court().tasks().count(), 0);
+    let again = stale
+        .post_unique(
+            Department::Works,
+            "乙".into(),
+            Seal::default(),
+            station,
+            false,
+        )
+        .unwrap();
+    assert!(again.is_none());
+    assert_eq!(stale.court().tasks().count(), 1);
+    assert_eq!(t.session().court().tasks().count(), 1);
+}
 #[test]
 fn old_state_without_queue_setting_loads_as_off() {
     let t = Temp::new("old");
