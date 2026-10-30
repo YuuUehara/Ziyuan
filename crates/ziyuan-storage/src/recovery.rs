@@ -840,9 +840,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            // 非 UTF-8 的绝对路径也要认作绝对，不能靠有损转换。
+            // 非 UTF-8 的绝对路径确实「绝对」，但记录以 JSON 存 `PathBuf`，
+            // serde 要求能转成 UTF-8：这种路径**编不出记录**，而不是被有损转换成别的路径。
+            // 这里钉住的是后者——宁可编码失败，也绝不悄悄改写路径。
             record.workspace = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
-            assert!(encode_record(&record).is_ok());
+            assert!(
+                encode_record(&record).is_err(),
+                "非 UTF-8 路径不能靠有损转换编码成记录"
+            );
         }
         for good in ["C:/ziyuan", "c:\\work\\ziyuan", "/tmp/ziyuan"] {
             record.workspace = PathBuf::from(good);

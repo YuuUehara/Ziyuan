@@ -35,6 +35,10 @@ impl Drop for Temp {
 }
 
 /// 记录里的工作区只能用 `X:\` 或 `/` 开头，规范化后的 Windows 根带 `\\?\`，故去掉前缀。
+///
+/// 必须传入**已规范化**的根（`ws.root()`），不要传临时目录的原始路径：CI 的
+/// `%TEMP%` 是 8.3 短名（`RUNNER~1`），与规范化后的长名（`runneradmin`）对不上，
+/// 记录会被判成「不是这个工作目录」。
 fn record_root(canonical: &Path) -> std::path::PathBuf {
     let text = canonical.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
@@ -351,7 +355,7 @@ fn finish_accepts_crlf_content_written_verbatim() {
     let crlf = b"line one\r\nline two\r\n";
     let ws = Workspace::open(temp.path()).expect("打开工作目录");
     let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
-    let mut rec = record(&record_root(temp.path()), RecordState::Published);
+    let mut rec = record(&record_root(ws.root()), RecordState::Published);
     rec.targets[0].after = FileState::Present(ziyuan_storage::content_sha256(crlf));
     guard.reserve().expect("占下奇数世代");
     guard.publish(&rec).expect("写恢复记录");
