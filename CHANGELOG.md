@@ -2,14 +2,23 @@
 
 ## Unreleased
 
+## 1.0.0-rc.2
+
+第二个 1.0 候选版：奏本审阅升级、可选 git-delta 渲染与 DAG 分办。新增 `DAG` 事件的事件簿至少需要本版读取；旧事件簿仍可读。此版为预发布，不替代稳定版；正式版前须补做 rc.2 的真实模型全链路验收。
+
 ### 新增
 
 - 分办支持 DAG 依赖与排程字段：有写权的子诏令自动串行，只读子诏令仍并行；依赖未完成时不派工，上游失败或撤销不会触发自动重试。受阻关系可在 CLI `--json`、Web 与 TUI 查看；期限或尝试次数用尽时记为失败，约定产出附入承办与汇总提示，内阁制可要求子诏令另行批红。
+- DAG 边界：目前只有自动分办可直接使用，尚无 CLI / Web 自定义依赖与排程字段的编辑入口；节点幂等键仅落盘，不代表任意工具调用已具备去重保证。见 [DAG 修改速查表](docs/phase3-dag-review.md)。
 
 ### 改进
 
 - 奏本审阅（Web）：改动可在「统一」与「左右」两种视图间切换，两边行号、着色与词级标记出自同一份预览；多文件时先列文件树（新建/改写、`+N −N`、原文已变），点文件名跳到该处；各文件标出呈报时原文的 `base_hash`（新建文件注「无原文」）；每段标明处置（待准、已准、驳回）。`--json` 与 `/api/state` 的改动各文件多了 `additions`、`deletions`，各段多了 `status`（`pending` / `approved` / `rejected`）。
 - git-delta 渲染：设 `ZIYUAN_DELTA` 为 [git-delta](https://github.com/dandavison/delta) 可执行文件的路径（未设则找 PATH 上的 `delta`），Web 奏本可选「delta」渲染（统一或左右），TUI 按 `z` 在内置、delta、delta 并排间轮换，`ziyuan diff` 在终端中经 delta 显示（`--side-by-side` 并排，`--plain` 不经 delta；管道输出照旧是统一 diff）。同名程序不止一个（如 Zed 的 Delta CLI），故以 git-delta 的参数实跑一小段差异来确认，不认的当作没有 delta，回退内置预览。段的划分、段号与逐段准奏不变，delta 只管呈现。新接口 `GET /api/tasks/{id}/changes/delta?side=&width=&light=` 逐段返回 HTML。
+
+### 文档
+
+- 更新 rc.2 Web 总览与工部奏本截图，补上内置/真实 git-delta 的统一与左右视图、DAG 受阻截图；指南注明截图版本和模拟模型来源。路线图补充正式版验收、DAG 配置入口与小说翻译试点计划。
 
 ## 1.0.0-rc.1
 

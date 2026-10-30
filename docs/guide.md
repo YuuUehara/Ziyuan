@@ -1,6 +1,8 @@
 # 紫垣使用指南
 
-README 的「快速开始」之后，各项功能的详细用法都在这里。截图取自 v0.7，用演示朝廷与模拟模型生成。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
+README 的「快速开始」之后，各项功能的详细用法都在这里。Web 总览、工部奏本（内置与 git-delta 的统一/左右视图）与 DAG 受阻截图已更新至 v1.0.0-rc.2（2026-10-30）；其余截图保留自 v0.7–v0.10，作相应功能示意，不代表最新界面。截图均用隔离的演示朝廷与模拟模型生成，不作为真实模型验收证据。各节相互独立，可按需查阅；体系结构与设计取舍见 [architecture.md](architecture.md)。
+
+本轮沿用既有截图方法：本机 OpenAI 兼容 SSE 模拟服务经真实 `read_file` / `write_file` 工具暂存两个文件，不直接篡改页面数据；DAG 状态取自 Web 集成测试 `state_exposes_write_dag_dependencies_and_blockers` 的演示事件簿。agent-browser 以天青主题、1500×1000（总览 1500×1200）、2× 像素密度拍摄，再裁剪、缩半为 PNG8（256 色、无抖色、去元数据）。模拟模型名为 `docs-mock`，不含真实密钥。内置图拍于安装 delta 前（按钮不可用）；delta 图使用官方 git-delta 0.20.1 的 Linux x86_64 发行包，以 `ZIYUAN_DELTA` 指定路径后重启服务，确认实际渲染成功、没有回退。
 
 ## 接入真实模型
 
@@ -143,8 +145,13 @@ ziyuan edict --tools none "只凭诏令文本回答"
 
 ## 工部动手：受控写权限
 
-![工部奏本：改动按段编号，可逐段勾选「准此段」，再准奏落盘或准奏并提交](images/web-tasks.png)
+![rc.2 工部奏本 · 统一视图：文件树、增删统计、原文摘要与逐段准奏](images/web-tasks.png)
 
+![rc.2 工部奏本 · 左右视图：原文与改后内容并排，段号与准奏范围不变](images/web-tasks-split.png)
+
+![rc.2 工部奏本 · git-delta 统一渲染：保留紫垣的段号与准奏控件](images/web-delta.png)
+
+![rc.2 工部奏本 · git-delta 左右渲染：按原文与改后行号并排审阅](images/web-delta-split.png)
 
 工部诏令可以另授 `write_file`（改写或新建文件）与 `run_tests`（跑测试）。其他五部的诏令授这两项会被拒绝。
 
@@ -205,6 +212,8 @@ ziyuan censor 3                                     # 或 ziyuan censor all
 **考成簿（彩蛋，仿万历初张居正考成法：立限考事，以事责人）：** `ziyuan kaocheng`，Web 吏部荐举旁的「考成簿」，TUI 的 `K`。每位在任官员列出功过，评为称职、平常、不及或无事可考：采纳、背书、实证记功，驳回、弹劾、失败记过。三种制度的开篇各不相同；内阁制下若首辅自己考成不及，史官会提醒万历十年张居正卒、次年被抄家。考成簿只供参考，不罢免任何人。
 
 ## 多官协作：分办与汇总
+
+![rc.2 DAG 分办：第二件子诏令须先等 #2，父诏令显示「受 #2 所阻」](images/web-dag.png)
 
 ```bash
 ziyuan split 3                          # 尚书（其官职的模型）把待办诏令拆给本部官员
