@@ -224,3 +224,146 @@ fn symlink_sources_rejected() {
     std::os::unix::fs::symlink(a, &link).unwrap();
     assert!(f.service().import(&p.id, &[link]).is_err());
 }
+
+fn imported(f: &Fixture) -> Project {
+    let p = f.create("en");
+    f.service()
+        .import(
+            &p.id,
+            &[
+                f.file("first.txt", "One\n\nTwo\n\nThree\n\nFour"),
+                f.file("second.txt", "五"),
+            ],
+        )
+        .unwrap()
+}
+fn candidate(block: &str, paragraphs: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(
+        &serde_json::json!({"schema_version":1,"block_id":block,"paragraphs":paragraphs}),
+    )
+    .unwrap()
+}
+
+#[test]
+fn valid_candidate_is_structural_only_and_read_only() {
+    let f = Fixture::new();
+    let p = imported(&f);
+    let block = &p.chapters[0].blocks[0];
+    let bytes = candidate(
+        &block.block_id,
+        serde_json::json!([
+            {"id":"c0001-p0001","text":"随意的中文也不代表质量合格"},
+            {"id":"c0001-p0002","text":"二"},
+            {"id":"c0001-p0003","text":"三"},
+            {"id":"c0001-p0004","text":"四"}
+        ]),
+    );
+    let path = f.service().project_dir(&p.id).unwrap().join("project.json");
+    let before = fs::read(&path).unwrap();
+    let report = f.service().check(&p.id, &block.block_id, &bytes).unwrap();
+    assert!(report.valid);
+    assert!(report.issues.is_empty());
+    assert_eq!(report.chapter_id, "c0001");
+    assert_eq!(report.expected_ids.len(), 4);
+    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(f.service().show(&p.id).unwrap(), p);
+    serde_json::to_value(report).unwrap();
+    assert!(f.service().check(&p.id, "c9999-b0001", &bytes).is_err());
+}
+
+#[test]
+fn candidate_collects_missing_duplicate_order_unknown_and_empty_together() {
+    let f = Fixture::new();
+    let p = imported(&f);
+    let bytes = candidate(
+        "c0001-b0001",
+        serde_json::json!([
+            {"id":"c0001-p0002","text":"二"},
+            {"id":"c0001-p0001","text":"一"},
+            {"id":"c0001-p0002","text":"重复"},
+            {"id":"c0002-p0001","text":"别章"},
+            {"id":"c0001-p0004","text":"　 \r\n"}
+        ]),
+    );
+    let a = f.service().check(&p.id, "c0001-b0001", &bytes).unwrap();
+    let b = f.service().check(&p.id, "c0001-b0001", &bytes).unwrap();
+    assert_eq!(a, b);
+    assert!(!a.valid);
+    for (kind, id) in [
+        (IssueKind::Missing, "c0001-p0003"),
+        (IssueKind::Duplicate, "c0001-p0002"),
+        (IssueKind::OutOfOrder, "c0001-p0001"),
+        (IssueKind::Unknown, "c0002-p0001"),
+        (IssueKind::EmptyText, "c0001-p0004"),
+    ] {
+        assert!(
+            a.issues
+                .iter()
+                .any(|i| i.kind == kind && i.paragraph_id.as_deref() == Some(id)),
+            "{a:?}"
+        );
+    }
+    assert!(
+        a.issues
+            .iter()
+            .all(|i| i.chapter_id == "c0001" && i.block_id == "c0001-b0001")
+    );
+}
+
+#[test]
+fn candidate_rejects_bad_json_versions_wrong_block_and_missing_schema_fields() {
+    let f = Fixture::new();
+    let p = imported(&f);
+    for (bytes, kind) in [
+        (b"not JSON".to_vec(), IssueKind::InvalidJson),
+        (
+            br#"{"block_id":"c0001-b0001","paragraphs":[]}"#.to_vec(),
+            IssueKind::InvalidJson,
+        ),
+        (
+            br#"{"schema_version":2,"block_id":"c0001-b0001","paragraphs":[]}"#.to_vec(),
+            IssueKind::NewerVersion,
+        ),
+        (
+            br#"{"schema_version":0,"block_id":"c0001-b0001","paragraphs":[]}"#.to_vec(),
+            IssueKind::UnsupportedVersion,
+        ),
+        (
+            candidate("c0002-b0001", serde_json::json!([])),
+            IssueKind::WrongBlock,
+        ),
+    ] {
+        let report = f.service().check(&p.id, "c0001-b0001", &bytes).unwrap();
+        assert!(!report.valid);
+        assert!(report.issues.iter().any(|i| i.kind == kind), "{report:?}");
+    }
+}
+
+#[test]
+fn original_tamper_and_newer_manifest_refuse_show_and_candidate_check() {
+    let f = Fixture::new();
+    let p = imported(&f);
+    let dir = f.service().project_dir(&p.id).unwrap();
+    let original = dir.join(&p.chapters[0].original_path);
+    let bytes = fs::read(&original).unwrap();
+    fs::write(&original, b"changed").unwrap();
+    assert!(matches!(
+        f.service().show(&p.id),
+        Err(TextProjectError::Stale(_))
+    ));
+    assert!(f.service().check(&p.id, "c0001-b0001", b"{}").is_err());
+    fs::write(original, bytes).unwrap();
+    let manifest = dir.join("project.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    value["schema_version"] = 2.into();
+    fs::write(manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(
+        f.service()
+            .show(&p.id)
+            .unwrap_err()
+            .to_string()
+            .contains("升级")
+    );
+    assert!(f.service().check(&p.id, "c0001-b0001", b"{}").is_err());
+}

@@ -7,10 +7,12 @@
 mod model;
 mod split;
 mod store;
+mod validate;
 
 pub use model::*;
 pub use split::{chunk_paragraphs, split_paragraphs};
 pub use store::TextProjects;
+pub use validate::{IssueKind, ValidationIssue, ValidationReport};
 
 pub const DEFAULT_BLOCK_BYTES: usize = 48 * 1024;
 pub type Result<T> = std::result::Result<T, TextProjectError>;
