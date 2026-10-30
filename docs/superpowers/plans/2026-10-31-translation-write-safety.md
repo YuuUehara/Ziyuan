@@ -671,6 +671,7 @@ jj commit crates/ziyuan-storage/src/workspace.rs crates/ziyuan-storage/src/lib.r
 - 实现边界调整为 `crates/ziyuan-runtime/src/tools/replace.rs` 内的私有 `replace_target`，`tools.rs` 只声明子模块并调用；不扩大公开 API，不引入 storage 依赖。子模块收纳原子替换、故障注入与底层测试，避免 `tools.rs` 继续膨胀。
 - 旧目标先以不截断方式申请写句柄并读取元数据，权限不足即拒绝；只读目标显式拒绝，不清除只读标记。在临时文件写入任何内容之前复制旧目标的普通权限，再写内容并 `sync_all`，避免私有文件的内容短暂暴露在默认权限的临时文件里，保留 Unix mode（含 executable/private bits）。新目标使用普通创建权限。不承诺所有者、ACL、扩展属性、hard-link 身份不变，原子替换会生成新文件身份。
 - 临时名称加入 PID、纳秒时间戳与计数器。所有临时文件创建后的错误走同一清理分支，先关闭句柄再删除；清理失败保留原错误的 source，并报告清理错误与本操作临时路径。不得删除不属于本操作的文件。进程被杀后的孤立临时文件清理由后续恢复设计处理，本块不扫描删除。
+- 临时文件名使用固定短前缀加上述唯一后缀，不拼接完整目标 basename；否则已有合法的 240 字符文件名可能因临时名称超过单路径组件长度而无法更新。已有／新建长文件名均须有回归测试。
 - 替换遵循 Chunk 1：Windows 错误 5／32／33 独立预算 250ms 内重试，每次最多睡 10ms；不删除旧目标。Unix 成功后尽力同步目录，不能因目录同步失败把已完成替换误报为未执行。
 - 故障注入为 `cfg(test)` 的线程局部状态，作用域 guard 在 Drop 自动复原。覆盖写一部分后失败、复制权限失败、文件同步失败、替换前失败；既有／不存在目标均验证旧字节不变或仍不存在，并验证没有本操作临时文件且无关文件保留。可通过内部操作封装或测试闭包确定性注入 rename 的暂时失败和耗尽，避免依赖杀毒软件时序。
 - 必须先取得真实 RED：先接入可编译的测试 seam（尚未改原子算法），在直接写入的基线上注入部分写失败，见证“旧字节保持完整”断言失败；再改原子替换并确认 GREEN。不再把未定义 `fault` 的编译失败当原子性证据。不提交直接写入的仪器化中间状态。
@@ -867,4 +868,9 @@ mod fault {
 - 定向验证：Windows 的存储单元测试 37 通过（其中工作目录模块 13 个），doc-tests 0；格式检查与 `cargo clippy -p ziyuan-storage --all-targets --locked -- -D warnings` 通过。日志位于 `D:/rust-project/ziyuan/target/workspace-lock-{test,clippy,fmt}.log`。
 - Windows 全工作区验证通过：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked --no-fail-fast` 均退出 0；28 组结果合计 314 个测试通过、0 失败，包含 0 个用例的 doc-tests 组。日志位于 `D:/rust-project/ziyuan/target/workspace-lock-full-{fmt,clippy,test}.log`。
 - 规格审查与随后独立的代码质量审查均批准，未发现阻塞性问题；Unix 专用符号链接测试已编写但在本机未运行，尚不能据此声称 Linux／macOS 验收通过。
-- 目前只实现基础设施；恢复记录、通用准奏、译书材料写入、CLI／Web 版本与错误映射及向量记忆库仍未实现。
+- Chunk 2 定向验证：Windows runtime 测试 59 通过、0 失败，fmt 与 Clippy 通过；规格审查批准，代码质量审查发现长文件名回归后已修正并等待复审。Unix mode `0600`／`0755` 的专用测试已写但未运行。
+- Chunk 2 行为 RED 已见证：直接写入的仪器化基线上 8 个内容完整性断言失败；只尝试一次 rename 的中间实现上 3 个重试测试失败；权限复制移到首字节写入前另有 1 个 RED。最终定向 GREEN，未把编译失败当原子性证据。日志 `D:/rust-project/ziyuan/target/write-safety-atomic-{red,red-retry,red-perm-order,test,clippy}.log`。
+- 长文件名测试先复现 Windows `InvalidFilename`（临时文件组件超长），改用固定短临时名称后通过，覆盖已有／新建 240 字符文件名；日志 `write-safety-atomic-{red,green}-long-name.log`。
+- Chunk 2 较早一轮全工作区验证（长文件名修正前）fmt／Clippy／test 均退出 0，28 组结果合计 330 通过、0 失败；最终修正后须复核，不将这一旧结果冒充最新结果。
+- 原子替换仅保证逐文件完整发布，不承诺批次原子可见、外部任意写入保护、所有者／ACL／扩展属性／hard-link 身份保持或进程被杀后无临时文件。后续恢复事务仍须完整实现。
+- 恢复记录 codec 的 Chunk 3a 子计划已审查批准；持久化记录与恢复命令、通用准奏事务、译书材料写入、CLI／Web 版本与错误映射及向量记忆库仍未实现。

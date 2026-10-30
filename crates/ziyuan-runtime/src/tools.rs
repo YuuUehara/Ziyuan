@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
 
+mod replace;
+
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
 /// 单次 `search_code` 最多返回的匹配行数。
@@ -214,6 +216,7 @@ fn base_state_in(root: &Path, change: &FileChange) -> Result<(BaseState, PathBuf
 /// 把皇帝准奏的改动写入项目。先逐一核对：路径仍在项目内且不属禁区，文件内容与呈报时的原文
 /// 一致（新建文件则仍不存在）；有任何一处不符则一处也不写。已等于改后内容的文件视为已写
 /// （上次落盘写到一半或写完未及记账就中断），跳过不写，重试因此能续完。
+/// 每个文件经同目录临时文件整体替换，不会留下写了一半的文件；多个文件之间不是原子的。
 pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError> {
     let root = root.canonicalize()?;
     let mut targets = Vec::new();
@@ -231,7 +234,7 @@ pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(target, after)?;
+        replace::replace_target(&target, after.as_bytes())?;
     }
     Ok(())
 }
@@ -1143,6 +1146,54 @@ mod tests {
             after: String::new(),
         }];
         assert!(apply_changes(&root, &evil).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_mid_batch_keeps_later_targets_untouched_and_retry_completes() {
+        use replace::faults::{Faults, install};
+        let dir = workspace("partial-batch");
+        let root = dir.join("project");
+        let original = fs::read_to_string(root.join("src/main.rs")).unwrap();
+        let changes = [
+            FileChange {
+                path: "src/main.rs".into(),
+                before: Some(original.clone()),
+                after: "first".into(),
+            },
+            FileChange {
+                path: "src/new/b.rs".into(),
+                before: None,
+                after: "second file content".into(),
+            },
+        ];
+        {
+            let _guard = install(Faults {
+                skip_calls: 1,
+                partial_write: true,
+                ..Faults::default()
+            });
+            let err = apply_changes(&root, &changes).unwrap_err().to_string();
+            assert!(err.contains("injected"), "{err}");
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "first"
+        );
+        assert!(!root.join("src/new/b.rs").exists());
+        let leftovers = |sub: &str| fs::read_dir(root.join(sub)).map_or(0, |d| d.count());
+        assert_eq!((leftovers("src"), leftovers("src/new")), (2, 0));
+        assert_eq!(base_state(&root, &changes[0]).unwrap(), BaseState::Written);
+        assert_eq!(base_state(&root, &changes[1]).unwrap(), BaseState::Original);
+        apply_changes(&root, &changes).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/new/b.rs")).unwrap(),
+            "second file content"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }
