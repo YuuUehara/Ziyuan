@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "紫垣 ZiYuan：用中国古代朝廷角色组织多智能体协作的命令行工具，改动须用户审阅批准才写入文件。"
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["agent", "llm", "multi-agent", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "ziyuan"

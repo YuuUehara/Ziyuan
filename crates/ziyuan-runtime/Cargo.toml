@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "任务运行与工具执行：紫垣（ZiYuan）的内部组件，供 ziyuan-cli 使用；Rust API 不保证稳定。"
+repository.workspace = true
 
 [dependencies]
 serde_json.workspace = true
