@@ -808,7 +808,9 @@ fn text_frontend_contract() {
         assert!(crate::INDEX_HTML.contains(expected), "missing {expected}");
     }
     // 三栏在窄屏（390px 落在此区间）竖排；三栏对照与札记分栏都在同一处。
-    let css = crate::INDEX_HTML
+    // Windows 检出可能是 CRLF。
+    let html = crate::INDEX_HTML.replace("\r\n", "\n");
+    let css = html
         .split("/* ---- 翰林院 · 译书")
         .nth(1)
         .expect("要有译书的样式");
