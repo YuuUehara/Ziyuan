@@ -241,6 +241,28 @@ impl Workspace {
     }
 }
 
+/// The caller's verdict that a published operation left no trace: every target still
+/// matches `before` and none of the batch's events reached the event log.
+///
+/// Constructed by the code that actually read the files and the log, so the decision is
+/// named where it is made instead of being passed as a bare `bool`.
+#[derive(Debug, Clone, Copy)]
+pub struct Untouched {
+    confirmed: bool,
+}
+
+impl Untouched {
+    /// The caller verified nothing was written.
+    pub fn confirmed() -> Self {
+        Self { confirmed: true }
+    }
+
+    /// The caller found traces of the operation, or could not rule them out.
+    pub fn ruled_out() -> Self {
+        Self { confirmed: false }
+    }
+}
+
 /// The file is dropped before the in-process reservation. Dropping never finishes
 /// an interrupted generation.
 pub struct WriteGuard {
@@ -335,6 +357,29 @@ impl WriteGuard {
     /// Mark the prepared record abandoned. Does not advance the generation.
     pub fn abandon(&mut self, operation_id: &str) -> Result<RecoveryRecord, WorkspaceError> {
         let mut record = self.matching(operation_id, RecordState::Prepared)?;
+        record.state = RecordState::Abandoned;
+        self.rewrite(&record)?;
+        Ok(record)
+    }
+
+    /// Mark a **published** record abandoned. Does not advance the generation.
+    ///
+    /// A published record normally means "files may already be written", so abandoning it
+    /// discards an approved write. The caller must have verified that nothing happened:
+    /// every target still matches `before` and this batch's events are not in the event log.
+    /// `observed` is that verdict — the store cannot check the files itself, but refusing to
+    /// act on a bare `false` keeps the decision explicit at the call site instead of implicit.
+    pub fn abandon_published(
+        &mut self,
+        operation_id: &str,
+        observed: Untouched,
+    ) -> Result<RecoveryRecord, WorkspaceError> {
+        if !observed.confirmed {
+            return Err(WorkspaceError::Unsafe(format!(
+                "published record {operation_id} was not confirmed untouched; refusing to abandon"
+            )));
+        }
+        let mut record = self.matching(operation_id, RecordState::Published)?;
         record.state = RecordState::Abandoned;
         self.rewrite(&record)?;
         Ok(record)
@@ -1320,6 +1365,49 @@ mod tests {
             Err(WorkspaceError::PendingRecovery { .. })
         ));
         assert_no_temps(&root);
+    }
+
+    #[test]
+    fn abandon_published_requires_the_callers_confirmation() {
+        // A published record usually means files may already be written. Abandoning it is
+        // only allowed when the caller states nothing happened; a bare refusal leaves the
+        // record untouched so the workspace stays blocked.
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let operation = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        guard.publish(&record(&ws, RecordState::Published)).unwrap();
+        assert_eq!(guard.reserve().unwrap(), 1);
+
+        assert!(matches!(
+            guard.abandon_published(operation, Untouched::ruled_out()),
+            Err(WorkspaceError::Unsafe(_))
+        ));
+        assert_eq!(
+            ws.pending_record().unwrap().unwrap().state,
+            RecordState::Published
+        );
+        assert!(ws.ensure_writable().is_err(), "still blocked");
+
+        let abandoned = guard
+            .abandon_published(operation, Untouched::confirmed())
+            .unwrap();
+        assert_eq!(abandoned.state, RecordState::Abandoned);
+        assert_eq!(guard.generation().unwrap(), 1, "abandon must not advance");
+    }
+
+    #[test]
+    fn abandon_published_refuses_a_prepared_record() {
+        // The published-only entry point must not become a way around the prepared check.
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let operation = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        guard.publish(&record(&ws, RecordState::Prepared)).unwrap();
+        assert!(matches!(
+            guard.abandon_published(operation, Untouched::confirmed()),
+            Err(WorkspaceError::RecordMismatch { .. })
+        ));
     }
 
     #[test]

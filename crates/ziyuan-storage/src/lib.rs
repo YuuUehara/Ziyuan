@@ -13,7 +13,7 @@ pub mod workspace;
 
 pub use json_file::{JsonFile, JsonFileError, Stored};
 pub use recovery::{RecordState, RecoveryError, RecoveryRecord};
-pub use workspace::{LockScope, Workspace, WorkspaceError, WriteGuard};
+pub use workspace::{LockScope, Untouched, Workspace, WorkspaceError, WriteGuard};
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -664,7 +664,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 17] = [
+pub const RELEASES: [&str; 18] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -682,6 +682,9 @@ pub const RELEASES: [&str; 17] = [
     "1.0.0",
     "1.1.0",
     "1.2.0",
+    // 1.2.1 没有新增事件类型，列在这里只是让「最后一版」与当前版本一致；
+    // 没有任何事件要求它，旧事件簿的 `readable_since` 不会变成 1.2.1。
+    "1.2.1",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。

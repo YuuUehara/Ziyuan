@@ -14,22 +14,22 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/YuuUehara/Ziyuan"
 
 [workspace.dependencies]
-ziyuan-core = { path = "crates/ziyuan-core", version = "=1.2.0" }
-ziyuan-governance = { path = "crates/ziyuan-governance", version = "=1.2.0" }
-ziyuan-runtime = { path = "crates/ziyuan-runtime", version = "=1.2.0" }
-ziyuan-llm = { path = "crates/ziyuan-llm", version = "=1.2.0" }
-ziyuan-github = { path = "crates/ziyuan-github", version = "=1.2.0" }
-ziyuan-storage = { path = "crates/ziyuan-storage", version = "=1.2.0" }
-ziyuan-app = { path = "crates/ziyuan-app", version = "=1.2.0" }
-ziyuan-web = { path = "crates/ziyuan-web", version = "=1.2.0" }
-ziyuan-tui = { path = "crates/ziyuan-tui", version = "=1.2.0" }
+ziyuan-core = { path = "crates/ziyuan-core", version = "=1.2.1" }
+ziyuan-governance = { path = "crates/ziyuan-governance", version = "=1.2.1" }
+ziyuan-runtime = { path = "crates/ziyuan-runtime", version = "=1.2.1" }
+ziyuan-llm = { path = "crates/ziyuan-llm", version = "=1.2.1" }
+ziyuan-github = { path = "crates/ziyuan-github", version = "=1.2.1" }
+ziyuan-storage = { path = "crates/ziyuan-storage", version = "=1.2.1" }
+ziyuan-app = { path = "crates/ziyuan-app", version = "=1.2.1" }
+ziyuan-web = { path = "crates/ziyuan-web", version = "=1.2.1" }
+ziyuan-tui = { path = "crates/ziyuan-tui", version = "=1.2.1" }
 axum = "0.8"
 ratatui = "0.30"
 futures-util = { version = "0.3", default-features = false }

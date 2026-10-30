@@ -5,7 +5,7 @@ use std::error::Error;
 use std::io::Read;
 use std::path::PathBuf;
 use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects, ValidationReport};
-use ziyuan_storage::{LockScope, RecordState, Workspace};
+use ziyuan_storage::{LockScope, RecordState, Untouched, Workspace};
 
 /// `text recovery status` 发现未收尾的受管写入：状态本身读成功，但退出码仍为 1，
 /// 好让脚本据此判断还能不能写入。
@@ -413,7 +413,46 @@ fn run_recovery(action: RecoveryAction, json: bool) -> Result<(), Box<dyn Error>
         }
         RecoveryAction::Abandon { operation_id } => {
             let mut guard = workspace.lock(LockScope::Workspace)?;
-            let record = guard.abandon(&operation_id)?;
+            // 放弃的前提是「什么都没发生」：目标必须仍是旧内容，事件也一条没进事件簿。
+            // 只靠 CLI 信任调用者不行，这里逐项核对；任何一项不成立都不放弃。
+            let record = workspace
+                .pending_record()?
+                .ok_or("没有待收尾的恢复记录；用 ziyuan text recovery status 查看")?;
+            if record.operation_id != operation_id {
+                return Err(format!(
+                    "操作 ID 不符：磁盘上是 {}，不是 {operation_id}",
+                    record.operation_id
+                )
+                .into());
+            }
+            for target in &record.targets {
+                let actual = current_state(workspace.root(), &target.path)?;
+                if actual != target.before {
+                    return Err(format!(
+                        "目标 {} 已不是记录中的旧内容，这次写入可能已经落盘：不能放弃。\n\
+                         请改用 ziyuan text recovery finish {operation_id} --yes 收尾。",
+                        target.path
+                    )
+                    .into());
+                }
+            }
+            if events_present(workspace.root(), &record)? {
+                return Err(format!(
+                    "这次写入的事件已经在事件簿中：不能放弃。\n\
+                     请改用 ziyuan text recovery finish {operation_id} --yes 收尾。"
+                )
+                .into());
+            }
+            if record.state != RecordState::Prepared && record.state != RecordState::Published {
+                return Err(format!("记录状态为 {}，不能放弃", state_name(record.state)).into());
+            }
+            // 核对已全部通过：把结论显式交给存储层，由它按记录状态选对应的入口。
+            let record = match record.state {
+                RecordState::Published => {
+                    guard.abandon_published(&operation_id, Untouched::confirmed())?
+                }
+                _ => guard.abandon(&operation_id)?,
+            };
             guard.finish()?;
             guard.remove_record()?;
             match json {
@@ -446,23 +485,42 @@ fn finish_recovery(
         .into());
     }
     let state = record.state;
-    // 收尾前核对每个目标的实际摘要：只有「已改成记录中的新内容」或「仍是旧内容」才算对得上。
-    // 中途又被别人改过的文件不能靠「收尾」盖过去，否则等于替一次不完整的写入做担保。
-    let drift = target_drift(workspace.root(), &record)?;
-    if let Some(path) = drift {
+    // 先看事件簿：这批事件在不在，决定「已发布」的记录该怎么收尾。
+    let recorded = events_present(workspace.root(), &record)?;
+    let mut written = 0usize;
+    let mut pending = Vec::new();
+    for target in &record.targets {
+        match current_state(workspace.root(), &target.path)? {
+            state if state == target.after => written += 1,
+            state if state == target.before => pending.push(target.path.clone()),
+            _ => {
+                return Err(format!(
+                    "目标 {} 的当前内容既不是记录中的旧内容、也不是新内容：写入可能只完成了一部分。\n\
+                     请先自行核对并修正该文件，再重试；不要用 finish 把不确定的状态盖过去。",
+                    target.path
+                )
+                .into());
+            }
+        }
+    }
+    if state == RecordState::Published && recorded {
+        // 事件已经记上，说明这次写入已经完成，只是没来得及收尾。
+    } else if state == RecordState::Published && !pending.is_empty() {
+        // 最关键的一种：记录已发布，但还有目标停在旧内容上，事件也没记。
+        // 这既可能是「一个文件都没写」，也可能是「写到一半」。前者放弃可惜——那是用户
+        // 已经批准过的改动；后者不能当作完成。两种情况都不该由一条命令悄悄抹掉。
         return Err(format!(
-            "目标 {path} 的当前内容既不是记录中的旧内容、也不是新内容：写入可能只完成了一部分。\n\
-             请先自行核对并修正该文件，再重试；不要用 finish 把不确定的状态盖过去。"
+            "这次写入没有完成：{} 个目标仍是旧内容（{}），事件也未记入事件簿。\n\
+             已写入的目标：{written} 个。\n\
+             这是你没有替用户做的决定，所以本命令不会自己收尾。请二选一：\n\
+              · 想保留这次批准：重新审阅并再次准奏（目标已是新内容的会自动跳过）；\n\
+              · 确认放弃：ziyuan text recovery abandon {operation_id} --yes（前提是目标全部仍是旧内容）。",
+            pending.len(),
+            pending.join("、")
         )
         .into());
     }
-    if state == RecordState::Prepared {
-        // 记录只到「已准备」：没有发布过，目标理应仍是旧状态，核对已在上一步做过。
-        println_if_human(json, || {
-            println!("记录为「已准备」，目标与原记录一致；收尾只推进世代并清理记录。");
-        });
-    }
-    // 「已发布」须先转成「已完成」才能删记录：核对过目标与记录一致，等于确认这次写入的结果。
+    // 目标全部已是新内容、或事件已记：这次写入确实发生过，收尾即可。
     if state == RecordState::Published {
         guard.complete(operation_id)?;
     }
@@ -485,32 +543,45 @@ fn even_odd(generation: u64) -> &'static str {
     }
 }
 
-/// 返回第一个既非旧内容、也非新内容的目标路径；全部对得上时为 `None`。
-fn target_drift(
-    root: &std::path::Path,
-    record: &ziyuan_storage::RecoveryRecord,
-) -> Result<Option<String>, Box<dyn Error>> {
-    use ziyuan_storage::recovery::FileState;
-    for target in &record.targets {
-        let path = root.join(&target.path);
-        let actual = match std::fs::read(&path) {
-            Ok(bytes) => FileState::Present(ziyuan_storage::content_sha256(&bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileState::Absent,
-            Err(e) => {
-                return Err(format!("读不了目标 {}：{e}", target.path).into());
-            }
-        };
-        if actual != target.before && actual != target.after {
-            return Ok(Some(target.path.clone()));
-        }
+fn state_name(state: RecordState) -> &'static str {
+    match state {
+        RecordState::Prepared => "已准备",
+        RecordState::Published => "已发布",
+        RecordState::Completed => "已完成",
+        RecordState::Abandoned => "已放弃",
     }
-    Ok(None)
 }
 
-fn println_if_human(json: bool, print: impl FnOnce()) {
-    if !json {
-        print();
+/// 目标路径当前的摘要状态。
+fn current_state(
+    root: &std::path::Path,
+    target: &str,
+) -> Result<ziyuan_storage::recovery::FileState, Box<dyn Error>> {
+    use ziyuan_storage::recovery::FileState;
+    match std::fs::read(root.join(target)) {
+        Ok(bytes) => Ok(FileState::Present(ziyuan_storage::content_sha256(&bytes))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileState::Absent),
+        Err(e) => Err(format!("读不了目标 {target}：{e}").into()),
     }
+}
+
+/// 记录里那批事件是否已经进了事件簿：逐行比对最近的若干条，不看时间戳字段。
+/// 读不到事件簿时按「没记」处理，但调用方仍会因目标不符而拒绝，不会误判为完成。
+fn events_present(
+    root: &std::path::Path,
+    record: &ziyuan_storage::RecoveryRecord,
+) -> Result<bool, Box<dyn Error>> {
+    let log = ziyuan_storage::EventLog::new(root);
+    let mut history = match ziyuan_storage::EventStore::load(&log) {
+        Ok(history) => history,
+        Err(_) => return Ok(false),
+    };
+    let batch: Vec<String> = record.events.encoded_events.clone();
+    let lines: Vec<String> = history
+        .drain(..)
+        .map(|event| ziyuan_storage::encode_event_line(&event))
+        .collect();
+    Ok(lines.len() >= batch.len() && lines[lines.len() - batch.len()..] == batch[..])
 }
 
 fn print_report(report: &ValidationReport) {

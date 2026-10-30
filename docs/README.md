@@ -26,6 +26,7 @@
 
 每份只记录当时实际做过的检查和未测项目。
 
+- [1.2.1](acceptance/1.2.1.md)
 - [1.2.0](acceptance/1.2.0.md)
 - [1.1.0](acceptance/1.1.0.md)
 - [1.0.0-rc.4 发布包](acceptance/1.0.0-rc.4.md)

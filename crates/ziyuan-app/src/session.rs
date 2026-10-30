@@ -188,11 +188,33 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 本批是否需要记一条时辰：分钟变了才记。恢复记录要预知本批内容，须与 `commit` 同一判断。
+    pub(crate) fn upcoming_clock(&self) -> Option<u64> {
+        if !self.store.stamps_time() {
+            return None;
+        }
+        let at = now();
+        self.clock.is_none_or(|t| t / 60 != at / 60).then_some(at)
+    }
+
     /// 由 `propose` 基于当前状态生成事件，校验后写入。事件簿若已被其他进程更新，
     /// 则重新加载并重新生成，因此 ID 分配与规则检查总是基于最新状态。返回实际写入的事件。
     pub(crate) fn commit(
         &mut self,
+        propose: impl FnMut(&Court) -> Result<Vec<CourtEvent>, GovernanceError>,
+    ) -> Result<Vec<CourtEvent>, AppError> {
+        self.commit_with_clock(propose, None)
+    }
+
+    /// 同 [`commit`](Self::commit)，但可以钉死本批的时辰：受管写入在发布恢复记录时就把
+    /// 本批要记的事件算好了，实际追加必须与记录完全一致，不能再自己判断一次。
+    ///
+    /// `clock` 为 `None` 时按 [`upcoming_clock`](Self::upcoming_clock) 现算；
+    /// `Some(None)` 表示这一批不记时辰。
+    pub(crate) fn commit_with_clock(
+        &mut self,
         mut propose: impl FnMut(&Court) -> Result<Vec<CourtEvent>, GovernanceError>,
+        mut clock: Option<Option<u64>>,
     ) -> Result<Vec<CourtEvent>, AppError> {
         loop {
             let events = propose(&self.court)?;
@@ -203,13 +225,14 @@ impl<S: EventStore> Session<S> {
             for event in &events {
                 next.apply(event)?;
             }
-            // 分钟变了才记一条时辰，置于本批之前。
+            // 分钟变了才记一条时辰，置于本批之前。受管写入已钉死时照记录来。
+            let at = match clock.take() {
+                Some(pinned) => pinned,
+                None => self.upcoming_clock(),
+            };
             let mut written = Vec::with_capacity(events.len() + 1);
-            if self.store.stamps_time() {
-                let at = now();
-                if self.clock.is_none_or(|t| t / 60 != at / 60) {
-                    written.push(CourtEvent::Clock(at));
-                }
+            if let Some(at) = at {
+                written.push(CourtEvent::Clock(at));
             }
             written.extend(events.iter().cloned());
             match self.store.append(self.len, &written) {
@@ -218,7 +241,14 @@ impl<S: EventStore> Session<S> {
                     self.revise_huidian();
                     return Ok(events);
                 }
-                Err(StorageError::Conflict { .. }) => self.reload()?,
+                Err(StorageError::Conflict { .. }) => {
+                    self.reload()?;
+                    // 重载后仍须沿用钉死的时辰：记录已发布，改写它就等于让记录与实际不符。
+                    clock = match clock.is_some() {
+                        true => clock,
+                        false => Some(at),
+                    };
+                }
                 Err(e) => return Err(e.into()),
             }
         }

@@ -619,8 +619,10 @@ impl<S: EventStore> Session<S> {
         skipped: &[u32],
         known: usize,
         event: &CourtEvent,
-    ) -> Result<RecoveryRecord, AppError> {
+    ) -> Result<(RecoveryRecord, Option<u64>), AppError> {
         let generation = workspace.generation().map_err(workspace_error)?;
+        // 本批要记的时辰在这里一次取定：记录里写什么，实际追加就写什么。
+        let pinned_clock = self.upcoming_clock();
         let targets = self.target_states(workspace, selected)?;
         // 记录所覆盖的是追加之后事件簿的前若干条：基础条数取事件簿本身报出的已知条数；
         // 报不出时退而用本次准奏开头的条数 `known`（`reload` 刚读过，二者通常相同）。
@@ -629,14 +631,12 @@ impl<S: EventStore> Session<S> {
             .known_events()
             .map_err(|e| AppError::Apply(e.to_string()))?
             .unwrap_or(known);
-        // 这一批还可能多记一条时辰（见 `commit`），故按可能的最长批次算。
-        let expected_events = base as u64 + 2;
-        // 文件事件簿报得出前至多 `expected_events` 条的摘要与整本长度；内存事件簿报不出，
-        // 此时记 0 与本次已知历史的摘要（`history` 与事件簿前 `base` 条一致，见 `Session::history`），
-        // 记录仍自洽，只是不足以核对文件。
+        // 摘要口径：事件簿**前 `base` 条**（即本批追加之前）的完整内容摘要。恒为「写入前」，
+        // 不含本批，因而不随批次长短变化；核对时按同样口径重算即可。
+        // 文件事件簿与内存事件簿都用这一口径，故两条路径写出的字段含义一致。
         let history_sha256 = match self
             .store
-            .history_sha256_at_most(expected_events as usize)
+            .history_sha256_at_most(base)
             .map_err(|e| AppError::Apply(e.to_string()))?
         {
             Some(sha) => sha,
@@ -655,38 +655,43 @@ impl<S: EventStore> Session<S> {
                     .collect()
             }
         };
+        // 本批写入**之前**事件簿的字节数；与 `history_sha256` 同属「写入前」状态。
         let expected_bytes = self
             .store
             .history_bytes()
             .map_err(|e| AppError::Apply(e.to_string()))?
             .unwrap_or(0);
+        // 本批要记的事件在这里就算定：时辰在发布记录时取定，实际追加由 `commit_with_clock`
+        // 钉死（见 `write_transaction`），不会因为中途跨了整分钟而多出一条，记录与实际一致。
         let mut encoded_events = Vec::with_capacity(2);
-        if self.store.stamps_time() {
-            let at = crate::time::now();
-            if self.clock.is_none_or(|t| t / 60 != at / 60) {
-                encoded_events.push(ziyuan_storage::encode_event_line(&CourtEvent::Clock(at)));
-            }
+        if let Some(at) = pinned_clock {
+            encoded_events.push(ziyuan_storage::encode_event_line(&CourtEvent::Clock(at)));
         }
         encoded_events.push(ziyuan_storage::encode_event_line(event));
-        Ok(RecoveryRecord {
-            operation_id: new_operation(),
-            workspace: record_path(workspace.root()),
-            generation_before: generation,
-            generation_after: generation + 2,
-            state: RecordState::Published,
-            application: ApplicationSource {
-                task: task.0,
-                changes_version: "v1".into(),
-                skipped: skipped.to_vec(),
+        // 追加之后事件簿应有的条数：写入前 `base` 条加上本批实际长度。
+        let expected_events = base as u64 + encoded_events.len() as u64;
+        Ok((
+            RecoveryRecord {
+                operation_id: new_operation(),
+                workspace: record_path(workspace.root()),
+                generation_before: generation,
+                generation_after: generation + 2,
+                state: RecordState::Published,
+                application: ApplicationSource {
+                    task: task.0,
+                    changes_version: "v1".into(),
+                    skipped: skipped.to_vec(),
+                },
+                events: EventBatch {
+                    expected_events,
+                    expected_bytes,
+                    history_sha256,
+                    encoded_events,
+                },
+                targets,
             },
-            events: EventBatch {
-                expected_events,
-                expected_bytes,
-                history_sha256,
-                encoded_events,
-            },
-            targets,
-        })
+            pinned_clock,
+        ))
     }
 
     /// 一笔受管事务的写入：工作区锁 → 世代号 → 恢复记录 → 写文件 → 记事件 → 收尾。
@@ -721,7 +726,8 @@ impl<S: EventStore> Session<S> {
             .map_err(workspace_error)?;
         workspace.ensure_writable().map_err(unusable)?;
 
-        let record = self.recovery_record(&workspace, selected, task, &skipped, known, &event)?;
+        let (record, pinned_clock) =
+            self.recovery_record(&workspace, selected, task, &skipped, known, &event)?;
         let operation = record.operation_id.clone();
         // 写前先按落盘方的规矩核一遍（自呈报以来有没有被改动、路径是否越界）：这一关不过就
         // 一处也不会写，因此连世代号都不必推进，更不留恢复记录——不会因此把工作区卡住。
@@ -749,14 +755,26 @@ impl<S: EventStore> Session<S> {
         // 先推进世代号，再发布记录：崩溃留下的定是「记录已发布、世代号为奇数」。
         guard.reserve().map_err(workspace_error)?;
         if let Err(error) = guard.publish(&record) {
-            // 发布失败：尽力把世代号推回偶数，免得一个没写成的记录把工作区卡死。
-            let _ = guard.finish();
-            return Err(AppError::Apply(match swept {
+            // 发布失败：只有盘上确实没有记录时才把世代号推回偶数。
+            // 「已发布 ⇒ 世代号为奇数」是恢复流程依赖的不变式，若失败后仍留着一份已发布的
+            // 记录还倒退世代号，下一次写入就会在「记录要求先收尾」与「世代号说没事」间自相矛盾。
+            let stray = workspace
+                .pending_record()
+                .map_err(workspace_error)?
+                .is_some();
+            if !stray {
+                let _ = guard.finish();
+            }
+            return Err(AppError::Apply(match (swept, stray) {
                 // 已清掉「已收尾」的记录：上一次收尾不完整，须核对后再写。
-                true => format!(
+                (true, false) => format!(
                     "收尾上次受管写入后发布本次恢复记录失败（{error}），已恢复世代号；请核对项目文件后重试"
                 ),
-                false => format!("无法写入恢复记录：{error}"),
+                (_, true) => format!(
+                    "发布本次恢复记录失败（{error}），盘上仍留有一份记录；\
+                     请先运行 ziyuan text recovery status 核对"
+                ),
+                (false, false) => format!("无法写入恢复记录：{error}"),
             }));
         }
 
@@ -765,7 +783,8 @@ impl<S: EventStore> Session<S> {
         // 守卫随函数结束而释放，世代号保持奇数。
         ziyuan_runtime::tools::apply_changes(root, selected)
             .map_err(|e| AppError::Apply(e.to_string()))?;
-        self.commit(|_| Ok(vec![event.clone()]))?;
+        // 钉死发布记录时算好的时辰：实际追加的事件必须与记录里写的完全一致。
+        self.commit_with_clock(|_| Ok(vec![event.clone()]), Some(pinned_clock))?;
 
         // 收尾：记录转为「已完成」、世代号回偶数、删掉记录。
         guard.complete(&operation).map_err(workspace_error)?;

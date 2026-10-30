@@ -237,9 +237,33 @@ fn finish_allows_a_published_record_whose_files_were_already_written() {
 }
 
 #[test]
-fn finish_allows_a_published_record_whose_files_were_never_written() {
-    // 另一半形态：记录发布了，但一个文件都还没写到，目标仍是旧内容（此处为不存在）。
+fn finish_refuses_a_published_record_whose_files_were_never_written() {
+    // 另一半形态：记录发布了，但一个文件都还没写到，目标仍是旧内容。
+    // 这正是「已发布就崩了」的常态，不能当作完成来收尾——那样等于把用户已批准的改动悄悄丢掉。
     let temp = Temp::new("published-unwritten");
+    let ws = Workspace::open(temp.path()).expect("打开工作目录");
+    let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
+    publish(&ws, &mut guard, RecordState::Published);
+    drop(guard);
+
+    let (code, stdout, stderr) = run(
+        temp.path(),
+        &["text", "recovery", "finish", OPERATION, "--yes"],
+    );
+    assert_ne!(code, 0, "什么都没写时不应报成功收尾：{stdout}");
+    assert!(stderr.contains("没有完成"), "{stderr}");
+    assert!(stderr.contains("abandon"), "应指出放弃的去路：{stderr}");
+
+    // 记录与奇数世代都必须原样留着：拒绝收尾不能顺手把状态改掉。
+    let reopened = Workspace::open(temp.path()).expect("重新打开");
+    assert!(reopened.pending_record().expect("读记录").is_some());
+    assert!(reopened.ensure_writable().is_err(), "仍应拒绝写入");
+}
+
+#[test]
+fn a_published_record_with_nothing_written_can_be_abandoned() {
+    // 拒绝收尾之后，用户仍要有一条明确的路：确认放弃。
+    let temp = Temp::new("published-abandon");
     let ws = Workspace::open(temp.path()).expect("打开工作目录");
     let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
     publish(&ws, &mut guard, RecordState::Published);
@@ -247,9 +271,57 @@ fn finish_allows_a_published_record_whose_files_were_never_written() {
 
     let (code, _, stderr) = run(
         temp.path(),
+        &["text", "recovery", "abandon", OPERATION, "--yes"],
+    );
+    assert_eq!(code, 0, "目标全部未改动时应允许放弃：{stderr}");
+
+    let reopened = Workspace::open(temp.path()).expect("重新打开");
+    reopened.ensure_writable().expect("放弃后应可写入");
+}
+
+#[test]
+fn a_published_record_whose_targets_were_written_cannot_be_abandoned() {
+    // 目标已是新内容时放弃，等于把已落盘的结果从账上抹掉，必须拒绝。
+    let temp = Temp::new("published-written-abandon");
+    materialize_target(temp.path());
+    let ws = Workspace::open(temp.path()).expect("打开工作目录");
+    let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
+    publish(&ws, &mut guard, RecordState::Published);
+    drop(guard);
+
+    let (code, stdout, stderr) = run(
+        temp.path(),
+        &["text", "recovery", "abandon", OPERATION, "--yes"],
+    );
+    assert_ne!(code, 0, "目标已改写时不应允许放弃：{stdout}");
+    assert!(stderr.contains("已不是记录中的旧内容"), "{stderr}");
+    assert!(stderr.contains("finish"), "应指出收尾的去路：{stderr}");
+
+    let reopened = Workspace::open(temp.path()).expect("重新打开");
+    assert!(reopened.pending_record().expect("读记录").is_some());
+}
+
+#[test]
+fn finish_accepts_crlf_content_written_verbatim() {
+    // 落盘按字节原样写，不做行尾规范化；记录里的摘要是对写后的字节算的，
+    // 因此含 CRLF 的目标也应能顺利收尾。这里把这一点钉住，免得日后再猜。
+    let temp = Temp::new("crlf");
+    let crlf = b"line one\r\nline two\r\n";
+    let ws = Workspace::open(temp.path()).expect("打开工作目录");
+    let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
+    let mut rec = record(&record_root(temp.path()), RecordState::Published);
+    rec.targets[0].after = FileState::Present(ziyuan_storage::content_sha256(crlf));
+    guard.reserve().expect("占下奇数世代");
+    guard.publish(&rec).expect("写恢复记录");
+    drop(guard);
+    std::fs::create_dir_all(temp.path().join("docs")).expect("建目标目录");
+    std::fs::write(temp.path().join("docs/notes.md"), crlf).expect("写目标文件");
+
+    let (code, _, stderr) = run(
+        temp.path(),
         &["text", "recovery", "finish", OPERATION, "--yes"],
     );
-    assert_eq!(code, 0, "目标仍是旧内容时应允许收尾：{stderr}");
+    assert_eq!(code, 0, "CRLF 内容应能收尾：{stderr}");
 }
 
 #[test]
