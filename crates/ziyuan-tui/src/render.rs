@@ -371,6 +371,33 @@ impl App {
             status_line.push(Span::raw(format!("  承办 {}", name(w))));
         }
         lines.push(Line::from(status_line));
+        if let Some(link) = &task.translation {
+            // 译书：只读显示关联的块与译稿现况。逐块状态（待御览、版本失效等）须回放事件簿并核对
+            // 磁盘上的译稿，TUI 不另算，只看诏令本身。
+            let state = if !link.kind.writes() {
+                "只读审校"
+            } else {
+                match (&task.changes, &task.status) {
+                    (Some(changes), _) => match changes.state {
+                        ChangeState::Proposed => "译稿待准奏",
+                        ChangeState::Applied => "已准奏",
+                        ChangeState::Discarded => "译稿已驳回",
+                    },
+                    (None, TaskStatus::Failed { .. }) => "失败",
+                    (None, TaskStatus::Cancelled) => "已撤销",
+                    (None, _) => "未呈报译稿",
+                }
+            };
+            let project: String = format!("{}…", link.project.chars().take(8).collect::<String>());
+            lines.push(Line::from(vec![
+                label("译书"),
+                Span::raw(format!(
+                    "{} · {project} · {} · {state}",
+                    link.kind.label(),
+                    link.block
+                )),
+            ]));
+        }
         if let Some(used) = &task.template {
             lines.push(Line::from(vec![
                 label("翰林院"),

@@ -71,6 +71,8 @@ jobs:
           name="ziyuan-$GITHUB_REF_NAME-${{ matrix.target }}"
           mkdir "$name"
           cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          # 界面内置 JetBrains Mono（SIL OFL 1.1），许可证须随包附上。
+          cp crates/ziyuan-web/src/fonts/JetBrainsMono-OFL.txt "$name/"
           if [ "${{ runner.os }}" = Windows ]; then
             cp "target/${{ matrix.target }}/release/ziyuan.exe" "$name/"
             7z a "$name.zip" "$name" > /dev/null

@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>奉天门 · 紫垣</title>
+<script>
+  // 字形随系统语言（如 ja 用日文字形），不按原文语种预设。
+  if (navigator.language) document.documentElement.lang = navigator.language;
+</script>
 <style>
   /* 三殿分区：左为殿名，中为诏令，右为所选诏令的全文。
      分区只靠留白、细线与底色深浅；强调色只有一枚朱印。配色见 [data-theme]。 */
@@ -75,11 +79,32 @@
     --bad: #a8402c;
     --info: #3f6390;
   }
+  /* 字体只用 SIL OFL 1.1 开源字体（见 docs/guide.md#字体）。名单按各平台实际安装后的族名列出；
+     只有 JetBrains Mono 随程序内置，其余未安装时回落到浏览器的通用字体。 */
+  @font-face {
+    font-family: "JetBrains Mono";
+    src: local("JetBrains Mono"), url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+    font-weight: 400; font-style: normal; font-display: swap;
+  }
+  @font-face {
+    font-family: "JetBrains Mono";
+    src: local("JetBrains Mono Bold"), url("/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+    font-weight: 700; font-style: normal; font-display: swap;
+  }
   :root {
-    --serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
-    --sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+    --serif: "Source Han Serif SC", "Source Han Serif SC VF", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif VF", "Source Han Serif", serif;
+    --sans: "Source Han Sans SC", "Source Han Sans SC VF", "Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans VF", "Source Han Sans", sans-serif;
+    --mono: "JetBrains Mono", "Sarasa Mono SC", "Source Han Mono SC", "Source Han Mono", "Noto Sans Mono CJK SC", monospace;
+    /* 译书原文、译文与朱批。 */
+    --text: "LXGW WenKai", "LXGW WenKai Screen", var(--serif);
     --radius: 3px;
+  }
+  /* 系统语言为日文时（页首脚本按 navigator.language 设 lang）换日文字形。 */
+  :root:lang(ja) {
+    --serif: "Source Han Serif JP", "Source Han Serif VF", "Noto Serif JP", "Noto Serif CJK JP", "Source Han Serif", serif;
+    --sans: "Source Han Sans JP", "Source Han Sans VF", "Noto Sans JP", "Noto Sans CJK JP", "Source Han Sans", sans-serif;
+    --mono: "JetBrains Mono", "Sarasa Mono J", "Source Han Mono", "Noto Sans Mono CJK JP", monospace;
+    --text: "Klee One", "LXGW WenKai", "LXGW WenKai Screen", var(--serif);
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
@@ -215,6 +240,7 @@
   .badge.awaiting { background: var(--seal); color: var(--seal-ink); }
   .badge.urgent { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
   .badge.seal, .badge.template, .badge.courier, .badge.cancelled { color: var(--tint-ink); background: var(--tint); }
+  .badge.seal { white-space: normal; overflow-wrap: anywhere; }
   .badge.accept { font-weight: 600; }
 
   /* 正文各段：小标题加留白，左缘一道细线区分来源。 */
@@ -445,12 +471,73 @@
     .subscription-list { max-height: 50vh; }
   }
 
+  /* ---- 翰林院 · 译书：项目 → 章 → 块，三栏对照 ---- */
+  .text-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 20px; align-items: start; }
+  .text-side, .text-main { min-width: 0; }
+  .text-outline { margin-top: 10px; max-height: 46vh; overflow: auto; border-top: 1px solid var(--line); }
+  .text-chapter { margin: 10px 0 2px; font-family: var(--serif); font-size: 13px; color: var(--muted); }
+  .text-block-row {
+    display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; font: inherit;
+    border: 0; border-left: 2px solid transparent; border-radius: 0; background: transparent; padding: 3px 6px;
+  }
+  .text-block-row .id { font-family: var(--mono); font-size: 11.5px; }
+  .text-block-row .state { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .text-block-row:hover { background: var(--well); }
+  .text-block-row.current { background: var(--tint); border-left-color: var(--seal); }
+  .text-block-row.current .id { color: var(--tint-ink); font-weight: 600; }
+  .text-compare { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .text-col { display: flex; flex-direction: column; min-width: 0; }
+  .text-col h4 { margin: 0 0 6px; font-family: var(--serif); font-size: 14px; font-weight: 600; letter-spacing: 2px; }
+  /* 长段落在栏内换行、栏内滚动，不撑开页面。 */
+  .text-scroll {
+    flex: 1; max-height: 52vh; overflow: auto; padding: 10px 12px; overflow-wrap: anywhere;
+    background: var(--sheet); border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .text-para { margin: 0 0 12px; font-family: var(--text); font-size: 14px; line-height: 1.8; white-space: pre-wrap; }
+  .text-para:last-child { margin-bottom: 0; }
+  .text-para[data-text-para] { cursor: pointer; }
+  .text-para[data-text-para]:hover { background: var(--well); }
+  .text-para.picked { background: var(--tint); }
+  .text-para .pid { display: block; font: 11px/1.5 var(--mono); color: var(--muted); }
+  .text-para .zhu { display: block; margin-top: 4px; padding-left: 8px; border-left: 2px solid var(--seal); font-family: var(--text); font-size: 12.5px; color: var(--tint-ink); }
+  .text-para.changed { background: var(--add); }
+  .text-materials { display: grid; gap: 10px; margin-top: 14px; }
+  .text-material { font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+  .text-material summary { cursor: pointer; font-family: var(--serif); font-size: 13.5px; }
+  .text-materials pre {
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; max-height: 220px;
+    overflow: auto; background: var(--well); border-radius: var(--radius); font: 12px/1.6 var(--mono);
+  }
+  .text-problems { color: var(--bad); margin: 4px 0 0; padding-left: 20px; }
+  .text-problems li { margin: 2px 0; }
+  .text-glossary { margin: 4px 0 0; padding-left: 20px; }
+  .text-note-list { max-height: 42vh; overflow: auto; overflow-wrap: anywhere; margin-top: 10px; }
+  .text-note { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .text-note:last-child { border-bottom: 0; }
+  .text-note .src, .text-note .zh, #text-zhupi-input { font-family: var(--text); }
+  .text-note .zh { color: var(--tint-ink); }
+  .text-note .actions { margin-top: 6px; }
+  .text-notes-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .text-notes-layout > div { min-width: 0; }
+  #text-zhupi-input { min-height: 60px; }
+  #text-zhupi-form label { margin-top: 0; }
+  /* 结果与错误里常有长路径或 SHA，须在窄屏内换行。 */
+  #text-action-result, #text-status, #note-result, #note-status, #text-project-meta { overflow-wrap: anywhere; }
+  #text-action-result.error, #note-result.error, #text-status .error { color: var(--bad); }
+  @media (max-width: 760px) {
+    .text-layout, .text-notes-layout { grid-template-columns: minmax(0, 1fr); }
+    .text-compare { grid-template-columns: minmax(0, 1fr); }
+    .text-scroll { max-height: none; }
+    .text-outline { max-height: 28vh; }
+    .text-note-list { max-height: 40vh; }
+  }
+
   /* 观政令牌只读：写操作的按钮与表单一律不显示，只留标了 data-view 的查看按钮。 */
   body.viewer button:not([data-view]),
   body.viewer .write,
   body.viewer select[id^="appoint-"],
   body.viewer select[id^="redraft-"],
-  body.viewer input[id^="note-"],
+  body.viewer input[id^="note-"]:not([data-view]),
   body.viewer label.pick { display: none !important; }
   .viewer-badge { display: none; }
   body.viewer .viewer-badge { display: inline; }
@@ -468,6 +555,7 @@
   #locked h2 { font-family: var(--serif); margin-top: 0; }
 
   @media (max-width: 1100px) {
+    .text-layout { grid-template-columns: minmax(0, 1fr); }
     .edicts { grid-template-columns: minmax(0, 1fr); }
     .edict-list { position: static; max-height: 46vh; }
     .officials-layout { grid-template-columns: minmax(0, 1fr); }
@@ -697,6 +785,67 @@
           <div class="row" id="github-row" hidden>
             <input type="text" id="github-label" data-keep placeholder="标签（默认 ziyuan）">
             <button class="small shrink" id="github-pull">收来件</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="card full" id="text-card">
+      <h2>翰林院 · 译书 <small>项目 · 章 · 块；原文 / 已准奏译文 / 待准修订</small><span class="viewer-badge">只读：不能下诏、朱批、定稿或改札记</span></h2>
+      <div class="body">
+        <p class="hint">译书与御笔札记不依赖朝廷；块进度、待准修订与御览须先建朝（ziyuan init）。驳回的改动不会落盘，已准奏的译稿也不会被自动覆盖。</p>
+        <div class="text-layout">
+          <div class="text-side">
+            <label for="text-project">项目</label>
+            <select id="text-project" data-keep></select>
+            <p class="hint" id="text-project-meta"></p>
+            <div class="text-outline" id="text-outline" role="region" aria-label="章与块" tabindex="0"></div>
+          </div>
+          <div class="text-main">
+            <p class="hint" id="text-status" role="status" aria-live="polite"></p>
+            <div class="text-compare">
+              <div class="text-col"><h4>原文</h4><div class="text-scroll" id="text-source"></div></div>
+              <div class="text-col"><h4>已准奏译文</h4><div class="text-scroll" id="text-zh"></div></div>
+              <div class="text-col"><h4>待准修订</h4><div class="text-scroll" id="text-pending"></div></div>
+            </div>
+            <div class="text-materials" id="text-materials"></div>
+            <div class="actions" id="text-actions"></div>
+            <p class="hint" id="text-action-result" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+        <div class="text-notes-layout">
+          <div>
+            <h3>御笔札记 <small class="hint">全局一份，不随诏令交给模型；并入草稿后须批准上下文才生效</small></h3>
+            <form class="row" id="note-filter-form">
+              <input type="text" id="note-search" data-view data-keep placeholder="搜索原文、译法、备注">
+              <select id="note-kind" data-keep class="shrink">
+                <option value="">全部</option><option value="word">词语</option><option value="passage">段落</option>
+              </select>
+              <button class="small shrink" type="submit" data-view>筛选</button>
+            </form>
+            <p class="hint" id="note-status" role="status" aria-live="polite"></p>
+            <div class="text-note-list" id="note-list"></div>
+          </div>
+          <div class="write">
+            <h3>记一条 <small class="hint">原文取所选段，译法自己写</small></h3>
+            <form id="note-form">
+              <label for="note-new-kind">种类</label>
+              <select id="note-new-kind" data-keep>
+                <option value="word">词语（并入术语表草稿）</option>
+                <option value="passage">段落（并入文体的「范例」一节）</option>
+              </select>
+              <label for="note-source">原文</label>
+              <textarea id="note-source" data-keep placeholder="选中段落后自动填入，也可自己写"></textarea>
+              <label for="note-zh">译法</label>
+              <textarea id="note-zh" data-keep placeholder="认可的译法"></textarea>
+              <label for="note-remark">备注（可选）</label>
+              <input type="text" id="note-remark" data-keep placeholder="如：全书统一、第三章起改用">
+              <p class="hint" id="note-link"></p>
+              <div class="actions">
+                <button type="submit" class="gold small" id="note-submit">记下</button>
+                <button type="button" class="small" id="note-cancel" hidden>放弃修改</button>
+              </div>
+              <p class="hint" id="note-result" role="status" aria-live="polite"></p>
+            </form>
           </div>
         </div>
       </div>
@@ -1156,6 +1305,584 @@ $("filters").addEventListener("click", (event) => {
 $("edict-new").addEventListener("click", () => { select("new"); $("edict-text").focus(); });
 $("edict-close").addEventListener("click", () => { selected = null; preserve(render); });
 
+// ---- 翰林院 · 译书：项目 → 章 → 块，三栏对照，逐段朱批与御笔札记 ----
+// 项目、材料与札记不依赖朝廷；块进度与待准修订由服务端回放事件簿得出，未建朝时为空。
+let textProjects = null;   // GET /text
+let textProject = null;    // GET /text/<项目>
+let textBlock = null;      // GET /text/<项目>/blocks/<块>
+let textProjectId = null;
+let textBlockId = null;
+let textPicked = null;     // 选中的段：朱批与札记都以它为准
+let textError = null;
+let textBusy = false;
+let textLoaded = false;
+// 「项目/块/段」→ 未保存的朱批：重绘、刷新与关页都不丢（只在本标签页，存 sessionStorage）。
+const textDrafts = (() => {
+  try { return JSON.parse(sessionStorage.getItem("ziyuan-text-drafts") || "{}"); } catch { return {}; }
+})();
+function textDraftKey(paragraph) {
+  return `${textProjectId}/${textBlockId}/${paragraph || ""}`;
+}
+function textDraftSave() {
+  try { sessionStorage.setItem("ziyuan-text-drafts", JSON.stringify(textDrafts)); } catch {}
+}
+let notesCache = [];
+let noteEditing = null;    // 正在改的札记 ID
+const noteFilters = { search: "", kind: "" };
+
+// 地址栏记下所在的项目与块，刷新或书签都能回到原处。
+function textSelection() {
+  const parts = location.hash.slice(1).split("/");
+  if (parts[0] !== "wuying" || parts[1] !== "text") return null;
+  return { project: parts[2] || null, block: parts[3] || null };
+}
+function textHash() {
+  return "#wuying/text" + (textProjectId ? "/" + textProjectId : "") + (textBlockId ? "/" + textBlockId : "");
+}
+async function loadText() {
+  try {
+    const list = await api("/text");
+    textProjects = list.projects || [];
+    const wanted = textSelection();
+    if (wanted && wanted.project && textProjects.some((p) => p.id === wanted.project)) {
+      textProjectId = wanted.project;
+      textBlockId = wanted.block;
+    } else if (!textProjects.some((p) => p.id === textProjectId)) {
+      textProjectId = textProjects.length ? textProjects[0].id : null;
+      textBlockId = null;
+    }
+    textLoaded = true;
+    await loadTextProject();
+  } catch (e) {
+    textError = `无法加载译书项目：${e.message}`;
+    renderText();
+  }
+  await loadNotes();
+}
+async function loadTextProject() {
+  textProject = null;
+  textError = null;
+  if (!textProjectId) { renderText(); return; }
+  try {
+    textProject = await api("/text/" + encodeURIComponent(textProjectId));
+  } catch (e) {
+    textError = `无法加载项目：${e.message}`;
+    textProject = null;
+    textBlockId = null;
+    renderText();
+    return;
+  }
+  const blocks = (textProject.outline || []).flatMap((c) => c.blocks);
+  if (!blocks.includes(textBlockId)) textBlockId = blocks.length ? blocks[0] : null;
+  if (!textBlockId) { textBlock = null; renderText(); return; }
+  history.replaceState(null, "", textHash());
+  await loadTextBlock();
+}
+async function loadTextBlock() {
+  if (!textProjectId || !textBlockId) return;
+  textError = null;
+  try {
+    textBlock = await api(`/text/${encodeURIComponent(textProjectId)}/blocks/${encodeURIComponent(textBlockId)}`);
+    const paragraphs = ((textBlock.source && textBlock.source.paragraphs) || []).map((p) => p.id);
+    // 刷新后回到原来看的那一段。
+    if (!textPicked) textPicked = textPickedLoad();
+    if (textPicked && !paragraphs.includes(textPicked)) textPicked = null;
+  } catch (e) {
+    textBlock = null;
+    textError = `无法加载此块：${e.message}`;
+  }
+  renderText();
+}
+function textPickedLoad() {
+  try {
+    return JSON.parse(sessionStorage.getItem("ziyuan-text-picked") || "{}")[textBlockId] || null;
+  } catch {
+    return null;
+  }
+}
+function textPickedSave() {
+  try {
+    const map = JSON.parse(sessionStorage.getItem("ziyuan-text-picked") || "{}");
+    if (textBlockId) map[textBlockId] = textPicked;
+    sessionStorage.setItem("ziyuan-text-picked", JSON.stringify(map));
+  } catch {}
+}
+function selectTextBlock(block) {
+  if (!block || block === textBlockId) return;
+  textBlockId = block;
+  textPicked = null;
+  history.replaceState(null, "", textHash());
+  loadTextBlock();
+}
+
+// 各栏独立滚动；重绘时保留输入的文字、焦点与滚动位置。
+function textScrollers() {
+  return [...$("text-card").querySelectorAll(".text-scroll, .text-outline, .text-note-list")];
+}
+function renderText() {
+  const card = $("text-card");
+  const kept = {};
+  card.querySelectorAll("[data-keep]").forEach((el) => {
+    kept[el.id] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  const focused = card.contains(document.activeElement) ? document.activeElement.id : null;
+  const scroll = textScrollers().map((el) => el.scrollTop);
+  renderTextNow();
+  for (const [id, value] of Object.entries(kept)) {
+    const el = $(id);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = value;
+    else if (el.tagName !== "SELECT" || [...el.options].some((o) => o.value === value)) el.value = value;
+  }
+  textScrollers().forEach((el, i) => { if (scroll[i] != null) el.scrollTop = scroll[i]; });
+  if (focused && $(focused)) $(focused).focus();
+}
+function textZhupiItems() {
+  return (textBlock && textBlock.zhupi && textBlock.zhupi.items) || {};
+}
+function textZhupiSaved(paragraph) {
+  const note = textZhupiItems()[paragraph];
+  return note ? note.text : "";
+}
+function textZhupiValue(paragraph) {
+  return textDrafts[textDraftKey(paragraph)] ?? textZhupiSaved(paragraph);
+}
+function textParagraph(paragraph) {
+  const all = (textBlock && textBlock.source && textBlock.source.paragraphs) || [];
+  const found = all.find((p) => p.id === paragraph);
+  return found ? found.text : "";
+}
+function textStaleText(reason) {
+  switch (reason.reason) {
+    case "source_changed": return "原文已变";
+    case "context_changed": return `上下文已更新（所用 v${reason.used}，现行 v${reason.current}）`;
+    case "summary_changed": return `前情摘要有变：${(reason.chapters || []).join("、")}`;
+    case "translation_edited": return "磁盘上的译稿与已准奏或已定稿的不同";
+    case "translation_missing": return "已准奏的译稿不见了";
+    default: return String(reason.reason || "版本失效");
+  }
+}
+function textParagraphHtml(p, changed, note) {
+  const zhu = textZhupiSaved(p.id);
+  const picked = p.id === textPicked ? " picked" : "";
+  const mark = changed ? " changed" : "";
+  return `<p class="text-para${mark}${picked}" data-text-para="${esc(p.id)}" ${note ? `title="${esc(note)}"` : ""}>` +
+    `<span class="pid">${esc(p.id)}</span>${esc(p.text)}` +
+    (zhu ? `<span class="zhu">朱批：${esc(zhu)}</span>` : "") +
+    `</p>`;
+}
+function textMessage(text, error = false) {
+  const out = $("text-action-result");
+  out.textContent = text;
+  out.classList.toggle("error", error);
+}
+function textPick(paragraph) {
+  textPicked = paragraph;
+  const source = $("note-source");
+  if (source && paragraph) {
+    const text = textParagraph(paragraph);
+    source.value = text;
+    // 词语一栏至多 200 字；长段自动按段落记。
+    if (text.length > 200) $("note-new-kind").value = "passage";
+  }
+  const select = $("text-zhupi-para");
+  if (select && paragraph) select.value = paragraph;
+  const input = $("text-zhupi-input");
+  if (input) input.value = textZhupiValue(paragraph);
+  $("text-card").querySelectorAll(".text-para[data-text-para]").forEach((el) => {
+    el.classList.toggle("picked", el.dataset.textPara === textPicked);
+  });
+  textPickedSave();
+  updateNoteLink();
+}
+function updateNoteLink() {
+  const link = $("note-link");
+  if (!link) return;
+  link.textContent = textProjectId
+    ? `出处：项目 ${textProjectId.slice(0, 8)}…${textBlockId ? " · 块 " + textBlockId : ""}${textPicked ? " · 段 " + textPicked : ""}`
+    : "未选项目：札记不记出处，只存译法。";
+}
+function renderTextNow() {
+  const projects = textProjects || [];
+  const select = $("text-project");
+  select.innerHTML = projects.length
+    ? projects.map((p) => `<option value="${esc(p.id)}">${esc(p.title)}（${p.chapters} 章 · ${p.blocks} 块）</option>`).join("")
+    : `<option value="">（尚无文本项目）</option>`;
+  select.value = projects.some((p) => p.id === textProjectId) ? textProjectId : "";
+  select.disabled = !projects.length;
+  const project = textProject && textProject.project;
+  $("text-project-meta").textContent = project
+    ? `${project.source_language} → ${project.target_language}；上下文 v${textProject.context.version}（已批准 ${textProject.context.versions.length} 版）`
+    : projects.length ? "" : "尚无文本项目：先用 ziyuan text init、ziyuan text import 建项目并导入原文。";
+
+  // 章与块：状态由服务端回放事件簿得出，未建朝时为空。
+  const byBlock = new Map(((textProject && textProject.statuses) || []).map((s) => [s.block, s]));
+  $("text-outline").innerHTML = textProject && (textProject.outline || []).length
+    ? textProject.outline.map((chapter) =>
+        `<div class="text-chapter">${esc(chapter.chapter)}${chapter.source_name ? " · " + esc(chapter.source_name) : ""}</div>` +
+        chapter.blocks.map((b) => {
+          const st = byBlock.get(b);
+          return `<button type="button" class="text-block-row ${b === textBlockId ? "current" : ""}" data-view data-text-block="${esc(b)}">` +
+            `<span class="id">${esc(b)}</span><span class="state">${st ? esc(st.label) : ""}</span></button>`;
+        }).join(""))
+        .join("")
+    : `<p class="hint">${projects.length ? "此项目还没有导入原文。" : "建好项目并导入 TXT 后在此列出章与块。"}</p>`;
+
+  const b = textBlock;
+  const statusLine = [];
+  if (textError) statusLine.push(`<span class="error">${esc(textError)}</span>`);
+  if (b) {
+    statusLine.push(`<b>${esc(b.block)}</b> · 章 ${esc(b.chapter)}`);
+    if (b.status) {
+      const kind = b.status.state && b.status.state.state;
+      // 与奉天殿诏令同一套徽章：待准奏、待御览用朱印，执行中用 assigned。
+      const tone = {
+        finalized: "accept", failed: "failed", stale: "failed", running: "assigned",
+        awaiting_approval: "awaiting", awaiting_yulan: "awaiting", cancelled: "cancelled", uncertain: "pending",
+      }[kind] || "";
+      statusLine.push(`<span class="badge ${tone}">${esc(b.status.label)}</span>`);
+      if (b.status.note) statusLine.push(esc(b.status.note));
+      const tasks = b.status.tasks || [];
+      if (tasks.length) {
+        statusLine.push(tasks.map((id) => `<button type="button" class="small" data-view data-goto-task="${id}" title="到奉天殿看此诏令">#${id}</button>`).join(" "));
+      }
+    } else {
+      statusLine.push("朝廷尚未建立：块进度与御览不可用（ziyuan init 后显示）。");
+    }
+  } else if (!textError) {
+    statusLine.push(textProjectId ? "选一个块看材料。" : "选一个项目。");
+  }
+  $("text-status").innerHTML = statusLine.join(" · ");
+
+  // 三栏：原文 / 已准奏译文 / 待准修订（待准奏诏令的最终译稿）。
+  const sourceParagraphs = (b && b.source && b.source.paragraphs) || [];
+  $("text-source").innerHTML = sourceParagraphs.length
+    ? sourceParagraphs.map((p) => textParagraphHtml(p, false)).join("")
+    : `<p class="hint">${b ? "此块没有原文。" : "选一个块以看原文。"}</p>`;
+  const zh = b && b.translation && b.translation.paragraphs;
+  $("text-zh").innerHTML = zh
+    ? zh.map((p) => textParagraphHtml(p, false)).join("")
+    : `<p class="hint">${b ? (b.translation_error ? `译稿解析失败：${esc(b.translation_error)}` : "尚无译稿：先下初译诏令。") : "选一个块。"}</p>`;
+  const pending = b && b.pending;
+  const current = new Map((zh || []).map((p) => [p.id, p.text]));
+  $("text-pending").innerHTML = pending
+    ? (pending.output && pending.output.paragraphs
+        ? pending.output.paragraphs.map((p) => textParagraphHtml(p, current.get(p.id) !== p.text, `诏令 #${pending.task}（${pending.label}）待准奏`)).join("")
+        : `<p class="hint">诏令 #${pending.task} 待准奏，候选稿无从解析：${esc(pending.parse_error || "未知错误")}</p><pre>${esc(pending.text || "")}</pre>`)
+    : `<p class="hint">${b ? "没有待准奏的初译或修订。" : "选一个块。"}</p>`;
+
+  // 材料：结构检查、失效原因、上下文、建议、衔接段、审校回奏、朱批导出与逐段朱批。
+  const materials = [];
+  if (b && b.check) {
+    materials.push(b.check.valid
+      ? `<div class="text-material"><b>结构检查</b>：<span class="badge accept">通过</span> <span class="hint">只查段落齐全、次序与空译文，不评质量</span></div>`
+      : `<div class="text-material"><b>结构检查</b>：<span class="badge failed">不通过</span><ul class="text-problems">${
+          b.check.issues.map((i) => `<li>${esc(i.message)}${i.paragraph_id ? `（${esc(i.paragraph_id)}）` : ""}</li>`).join("")
+        }</ul></div>`);
+  }
+  if (b && b.status && b.status.state && b.status.state.state === "stale") {
+    materials.push(`<div class="text-material"><b>版本失效</b><ul class="text-problems">${
+      b.status.state.reasons.map((r) => `<li>${esc(textStaleText(r))}</li>`).join("")
+    }</ul><p class="hint">失效的块须下修订诏令重修；已准奏的译稿不会自动覆盖。</p></div>`);
+  }
+  if (b) {
+    const ctx = b.context && b.context.value;
+    if (ctx) {
+      const glossary = (ctx.glossary || []).length
+        ? `<ul class="text-glossary">${ctx.glossary.map((g) =>
+            `<li><b>${esc(g.source)}</b> → ${(g.allowed || []).map(esc).join(" / ")}${g.note ? `（${esc(g.note)}）` : ""}${g.scope ? `［${esc(g.scope)}］` : ""}</li>`).join("")}</ul>`
+        : `<p class="hint">术语表为空。</p>`;
+      materials.push(`<details class="text-material"><summary>上下文 v${ctx.version || 0} · 术语 ${(ctx.glossary || []).length} 条 · 前情摘要 ${Object.keys(ctx.summaries || {}).length} 章</summary>` +
+        glossary + (ctx.style ? `<pre>${esc(ctx.style)}</pre>` : `<p class="hint">文体（style.md）为空。</p>`) + `</details>`);
+    } else if (b.context && b.context.error) {
+      materials.push(`<div class="text-material"><b>上下文</b>：<span class="badge failed">context.json 解析失败</span><pre>${esc(b.context.error)}</pre></div>`);
+    } else {
+      materials.push(`<div class="text-material hint">尚未导出上下文（首次下诏时生成）。可先在 <code>translations/${esc(textProjectId || "")}/context/</code> 写 glossary.json 与 style.md，再按「批准上下文」。</div>`);
+    }
+    if ((b.proposals || []).length) {
+      materials.push(`<div class="text-material"><b>建议（不会自动生效）</b>：${b.proposals.map(esc).join("、")}</div>`);
+    }
+    if (b.neighbors && b.neighbors.value) {
+      materials.push(`<details class="text-material"><summary>前后衔接段（只读参考，不得翻译）</summary><pre>${esc(b.neighbors.text)}</pre></details>`);
+    }
+    if (b.reviews && b.reviews.value) {
+      materials.push(`<details class="text-material"><summary>审校回奏（修订时导出给模型）</summary><pre>${esc(b.reviews.text)}</pre></details>`);
+    }
+    if (b.zhupi_export && b.zhupi_export.value) {
+      materials.push(`<details class="text-material"><summary>朱批导出（zhupi.json，修订时导出给模型）</summary><pre>${esc(b.zhupi_export.text)}</pre></details>`);
+    }
+    if (sourceParagraphs.length) {
+      const paragraph = textPicked || sourceParagraphs[0].id;
+      materials.push(`<div class="text-material write" id="text-zhupi-form"><b>逐段朱批</b>` +
+        `<p class="hint">朱批优先于审校意见；存于项目文件，御览定稿时记下版本。</p>` +
+        `<label for="text-zhupi-para">段</label><select id="text-zhupi-para" data-keep>${
+          sourceParagraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === paragraph ? "selected" : ""}>${esc(p.id)}${textZhupiSaved(p.id) ? "（已朱批）" : ""}</option>`).join("")
+        }</select>` +
+        `<label for="text-zhupi-input">朱批</label><textarea id="text-zhupi-input" data-keep placeholder="此段怎么改：用词、语气、依据">${esc(textZhupiValue(paragraph))}</textarea>` +
+        `<div class="actions"><button type="button" class="small" data-text-action="zhupi-save">朱批</button>` +
+        `<button type="button" class="small" data-text-action="zhupi-clear">清除此段朱批</button></div></div>`);
+    }
+  }
+  $("text-materials").innerHTML = materials.join("");
+  // 与 text status 的下一步一致：执行中、待准奏时不再下诏或定稿；定稿后先退回重修，才能初译或修订。
+  const kind = b && b.status && b.status.state && b.status.state.state;
+  const blockedBy = {
+    finalized: ["translate", "revise"],
+    running: ["translate", "review", "revise", "finalize"],
+    awaiting_approval: ["translate", "review", "revise", "finalize"],
+  }[kind] || [];
+  const why = {
+    finalized: "已御览定稿；要重译或修订请先退回重修",
+    running: "有诏令未结：先执行（ziyuan run），不要重复下诏",
+    awaiting_approval: "译稿待准奏：先到奉天殿准奏或驳回",
+  }[kind];
+  $("text-actions").innerHTML = [
+    ["translate", "初译", "导出材料，下工部初译诏令（只入队，须批红后执行）"],
+    ["review", "审校", "下两件只读审校（忠实度、文风）"],
+    ["revise", "修订", "导出朱批与审校回奏，下统稿诏令"],
+    ["finalize", "御览定稿", "签署此块译稿；须结构检查通过，原文、上下文与朱批未变"],
+    ["reopen", "退回重修", "写明理由退回"],
+    ["context-approve", "批准上下文", "把 translations/&lt;项目&gt;/context/ 草稿存为新版本"],
+  ].map(([action, label, title]) => {
+    const off = blockedBy.includes(action);
+    return `<button type="button" class="small${action === "reopen" ? " reject" : ""}" data-text-action="${action}" title="${esc(off ? why : title)}"${off ? " disabled" : ""}>${label}</button>`;
+  }).join("");
+  updateNoteLink();
+}
+async function textAction(path, body, done) {
+  if (textBusy || !state || state.viewer) return false;
+  textBusy = true;
+  textMessage("正在处理…");
+  try {
+    const result = await api(path, body);
+    textMessage(done(result));
+    await loadTextProject();
+    return true;
+  } catch (e) {
+    // 失败时保留朱批输入，只报错。
+    textMessage(`操作失败：${e.message}`, true);
+    return false;
+  } finally {
+    textBusy = false;
+  }
+}
+async function onTextAction(action) {
+  const b = textBlock;
+  if (!b || !state || state.viewer) return;
+  const base = `/text/${encodeURIComponent(b.project)}/blocks/${encodeURIComponent(b.block)}`;
+  const ids = (r) => (r.tasks || []).map((t) => "#" + t).join("、");
+  switch (action) {
+    case "zhupi-save":
+    case "zhupi-clear": {
+      const select = $("text-zhupi-para");
+      const input = $("text-zhupi-input");
+      if (!select || !input) return;
+      const paragraph = select.value;
+      const text = action === "zhupi-clear" ? "" : input.value;
+      if (action === "zhupi-save" && !text.trim()) {
+        textMessage("朱批为空：要清除请按「清除此段朱批」。", true);
+        return;
+      }
+      const ok = await textAction(`${base}/zhupi`, { paragraph, text },
+        () => action === "zhupi-clear" ? `已清除 ${paragraph} 的朱批。` : `已记下 ${paragraph} 的朱批。`);
+      if (ok) {
+        delete textDrafts[textDraftKey(paragraph)];
+        textDraftSave();
+      }
+      break;
+    }
+    case "context-approve":
+      await textAction(`/text/${encodeURIComponent(b.project)}/context/approve`, {},
+        (r) => `上下文已批准为 v${r.version}；此后下诏用此版本。`);
+      break;
+    case "translate":
+      await textAction(`${base}/issue`, { kind: "translate" }, (r) => `已下初译诏令 ${ids(r)}：只入队，须批红后执行。`);
+      break;
+    case "review":
+      await textAction(`${base}/issue`, { kind: "review" }, (r) => `已下审校诏令 ${ids(r)}：只入队，须批红后执行。`);
+      break;
+    case "revise":
+      await textAction(`${base}/issue`, { kind: "revise" }, (r) => `已下修订诏令 ${ids(r)}：只入队，须批红后执行。`);
+      break;
+    case "finalize":
+      await textAction(`${base}/finalize`, {}, (r) => `已御览定稿（译稿 ${String(r.translation_hash).slice(0, 12)}…）。`);
+      break;
+    case "reopen": {
+      const reason = window.prompt("退回重修的理由（单行；此后须下修订诏令）");
+      if (reason === null) return;
+      if (!reason.trim()) { textMessage("退回须写明理由。", true); return; }
+      await textAction(`${base}/reopen`, { reason: reason.trim() }, () => "已退回重修：此后须下修订诏令。");
+      break;
+    }
+    default:
+  }
+}
+function gotoTask(id) {
+  selected = String(id);
+  if (location.hash !== "#fengtian") location.hash = "#fengtian";
+  else showHall();
+  preserve(render);
+}
+
+// ---- 御笔札记：全局一份，按项目/种类/检索词列出 ----
+async function loadNotes() {
+  const params = new URLSearchParams();
+  if (noteFilters.search) params.set("search", noteFilters.search);
+  if (noteFilters.kind) params.set("kind", noteFilters.kind);
+  try {
+    notesCache = await api("/notes" + (params.size ? "?" + params : ""));
+    $("note-status").textContent = notesCache.length ? `共 ${notesCache.length} 条` : "";
+  } catch (e) {
+    notesCache = [];
+    $("note-status").textContent = `无法加载札记：${e.message}`;
+  }
+  renderNotes();
+}
+function renderNotes() {
+  const list = $("note-list");
+  const top = list.scrollTop;
+  list.innerHTML = notesCache.length
+    ? notesCache.map((n) => `<article class="text-note">` +
+        `<div><span class="badge">${n.kind === "word" ? "词语" : "段落"}</span> <span class="src">${esc(n.source)}</span> → <span class="zh">${esc(n.zh)}</span></div>` +
+        (n.remark ? `<div class="hint">${esc(n.remark)}</div>` : "") +
+        (n.project ? `<div class="hint">出处：${esc(n.project.slice(0, 8))}…${n.block ? " · 块 " + esc(n.block) : ""}${n.paragraph ? " · 段 " + esc(n.paragraph) : ""}</div>` : "") +
+        `<div class="actions">` +
+        `<button type="button" class="small" data-note-action="promote" data-note-id="${esc(n.id)}" title="并入当前项目的上下文草稿；之后须 text context approve 才生效">并入草稿</button>` +
+        `<button type="button" class="small" data-note-action="edit" data-note-id="${esc(n.id)}">改</button>` +
+        `<button type="button" class="small reject" data-note-action="remove" data-note-id="${esc(n.id)}">删</button>` +
+        `</div></article>`).join("")
+    : `<p class="empty">尚无札记。选中一段，写上认可的译法，按「记下」。</p>`;
+  list.scrollTop = top;
+}
+function resetNoteEditor() {
+  noteEditing = null;
+  $("note-submit").textContent = "记下";
+  $("note-cancel").hidden = true;
+  for (const id of ["note-source", "note-zh", "note-remark"]) $(id).value = "";
+  $("note-new-kind").value = "word";
+}
+async function onNoteAction(action, id) {
+  if (!state || state.viewer) return;
+  const note = notesCache.find((n) => n.id === id);
+  if (!note) return;
+  const result = $("note-result");
+  if (action === "edit") {
+    noteEditing = id;
+    $("note-new-kind").value = note.kind;
+    $("note-source").value = note.source;
+    $("note-zh").value = note.zh;
+    $("note-remark").value = note.remark || "";
+    $("note-submit").textContent = "保存修改";
+    $("note-cancel").hidden = false;
+    result.textContent = `正在修改札记 ${id.slice(0, 8)}…（改完按「保存修改」）`;
+    result.classList.remove("error");
+    $("note-zh").focus();
+    return;
+  }
+  if (action === "remove") {
+    if (!confirm(`删去札记「${note.source.slice(0, 20)}」？`)) return;
+    try {
+      await api(`/notes/${encodeURIComponent(id)}/remove`, {});
+      result.textContent = "已删去札记。";
+      result.classList.remove("error");
+      resetNoteEditor();
+      await loadNotes();
+    } catch (e) {
+      result.textContent = `删除失败：${e.message}`;
+      result.classList.add("error");
+    }
+    return;
+  }
+  if (action === "promote") {
+    if (!textProjectId) {
+      result.textContent = "先在左栏选一个项目，才能并入它的上下文草稿。";
+      result.classList.add("error");
+      return;
+    }
+    try {
+      const r = await api(`/notes/${encodeURIComponent(id)}/promote`, { project: textProjectId });
+      result.textContent = `已并入 ${r.path}${r.added ? "" : "（已有相同条目，未重复写）"}；须按「批准上下文」或运行 ziyuan text context approve 才生效。`;
+      result.classList.remove("error");
+    } catch (e) {
+      result.textContent = `并入失败：${e.message}`;
+      result.classList.add("error");
+    }
+  }
+}
+$("text-project").addEventListener("change", (event) => {
+  textProjectId = event.target.value || null;
+  textBlockId = null;
+  textPicked = null;
+  history.replaceState(null, "", textHash());
+  loadTextProject();
+});
+$("text-card").addEventListener("click", (event) => {
+  const action = event.target.closest("[data-text-action]");
+  if (action) { onTextAction(action.dataset.textAction); return; }
+  const note = event.target.closest("[data-note-action]");
+  if (note) { onNoteAction(note.dataset.noteAction, note.dataset.noteId); return; }
+  const block = event.target.closest("[data-text-block]");
+  if (block) { selectTextBlock(block.dataset.textBlock); return; }
+  const paragraph = event.target.closest("[data-text-para]");
+  if (paragraph) { textPick(paragraph.dataset.textPara); return; }
+  const goto = event.target.closest("[data-goto-task]");
+  if (goto) gotoTask(goto.dataset.gotoTask);
+});
+$("text-card").addEventListener("input", (event) => {
+  if (event.target.id === "text-zhupi-input") {
+    textDrafts[textDraftKey($("text-zhupi-para").value)] = event.target.value;
+    textDraftSave();
+  }
+});
+$("text-card").addEventListener("change", (event) => {
+  if (event.target.id === "text-zhupi-para") {
+    textPicked = event.target.value;
+    const input = $("text-zhupi-input");
+    if (input) input.value = textZhupiValue(textPicked);
+    $("text-card").querySelectorAll(".text-para[data-text-para]").forEach((el) => {
+      el.classList.toggle("picked", el.dataset.textPara === textPicked);
+    });
+    textPickedSave();
+    updateNoteLink();
+  }
+});
+$("note-filter-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  noteFilters.search = $("note-search").value.trim();
+  noteFilters.kind = $("note-kind").value;
+  loadNotes();
+});
+$("note-cancel").addEventListener("click", resetNoteEditor);
+$("note-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state || state.viewer) return;
+  const result = $("note-result");
+  const body = {
+    kind: $("note-new-kind").value,
+    source: $("note-source").value,
+    zh: $("note-zh").value,
+    remark: $("note-remark").value,
+  };
+  try {
+    if (noteEditing) {
+      await api(`/notes/${encodeURIComponent(noteEditing)}/edit`, body);
+      result.textContent = "札记已改。";
+    } else {
+      if (textProjectId) body.project = textProjectId;
+      if (textProjectId && textBlockId) body.block = textBlockId;
+      if (textProjectId && textBlockId && textPicked) body.paragraph = textPicked;
+      await api("/notes", body);
+      result.textContent = "已记下札记。可在左侧「并入草稿」并入当前项目的上下文。";
+    }
+    result.classList.remove("error");
+    resetNoteEditor();
+    await loadNotes();
+  } catch (e) {
+    result.textContent = `保存失败：${e.message}`;
+    result.classList.add("error");
+  }
+});
+
 // ---- 作品关注：独立于朝廷渲染，刷新不覆盖正在编辑的输入或设置 ----
 let settingsDirty = false, subscriptionBusy = false, subscriptionLoad = null;
 let subscriptionGeneration = 0, subscriptionsLoaded = false;
@@ -1184,8 +1911,8 @@ function subscriptionControls() {
   });
   $("subscription-panel").setAttribute("aria-busy", String(subscriptionBusy || !!subscriptionLoad));
 }
-function subscriptionButton(label, action) {
-  const button = subscriptionText("button", label, "small");
+function subscriptionButton(label, action, variant = "") {
+  const button = subscriptionText("button", label, variant ? `small ${variant}` : "small");
   button.type = "button";
   button.dataset.subscriptionWrite = "";
   button.addEventListener("click", action);
@@ -1209,7 +1936,7 @@ function renderSubscriptions(list, updates) {
       actions.append(subscriptionButton("取消关注", () => {
         if (confirm(`取消关注 ${item.code}？其提醒也将移除。`)) subscriptionAction("/subscriptions/remove", {code:item.code},
           (r) => r.found ? "已取消关注" : "作品已不在关注列表");
-      }));
+      }, "reject"));
       card.append(actions);
     }
     items.append(card);
@@ -1320,7 +2047,9 @@ $("subscription-settings-form").addEventListener("submit", (event) => {
 const HALLS = ["fengtian", "huagai", "wenhua", "wuying", "qiju"];
 let hall = "fengtian";
 function showHall() {
-  let want = location.hash.slice(1);
+  // 译书用 #wuying/text/<项目>/<块> 记住位置，仍落在武英殿。
+  const text = textSelection();
+  let want = text ? "wuying" : location.hash.slice(1);
   // 作品关注已并入武英殿的兵部驿站；旧书签仍可用。
   if (want === "subscriptions") {
     history.replaceState(null, "", "#wuying");
@@ -1332,6 +2061,7 @@ function showHall() {
   if (hall === "qiju" && state) loadHistory().catch((e) => toast(e.message, true));
   if (hall === "wuying" && state) loadRecords().catch((e) => toast(e.message, true));
   if (hall === "wuying") loadSubscriptions();
+  if (hall === "wuying") loadText();
 }
 window.addEventListener("hashchange", showHall);
 showHall();
@@ -1471,6 +2201,8 @@ async function refresh() {
     renderOfficeConfig(state);
     if (hall === "qiju") loadHistory();
     if (hall === "wuying") loadSubscriptions();
+    // 译书材料随「changed」重置（朱批、下诏、准奏都改状态），输入由重绘时保留。
+    if (hall === "wuying" && textLoaded) loadTextProject();
   } catch (e) {
     if (!$("locked").classList.contains("show")) toast(e.message, true);
   }

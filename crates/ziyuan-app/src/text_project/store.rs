@@ -160,6 +160,33 @@ impl TextProjects {
             })?;
         Ok(stored.value)
     }
+    /// 全部文本项目，按 ID 排序。每个项目都按 [`show`](Self::show) 校验（原文副本、分块副本与
+    /// 记录相符）；校验不过的跳过——一个坏掉的项目不该让整张列表都列不出来。
+    /// 尚未建过项目（没有 `.ziyuan/text-projects/`）时为空，不是错误。
+    pub fn list(&self) -> Result<Vec<Project>> {
+        let mut ids = Vec::new();
+        match fs::read_dir(&self.root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    if valid_id(&name).is_err() {
+                        continue;
+                    }
+                    match entry.file_type() {
+                        Ok(t) if t.is_dir() && !t.is_symlink() => ids.push(name),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        ids.sort();
+        Ok(ids.iter().filter_map(|id| self.show(id).ok()).collect())
+    }
     /// Validates stored schema, source hashes, source correspondence and prompt copies.
     pub fn show(&self, id: &str) -> Result<Project> {
         let project = self
@@ -354,6 +381,60 @@ fn same_metadata(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_is_sorted_and_skips_broken_projects() {
+        let workspace = std::env::temp_dir().join(format!("ziyuan-list-{}", random_id().unwrap()));
+        fs::create_dir_all(&workspace).unwrap();
+        let metadata = || NewProject {
+            title: "作品".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Default::default(),
+        };
+        let source = workspace.join("c1.txt");
+        fs::write(&source, "一。\n\n二。\n").unwrap();
+        let texts = TextProjects::new(&workspace);
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let project = texts.create(metadata()).unwrap();
+            texts
+                .import(&project.id, std::slice::from_ref(&source))
+                .unwrap();
+            ids.push(project.id);
+        }
+        ids.sort();
+        let listed = |texts: &TextProjects| {
+            texts
+                .list()
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>()
+        };
+        // 还没有任何项目时为空，不是错误。
+        assert!(
+            TextProjects::new(workspace.join("empty"))
+                .list()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(listed(&texts), ids);
+        // 原文副本被改动：只跳过这一项，其余照列。
+        let broken = &ids[1];
+        let chapter = texts.show(broken).unwrap().chapters[0]
+            .original_path
+            .clone();
+        fs::write(texts.project_dir(broken).unwrap().join(chapter), "改过。\n").unwrap();
+        assert!(texts.show(broken).is_err());
+        assert_eq!(listed(&texts), vec![ids[0].clone(), ids[2].clone()]);
+        // 非法目录名与散落文件都不算项目。
+        fs::create_dir_all(texts.root.join("not-a-project")).unwrap();
+        fs::write(texts.root.join("stray.json"), b"{}").unwrap();
+        assert_eq!(listed(&texts), vec![ids[0].clone(), ids[2].clone()]);
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn source_snapshot_detects_same_length_change_and_removal() {
         let path = std::env::temp_dir().join(format!("ziyuan-source-{}.txt", random_id().unwrap()));

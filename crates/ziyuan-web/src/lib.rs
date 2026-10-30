@@ -14,6 +14,7 @@ mod personnel;
 mod run;
 mod state;
 mod subscriptions;
+mod text;
 mod timer;
 mod views;
 
@@ -46,6 +47,46 @@ use crate::views::{
     changes_delta, duzhi, events_stream, history, kaocheng, recommend, records, state,
 };
 const INDEX_HTML: &str = include_str!("index.html");
+
+/// 随界面内置的字体（JetBrains Mono，SIL OFL 1.1，许可证见 `fonts/JetBrainsMono-OFL.txt`）。
+/// 中文与日文字体不内置，见 docs/guide.md。
+const FONTS: &[(&str, &[u8])] = &[
+    (
+        "JetBrainsMono-Regular.woff2",
+        include_bytes!("fonts/JetBrainsMono-Regular.woff2"),
+    ),
+    (
+        "JetBrainsMono-Bold.woff2",
+        include_bytes!("fonts/JetBrainsMono-Bold.woff2"),
+    ),
+    (
+        "JetBrainsMono-OFL.txt",
+        include_bytes!("fonts/JetBrainsMono-OFL.txt"),
+    ),
+];
+
+async fn font(axum::extract::Path(name): axum::extract::Path<String>) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+    match FONTS.iter().find(|(n, _)| *n == name) {
+        Some((n, bytes)) => {
+            let kind = if n.ends_with(".woff2") {
+                "font/woff2"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, kind),
+                    (header::CACHE_CONTROL, "public, max-age=604800"),
+                ],
+                *bytes,
+            )
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
 
 pub struct Config {
     /// 朝廷所在目录（含 `.ziyuan/`），也是玉玺查阅范围的根。
@@ -159,13 +200,34 @@ fn router_for(app: AppState) -> Router {
         .route("/officials/{id}/pardon", post(pardon))
         .route("/nominate", post(nominate))
         .route("/palace", post(palace))
+        .route("/text", get(text::list))
+        .route("/text/{project}", get(text::project))
+        .route("/text/{project}/blocks/{block}", get(text::block))
+        .route(
+            "/text/{project}/context/approve",
+            post(text::approve_context),
+        )
+        .route("/text/{project}/blocks/{block}/zhupi", post(text::zhupi))
+        .route(
+            "/text/{project}/blocks/{block}/finalize",
+            post(text::finalize),
+        )
+        .route("/text/{project}/blocks/{block}/reopen", post(text::reopen))
+        .route("/text/{project}/blocks/{block}/issue", post(text::issue))
+        .route("/notes", get(text::notes_list).post(text::note_add))
+        .route("/notes/{id}/edit", post(text::note_edit))
+        .route("/notes/{id}/remove", post(text::note_remove))
+        .route("/notes/{id}/promote", post(text::note_promote))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
     Router::new()
         .route("/", get(index))
         .route("/login", post(login))
+        .route("/fonts/{name}", get(font))
         .nest("/api", api)
         .with_state(app)
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_tests;

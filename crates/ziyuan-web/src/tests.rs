@@ -16,6 +16,39 @@ pub(crate) const TOKEN: &str = "test-token";
 pub(crate) const VIEWER: &str = "viewer-token";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn bundled_fonts_are_served_without_a_token_and_carry_their_license() {
+    let (base, _) = start("fonts").await;
+    let fetch = |path: &'static str| {
+        let url = format!("{base}{path}");
+        tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut response = agent.get(&url).call().unwrap();
+            let kind = response
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let body = response.body_mut().read_to_vec().unwrap();
+            (response.status().as_u16(), kind, body)
+        })
+    };
+    let (status, kind, body) = fetch("/fonts/JetBrainsMono-Regular.woff2").await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(kind.as_deref(), Some("font/woff2"));
+    assert_eq!(&body[..4], b"wOF2");
+    let (status, _, body) = fetch("/fonts/JetBrainsMono-OFL.txt").await.unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        String::from_utf8(body)
+            .unwrap()
+            .contains("SIL OPEN FONT LICENSE Version 1.1")
+    );
+    assert_eq!(fetch("/fonts/../lib.rs").await.unwrap().0, 404);
+    assert_eq!(fetch("/fonts/missing.woff2").await.unwrap().0, 404);
+}
+#[tokio::test(flavor = "multi_thread")]
 async fn subscriptions_auth_reads_are_side_effect_free_and_writes_are_typed() {
     let (base, root) = start("subscriptions-auth").await;
     let dir = root.join(".ziyuan/subscriptions");

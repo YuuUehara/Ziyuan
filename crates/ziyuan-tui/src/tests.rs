@@ -8,12 +8,12 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use ziyuan_app::Session;
 use ziyuan_core::{
-    AgentId, BudgetScope, Capability, CourtEvent, Department, GovernanceMode, Office, Seal, TaskId,
-    TokenUsage, Verdict,
+    AgentId, BudgetScope, Capability, CourtEvent, Department, FileChange, GovernanceMode, Office,
+    Seal, TaskId, TokenUsage, TranslationKind, TranslationLink, Verdict,
 };
 use ziyuan_governance::{Court, founding_events};
 use ziyuan_runtime::Limits;
-use ziyuan_storage::EventLog;
+use ziyuan_storage::{EventLog, EventStore};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -52,7 +52,11 @@ fn press(app: &mut App, keys: &str) {
 }
 
 fn screen(app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    screen_at(app, 100, 30)
+}
+
+fn screen_at(app: &App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|f| app.draw(f)).unwrap();
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)
@@ -537,4 +541,115 @@ fn blocked_dag_subtask_uses_the_blocked_status_badge() {
     let subtasks = &court.task(parent).unwrap().split.as_ref().unwrap().subtasks;
     let blocked = court.task(subtasks[1]).unwrap();
     assert_eq!(crate::render::status_badge(&court, blocked).0, "受阻");
+}
+
+/// 详情里的译书一行：种类、项目前八位、块与译稿现况（只读，随诏令本身）。
+#[tokio::test(flavor = "multi_thread")]
+async fn translation_line_shows_kind_project_block_and_state() {
+    let (mut app, _messages, root) = temp_app("translation");
+    let project = "0123456789abcdef0123456789abcdef".to_owned();
+    let block = "c0001-b0001";
+    let output = format!("translations/{project}/{block}/zh.json");
+    let seal = Seal {
+        capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+        scope: vec![format!("translations/{project}/{block}")],
+        mcp: Default::default(),
+    };
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let edict = court
+        .new_edict(Department::Works, "翰林院译书 · 初译".into(), seal)
+        .unwrap();
+    let task = edict.id;
+    let worker = court.route(&edict).unwrap().worker;
+    let mut events = vec![CourtEvent::EdictIssued(Box::new(edict))];
+    court.apply(&events[0]).unwrap();
+    let link = TranslationLink {
+        project: project.clone(),
+        block: block.into(),
+        kind: TranslationKind::Translate,
+        source_hash: "0".repeat(64),
+        context_version: 0,
+        output_path: output.clone(),
+        zhupi_hash: "1".repeat(64),
+    };
+    events.push(court.propose_translation_link(task, link).unwrap());
+    events.push(CourtEvent::TaskAssigned {
+        task,
+        worker,
+        model: None,
+    });
+    events.push(CourtEvent::ChangesProposed {
+        task,
+        changes: vec![FileChange {
+            path: output,
+            before: None,
+            after: "{\"schema_version\":1,\"paragraphs\":[]}".into(),
+        }],
+    });
+    events.push(CourtEvent::TaskCompleted {
+        task,
+        worker,
+        summary: "译毕".into(),
+    });
+    for event in &events[1..] {
+        court.apply(event).unwrap();
+    }
+    fn append(root: &std::path::Path, events: &[CourtEvent]) {
+        let mut log = EventLog::new(root);
+        let expected = log.load().unwrap().len();
+        log.append(expected, events).unwrap();
+    }
+    append(&root, &events);
+    app.reload();
+
+    let detail = |app: &App| {
+        let task = app.court().task(task).unwrap();
+        app.task_detail(task)
+            .0
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let shown = detail(&app);
+    assert!(
+        shown.contains("译书　初译 · 01234567… · c0001-b0001 · 译稿待准奏"),
+        "{shown}"
+    );
+    let drawn = screen(&app);
+    assert!(
+        drawn.contains("译书") && drawn.contains("c0001-b0001") && drawn.contains("译稿待准奏"),
+        "{drawn}"
+    );
+    // 窄终端里详情按可用宽度折行，项目缩写与块号仍完整，状态不丢失。
+    for width in [40, 60] {
+        let drawn = screen_at(&app, width, 80);
+        assert!(
+            drawn.contains("译书")
+                && drawn.contains("01234567~")
+                && drawn.contains("c0001-b0001")
+                && drawn.contains("译稿待准奏"),
+            "{width} columns:\n{drawn}"
+        );
+    }
+
+    // 准奏后同一行改说「已准奏」。
+    events.push(CourtEvent::ChangesApplied {
+        task,
+        skipped: vec![],
+    });
+    append(&root, &events[5..]);
+    app.reload();
+    let shown = detail(&app);
+    assert!(
+        shown.contains("译书　初译 · 01234567… · c0001-b0001 · 已准奏"),
+        "{shown}"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }

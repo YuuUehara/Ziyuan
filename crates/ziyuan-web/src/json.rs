@@ -259,6 +259,15 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                         .map(|(a, o)| json!({ "id": a.id.0, "name": a.name, "office": o.label() }))
                         .collect::<Vec<_>>()
                 }),
+                // 译书：诏令关联的文本项目块（未关联为 null），供页面「翰林院 · 译书」与 TUI 显示。
+                "translation": t.translation.as_ref().map(|l| json!({
+                    "project": l.project,
+                    "block": l.block,
+                    "kind": l.kind.code(),
+                    "source_hash": l.source_hash,
+                    "context_version": l.context_version,
+                    "output_path": l.output_path,
+                })),
                 "changes": t.changes.as_ref().map(|c| json!({
                     "state": match c.state {
                         ChangeState::Proposed => "proposed",
