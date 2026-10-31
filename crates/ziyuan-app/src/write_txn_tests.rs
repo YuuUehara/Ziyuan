@@ -514,42 +514,70 @@ async fn a_pending_record_from_another_operation_blocks_before_any_write() {
     assert!(root.temps().is_empty(), "{:?}", root.temps());
 }
 
+/// 在 `dir` 上准奏一件改动；撞上「另一进程正在写入」的拒绝时，等它收尾后换一份新会话重来。
+///
+/// 受管写入在**锁外**就先查一次 `ensure_writable`，撞上另一进程刚发布的记录或它留下的奇数
+/// 世代号时会立刻拒绝——那是设计如此（那一刻写下去就会与对方的收尾相撞），真实用户看到的
+/// 就是「请稍候重试」。所以拒绝不算失败：只要工作区此刻仍不可写，就等对方收尾再来一次；
+/// 工作区可写却仍失败，说明是别的毛病（原文被改动、路径越界），原样报出。
+fn approve_with_retry(dir: &Path, text: &'static str, change: FileChange) -> Result<(), String> {
+    let mut last = String::new();
+    // 20ms 一次、最多 2 秒：足够覆盖对方的写入与收尾，也不会把真正的卡死拖成超时。
+    for _ in 0..100 {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let seal = Seal {
+            capabilities: [Capability::WriteFile].into(),
+            scope: vec![".".into()],
+            mcp: Default::default(),
+        };
+        let task = session
+            .issue(Department::Works, text.into(), seal)
+            .unwrap()
+            .id;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(session.run(
+                &[task],
+                &scheduler(Specific(change.clone())),
+                &CancelToken::new(),
+                |_| {},
+            ))
+            .unwrap();
+        match session.apply_reviewed(task, dir, Vec::new(), None) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                // 只有「工作区还有未收尾的写入」才是可重试的拒绝。
+                let retryable = Workspace::open(dir)
+                    .map(|workspace| workspace.ensure_writable().is_err())
+                    .unwrap_or(false);
+                if !retryable {
+                    return Err(error.to_string());
+                }
+                last = error.to_string();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!("等对方收尾等了 2 秒仍未成功：{last}"))
+}
+
 #[tokio::test]
 async fn concurrent_approvals_on_two_tasks_never_interleave() {
-    // 两个线程各持自己的会话，同时对同一根目录准奏；只有一份能成，另一份被拒或等锁后成功，
-    // 无论次序如何，文件都只会是两件改动之一，绝不会是两者的混合。
+    // 两个线程各持自己的会话，同时对同一根目录准奏，无论次序如何，文件都只会是两件改动
+    // 各自的结果，绝不会是两者的混合。
+    //
+    // 这里必须容忍「被拒后重试」：撞上另一个进程刚发布的记录或它留下的奇数世代号时，
+    // 受管写入会立刻拒绝（见 `approve_with_retry`），而那是设计行为，不是缺陷。
     let root = std::sync::Arc::new(Root::new("concurrent"));
     // 两件不同的改动：一件把 a.txt 改为 CHANGED，一件新建 b.txt。
     let dir = root.path().to_path_buf();
     let open = |text: &'static str, change: FileChange, name: &'static str| {
         let dir = dir.clone();
-        std::thread::spawn(move || {
-            let mut store = MemoryEventLog::default();
-            let mut session = Session::found(&mut store).unwrap();
-            let seal = Seal {
-                capabilities: [Capability::WriteFile].into(),
-                scope: vec![".".into()],
-                mcp: Default::default(),
-            };
-            let task = session
-                .issue(Department::Works, text.into(), seal)
-                .unwrap()
-                .id;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .unwrap();
-            runtime
-                .block_on(session.run(
-                    &[task],
-                    &scheduler(Specific(change)),
-                    &CancelToken::new(),
-                    |_| {},
-                ))
-                .unwrap();
-            let result = session.apply_reviewed(task, &dir, Vec::new(), None);
-            (name, result.map_err(|e| e.to_string()))
-        })
+        std::thread::spawn(move || (name, approve_with_retry(&dir, text, change)))
     };
     // 读者看到的始终是「原文」或「改后内容」之一；b.txt 只在第二件成功时出现。
     let a = open(
@@ -580,6 +608,55 @@ async fn concurrent_approvals_on_two_tasks_never_interleave() {
     );
     assert_eq!(root.generation() % 2, 0);
     assert!(root.record().is_none(), "两次都收尾成功，不留记录");
+    assert!(root.temps().is_empty(), "{:?}", root.temps());
+}
+
+/// 确定性版本：盘上摆好一条「已发布、未收尾」的记录，准奏的头一次必被拒；等另一进程收尾后
+/// 重试即成功。
+///
+/// 上一条并发用例撞不撞得上这种拒绝要看调度，所以这里用 `foreign_record` 把现场摆死，
+/// 把「等对方收尾、再换新会话重来」这条路确定地走一遍——`approve_with_retry` 的可重试判据
+/// 一旦写错（比如恒判为不可重试），本用例立刻失败。
+#[test]
+fn approval_retries_until_the_other_process_finishes() {
+    let root = std::sync::Arc::new(Root::new("retry-after-other"));
+    let ws = root.workspace();
+    let record = foreign_record(ws.root(), TaskId(7));
+    let operation = record.operation_id.clone();
+    let mut guard = ws.lock(LockScope::Workspace).unwrap();
+    guard.publish(&record).unwrap();
+    guard.reserve().unwrap();
+    drop(guard);
+    // 头一次准奏必定被拒：记录已发布、世代号为奇数。
+    assert!(root.workspace().ensure_writable().is_err());
+
+    let finisher = {
+        let root = std::sync::Arc::clone(&root);
+        let operation = operation.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            finish_on_disk(&root, &operation);
+        })
+    };
+    let result = approve_with_retry(
+        root.path(),
+        "改 a.txt",
+        FileChange {
+            path: "a.txt".into(),
+            before: Some(ORIGINAL.into()),
+            after: CHANGED.into(),
+        },
+    );
+    finisher.join().unwrap();
+    result.unwrap();
+
+    assert_eq!(root.read(), CHANGED);
+    assert_eq!(
+        root.generation() % 2,
+        0,
+        "收尾与被拒的重试都不得留下奇数世代号"
+    );
+    assert!(root.record().is_none(), "重试成功后不留记录");
     assert!(root.temps().is_empty(), "{:?}", root.temps());
 }
 

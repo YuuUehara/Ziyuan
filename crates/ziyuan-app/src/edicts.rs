@@ -579,7 +579,9 @@ fn digest_of(path: &Path) -> io::Result<FileState> {
 
 /// 之后各项写入拒绝的说明：指的是同一件事，给出可执行的下一步。
 fn blocked(requirement: String) -> String {
-    format!("此工作区上次受管写入未收尾（{requirement}），已拒绝写入：一处也不写、不留记录")
+    // 缘由与下一步都交给 `WorkspaceError` 的文案：它知道是记录未收尾还是世代号为奇数，
+    // 也会点出该跑哪条收尾命令。这里只补一句「一处也没写」，别把「未收尾」再说一遍。
+    format!("已拒绝写入，一处也不写、不留记录：{requirement}")
 }
 
 /// 工作区控制文件的错误一律转成可执行的 [`AppError::Apply`]，不回显内部路径细节。

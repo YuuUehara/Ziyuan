@@ -38,40 +38,51 @@ pub enum WorkspaceError {
     RecordExists { operation_id: String },
 }
 impl fmt::Display for WorkspaceError {
+    // 这几句话会经 `blocked()`／`workspace_error()` 原样嵌进用户看到的中文提示
+    // （如「此工作区上次受管写入未收尾（…）」），所以一律写中文，并尽量带上下一步。
+    // 括号里的 `{reason}` 仍是内部诊断原文：它由本文件各处构造，可能含绝对路径。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "workspace I/O failed: {e}"),
+            Self::Io(e) => write!(f, "工作区读写失败: {e}"),
             Self::Timeout { waited } => {
-                write!(f, "workspace write lock timed out after {waited:?}")
+                write!(f, "等待工作区写入锁超过 {waited:?}，请稍后重试")
             }
-            Self::Unsafe(reason) => write!(f, "unsafe workspace path: {reason}"),
-            Self::Corrupt(reason) => write!(f, "corrupt workspace control file: {reason}"),
+            Self::Unsafe(reason) => write!(f, "工作区路径不安全: {reason}"),
+            Self::Corrupt(reason) => write!(f, "工作区控制文件不合规: {reason}"),
             Self::Newer { found } => write!(
                 f,
-                "workspace write protocol {found} requires a newer version"
+                "工作区写入协议 {found} 由更新版本的紫垣写入，本版只支持 {WRITE_PROTOCOL}，请升级 ziyuan"
             ),
-            Self::Unfinished { generation } => {
-                write!(f, "workspace write generation {generation} is unfinished")
-            }
-            Self::NotStarted { generation } => {
-                write!(f, "workspace write generation {generation} has not started")
-            }
-            Self::Recovery(e) => write!(f, "workspace recovery record is unusable: {e}"),
+            Self::Unfinished { generation } => write!(
+                f,
+                "世代 {generation} 的受管写入尚未收尾，请先运行 ziyuan text recovery status 收尾"
+            ),
+            Self::NotStarted { generation } => write!(
+                f,
+                "世代 {generation} 已是偶数，没有待收尾的受管写入，请核对 ziyuan text recovery status"
+            ),
+            Self::Recovery(e) => write!(f, "工作区恢复记录不可用: {e}"),
             Self::PendingRecovery { operation_id } => write!(
                 f,
-                "workspace has a published recovery operation {operation_id}: run `ziyuan text recovery status` and finish it before writing"
+                "恢复记录 {operation_id} 已发布而尚未收尾，请先运行 ziyuan text recovery status 收尾"
             ),
             Self::FinishPending { operation_id } => write!(
                 f,
-                "recovery operation {operation_id} is finished but not closed: run `ziyuan text recovery finish {operation_id} --yes`"
+                "恢复记录 {operation_id} 已完成但未收尾，请运行 ziyuan text recovery finish {operation_id} --yes"
             ),
             Self::RecordMismatch { operation_id } => {
-                write!(f, "recovery record does not match operation {operation_id}")
+                write!(
+                    f,
+                    "恢复记录与操作 {operation_id} 不符，请运行 ziyuan text recovery status 核对"
+                )
             }
-            Self::NoPendingRecord => write!(f, "workspace has no recovery record"),
+            Self::NoPendingRecord => write!(
+                f,
+                "工作区没有待收尾的恢复记录，可运行 ziyuan text recovery status 核对"
+            ),
             Self::RecordExists { operation_id } => write!(
                 f,
-                "workspace recovery record for operation {operation_id} already exists"
+                "操作 {operation_id} 的恢复记录已存在，请运行 ziyuan text recovery status 核对"
             ),
         }
     }
@@ -1068,7 +1079,14 @@ mod tests {
         ] {
             assert!(error.source().is_none());
             assert!(!error.to_string().is_empty());
-            assert!(!error.to_string().contains("recover"));
+            // 原先这里断言消息里不含 "recover"：那时消息是英文，而这几支本不该谈恢复记录。
+            // 现在消息一律写成中文提示，并**故意**点出收尾命令（`ziyuan text recovery status`）
+            // 作为下一步，所以改守另一条更要紧的规矩：这几句话会原样嵌进用户可见提示，
+            // 不得带路径分隔符。
+            assert!(
+                !error.to_string().contains('/') && !error.to_string().contains('\\'),
+                "{error}"
+            );
         }
     }
 
