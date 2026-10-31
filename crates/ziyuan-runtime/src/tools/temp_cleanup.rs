@@ -418,6 +418,11 @@ fn lease_id_of(name: &str) -> Option<&str> {
 ///
 /// 由此得到一条不变量：没有租约列举就没有任何删除。凡是要判归属的路径都从 `leases`
 /// 出发，列不出来时调用方连候选都不该送进来。
+///
+/// 一处有意的取舍：租约句柄拿不到（`PermissionDenied`，典型是并发清理者正在删它）时
+/// 报 `LeaseBusy`，不报 I/O 失败。一份**永久**读不了的租约因此也呈现为 `LeaseBusy`——
+/// 两种呈现都会进报告、都会保留候选，区别只在退出码：宁可把“读不了”说成“本轮占用”，
+/// 也不让一份删不掉的租约把每一次干净的并发运行都变成失败。
 fn decide_candidate(
     dir: &Path,
     name: &str,
@@ -433,6 +438,13 @@ fn decide_candidate(
     }
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return keep(path, Kind::Temp, Reason::TempAlreadyAbsent);
+        }
+        // 删除中的候选报的是 `PermissionDenied` 而不是 `NotFound`（Windows 口径，
+        // 句柄一关才彻底消失）。这一轮它等于已经不在：按“已不存在”收尾，不记失败——
+        // 记失败会让一次干净的并发清理随机退 1（并发用例实测约每几十次出现一次）。
+        // 代价：一份**永久**读不了元数据的候选也会落在这里，报成“已不存在”。
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             return keep(path, Kind::Temp, Reason::TempAlreadyAbsent);
         }
         Err(e) => {
@@ -454,6 +466,8 @@ fn decide_candidate(
     for (lease_path, id) in leases {
         let meta = match fs::symlink_metadata(lease_path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            // 删除中的租约同上：这一轮它已经不在清单的意义上了，跳过而不是记失败。
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => continue,
             Err(e) => {
                 problems.push(Problem {
                     path: lease_path.clone(),
@@ -470,16 +484,13 @@ fn decide_candidate(
         }
         let mut file = match OpenOptions::new().read(true).write(true).open(lease_path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            // 拿不到句柄不等于“这份租约读不懂”：Windows 上删除中的文件会报
+            // `PermissionDenied`，而锁支持缺失一类的错误也会落在这里。按“本轮不可用”
+            // 处理——与“租约被占用”同样的后果，绝不当成 I/O 失败去拉高退出码。
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                return keep(path, Kind::Temp, Reason::LeaseBusy);
+            }
             Err(e) => {
-                // Windows 上正在删除的文件打不开，报的是 `AccessDenied` 而不是
-                // `NotFound`。并发清理者抢先删掉也是正常收尾，所以回查一次名字：
-                // 已经没了就按不存在处理，别把别人的成功记成自己的失败。
-                if matches!(
-                    fs::symlink_metadata(lease_path),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound
-                ) {
-                    continue;
-                }
                 problems.push(Problem {
                     path: lease_path.clone(),
                     message: e.to_string(),
@@ -607,6 +618,10 @@ fn remove_as_owner(claim: &Claim, path: &Path, problems: &mut Vec<Problem>) -> O
 /// 孤儿租约：内容合法、`temp=` 已不存在才删；`apply=false` 只报。
 ///
 /// 与候选一样，锁住之后只认这个句柄：读到内容、删的也是它自己。
+///
+/// 与 `decide_candidate` 同一处取舍：句柄拿不到（`PermissionDenied`）报 `LeaseBusy`，
+/// 不报 I/O 失败。一份**永久**读不了的租约因此也呈现为 `LeaseBusy`（两种呈现都在报告里、
+/// 都不删），换来的是并发清理的正常收尾不会把退出码拉成 1。
 fn decide_lease(
     dir: &Path,
     lease_path: &Path,
@@ -618,6 +633,11 @@ fn decide_lease(
     let kept = |reason| keep(lease_path.to_path_buf(), kind, reason);
     let meta = match fs::symlink_metadata(lease_path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return kept(Reason::LeaseAlreadyAbsent);
+        }
+        // 与 `decide_candidate` 同一个删除中的窗口：别人正把这份租约删掉，这一轮它
+        // 等于已经不在了。记成 I/O 失败会让干净的并发清理随机退 1。
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             return kept(Reason::LeaseAlreadyAbsent);
         }
         Err(e) => {
@@ -636,15 +656,12 @@ fn decide_lease(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return kept(Reason::LeaseAlreadyAbsent);
         }
+        // 与 `decide_candidate` 同一条规则：删除中的租约在 Windows 上报
+        // `PermissionDenied`，句柄拿不到只说明本轮用不上它，不说明它读不懂。
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            return kept(Reason::LeaseBusy);
+        }
         Err(e) => {
-            // 与 `decide_candidate` 同一个竞态：Windows 上删除中的文件报
-            // `AccessDenied`。名字已经没了就按“已被别人删掉”收尾，不记失败。
-            if matches!(
-                fs::symlink_metadata(lease_path),
-                Err(error) if error.kind() == io::ErrorKind::NotFound
-            ) {
-                return kept(Reason::LeaseAlreadyAbsent);
-            }
             problems.push(Problem {
                 path: lease_path.to_path_buf(),
                 message: e.to_string(),
@@ -788,9 +805,12 @@ pub struct Report {
     /// 主动不进入的目录：相对 `root` 的目录路径（根层就是名字本身），`/` 分隔。
     ///
     /// 报路径而不是名字：两个子目录里各有一个 `target` 时，只报名字分不出没扫的是哪个。
-    /// 仍然是相对路径，报告不含绝对路径这条契约不变。`sweep_workspace` 会排好序并去重，
+    /// 仍然是相对路径，报告不含绝对路径这条契约不变。`finish` 会排好序并去重，
     /// 所以同一棵树的报告能逐字比较。
     pub skipped: Vec<String>,
+    /// 因深度上限主动停止下探的目录（相对路径）。这不是 I/O 失败：报告要写明
+    /// “没走到这里”，但不能据此让命令退 1，否则一棵合法的深目录树会永远报失败。
+    pub capped: Vec<String>,
 }
 
 impl Report {
@@ -804,7 +824,26 @@ impl Report {
             problems: Vec::new(),
             unscanned: Vec::new(),
             skipped: Vec::new(),
+            capped: Vec::new(),
         }
+    }
+
+    /// 报告里的路径清单统一排序去重：`skipped`、`capped`、`unscanned` 都走这一处。
+    ///
+    /// 排序是**必须**的，不是为了让输出好看：`walk` 的 `children.sort()` 按路径组件排，
+    /// 而报告里的清单按字符串排，两者的次序不一样（`a-b/` 按组件在 `a/` 之前，按字符串
+    /// 在 `a/` 之后）。不在这里按报告自己的口径重排，同一棵树的清单顺序会随遍历次序漂移。
+    ///
+    /// `dedup` 不是装饰：非 UTF-8 的名字 `scan_into` 与 `walk` 会各记一次（两处都不能
+    /// 单独少记，见各自的注释），只有这里去掉重复，报告才不会把同一个目录项数成两个。
+    /// 其余清单今天不会产生重复项，去重是给将来新入口留的防线。
+    fn finish(&mut self) {
+        for list in [&mut self.skipped, &mut self.capped] {
+            list.sort();
+            list.dedup();
+        }
+        self.unscanned.sort();
+        self.unscanned.dedup();
     }
 
     /// 报告里的路径形式：相对 `root`、`/` 分隔。绝对路径不外泄。
@@ -866,6 +905,10 @@ impl Report {
     ///
     /// 预览里“本可删除但没删”**不是**失败：报告已经逐项标出可清理数，脚本据此决定
     /// 是否加 `--yes`；设计明确“仅保留活跃或未知项不算执行失败”。
+    ///
+    /// `capped`（深度上限）与 `skipped`（主动不进）都**不**算：两者都是设计内的边界，
+    /// 不是这一轮做错了什么。把它们算进来，一棵合法的深目录树会让每次运行都退 1，
+    /// 退出码就再也没人看了。
     pub fn needs_attention(&self) -> bool {
         !self.problems.is_empty() || !self.unscanned.is_empty()
     }
@@ -894,6 +937,7 @@ impl Report {
             "leases": describe(Kind::Lease),
             "removed_total": self.removed_total(),
             "skipped": self.skipped,
+            "capped": self.capped,
             "items": self.items.iter().map(|item| json!({
                 "path": self.display_relative(&item.path),
                 "kind": match item.kind { Kind::Temp => "temp", Kind::Lease => "lease" },
@@ -933,6 +977,7 @@ pub fn sweep_dir(
         false,
     );
     scan_into(&mut report, dir, relative_dir, protected, apply);
+    report.finish();
     report
 }
 
@@ -944,10 +989,18 @@ pub fn sweep_dir(
 /// 各自演进、各留一处判断；合成一份后，任一方为读取需要放宽名单，都会顺手放宽删除范围。
 const SKIPPED_DIRS: [&str; 5] = [".ziyuan", ".git", ".jj", "target", "node_modules"];
 
-/// 递归深度上限：超过即停止下探，并把跳过的目录记进报告。
+/// 递归深度上限：到达即不再下探，并把跳过的目录记进 `report.capped`。
 ///
-/// 不能只靠跳过名单兜住：名单只认名字，改个名字的产物目录或超深 monorepo 都能让一轮
-/// 扫描跑上几分钟且毫无输出。到达上限的目录进 `unscanned`，因为它确实一个都没看。
+/// 层级口径：工作区根是第 0 层，第 `MAX_DEPTH` 层的目录**本身不进入**（也不扫），
+/// 所以真正被扫的最深一层是 `MAX_DEPTH - 1`。
+///
+/// 上限管深度，不管广度：一棵又宽又浅的树照常扫完，这里不限制单层目录数。
+/// 之所以需要它：跳过名单只认名字，改个名字的产物目录或超深 monorepo 都能让一轮
+/// 扫描跑上几分钟且毫无输出。
+///
+/// 进 `capped` 而不是 `unscanned`：上限是设计内的边界，不是这一轮读失败了。混进
+/// `unscanned` 会让 `needs_attention()` 一直为真——一棵合法的深目录树（vendored SDK、
+/// `.venv`、生成目录）从此每次运行都退 1。
 const MAX_DEPTH: usize = 32;
 
 /// 手工入口用：从工作区根开始递归清理。
@@ -960,12 +1013,7 @@ pub fn sweep_workspace(root: &Path, protected: &BTreeSet<String>, apply: bool) -
         true,
     );
     walk(&mut report, root, "", protected, apply, 0);
-    // 同一目录可能被记两遍（`scan_into` 与下探各记一次）：不排序去重的话，报告不能逐字
-    // 比较，数目也会被读多。两处都排，别只排 `skipped`。
-    report.skipped.sort();
-    report.skipped.dedup();
-    report.unscanned.sort();
-    report.unscanned.dedup();
+    report.finish();
     report
 }
 
@@ -981,10 +1029,14 @@ fn walk(
     apply: bool,
     depth: usize,
 ) {
-    // 先判上限再扫：这一层整个不进来，报告只能写“未扫描”。反过来（先扫再判上限）会
-    // 删掉东西却仍声称没进入，报告自相矛盾。
+    // 先判上限再扫：这一层整个不进来，报告只能写“没走到这里”。反过来（先扫再判上限）
+    // 会删掉东西却仍声称没进入，报告自相矛盾。
+    //
+    // 记 `capped` 而不是 `unscanned`：这一层没进去是深度上限的设计结果，不是读失败。
+    // `relative_dir` 已经是这一层相对根的路径（`join_relative` 的分隔与去根口径），
+    // 直接照抄即可。
     if depth >= MAX_DEPTH {
-        report.unscanned.push(dir.to_path_buf());
+        report.capped.push(relative_dir.to_owned());
         return;
     }
     scan_into(report, dir, relative_dir, protected, apply);
@@ -994,23 +1046,50 @@ fn walk(
         return;
     };
     let mut children = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        // 逐条显式处理，不用 `flatten()`：`flatten()` 会把单条 `read_dir` 错误悄悄丢掉，
+        // 于是报告仍然声称扫全了，而被丢掉的那一项可能正是某一整棵子树的入口。
+        // 口径与 `scan_into` 的同一处一致——目录级失败关闭：记问题、把目录记进
+        // `unscanned`，并且不再下探（继续列举只会拿到不完整的子树）。
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                report.unscanned.push(dir.to_path_buf());
+                report.problems.push(Problem {
+                    path: dir.to_path_buf(),
+                    message: e.to_string(),
+                });
+                return;
+            }
+        };
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            // 名字不是 UTF-8：读不进受保护集合的比较，也拼不出相对路径。
-            // 静默跳过会让报告声称扫全了，所以显式记一条。
-            report.problems.push(Problem {
-                path: entry.path(),
-                message: "目录项名称不是 UTF-8，未能纳入扫描".into(),
-            });
+            // 名字不是 UTF-8：读不进受保护集合的比较，也拼不出相对路径，这棵子树确实
+            // 没扫。记 `unscanned` 而**不是**问题项：一个历史遗留的错编码目录名会让
+            // 中文项目永久退 1，而用户看着一条“失败”也无从下手——说清楚“这里没扫”
+            // 才是实情，也确实能靠改目录名解决。
+            report.unscanned.push(entry.path());
             continue;
         };
         let meta = match fs::symlink_metadata(entry.path()) {
             Ok(meta) => meta,
-            // 列举之后这一项消失了：并发清理者抢先删掉就是正常收尾，不算失败
-            // （`scan_into` 对候选与租约的 `NotFound` 用的是同一个口径）。别的错误连
-            // 类型都判不出，下探与否无从谈起：记一条，不猜。
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            // 列举之后这一项拿不到元数据：并发清理者正删它时，`NotFound` 是删完了，
+            // `PermissionDenied` 是**正在删**（Windows 上删除中的名字报
+            // `AccessDenied`，句柄一关就彻底消失）。两种情况都是“这一项本轮不归我们
+            // 处理”，不是失败：按失败记，一次干净的并发清理就会随机退 1（实测这个
+            // 竞态在并发用例里约每十次出现一次）。
+            //
+            // 代价说清楚：一份**永久**读不了元数据的项（权限被改坏）也会这样被跳过，
+            // 报告不会提它。安全的那个方向没破——判不出类型就绝不下探、绝不删除；
+            // 漏掉的清理下一轮仍会尝试。
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
             Err(_) => {
                 report.problems.push(Problem {
                     path: entry.path(),
@@ -1019,10 +1098,12 @@ fn walk(
                 continue;
             }
         };
-        // 判定必须基于不跟随链接的元数据：`fs::symlink_metadata` 的 `is_dir()` 与
-        // `is_symlink()` 互斥，所以链接（含 junction）在 `is_dir()` 上就是 false；写成
-        // `fs::metadata(...).is_dir()` 才会跟随，清理范围就跑到工作区之外了。后半个
-        // `is_symlink()` 是双保险，哪天判定换成跟随版也还有一道。
+        // 判定必须基于不跟随链接的元数据：`fs::metadata` 会把目录 junction 解析成普通
+        // 目录（`is_dir()=true`），清理范围就跑到工作区之外了。`symlink_metadata` 下
+        // 目录 junction 报的是 `is_dir()=false, is_symlink()=true`（实测，见用例
+        // `workspace_sweep_never_follows_a_junction`），所以真正挡住 junction 的是
+        // “不跟随”这件事本身；后半个 `is_symlink()` 是把“链接一律不进入”的意图在判定
+        // 里写全，而不是今天唯一生效的一道。
         let file_type = meta.file_type();
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
@@ -1036,7 +1117,8 @@ fn walk(
         children.push((entry.path(), join_relative(relative_dir, name)));
     }
     // 先排序再下探：报告里的项按目录逐个追加，顺序跟着文件系统的返回次序走就不可复现，
-    // 两个清理者的报告也没法比较。
+    // 两个清理者的报告也没法比较。按 `(path, relative)` 排即按路径组件比，报告清单则由
+    // `Report::finish` 按字符串重排，两处口径不同，各自都要排。
     children.sort();
     for (path, relative) in children {
         walk(report, &path, &relative, protected, apply, depth + 1);
@@ -1082,6 +1164,11 @@ fn scan_into(
                     Ok(entry) => {
                         let file_name = entry.file_name();
                         let Some(name) = file_name.to_str() else {
+                            // 名字不是 UTF-8 就没法拿去做候选名或租约名的比较，这一项
+                            // 确实没判，整棵子树（若它是目录）也不会被下探。所以记
+                            // `unscanned`：静默跳过会让报告声称扫全了，而记成问题项又
+                            // 会让一个历史遗留的错编码名字永久退 1——两样都不是实情。
+                            report.unscanned.push(entry.path());
                             continue;
                         };
                         names.push(name.to_owned());
@@ -1891,6 +1978,36 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_deleting_lease_is_never_an_io_failure() {
+        // Windows 的“删除中”窗口：名字已经被删、删它的一方还握着句柄，于是它既不在
+        // `NotFound` 的意义上不存在（`stat` 未必报 `NotFound`），又打不开
+        // （`ERROR_ACCESS_DENIED`）。窗口落在 `stat` 还是 `open` 上视时机而定，结论
+        // 都一样：这一轮用不上这份租约，保留候选，**不记 I/O 失败**——记了会让一次干净
+        // 的并发清理随机退 1。具体保留原因因此不写死：`LeaseBusy`（打不开）与
+        // `TempWithoutLease`（`stat` 就读不出这份租约）都符合契约。
+        let (dir, name, _id) = sweep_fixture("lease-delete-pending");
+        let lease = lease_paths(&dir).pop().expect("夹具里应当有一份租约");
+        // std 打开时带 `FILE_SHARE_DELETE`，所以这句删除让名字立刻进入删除中，直到
+        // 句柄关掉才真正消失——正是另一个清理者正在删时的那段窗口。
+        let held = File::open(&lease).unwrap();
+        std::fs::remove_file(&lease).unwrap();
+        let report = sweep_dir(&dir, "", &empty_protected(), true);
+        assert!(report.problems.is_empty(), "{report:?}");
+        assert!(
+            !report.needs_attention(),
+            "并发删除中的租约不是失败: {report:?}"
+        );
+        assert!(dir.join(&name).is_file(), "读不出归属证据时绝不删候选");
+        assert!(
+            matches!(temp_item(&report, &name).outcome, Outcome::Keep(_)),
+            "{report:?}"
+        );
+        drop(held);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn lease_that_is_not_a_file_is_never_followed() {
         let dir = scratch("lease-dir");
@@ -2288,6 +2405,75 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn workspace_sweep_reports_an_unencodable_name_as_unscanned() {
+        use std::os::windows::ffi::OsStringExt;
+        // 名字里放一个孤立代理项：Windows 的文件名是 UTF-16 码元序列，允许这种名字，
+        // 而 `OsStr::to_str()` 会失败——正是 `to_str()` 那一支要接住的形态。
+        // 期望：进 `unscanned`（这棵子树确实没扫），不进 `problems`（不是失败）。
+        let root = scratch("tree-non-utf8");
+        let mut wide: Vec<u16> = "legacy-".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend("-.txt".encode_utf16());
+        let name = std::ffi::OsString::from_wide(&wide);
+        if std::fs::write(root.join(&name), b"x").is_err() {
+            // 文件系统不接受这种名字：跳过，不报假失败。
+            eprintln!("跳过：这个文件系统不接受孤立代理项的名字");
+            std::fs::remove_dir_all(&root).unwrap();
+            return;
+        }
+        let report = sweep_workspace(&root, &empty_protected(), true);
+        assert!(report.problems.is_empty(), "{report:?}");
+        // 递归与单层两个入口都必须记到：少记一处，报告就声称扫全了。
+        assert_eq!(report.unscanned, vec![root.join(&name)], "{report:?}");
+        let direct = sweep_dir(&root, "", &empty_protected(), true);
+        assert!(direct.problems.is_empty(), "{direct:?}");
+        assert_eq!(direct.unscanned, vec![root.join(&name)], "{direct:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_ignores_a_file_named_like_a_skipped_dir() {
+        // 名字叫 `target` 的**文件**不是“没进入的目录”：类型判定必须排在跳过判定之前，
+        // 否则一个普通文件会被报成“跳过了目录”。它也不符合候选命名，所以两份清单里
+        // 都不该有它。
+        let root = scratch("tree-target-file");
+        std::fs::write(root.join("target"), b"x").unwrap();
+        let report = sweep_workspace(&root, &empty_protected(), true);
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert!(report.items.is_empty(), "{report:?}");
+        assert!(root.join("target").is_file(), "普通文件不得被删");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_orders_children_by_name() {
+        // 子目录倒着建（`b` 先、`a` 后），报告里的项仍必须 `a` 在前：`children.sort()`
+        // 是下探顺序的唯一依据，删掉它，报告顺序就跟着文件系统的返回次序走。
+        let root = scratch("tree-order");
+        for sub in ["b", "a"] {
+            let dir = root.join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = fresh_temp_name();
+            write_temp(&dir, &name);
+            dead_lease(&dir, &hex_id(47), &name);
+        }
+        let report = sweep_workspace(&root, &empty_protected(), true);
+        let order: Vec<String> = report
+            .items
+            .iter()
+            .filter(|item| item.kind == Kind::Temp)
+            .map(|item| report.display_relative(&item.path))
+            .collect();
+        assert_eq!(order.len(), 2, "{report:?}");
+        assert!(
+            order[0].starts_with("a/") && order[1].starts_with("b/"),
+            "子目录必须按名字下探: {order:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn two_cleaners_never_double_count_a_single_candidate() {
         let (dir, name, _id) = sweep_fixture("tree-race");
@@ -2346,6 +2532,54 @@ mod tests {
         std::fs::remove_dir_all(outside).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn workspace_sweep_never_follows_a_junction() {
+        use std::os::windows::process::CommandExt;
+        // 目录 junction 必须在工作区边界上止步：跟进去就会删到工作区之外。
+        // 实测（这个工具链）：`symlink_metadata(junction)` 给出
+        // `is_dir()=false, is_symlink()=true`，而跟随版的 `metadata()` 给出
+        // `is_dir()=true, is_symlink()=false`——所以挡住 junction 的是“用不跟随的
+        // 元数据”这件事，换成 `metadata()` 时 `is_symlink()` 也救不回来。这条用例
+        // 盯的是结果（外面那份残留原样还在），不是某一半条件。
+        let dir = scratch("tree-junction");
+        let outside = dir.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let name = fresh_temp_name();
+        write_temp(&outside, &name);
+        dead_lease(&outside, &hex_id(45), &name);
+        let link = dir.join("link");
+        // 走 `raw_arg`：`arg` 的反斜杠转义 cmd.exe 认不得，路径里有空格时会静默建不出来。
+        let created = std::process::Command::new("cmd.exe")
+            .raw_arg(format!(
+                "/C mklink /J \"{}\" \"{}\"",
+                link.display(),
+                outside.display()
+            ))
+            // 成败只看退出码；`mklink` 会往 stdout 打一行，别把它混进测试输出。
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !created.is_ok_and(|status| status.success()) {
+            // 环境里没有 mklink 或不允许建 junction：跳过而不是报假失败。
+            eprintln!("跳过：这个环境建不出目录 junction");
+            std::fs::remove_dir_all(&dir).unwrap();
+            std::fs::remove_dir_all(&outside).unwrap();
+            return;
+        }
+        let report = sweep_workspace(&dir, &empty_protected(), true);
+        assert!(report.items.is_empty(), "{report:?}");
+        assert!(
+            outside.join(&name).is_file(),
+            "junction 指向的残留不得被清理"
+        );
+        // junction 自己用 `remove_dir` 摘掉：`remove_dir_all` 在 reparse point 上的
+        // 行为不值得依赖，摘错了就顺着删到目标里去了。
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
     #[test]
     fn workspace_sweep_stops_at_the_depth_cap() {
         let root = scratch("tree-depth");
@@ -2368,17 +2602,20 @@ mod tests {
             MAX_DEPTH - 1,
             "{report:?}"
         );
-        // 到上限的那一层整个没进去：报告必须写成“未扫描”，不能保持沉默。
+        // 到上限的那一层整个没进去：报告必须写明“没走到这里”，不能保持沉默。
         let expected_cap = (1..=MAX_DEPTH)
             .map(|depth| format!("d{depth}"))
             .collect::<Vec<_>>()
             .join("/");
-        assert_eq!(report.unscanned.len(), 1, "{report:?}");
+        assert_eq!(report.capped, vec![expected_cap.clone()], "{report:?}");
         assert_eq!(
-            report.display_relative(&report.unscanned[0]),
-            expected_cap,
-            "{report:?}"
+            report.to_json()["capped"].as_array().map(Vec::len),
+            Some(1),
+            "上限必须进 JSON: {report:?}"
         );
+        // 上限不是读失败：混进 `unscanned` 会让一棵合法的深目录树每次运行都退 1。
+        assert!(report.unscanned.is_empty(), "{report:?}");
+        assert!(report.problems.is_empty(), "{report:?}");
         // 上限及更深的层原样留着：没进去就不许说清过。
         for (dir, name) in chain.iter().skip(MAX_DEPTH - 1) {
             assert!(
@@ -2388,8 +2625,8 @@ mod tests {
             );
         }
         assert!(
-            report.needs_attention(),
-            "停下没扫的层必须让调用方看见: {report:?}"
+            !report.needs_attention(),
+            "深度上限不是失败，不得让命令退 1: {report:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

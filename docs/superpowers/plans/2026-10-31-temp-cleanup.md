@@ -1652,25 +1652,33 @@ pub struct Report {
     pub mode: Mode,
     /// 扫描范围：本次从哪个根开始。
     pub root: PathBuf,
+    /// 报告里的“范围”标签：`root` 相对工作区根的路径，工作区根本身是空串。
+    scope: String,
     pub recursive: bool,
     pub items: Vec<Item>,
     pub problems: Vec<Problem>,
     /// 读不了的目录：既不算扫描成功，也不中止整轮。
     pub unscanned: Vec<PathBuf>,
-    /// 主动不进入的目录名（只报名字，报告仍不含绝对路径）。
+    /// 主动不进入的目录：相对 `root` 的路径（`/` 分隔），不是名字——两个子目录里各有一个
+    /// `target` 时，只报名字分不出没扫的是哪个。
     pub skipped: Vec<String>,
+    /// 因深度上限主动停止下探的目录（相对路径）。这不是 I/O 失败：报告要写明“没走到这里”，
+    /// 但不能据此让命令退 1，否则一棵合法的深目录树会永远报失败。
+    pub capped: Vec<String>,
 }
 
 impl Report {
-    fn new(mode: Mode, root: &Path, recursive: bool) -> Self {
+    fn new(mode: Mode, root: &Path, scope: &str, recursive: bool) -> Self {
         Self {
             mode,
             root: root.to_path_buf(),
+            scope: scope.to_owned(),
             recursive,
             items: Vec::new(),
             problems: Vec::new(),
             unscanned: Vec::new(),
             skipped: Vec::new(),
+            capped: Vec::new(),
         }
     }
 
@@ -1728,6 +1736,8 @@ impl Report {
     ///
     /// 预览里“本可删除但没删”**不是**失败：报告已经逐项标出可清理数，脚本据此决定
     /// 是否加 `--yes`；设计明确“仅保留活跃或未知项不算执行失败”。
+    /// 按设计的退出码判定：只有扫描／删除的 I/O 失败、或读不了的目录才算“需要处理”。
+    /// `skipped`（主动不进）与 `capped`（深度上限）都是设计内的边界，不算失败。
     pub fn needs_attention(&self) -> bool {
         !self.problems.is_empty() || !self.unscanned.is_empty()
     }
@@ -1752,6 +1762,7 @@ impl Report {
             "leases": describe(Kind::Lease),
             "removed_total": self.removed_total(),
             "skipped": self.skipped,
+            "capped": self.capped,
             "items": self.items.iter().map(|item| json!({
                 "path": self.display_relative(&item.path),
                 "kind": match item.kind { Kind::Temp => "temp", Kind::Lease => "lease" },
@@ -1782,8 +1793,14 @@ impl Report {
 /// `relative_dir` 是相对工作区根的目录路径（根目录传空串），用来拼受保护集合里的
 /// 相对路径；它不是被扫目录内部的位置。
 pub fn sweep_dir(dir: &Path, relative_dir: &str, protected: &BTreeSet<String>, apply: bool) -> Report {
-    let mut report = Report::new(if apply { Mode::Apply } else { Mode::Preview }, dir, false);
+    let mut report = Report::new(
+        if apply { Mode::Apply } else { Mode::Preview },
+        dir,
+        relative_dir,
+        false,
+    );
     scan_into(&mut report, dir, relative_dir, protected, apply);
+    report.finish();
     report
 }
 
@@ -2462,10 +2479,15 @@ const SKIPPED_DIRS: [&str; 5] = [".ziyuan", ".git", ".jj", "target", "node_modul
 
 /// 手工入口用：从工作区根开始递归清理。
 pub fn sweep_workspace(root: &Path, protected: &BTreeSet<String>, apply: bool) -> Report {
-    let mut report = Report::new(if apply { Mode::Apply } else { Mode::Preview }, root, true);
-    walk(&mut report, root, "", protected, apply);
-    report.skipped.sort();
-    report.skipped.dedup();
+    let mut report = Report::new(
+        if apply { Mode::Apply } else { Mode::Preview },
+        root,
+        "",
+        true,
+    );
+    walk(&mut report, root, "", protected, apply, 0);
+    // 清单的排序去重收在一处：新增入口不必先学会“别重复写”。
+    report.finish();
     report
 }
 
@@ -2476,51 +2498,78 @@ fn walk(
     relative_dir: &str,
     protected: &BTreeSet<String>,
     apply: bool,
+    depth: usize,
 ) {
+    // 工作区根是第 0 层，第 `MAX_DEPTH` 层的目录不进入：记 `capped`（相对路径），
+    // 不记 `unscanned`——上限是设计内的边界，不是读失败，不能据此退 1。
+    if depth >= MAX_DEPTH {
+        report.capped.push(relative_dir.to_owned());
+        return;
+    }
     scan_into(report, dir, relative_dir, protected, apply);
     let Ok(entries) = fs::read_dir(dir) else {
-        // `scan_into` 已把该目录记进 `unscanned`。
+        // `scan_into` 已把该目录记进 `unscanned`，这里不重复记。
         return;
     };
     let mut children = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        // 逐条显式处理，不用 `flatten()`：被丢掉的单条错误可能是整棵子树的入口，
+        // 而报告仍会声称扫全了。口径与 `scan_into` 一致：目录级失败关闭。
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                report.unscanned.push(dir.to_path_buf());
+                report.problems.push(Problem { path: dir.to_path_buf(), message: e.to_string() });
+                return;
+            }
+        };
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            // 名字不是 UTF-8：读不进受保护集合的比较，也拼不出相对路径。
-            // 静默跳过会让报告声称扫全了，所以显式记一条。
-            report.problems.push(Problem {
-                path: entry.path(),
-                message: "目录项名称不是 UTF-8，未能纳入扫描".into(),
-            });
+            // 名字不是 UTF-8：这棵子树确实没扫，记 `unscanned` 而不是问题项——
+            // 一条用户无从下手的“失败”不该让中文项目永久退 1。
+            report.unscanned.push(entry.path());
             continue;
         };
-        if SKIPPED_DIRS.contains(&name) {
-            report.skipped.push(name.to_owned());
-            continue;
-        }
-        let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-            report.problems.push(Problem {
-                path: entry.path(),
-                message: "无法读取目录项元数据".into(),
-            });
-            continue;
+        let meta = match fs::symlink_metadata(entry.path()) {
+            Ok(meta) => meta,
+            // `NotFound` 是并发清理者已删完，`PermissionDenied` 是正在删：两者都是
+            // “这一项本轮不归我们处理”，不是失败。
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                report.problems.push(Problem {
+                    path: entry.path(),
+                    message: "无法读取目录项元数据".into(),
+                });
+                continue;
+            }
         };
-        // `is_dir()` 对符号链接返回 false（跟随后才为真），junction/reparse 同理
-        // 不满足普通目录判定；再显式排除链接，双保险。
+        // 必须用不跟随的元数据：`fs::metadata` 会把 junction 解析成普通目录。
         let file_type = meta.file_type();
         if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        if SKIPPED_DIRS.contains(&name) {
+            // 记相对路径而不是名字：两处同名目录只报名字，分不出没扫的是哪个。
+            report.skipped.push(join_relative(relative_dir, name));
             continue;
         }
         children.push((entry.path(), join_relative(relative_dir, name)));
     }
     children.sort();
     for (path, relative) in children {
-        walk(report, &path, &relative, protected, apply);
+        walk(report, &path, &relative, protected, apply, depth + 1);
     }
 }
 ```
 
-`skipped` 里排的是名字、不是路径，排序结果与遍历顺序无关；这也是用例能断言固定顺序的原因。
+`skipped` 与 `capped` 里排的是**相对路径**（不是名字），由 `Report::finish` 统一排序去重。两处排序口径不同、都要排：`children.sort()` 按路径组件比（`a-b/` 在 `a/` 之前），报告清单按字符串比（`a-b` 在 `a` 之后）。
 
 - [ ] **Step 4: 运行并做仓库标准校验。**
 
@@ -2632,7 +2681,18 @@ fn run_temps(workspace: &Workspace, apply: bool, json: bool) -> Result<(), Box<d
             leases.candidates, leases.removable, leases.removed, leases.kept
         );
         if !report.skipped.is_empty() {
-            println!("未进入的目录（按名字跳过）：{}", report.skipped.join("、"));
+            // 报相对路径：两个子目录里各有一个 `target` 时，光看名字分不出没扫的是哪个。
+            println!(
+                "未进入的目录（按路径跳过）：{}",
+                report.skipped.join("、")
+            );
+        }
+        if !report.capped.is_empty() {
+            // 深度上限不是失败：写明“没走到这里”，但不影响退出码。
+            println!(
+                "到达深度上限、未继续下探的目录：{}",
+                report.capped.join("、")
+            );
         }
         for item in &report.items {
             let why = match item.outcome {
