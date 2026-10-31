@@ -4,6 +4,7 @@ mod support;
 use std::fs::OpenOptions;
 use std::io;
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 fn continue_and_finish(child: &mut support::ChildGuard, stream: &mut TcpStream) {
@@ -413,6 +414,378 @@ fn lock_identity_survives_rename_and_hardlink_but_not_recreate() {
     )
     .unwrap();
     child.finish(support::DEFAULT_TIMEOUT).unwrap();
+}
+
+fn lease_paths(root: &Path, id: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    (root.join("temp"), root.join(support::lease_file_name(id)))
+}
+
+fn dir_names(root: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn assert_lease_is_held(lease: &Path) {
+    // A live writer must make the lease lock unobtainable. Only a non-blocking
+    // probe is ever used; a cleaner is never allowed to wait here.
+    let probe =
+        support::probe_lock(support::open_probe(lease).expect("open lease probe handle")).unwrap();
+    assert!(
+        matches!(probe, support::ProbeLock::Busy),
+        "lease must be held by the writer: {probe:?}"
+    );
+}
+
+#[test]
+fn lease_covers_close_before_rename_window() {
+    let mut child = support::ChildGuard::spawn("lease-close-before-rename").unwrap();
+    let mut stream = child
+        .ready("lease-held-closed-before-rename", support::DEFAULT_TIMEOUT)
+        .unwrap();
+    let root = child.root().to_path_buf();
+    let id = child.id().to_owned();
+    let (temp, lease) = lease_paths(&root, &id);
+
+    // Round one established this window: after the temp handle closes its own
+    // lock is gone and an independent probe acquires it.
+    let temp_probe = support::probe_lock(support::open_probe(&temp).unwrap()).unwrap();
+    assert!(
+        matches!(temp_probe, support::ProbeLock::Acquired(_)),
+        "closed temp handle must still expose the unprotected interval: {temp_probe:?}"
+    );
+    drop(temp_probe);
+
+    // The candidate lease must be busy at exactly that moment.
+    assert_lease_is_held(&lease);
+    eprintln!("native lease window: temp Acquired while lease Busy before rename");
+
+    continue_and_finish(&mut child, &mut stream);
+    assert_eq!(
+        std::fs::read(root.join("target")).unwrap(),
+        support::COMPLETE_NEW
+    );
+    assert!(!temp.exists());
+    assert!(!lease.exists());
+    assert_eq!(dir_names(&root), vec!["target".to_owned()]);
+}
+
+#[test]
+fn cleaner_keeps_temp_while_lease_is_held() {
+    let mut child = support::ChildGuard::spawn("lease-close-before-rename").unwrap();
+    let mut stream = child
+        .ready("lease-held-closed-before-rename", support::DEFAULT_TIMEOUT)
+        .unwrap();
+    let root = child.root().to_path_buf();
+    let id = child.id().to_owned();
+    let (temp, lease) = lease_paths(&root, &id);
+
+    let decision = support::recover_temp(&root, &id, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseBusy),
+        "a held lease must make the cleaner keep the temp file"
+    );
+    // The temp handle is already closed, so reading its bytes is safe here.
+    assert_eq!(std::fs::read(&temp).unwrap(), support::COMPLETE_NEW);
+    assert!(lease.is_file());
+    assert_eq!(
+        std::fs::metadata(&lease).unwrap().len(),
+        support::lease_line("temp", &id).len() as u64
+    );
+
+    continue_and_finish(&mut child, &mut stream);
+    assert_eq!(
+        std::fs::read(root.join("target")).unwrap(),
+        support::COMPLETE_NEW
+    );
+    assert!(!temp.exists());
+    // The writer completed its own order: handle closed, then lease deleted.
+    assert!(!lease.exists());
+    assert_eq!(
+        std::fs::metadata(&lease).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    // The name is free and its lock is acquirable again.
+    let recreated = support::probe_lock(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&lease)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        matches!(recreated, support::ProbeLock::Acquired(_)),
+        "lease name must be acquirable after the writer finished: {recreated:?}"
+    );
+    drop(recreated);
+    std::fs::remove_file(&lease).unwrap();
+}
+
+#[test]
+fn killed_writer_lease_is_reclaimable() {
+    // Verified reclaim: v1, matching temp=, regular temp file.
+    {
+        let mut child = support::ChildGuard::spawn("lease-held-kill").unwrap();
+        let _stream = child.ready("lease-held", support::DEFAULT_TIMEOUT).unwrap();
+        let root = child.root().to_path_buf();
+        let id = child.id().to_owned();
+        let (temp, lease) = lease_paths(&root, &id);
+        std::fs::write(root.join("unrelated"), b"keep").unwrap();
+
+        child.kill().unwrap();
+        assert!(!child.reap(support::DEFAULT_TIMEOUT).unwrap().success());
+
+        let decision = support::recover_temp(&root, &id, "temp").unwrap();
+        assert_eq!(
+            decision,
+            support::LeaseDecision::remove(support::RemoveReason::WriterDeadLeaseVerified)
+        );
+        assert!(!temp.exists());
+        assert!(!lease.exists());
+        // Nothing the cleaner did not name may change.
+        assert_eq!(std::fs::read(root.join("unrelated")).unwrap(), b"keep");
+        assert_eq!(dir_names(&root), vec!["unrelated".to_owned()]);
+    }
+
+    // Retain branch: lease content does not describe this temp file.
+    {
+        let mut child = support::ChildGuard::spawn("lease-mismatched-kill").unwrap();
+        let _stream = child.ready("lease-held", support::DEFAULT_TIMEOUT).unwrap();
+        let root = child.root().to_path_buf();
+        let id = child.id().to_owned();
+        let (temp, lease) = lease_paths(&root, &id);
+
+        child.kill().unwrap();
+        assert!(!child.reap(support::DEFAULT_TIMEOUT).unwrap().success());
+
+        let decision = support::recover_temp(&root, &id, "temp").unwrap();
+        assert_eq!(
+            decision,
+            support::LeaseDecision::keep(support::KeepReason::LeaseContentMismatch)
+        );
+        assert_eq!(std::fs::read(&temp).unwrap(), support::COMPLETE_NEW);
+        let content = std::fs::read_to_string(&lease).unwrap();
+        assert_eq!(content, support::lease_line("other-temp", &id));
+        assert_eq!(dir_names(&root).len(), 2);
+    }
+
+    // Retain branch: the referenced temp file is already absent.
+    {
+        let mut child = support::ChildGuard::spawn("lease-only-kill").unwrap();
+        let _stream = child.ready("lease-only", support::DEFAULT_TIMEOUT).unwrap();
+        let root = child.root().to_path_buf();
+        let id = child.id().to_owned();
+        let (temp, lease) = lease_paths(&root, &id);
+
+        child.kill().unwrap();
+        assert!(!child.reap(support::DEFAULT_TIMEOUT).unwrap().success());
+
+        let decision = support::recover_temp(&root, &id, "temp").unwrap();
+        assert_eq!(
+            decision,
+            support::LeaseDecision::keep(support::KeepReason::TempAlreadyAbsent)
+        );
+        assert!(!temp.exists());
+        assert_eq!(
+            std::fs::read_to_string(&lease).unwrap(),
+            support::lease_line("temp", &id)
+        );
+        assert_eq!(dir_names(&root), vec![support::lease_file_name(&id)]);
+    }
+}
+
+#[test]
+fn killed_before_temp_creation_leaves_only_lease() {
+    let mut child = support::ChildGuard::spawn("lease-only-kill").unwrap();
+    let _stream = child.ready("lease-only", support::DEFAULT_TIMEOUT).unwrap();
+    let root = child.root().to_path_buf();
+    let id = child.id().to_owned();
+    let (temp, lease) = lease_paths(&root, &id);
+
+    child.kill().unwrap();
+    assert!(!child.reap(support::DEFAULT_TIMEOUT).unwrap().success());
+    assert!(!temp.exists());
+    assert_eq!(dir_names(&root), vec![support::lease_file_name(&id)]);
+
+    let decision = support::reclaim_orphan_lease(&root, &id).unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::remove(support::RemoveReason::OrphanLease)
+    );
+    assert!(!lease.exists());
+    assert!(dir_names(&root).is_empty());
+}
+
+#[test]
+fn temp_without_lease_and_foreign_leases_are_retained() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+    std::fs::write(root.join("temp"), support::COMPLETE_NEW).unwrap();
+
+    // 1. A correct-looking temp file with no lease record.
+    let no_lease = support::new_lease_id();
+    let decision = support::recover_temp(root, &no_lease, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::TempWithoutLease)
+    );
+    assert_eq!(
+        std::fs::read(root.join("temp")).unwrap(),
+        support::COMPLETE_NEW
+    );
+
+    // 2a. Unknown version.
+    let unknown = support::new_lease_id();
+    let unknown_path = root.join(support::lease_file_name(&unknown));
+    let unknown_line = format!("ziyuan-lease v2 temp=temp id={unknown}\n");
+    std::fs::write(&unknown_path, &unknown_line).unwrap();
+    let decision = support::recover_temp(root, &unknown, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseUnknownVersion)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&unknown_path).unwrap(),
+        unknown_line
+    );
+
+    // 2b. Unparsable content.
+    let unparsable = support::new_lease_id();
+    let unparsable_path = root.join(support::lease_file_name(&unparsable));
+    std::fs::write(&unparsable_path, b"not-a-lease record\n").unwrap();
+    let decision = support::recover_temp(root, &unparsable, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
+    );
+    assert_eq!(
+        std::fs::read(&unparsable_path).unwrap(),
+        b"not-a-lease record\n"
+    );
+
+    // 3. Lease file name and recorded id disagree.
+    let name_id = support::new_lease_id();
+    let other_id = support::new_lease_id();
+    let mismatched_path = root.join(support::lease_file_name(&name_id));
+    let mismatched_line = support::lease_line("temp", &other_id);
+    std::fs::write(&mismatched_path, &mismatched_line).unwrap();
+    let decision = support::recover_temp(root, &name_id, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseIdMismatch)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&mismatched_path).unwrap(),
+        mismatched_line
+    );
+
+    // Nothing above authorized any deletion: the temp file and all three
+    // foreign leases are byte-for-byte untouched.
+    assert_eq!(
+        std::fs::read(root.join("temp")).unwrap(),
+        support::COMPLETE_NEW
+    );
+    assert_eq!(dir_names(root).len(), 4);
+}
+
+#[test]
+fn second_creator_conflicts_instead_of_overwriting() {
+    let mut child = support::ChildGuard::spawn("lease-conflict").unwrap();
+    let mut stream = child
+        .ready("lease-conflict", support::DEFAULT_TIMEOUT)
+        .unwrap();
+    let root = child.root().to_path_buf();
+    let id = child.id().to_owned();
+    let lease = root.join(support::lease_file_name(&id));
+    let original = support::lease_line("temp", &id);
+    std::fs::write(&lease, &original).unwrap();
+
+    // create_new is the conflict primitive, observed directly as well.
+    let conflict = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lease)
+        .unwrap_err();
+    assert_eq!(conflict.kind(), io::ErrorKind::AlreadyExists);
+
+    support::send_message(
+        &mut stream,
+        "GO",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent conflict GO",
+    )
+    .unwrap();
+    let message = support::read_message(
+        &mut stream,
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent conflict result",
+    )
+    .unwrap();
+    assert_eq!(message, "LEASE_CONFLICT");
+    child.finish(support::DEFAULT_TIMEOUT).unwrap();
+    assert_eq!(std::fs::read_to_string(&lease).unwrap(), original);
+    assert_eq!(dir_names(&root), vec![support::lease_file_name(&id)]);
+}
+
+#[test]
+fn lease_lock_wait_has_deadline() {
+    let started = Instant::now();
+    let mut child = support::ChildGuard::spawn("lease-wait").unwrap();
+    let mut stream = child.ready("lease-wait", support::DEFAULT_TIMEOUT).unwrap();
+    let root = child.root().to_path_buf();
+    let id = child.id().to_owned();
+    let lease = root.join(support::lease_file_name(&id));
+
+    // The parent occupies the lease lock for the whole child wait.
+    let held = match support::probe_lock(support::create_lease_file(&root, &id, "temp").unwrap())
+        .unwrap()
+    {
+        support::ProbeLock::Acquired(file) => file,
+        support::ProbeLock::Busy => panic!("fresh lease lock unexpectedly busy"),
+    };
+    support::send_message(
+        &mut stream,
+        "GO",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent wait GO",
+    )
+    .unwrap();
+    let message = support::read_message(
+        &mut stream,
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent wait result",
+    )
+    .unwrap();
+    let millis = message
+        .strip_prefix("WAIT_TIMEOUT ")
+        .expect("writer must report a deadline timeout, not acquisition")
+        .parse::<u128>()
+        .unwrap();
+    assert!(
+        (200..2000).contains(&millis),
+        "lock wait must end in the hundreds-of-milliseconds range, not {millis}ms"
+    );
+    eprintln!("native lease lock wait: WAIT_TIMEOUT after {millis} ms");
+    // Both sides can still finish; no orphaned child or retained scratch.
+    continue_and_finish(&mut child, &mut stream);
+    assert!(started.elapsed() < support::DEFAULT_TIMEOUT);
+    // The timeout was caused by the parent's own lock, not by a broken probe:
+    // releasing it makes the very same lease acquirable again.
+    drop(held);
+    let released = support::probe_lock(support::open_probe(&lease).unwrap()).unwrap();
+    assert!(
+        matches!(released, support::ProbeLock::Acquired(_)),
+        "lease must be acquirable once the occupying handle closes: {released:?}"
+    );
+    drop(released);
+    assert_eq!(dir_names(&root), vec![support::lease_file_name(&id)]);
 }
 
 #[test]

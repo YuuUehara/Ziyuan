@@ -191,6 +191,236 @@ pub fn acquire_before(path: &Path, timeout: Duration) -> io::Result<File> {
     }
 }
 
+pub const LEASE_TAG: &str = "ziyuan-lease";
+pub const LEASE_VERSION: &str = "v1";
+const LEASE_WAIT: Duration = Duration::from_millis(300);
+
+pub fn new_lease_id() -> String {
+    format!(
+        "{:016x}{:016x}",
+        RandomState::new().hash_one(2_u8),
+        RandomState::new().hash_one(3_u8)
+    )
+}
+
+pub fn lease_file_name(id: &str) -> String {
+    format!(".ziyuan-lease-{id}")
+}
+
+pub fn lease_line(temp_name: &str, id: &str) -> String {
+    format!("{LEASE_TAG} {LEASE_VERSION} temp={temp_name} id={id}\n")
+}
+
+fn is_lower_hex_id(text: &str) -> bool {
+    text.len() == 32
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+// create_new is the conflict primitive: a second writer must never truncate
+// or reuse an existing lease. Content is written before the writer locks it.
+pub fn create_lease_file(root: &Path, id: &str, temp_name: &str) -> io::Result<File> {
+    if temp_name.is_empty()
+        || temp_name.contains(['/', '\\', '\n', '\r'])
+        || temp_name == "."
+        || temp_name == ".."
+    {
+        return Err(invalid("lease temp= must be a bare file name"));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(root.join(lease_file_name(id)))?;
+    file.write_all(lease_line(temp_name, id).as_bytes())?;
+    file.sync_all()?;
+    Ok(file)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseContent {
+    Valid { temp: String },
+    UnknownVersion,
+    Unparsable,
+    IdMismatch,
+}
+
+pub fn parse_lease(line: &str, expected_id: &str) -> LeaseContent {
+    let Some(body) = line.strip_suffix('\n') else {
+        return LeaseContent::Unparsable;
+    };
+    if body.contains(['\n', '\r']) {
+        return LeaseContent::Unparsable;
+    }
+    let mut fields = body.split(' ');
+    if fields.next() != Some(LEASE_TAG) {
+        return LeaseContent::Unparsable;
+    }
+    match fields.next() {
+        Some(LEASE_VERSION) => {}
+        Some(_) => return LeaseContent::UnknownVersion,
+        None => return LeaseContent::Unparsable,
+    }
+    let mut temp = None;
+    let mut id = None;
+    for field in fields {
+        if let Some(value) = field.strip_prefix("temp=") {
+            temp = Some(value.to_owned());
+        } else if let Some(value) = field.strip_prefix("id=") {
+            id = Some(value.to_owned());
+        } else {
+            return LeaseContent::Unparsable;
+        }
+    }
+    let (Some(temp), Some(id)) = (temp, id) else {
+        return LeaseContent::Unparsable;
+    };
+    if !is_lower_hex_id(&id) || id != expected_id {
+        return LeaseContent::IdMismatch;
+    }
+    if temp.is_empty() || temp.contains(['/', '\\']) || temp == "." || temp == ".." {
+        return LeaseContent::Unparsable;
+    }
+    LeaseContent::Valid { temp }
+}
+
+// Test-only decision model. Every test asserts one of these values, so a
+// cleaner rule that silently changed behaviour would fail the assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveReason {
+    WriterDeadLeaseVerified,
+    OrphanLease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepReason {
+    LeaseBusy,
+    TempWithoutLease,
+    TempAlreadyAbsent,
+    TempNotRegular,
+    LeaseUnknownVersion,
+    LeaseUnparsable,
+    LeaseIdMismatch,
+    LeaseContentMismatch,
+    LeaseAlreadyAbsent,
+    TempStillPresent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseDecision {
+    Remove { reason: RemoveReason },
+    Keep { reason: KeepReason },
+}
+
+impl LeaseDecision {
+    pub fn remove(reason: RemoveReason) -> Self {
+        Self::Remove { reason }
+    }
+
+    pub fn keep(reason: KeepReason) -> Self {
+        Self::Keep { reason }
+    }
+}
+
+fn read_text(file: &File) -> io::Result<String> {
+    let mut text = String::new();
+    let mut handle = file;
+    handle.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn classify_line(line: &str, id: &str) -> Result<LeaseContent, KeepReason> {
+    match parse_lease(line, id) {
+        LeaseContent::Valid { temp } => Ok(LeaseContent::Valid { temp }),
+        LeaseContent::UnknownVersion => Err(KeepReason::LeaseUnknownVersion),
+        LeaseContent::Unparsable => Err(KeepReason::LeaseUnparsable),
+        LeaseContent::IdMismatch => Err(KeepReason::LeaseIdMismatch),
+    }
+}
+
+// Temp-recovery entry point: never waits on a lease lock, only probes.
+pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseDecision> {
+    let temp = root.join(temp_name);
+    let lease_path = root.join(lease_file_name(id));
+    let lease = match open_probe(&lease_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(if temp.exists() {
+                LeaseDecision::keep(KeepReason::TempWithoutLease)
+            } else {
+                LeaseDecision::keep(KeepReason::TempAlreadyAbsent)
+            });
+        }
+        Err(e) => return Err(error("cleaner lease open", e)),
+    };
+    let held = match probe_lock(lease)? {
+        ProbeLock::Busy => return Ok(LeaseDecision::keep(KeepReason::LeaseBusy)),
+        ProbeLock::Acquired(file) => file,
+    };
+    let content = match classify_line(&read_text(&held)?, id) {
+        Ok(content) => content,
+        Err(reason) => return Ok(LeaseDecision::keep(reason)),
+    };
+    let LeaseContent::Valid { temp: recorded } = content else {
+        return Err(invalid("cleaner lease: unexpected content shape"));
+    };
+    if recorded != temp_name {
+        return Ok(LeaseDecision::keep(KeepReason::LeaseContentMismatch));
+    }
+    match std::fs::metadata(&temp) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(LeaseDecision::keep(KeepReason::TempAlreadyAbsent));
+        }
+        Err(e) => return Err(error("cleaner temp metadata", e)),
+        Ok(metadata) if !metadata.is_file() => {
+            return Ok(LeaseDecision::keep(KeepReason::TempNotRegular));
+        }
+        Ok(_) => {}
+    }
+    // Order is load-bearing: the temp file goes first, the lease last.
+    drop(held);
+    match std::fs::remove_file(&temp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(LeaseDecision::keep(KeepReason::TempAlreadyAbsent));
+        }
+        Err(e) => return Err(error("cleaner temp removal", e)),
+    }
+    std::fs::remove_file(&lease_path).map_err(|e| error("cleaner lease removal", e))?;
+    Ok(LeaseDecision::remove(RemoveReason::WriterDeadLeaseVerified))
+}
+
+// Lease-garbage entry point: only an orphan lease (its referenced temp is
+// gone) is removed, and only after the same version/id/content checks.
+pub fn reclaim_orphan_lease(root: &Path, id: &str) -> io::Result<LeaseDecision> {
+    let lease_path = root.join(lease_file_name(id));
+    let lease = match open_probe(&lease_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(LeaseDecision::keep(KeepReason::LeaseAlreadyAbsent));
+        }
+        Err(e) => return Err(error("orphan lease open", e)),
+    };
+    let held = match probe_lock(lease)? {
+        ProbeLock::Busy => return Ok(LeaseDecision::keep(KeepReason::LeaseBusy)),
+        ProbeLock::Acquired(file) => file,
+    };
+    let content = match classify_line(&read_text(&held)?, id) {
+        Ok(content) => content,
+        Err(reason) => return Ok(LeaseDecision::keep(reason)),
+    };
+    let LeaseContent::Valid { temp } = content else {
+        return Err(invalid("orphan lease: unexpected content shape"));
+    };
+    if root.join(&temp).exists() {
+        return Ok(LeaseDecision::keep(KeepReason::TempStillPresent));
+    }
+    drop(held);
+    std::fs::remove_file(&lease_path).map_err(|e| error("orphan lease removal", e))?;
+    Ok(LeaseDecision::remove(RemoveReason::OrphanLease))
+}
+
 fn error(stage: &str, error: io::Error) -> io::Error {
     // Windows reports socket read timeouts as TimedOut; Unix may use WouldBlock.
     let kind = match error.kind() {
@@ -295,13 +525,13 @@ pub fn accept_ready(
     Ok(stream)
 }
 
-struct Scratch {
+pub struct Scratch {
     path: PathBuf,
     remove_on_drop: bool,
 }
 
 impl Scratch {
-    fn create() -> io::Result<Self> {
+    pub fn create() -> io::Result<Self> {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| invalid("scratch clock"))?
@@ -327,6 +557,10 @@ impl Scratch {
             "scratch collision limit",
             io::ErrorKind::AlreadyExists.into(),
         ))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -389,6 +623,10 @@ impl ChildGuard {
 
     pub fn root(&self) -> &Path {
         &self.scratch.path
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn finish(&mut self, timeout: Duration) -> io::Result<()> {
@@ -456,6 +694,73 @@ fn env_text(name: &str) -> io::Result<String> {
         .map_err(|_| invalid(&format!("child configuration: missing or invalid {name}")))
 }
 
+// Each variant models one kill point of the writer lifecycle. The lease
+// handle (and temp handle) is owned until the flow says otherwise.
+enum LeaseCase {
+    None,
+    CloseBeforeRename { lease: Option<File> },
+    Held { _lease: File, _temp: File },
+    OnlyLease { _lease: File },
+    Conflict { path: PathBuf },
+    LockWait { path: PathBuf },
+}
+
+impl LeaseCase {
+    fn stage(&self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::CloseBeforeRename { .. } => Some("lease-held-closed-before-rename"),
+            Self::Held { .. } => Some("lease-held"),
+            Self::OnlyLease { .. } => Some("lease-only"),
+            Self::Conflict { .. } => Some("lease-conflict"),
+            Self::LockWait { .. } => Some("lease-wait"),
+        }
+    }
+}
+
+// Writer order under test: create lease -> lock lease -> create temp -> write
+// -> sync -> rename -> close lease handle -> delete lease.
+fn prepare_lease_case(case: &str, root: &Path, id: &str) -> io::Result<LeaseCase> {
+    let path = root.join(lease_file_name(id));
+    match case {
+        "lease-close-before-rename" => {
+            let lease = lock_new(create_lease_file(root, id, "temp")?)?;
+            let mut temp = create_temp(root, false)?;
+            write_complete(&mut temp)?;
+            // The temp handle closes here; the first-round window opens.
+            drop(temp);
+            // The lease handle stays held across READY, CONTINUE and rename.
+            let lease = Some(lease);
+            Ok(LeaseCase::CloseBeforeRename { lease })
+        }
+        "lease-held-kill" => {
+            let lease = lock_new(create_lease_file(root, id, "temp")?)?;
+            let mut temp = create_temp(root, false)?;
+            write_complete(&mut temp)?;
+            Ok(LeaseCase::Held {
+                _lease: lease,
+                _temp: temp,
+            })
+        }
+        "lease-mismatched-kill" => {
+            // Deliberately records a different temp name.
+            let lease = lock_new(create_lease_file(root, id, "other-temp")?)?;
+            let mut temp = create_temp(root, false)?;
+            write_complete(&mut temp)?;
+            Ok(LeaseCase::Held {
+                _lease: lease,
+                _temp: temp,
+            })
+        }
+        "lease-only-kill" => Ok(LeaseCase::OnlyLease {
+            _lease: lock_new(create_lease_file(root, id, "temp")?)?,
+        }),
+        "lease-conflict" => Ok(LeaseCase::Conflict { path }),
+        "lease-wait" => Ok(LeaseCase::LockWait { path }),
+        _ => Err(invalid("child lease: unknown case")),
+    }
+}
+
 pub fn run_child() -> io::Result<()> {
     // Validate every input before connecting or doing anything with a path.
     // Never include environment values in errors or mutate paths before validation.
@@ -474,6 +779,12 @@ pub fn run_child() -> io::Result<()> {
             | "live-restricted-share-prewritten"
             | "live-share-delete-lock-first"
             | "live-share-delete-prewritten"
+            | "lease-close-before-rename"
+            | "lease-held-kill"
+            | "lease-mismatched-kill"
+            | "lease-only-kill"
+            | "lease-conflict"
+            | "lease-wait"
     ) {
         return Err(invalid("child configuration: unknown case"));
     }
@@ -524,9 +835,24 @@ pub fn run_child() -> io::Result<()> {
     } else {
         None
     };
+    let lease_case = if matches!(
+        case.as_str(),
+        "lease-close-before-rename"
+            | "lease-held-kill"
+            | "lease-mismatched-kill"
+            | "lease-only-kill"
+            | "lease-conflict"
+            | "lease-wait"
+    ) {
+        prepare_lease_case(&case, &root, &id)?
+    } else {
+        LeaseCase::None
+    };
     let ready_id = if case == "wrong-id" { "wrong-id" } else { &id };
     let stage = if let Some(state) = &replacement {
         state.stage
+    } else if let Some(stage) = lease_case.stage() {
+        stage
     } else if case == "lock-holder" {
         "locked"
     } else {
@@ -554,6 +880,68 @@ pub fn run_child() -> io::Result<()> {
     } else {
         DEFAULT_TIMEOUT
     };
+    match &lease_case {
+        LeaseCase::Conflict { path } => {
+            let go = read_message(
+                &mut stream,
+                Instant::now() + DEFAULT_TIMEOUT,
+                "child lease GO",
+            )?;
+            if go != "GO" {
+                return Err(invalid("child lease GO mismatch"));
+            }
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => send_message(
+                    &mut stream,
+                    "LEASE_CONFLICT",
+                    Instant::now() + DEFAULT_TIMEOUT,
+                    "child lease conflict",
+                )?,
+                Ok(_) => {
+                    return Err(invalid(
+                        "child lease conflict: create_new unexpectedly succeeded",
+                    ));
+                }
+                Err(e) => return Err(error("child lease conflict", e)),
+            }
+            // The second writer reports the conflict and exits; it must never
+            // fall through to the shared write path or touch the lease.
+            return Ok(());
+        }
+        LeaseCase::LockWait { path } => {
+            let go = read_message(
+                &mut stream,
+                Instant::now() + DEFAULT_TIMEOUT,
+                "child lease GO",
+            )?;
+            if go != "GO" {
+                return Err(invalid("child lease GO mismatch"));
+            }
+            let started = Instant::now();
+            let message = match acquire_before(path, LEASE_WAIT) {
+                Ok(file) => {
+                    drop(file);
+                    "WAIT_ACQUIRED".to_owned()
+                }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    format!("WAIT_TIMEOUT {}", started.elapsed().as_millis())
+                }
+                Err(e) => return Err(error("child lease wait", e)),
+            };
+            send_message(
+                &mut stream,
+                &message,
+                Instant::now() + DEFAULT_TIMEOUT,
+                "child lease wait result",
+            )?;
+        }
+        _ => {}
+    }
     let response = read_message(&mut stream, Instant::now() + timeout, "child CONTINUE");
     if case == "continue-timeout" {
         return match response {
@@ -589,6 +977,15 @@ pub fn run_child() -> io::Result<()> {
     }
     if rename_after_close {
         fs::rename(root.join("temp"), root.join("target"))?;
+    }
+    if let LeaseCase::CloseBeforeRename { lease } = lease_case
+        && let Some(lease) = lease
+    {
+        // Lock still held while the temp file is renamed, then release the
+        // lease handle and only afterwards delete the lease file.
+        fs::rename(root.join("temp"), root.join("target"))?;
+        drop(lease);
+        fs::remove_file(root.join(lease_file_name(&id)))?;
     }
     Ok(())
 }
