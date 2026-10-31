@@ -825,7 +825,7 @@
               <p class="hint">重建只收录当前项目，替换工作区记忆缓存；不会改动原文、译稿或定稿状态。</p>
               <form class="row" id="memory-search-form">
                 <label for="memory-query">检索文字</label>
-                <input id="memory-query" type="text" data-view maxlength="2000" required placeholder="输入原文或译文，不会自动搜索">
+                <input id="memory-query" type="text" data-view maxlength="2000" required placeholder="输入原文，不会自动搜索">
                 <button class="small shrink" id="memory-search" type="submit" data-view>查当前项目</button>
               </form>
               <p class="hint" id="memory-result" role="status" aria-live="polite"></p>
@@ -1381,13 +1381,19 @@ async function loadText() {
   await loadNotes();
 }
 async function loadTextProject() {
+  const project = textProjectId;
   textProject = null;
   textError = null;
-  loadMemoryStatus();
+  if (project !== memoryProject) loadMemoryStatus(null);
   if (!textProjectId) { renderText(); return; }
   try {
-    textProject = await api("/text/" + encodeURIComponent(textProjectId));
+    const loaded = await api("/text/" + encodeURIComponent(project));
+    if (project !== textProjectId) return;
+    textProject = loaded;
+    loadMemoryStatus(JSON.stringify(loaded));
   } catch (e) {
+    if (project !== textProjectId) return;
+    loadMemoryStatus(null);
     textError = `无法加载项目：${e.message}`;
     textProject = null;
     textBlockId = null;
@@ -1831,16 +1837,22 @@ async function onNoteAction(action, id) {
     }
   }
 }
-// 记忆只在切换项目时读状态；重建和检索必须由用户明确触发。
+// 项目或资料有变才清掉旧参考；定时刷新不能吞掉正在输入的查询与结果。
+// 状态读取不执行检索；重建和检索必须由用户明确触发。
 // 序号使旧项目、旧搜索的慢响应不能覆盖当前选择。
 let memoryRequest = 0;
 let memoryAvailable = false;
+let memoryProject;
+let memoryFacts;
 function memoryControls(busy) {
   $("memory-build").disabled = busy || !textProjectId || !memoryAvailable;
   $("memory-search").disabled = busy || !textProjectId || !memoryAvailable;
   $("memory-query").disabled = busy || !textProjectId || !memoryAvailable;
 }
-async function loadMemoryStatus() {
+async function loadMemoryStatus(facts) {
+  if (textProjectId === memoryProject && facts === memoryFacts) return;
+  memoryProject = textProjectId;
+  memoryFacts = facts;
   const request = ++memoryRequest;
   const project = textProjectId;
   memoryAvailable = false;

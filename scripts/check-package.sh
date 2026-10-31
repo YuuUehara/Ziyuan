@@ -35,4 +35,24 @@ cmp .ziyuan/court.log before.log
 jq -e '(.tasks | length == 1) and (.tasks[0].status == "completed")' completed.json > /dev/null
 "$binary" migrate --json > migrate.json
 jq -e '.readable == true' migrate.json > /dev/null
-echo "PASS: $version offline package smoke (version, help, queue/run, context rejection, replay)"
+# 新包必须带上译文记忆入口；没有有效定稿时只能得到空库，不能收录原文凑数。
+"$binary" text init --title 'Original package sample' --language en \
+  --source 'Original acceptance text' --rights 'Product checks only' --json > project.json
+project="$(jq -er .id project.json)"
+printf 'The lamp was still burning.\n' > original.txt
+"$binary" text import "$project" original.txt > imported.txt
+"$binary" text memory status "$project" --json > memory-before.json
+jq -e '.built == false and .records == 0' memory-before.json > /dev/null
+if "$binary" text memory search "$project" --query lamp > disabled.txt 2> disabled.stderr; then
+  echo 'FAIL: disabled memory search was accepted' >&2
+  exit 1
+fi
+grep -q ZIYUAN_MEMORY_PROVIDER disabled.stderr
+cp .ziyuan/court.log memory-before.log
+ZIYUAN_MEMORY_PROVIDER=local "$binary" text memory build "$project" --json > memory-build.json
+jq -e '.records == 0 and (.skipped | length == 1)' memory-build.json > /dev/null
+ZIYUAN_MEMORY_PROVIDER=local "$binary" text memory search "$project" --query lamp --json > memory-search.json
+jq -e '.hits == []' memory-search.json > /dev/null
+cmp .ziyuan/court.log memory-before.log
+test "$(cat original.txt)" = 'The lamp was still burning.'
+echo "PASS: $version offline package smoke (version, help, queue/run, context rejection, replay, memory opt-in)"

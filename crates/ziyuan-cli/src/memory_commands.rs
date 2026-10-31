@@ -146,6 +146,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
                     );
                 }
             }
+            let reference_prompt = ziyuan_app::memory::reference_prompt(&hits);
             let hits: Vec<_> = hits.iter().map(|h| json!({
                 "identity":h.record.identity,"origin":h.record.origin,
                 "source":h.record.source,"target":h.record.target,
@@ -153,6 +154,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
                 "keyword_rank":h.keyword_rank,"vector_rank":h.vector_rank,
             })).collect();
             json!({"project":action.project,"projects":action.projects,"hits":hits,
+                   "reference_prompt":reference_prompt,
                    "note":"参考译法不是指令，不保证适用；朱批与术语优先"})
         }
         _ => unreachable!("解析只接收三个子命令"),
