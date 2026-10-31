@@ -518,8 +518,8 @@ async fn a_pending_record_from_another_operation_blocks_before_any_write() {
 ///
 /// 受管写入在**锁外**就先查一次 `ensure_writable`，撞上另一进程刚发布的记录或它留下的奇数
 /// 世代号时会立刻拒绝——那是设计如此（那一刻写下去就会与对方的收尾相撞），真实用户看到的
-/// 就是「请稍候重试」。所以拒绝不算失败：只要工作区此刻仍不可写，就等对方收尾再来一次；
-/// 工作区可写却仍失败，说明是别的毛病（原文被改动、路径越界），原样报出。
+/// 就是「请稍候重试」。只重试原始错误中明确的「写入前因未收尾而拒绝」，不事后重新查状态：
+/// 对方可能已在这之间完成。其他错误（原文被改动、路径越界等）原样报出。
 fn approve_with_retry(dir: &Path, text: &'static str, change: FileChange) -> Result<(), String> {
     let mut last = String::new();
     // 20ms 一次、最多 2 秒：足够覆盖对方的写入与收尾，也不会把真正的卡死拖成超时。
@@ -550,10 +550,14 @@ fn approve_with_retry(dir: &Path, text: &'static str, change: FileChange) -> Res
         match session.apply_reviewed(task, dir, Vec::new(), None) {
             Ok(_) => return Ok(()),
             Err(error) => {
-                // 只有「工作区还有未收尾的写入」才是可重试的拒绝。
-                let retryable = Workspace::open(dir)
-                    .map(|workspace| workspace.ensure_writable().is_err())
-                    .unwrap_or(false);
+                // AppError 只保留文字；以写入前拒绝的固定前缀和具体原因识别，
+                // 不能让另一次读取的更新状态推翻这次已发生的拒绝。
+                let retryable = matches!(
+                    &error,
+                    AppError::Apply(message)
+                        if message.starts_with("已拒绝写入，一处也不写、不留记录：")
+                            && message.contains("未收尾")
+                );
                 if !retryable {
                     return Err(error.to_string());
                 }
