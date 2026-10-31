@@ -63,7 +63,8 @@ const LEASE_LOCK_POLL: Duration = Duration::from_millis(5);
 pub struct Lease {
     path: std::path::PathBuf,
     file: Option<File>,
-    released: bool,
+    /// 表示“`release()` 已经试过”，**不是**“租约已经不在了”：删除可能失败。
+    release_attempted: bool,
 }
 
 impl Lease {
@@ -110,7 +111,7 @@ impl Lease {
                     return Ok(Self {
                         path,
                         file: Some(file),
-                        released: false,
+                        release_attempted: false,
                     });
                 }
                 Err(e) => {
@@ -127,7 +128,7 @@ impl Lease {
         ))
     }
 
-    /// 租约文件路径：`replace.rs` 用它填“删不掉”的诊断。
+    /// 租约文件路径：接入替换流程后由调用方填“删不掉”的诊断。
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -151,7 +152,7 @@ impl Lease {
     /// 改名已成功时删除失败**不能**回滚，也不能说替换失败：调用方改用诊断
     /// 通道单列一条，残留租约交给后续清理按孤儿处理。
     pub fn release(mut self) -> io::Result<()> {
-        self.released = true;
+        self.release_attempted = true;
         drop(self.file.take());
         #[cfg(test)]
         tests_hooks::after_close(&self.path);
@@ -167,7 +168,9 @@ impl Drop for Lease {
     fn drop(&mut self) {
         // Windows 上持锁的句柄会让删除失败，所以先关句柄。
         drop(self.file.take());
-        if !self.released {
+        // `release` 已经试过一次：失败原因（句柄被占用、路径被换成目录）通常仍在，
+        // 重试只会吞掉第二次失败，而 `Drop` 无处报告。残留交给清理器按孤儿处理。
+        if !self.release_attempted {
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -237,27 +240,23 @@ pub(crate) mod tests_hooks {
         /// 拿到锁之前把租约路径删掉：模拟孤儿回收抢先动手。
         Reclaim,
         /// 关句柄之后把租约换成目录：让删除必然失败（两个平台都会报错）。
-        SwapToDir { path: Option<PathBuf> },
+        SwapToDir(PathBuf),
     }
 
     thread_local! {
         static ARMED: RefCell<Vec<Armed>> = const { RefCell::new(Vec::new()) };
     }
 
-    pub(crate) fn arm_reclaim() {
+    pub(super) fn arm_reclaim() {
         ARMED.with(|slot| slot.borrow_mut().push(Armed::Reclaim));
     }
 
     /// 记下要换名的租约路径；真正换名发生在 `release` 关句柄之后。
-    pub(crate) fn arm_swap_to_dir(path: &Path) {
-        ARMED.with(|slot| {
-            slot.borrow_mut().push(Armed::SwapToDir {
-                path: Some(path.to_owned()),
-            })
-        });
+    pub(super) fn arm_swap_to_dir(path: &Path) {
+        ARMED.with(|slot| slot.borrow_mut().push(Armed::SwapToDir(path.to_owned())));
     }
 
-    pub(crate) fn clear() {
+    pub(super) fn clear() {
         ARMED.with(|slot| slot.borrow_mut().clear());
     }
 
@@ -274,18 +273,17 @@ pub(crate) mod tests_hooks {
         let _ = std::fs::create_dir(path);
     }
 
-    pub(crate) fn before_lock(path: &Path) {
+    pub(super) fn before_lock(path: &Path) {
         if take(|armed| matches!(armed, Armed::Reclaim)).is_some() {
             let _ = std::fs::remove_file(path);
         }
     }
 
-    pub(crate) fn after_close(path: &Path) {
-        if let Some(Armed::SwapToDir { path: Some(target) }) =
-            take(|armed| matches!(armed, Armed::SwapToDir { path: Some(target) } if target == path))
+    pub(super) fn after_close(path: &Path) {
+        if let Some(Armed::SwapToDir(target)) =
+            take(|armed| matches!(armed, Armed::SwapToDir(target) if target == path))
         {
-            let _ = target;
-            swap(path);
+            swap(&target);
         }
     }
 }
@@ -380,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn lease_covers_creation_until_release() {
+    fn drop_removes_an_unreleased_lease() {
         let dir = scratch("lease");
         let name = fresh_temp_name();
         let path = {
@@ -410,6 +408,27 @@ mod tests {
         };
         assert!(!path.exists(), "释放后租约必须消失");
         assert!(lease_paths(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn release_removes_the_lease_and_reports_success() {
+        let dir = scratch("release-ok");
+        let name = fresh_temp_name();
+        let lease = Lease::hold(&dir, &name).unwrap();
+        let path = lease.path().to_path_buf();
+        lease.release().unwrap();
+        assert!(!path.exists(), "release 成功后租约必须消失");
+        assert!(lease_paths(&dir).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn release_tolerates_a_lease_already_gone() {
+        let dir = scratch("release-gone");
+        let lease = Lease::hold(&dir, &fresh_temp_name()).unwrap();
+        std::fs::remove_file(lease.path()).unwrap();
+        assert!(lease.release().is_ok(), "已被删掉的租约不算失败");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
