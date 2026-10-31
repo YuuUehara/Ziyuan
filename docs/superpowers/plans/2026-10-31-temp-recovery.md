@@ -12,7 +12,7 @@
 
 设计依据：[临时文件清理设计](../specs/2026-10-31-temp-recovery-design.md)。向量记忆库不在本计划实施范围内。
 
-执行状态：Task 1 至 Task 3 完成（提交 c5310854、8aec5639、47a8cbff）；Task 4 第 1、3 步完成，第 2 步部分完成（1.89 缺失、Linux/macOS 证据未取得），第 4 步因证据不足未执行，停在第 6 步等待用户审阅。证据见[可行性报告](../../acceptance/1.2.2-temp-lease-feasibility.md)。
+执行状态：Task 1 至 Task 3 完成（提交 c5310854、8aec5639、47a8cbff）；Task 4 第 1、3、5、6 步完成，第 2 步部分完成（1.89 缺失、Linux/macOS 证据未取得），第 4 步因证据不足未执行。修正与锁身份补验见 71d2e713、6ed31b39。停在用户审阅，下一步须另行批准。证据见[可行性报告](../../acceptance/1.2.2-temp-lease-feasibility.md)。
 
 ## Chunk 1: 活跃保护可行性与设计停止点
 
@@ -215,7 +215,7 @@ cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
 
 若实验仅证明单文件锁不足，先交付负面结果并暂停，请用户批准下一轮有界协议验证。不得在缺少证据时写下“将用某种租约解决”然后进入生产实现。
 
-- [ ] **Step 5: 独立审查实验结论及设计补充，复核差异后提交。**
+- [x] **Step 5: 独立审查实验结论及设计补充，复核差异后提交。**
 
 使用 @requesting-code-review，并派一个只读 reviewer 检查本阶段变更；如发现问题先修复并重跑相关检查。提交前运行 `jj status`、`jj diff`，确认没有版本、依赖、CLI 或生产替换变更。
 
@@ -223,7 +223,7 @@ cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
 jj commit -m "docs(runtime): 记录临时租约验证结果与实现门槛" -m "Co-authored-by: factory-droid[bot] <138933559+factory-droid[bot]@users.noreply.github.com>"
 ```
 
-- [ ] **Step 6: 停止并交用户审阅。**
+- [x] **Step 6: 停止并交用户审阅。**
 
 交付实验报告、具体协议（若已闭合）、测试证据及限制。等待用户批准设计补充后，使用 @writing-plans 编写生产清理实施计划，不能直接执行下面的后续范围。
 
