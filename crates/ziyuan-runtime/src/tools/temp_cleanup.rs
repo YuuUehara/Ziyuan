@@ -471,6 +471,15 @@ fn decide_candidate(
         let mut file = match OpenOptions::new().read(true).write(true).open(lease_path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
+                // Windows 上正在删除的文件打不开，报的是 `AccessDenied` 而不是
+                // `NotFound`。并发清理者抢先删掉也是正常收尾，所以回查一次名字：
+                // 已经没了就按不存在处理，别把别人的成功记成自己的失败。
+                if matches!(
+                    fs::symlink_metadata(lease_path),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound
+                ) {
+                    continue;
+                }
                 problems.push(Problem {
                     path: lease_path.clone(),
                     message: e.to_string(),
@@ -628,6 +637,14 @@ fn decide_lease(
             return kept(Reason::LeaseAlreadyAbsent);
         }
         Err(e) => {
+            // 与 `decide_candidate` 同一个竞态：Windows 上删除中的文件报
+            // `AccessDenied`。名字已经没了就按“已被别人删掉”收尾，不记失败。
+            if matches!(
+                fs::symlink_metadata(lease_path),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ) {
+                return kept(Reason::LeaseAlreadyAbsent);
+            }
             problems.push(Problem {
                 path: lease_path.to_path_buf(),
                 message: e.to_string(),
@@ -768,7 +785,11 @@ pub struct Report {
     pub problems: Vec<Problem>,
     /// 读不了的目录：既不算扫描成功，也不中止整轮。
     pub unscanned: Vec<PathBuf>,
-    /// 主动不进入的目录名（只报名字，报告仍不含绝对路径）。
+    /// 主动不进入的目录：相对 `root` 的目录路径（根层就是名字本身），`/` 分隔。
+    ///
+    /// 报路径而不是名字：两个子目录里各有一个 `target` 时，只报名字分不出没扫的是哪个。
+    /// 仍然是相对路径，报告不含绝对路径这条契约不变。`sweep_workspace` 会排好序并去重，
+    /// 所以同一棵树的报告能逐字比较。
     pub skipped: Vec<String>,
 }
 
@@ -913,6 +934,113 @@ pub fn sweep_dir(
     );
     scan_into(&mut report, dir, relative_dir, protected, apply);
     report
+}
+
+/// 不进入的目录：控制目录与常见构建产物。跳过的不止 `.ziyuan`，所以必须记进
+/// `report.skipped` 并在两种输出里列出，否则“已扫全”就是假话。
+///
+/// 与 `tools.rs` 里同名的那一份故意分开：那一份管工具的**读取**范围（列目录时不展开），
+/// 这一份管**删除**范围。两者判错的代价不对等——读漏只是少看一眼，删漏不可撤回——所以
+/// 各自演进、各留一处判断；合成一份后，任一方为读取需要放宽名单，都会顺手放宽删除范围。
+const SKIPPED_DIRS: [&str; 5] = [".ziyuan", ".git", ".jj", "target", "node_modules"];
+
+/// 递归深度上限：超过即停止下探，并把跳过的目录记进报告。
+///
+/// 不能只靠跳过名单兜住：名单只认名字，改个名字的产物目录或超深 monorepo 都能让一轮
+/// 扫描跑上几分钟且毫无输出。到达上限的目录进 `unscanned`，因为它确实一个都没看。
+const MAX_DEPTH: usize = 32;
+
+/// 手工入口用：从工作区根开始递归清理。
+pub fn sweep_workspace(root: &Path, protected: &BTreeSet<String>, apply: bool) -> Report {
+    // 根的范围标签是空串（报告里呈现为 `.`），根下的路径都相对它。
+    let mut report = Report::new(
+        if apply { Mode::Apply } else { Mode::Preview },
+        root,
+        "",
+        true,
+    );
+    walk(&mut report, root, "", protected, apply, 0);
+    // 同一目录可能被记两遍（`scan_into` 与下探各记一次）：不排序去重的话，报告不能逐字
+    // 比较，数目也会被读多。两处都排，别只排 `skipped`。
+    report.skipped.sort();
+    report.skipped.dedup();
+    report.unscanned.sort();
+    report.unscanned.dedup();
+    report
+}
+
+/// 深度优先扫完整棵子树；`depth` 是 `dir` 相对根的层数（根为 0）。
+///
+/// `dir` 本身不看类型：根是用户亲手指的，即使它是链接也要扫。链接与非目录的判定只对
+/// 下探到的子目录生效——根是链接却被当成“不是目录”拒扫，等于用户指了也白指。
+fn walk(
+    report: &mut Report,
+    dir: &Path,
+    relative_dir: &str,
+    protected: &BTreeSet<String>,
+    apply: bool,
+    depth: usize,
+) {
+    // 先判上限再扫：这一层整个不进来，报告只能写“未扫描”。反过来（先扫再判上限）会
+    // 删掉东西却仍声称没进入，报告自相矛盾。
+    if depth >= MAX_DEPTH {
+        report.unscanned.push(dir.to_path_buf());
+        return;
+    }
+    scan_into(report, dir, relative_dir, protected, apply);
+    let Ok(entries) = fs::read_dir(dir) else {
+        // `scan_into` 已把该目录记进 `unscanned`：这里再记一次，同一目录就会在报告里
+        // 出现两遍，读的人会当成两个目录。所以只返回，不重复记。
+        return;
+    };
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            // 名字不是 UTF-8：读不进受保护集合的比较，也拼不出相对路径。
+            // 静默跳过会让报告声称扫全了，所以显式记一条。
+            report.problems.push(Problem {
+                path: entry.path(),
+                message: "目录项名称不是 UTF-8，未能纳入扫描".into(),
+            });
+            continue;
+        };
+        let meta = match fs::symlink_metadata(entry.path()) {
+            Ok(meta) => meta,
+            // 列举之后这一项消失了：并发清理者抢先删掉就是正常收尾，不算失败
+            // （`scan_into` 对候选与租约的 `NotFound` 用的是同一个口径）。别的错误连
+            // 类型都判不出，下探与否无从谈起：记一条，不猜。
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                report.problems.push(Problem {
+                    path: entry.path(),
+                    message: "无法读取目录项元数据".into(),
+                });
+                continue;
+            }
+        };
+        // 判定必须基于不跟随链接的元数据：`fs::symlink_metadata` 的 `is_dir()` 与
+        // `is_symlink()` 互斥，所以链接（含 junction）在 `is_dir()` 上就是 false；写成
+        // `fs::metadata(...).is_dir()` 才会跟随，清理范围就跑到工作区之外了。后半个
+        // `is_symlink()` 是双保险，哪天判定换成跟随版也还有一道。
+        let file_type = meta.file_type();
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        if SKIPPED_DIRS.contains(&name) {
+            // 记相对路径：两个子目录里各有一个 `target` 时，光看名字分不出是哪个没扫。
+            // 放在类型判定之后，是因为只有真的目录才算“没进入”，普通文件不在此列。
+            report.skipped.push(join_relative(relative_dir, name));
+            continue;
+        }
+        children.push((entry.path(), join_relative(relative_dir, name)));
+    }
+    // 先排序再下探：报告里的项按目录逐个追加，顺序跟着文件系统的返回次序走就不可复现，
+    // 两个清理者的报告也没法比较。
+    children.sort();
+    for (path, relative) in children {
+        walk(report, &path, &relative, protected, apply, depth + 1);
+    }
 }
 
 fn scan_into(
@@ -2067,6 +2195,247 @@ mod tests {
         assert!(report.problems.is_empty());
         assert!(report.unscanned.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_reaches_nested_directories() {
+        let dir = scratch("tree");
+        let nested = dir.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let target = fresh_temp_name();
+        write_temp(&nested, &target);
+        let id = hex_id(41);
+        dead_lease(&nested, &id, &target);
+        let report = sweep_workspace(&dir, &empty_protected(), true);
+        assert!(report.recursive);
+        assert_eq!(report.counts(Kind::Temp).removed, 1, "{report:?}");
+        assert!(!nested.join(&target).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_protects_nested_relative_paths() {
+        let dir = scratch("tree-protected");
+        let nested = dir.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let name = fresh_temp_name();
+        write_temp(&nested, &name);
+        let mut protected = empty_protected();
+        protected.insert(format!("sub/{name}"));
+        let report = sweep_workspace(&dir, &protected, true);
+        assert_eq!(
+            keep_reason(temp_item(&report, &name)),
+            Reason::RecoveryReferenced
+        );
+        assert!(nested.join(&name).is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_skips_control_and_build_directories() {
+        let dir = scratch("tree-skip");
+        for skipped in [".ziyuan", ".git", ".jj", "target", "node_modules"] {
+            let sub = dir.join(skipped);
+            std::fs::create_dir_all(&sub).unwrap();
+            let name = fresh_temp_name();
+            write_temp(&sub, &name);
+            dead_lease(&sub, &hex_id(42), &name);
+        }
+        let report = sweep_workspace(&dir, &empty_protected(), true);
+        assert!(report.items.is_empty(), "{report:?}");
+        for skipped in [".ziyuan", ".git", ".jj", "target", "node_modules"] {
+            assert_eq!(std::fs::read_dir(dir.join(skipped)).unwrap().count(), 2);
+        }
+        // 跳过不等于“没发生”：报告必须写明跳过了哪些，不能声称扫全了。
+        assert_eq!(
+            report.skipped,
+            vec![
+                ".git".to_string(),
+                ".jj".to_string(),
+                ".ziyuan".to_string(),
+                "node_modules".to_string(),
+                "target".to_string(),
+            ],
+            "{report:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_reports_skipped_paths_not_names() {
+        // 两棵不同子树里同名的跳过目录：只报名字的话，去重会把它们并成一条，
+        // 报告就说不出“到底哪两处没扫”。
+        let root = scratch("tree-skip-paths");
+        for sub in ["a", "b"] {
+            let dir = root.join(sub).join("target");
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = fresh_temp_name();
+            write_temp(&dir, &name);
+            dead_lease(&dir, &hex_id(46), &name);
+        }
+        let report = sweep_workspace(&root, &empty_protected(), true);
+        assert!(report.items.is_empty(), "{report:?}");
+        assert_eq!(
+            report.skipped,
+            vec!["a/target".to_string(), "b/target".to_string()],
+            "{report:?}"
+        );
+        assert_eq!(
+            report.to_json()["skipped"].as_array().map(Vec::len),
+            Some(2),
+            "{report:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_cleaners_never_double_count_a_single_candidate() {
+        let (dir, name, _id) = sweep_fixture("tree-race");
+        // 两个清理者并发扫同一棵树：谁先删都一样，合计只能记一次删除。
+        let root = std::sync::Arc::new(dir.clone());
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                std::thread::spawn(move || sweep_workspace(&root, &empty_protected(), true))
+            })
+            .collect();
+        let reports: Vec<Report> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let temps_removed: usize = reports
+            .iter()
+            .map(|report| report.counts(Kind::Temp).removed)
+            .sum();
+        assert_eq!(temps_removed, 1, "同一候选只能被记一次删除");
+        assert!(!dir.join(&name).exists());
+        assert!(lease_paths(&dir).is_empty());
+        for report in &reports {
+            // 落败的一方把“已被别人删掉”当成功收尾，不报失败。
+            assert!(report.problems.is_empty(), "{report:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reused_pid_without_a_lease_is_never_removed() {
+        let dir = scratch("tree-reuse");
+        // 旧版遗留、无租约：即使名字格式合法也不动（PID 只作诊断）。
+        let name = ".ziyuan-tmp-4242-1-1";
+        write_temp(&dir, name);
+        let report = sweep_workspace(&dir, &empty_protected(), true);
+        assert_eq!(
+            keep_reason(temp_item(&report, name)),
+            Reason::TempWithoutLease
+        );
+        assert!(dir.join(name).is_file(), "无归属证据的文件绝不删除");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_sweep_never_follows_a_linked_directory() {
+        let dir = scratch("tree-link");
+        let outside = dir.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let name = fresh_temp_name();
+        write_temp(&outside, &name);
+        dead_lease(&outside, &hex_id(43), &name);
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+        let report = sweep_workspace(&dir, &empty_protected(), true);
+        assert!(report.items.is_empty(), "{report:?}");
+        assert!(outside.join(&name).is_file(), "链接目标不得被清理");
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_stops_at_the_depth_cap() {
+        let root = scratch("tree-depth");
+        // 一条 `MAX_DEPTH + 2` 层深的链，每层都留一份可清理的残留（临时文件 + 已死租约）。
+        // 有上限才停得住：只靠跳过名单的话，换个名字的产物目录就能让扫描跑上几分钟且毫无输出。
+        let mut dir = root.clone();
+        let mut chain = Vec::new();
+        for depth in 1..=MAX_DEPTH + 2 {
+            dir = dir.join(format!("d{depth}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let name = fresh_temp_name();
+            write_temp(&dir, &name);
+            dead_lease(&dir, &hex_id(61), &name);
+            chain.push((dir.clone(), name));
+        }
+        let report = sweep_workspace(&root, &empty_protected(), true);
+        // 上限以内都扫了：根自己没有残留，`d1` 到 `d{MAX_DEPTH-1}` 各删一个。
+        assert_eq!(
+            report.counts(Kind::Temp).removed,
+            MAX_DEPTH - 1,
+            "{report:?}"
+        );
+        // 到上限的那一层整个没进去：报告必须写成“未扫描”，不能保持沉默。
+        let expected_cap = (1..=MAX_DEPTH)
+            .map(|depth| format!("d{depth}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(report.unscanned.len(), 1, "{report:?}");
+        assert_eq!(
+            report.display_relative(&report.unscanned[0]),
+            expected_cap,
+            "{report:?}"
+        );
+        // 上限及更深的层原样留着：没进去就不许说清过。
+        for (dir, name) in chain.iter().skip(MAX_DEPTH - 1) {
+            assert!(
+                dir.join(name).is_file(),
+                "超出上限的层不得被清理: {}",
+                dir.display()
+            );
+        }
+        assert!(
+            report.needs_attention(),
+            "停下没扫的层必须让调用方看见: {report:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_sweep_records_a_directory_it_cannot_list_once() {
+        // 列举失败的目录只该出现一次：`scan_into` 记一条，`walk` 紧接着的第二次
+        // `read_dir` 也必然失败；若那边也记一条，同一目录就会在报告里出现两遍，
+        // 读的人会当成两个目录。去重也一并兜住“同目录被两处各记一次”。
+        let root = scratch("tree-unscanned");
+        let not_a_dir = root.join("regular.txt");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        // 直接调 `walk`：去重会把重复项抹平，经入口断言就查不出“下探那一步又记了一条”。
+        let mut raw = Report::new(Mode::Apply, &root, "", true);
+        walk(&mut raw, &not_a_dir, "", &empty_protected(), true, 0);
+        assert_eq!(
+            raw.unscanned,
+            vec![not_a_dir.clone()],
+            "下探那一步不得重记: {raw:?}"
+        );
+        let report = sweep_workspace(&not_a_dir, &empty_protected(), true);
+        assert_eq!(report.unscanned, vec![not_a_dir.clone()], "{report:?}");
+        assert_eq!(
+            report.to_json()["unscanned"].as_array().map(Vec::len),
+            Some(1),
+            "{report:?}"
+        );
+        assert!(report.items.is_empty(), "{report:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_sweep_scans_a_linked_root() {
+        // 根是用户亲手指的，链接与否都得扫；链接判定只对下探到的子目录生效。
+        let real = scratch("tree-linked-root");
+        let name = fresh_temp_name();
+        write_temp(&real, &name);
+        dead_lease(&real, &hex_id(44), &name);
+        let link = real.with_extension("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let report = sweep_workspace(&link, &empty_protected(), true);
+        assert_eq!(report.counts(Kind::Temp).removed, 1, "{report:?}");
+        assert!(!real.join(&name).exists(), "链接根指向的残留必须被清掉");
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir_all(real).unwrap();
     }
 
     #[test]
