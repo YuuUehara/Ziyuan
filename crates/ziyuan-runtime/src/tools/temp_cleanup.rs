@@ -97,6 +97,7 @@ impl Reason {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outcome {
     /// 可删除；`Item::acted` 区分“预览里本可删除”与“真的删掉了”。
+    /// 删除尝试失败时仍是 `Remove` 而 `acted=false`，原因见同一条 `Problem`。
     Remove,
     Keep(Reason),
 }
@@ -113,6 +114,10 @@ pub struct Item {
     pub path: PathBuf,
     pub kind: Kind,
     pub outcome: Outcome,
+    /// 本轮真的删掉了它。`apply=false`、或删除失败时都是 `false`。
+    ///
+    /// 因此 `Apply` 模式下“可删除数 > 已删除数”表示有一次删除尝试失败：`outcome`
+    /// 仍是 `Remove`（它确实可清理），失败原因在同一条 `Problem` 里。
     pub acted: bool,
 }
 
@@ -364,10 +369,17 @@ fn lease_id_of(name: &str) -> Option<&str> {
 ///
 /// 顺序照设计：受保护判断（不开句柄）→ 类型核验（不跟随链接）→ 逐租约非阻塞试锁
 /// → 归属判定 → 持锁删除。
+///
+/// `leases` 由调用方按目录列一次传进来（设计第 2 步）：列不出来是“这个目录看不懂”，
+/// 属于调用方的扫描失败，不是某个候选或某份租约的原因，所以本函数不自己 `read_dir`。
+///
+/// 由此得到一条不变量：没有租约列举就没有任何删除。凡是要判归属的路径都从 `leases`
+/// 出发，列不出来时调用方连候选都不该送进来。
 fn decide_candidate(
     dir: &Path,
     name: &str,
     relative: &str,
+    leases: &[(PathBuf, String)],
     protected: &BTreeSet<String>,
     apply: bool,
     problems: &mut Vec<Problem>,
@@ -393,25 +405,15 @@ fn decide_candidate(
         Ok(_) => {}
     }
 
-    let entries = match lease_entries(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            problems.push(Problem {
-                path: dir.to_path_buf(),
-                message: e.to_string(),
-            });
-            return keep(path, Kind::Temp, Reason::LeaseUnparsable);
-        }
-    };
-
     let mut claimants: Vec<Claim> = Vec::new();
     let mut first_bad: Option<Reason> = None;
-    for (lease_path, id) in entries {
-        let meta = match fs::symlink_metadata(&lease_path) {
+    // 列举是调用方的目录级动作；这里只消费结果，失败不再落到某个候选头上。
+    for (lease_path, id) in leases {
+        let meta = match fs::symlink_metadata(lease_path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
                 problems.push(Problem {
-                    path: lease_path,
+                    path: lease_path.clone(),
                     message: e.to_string(),
                 });
                 first_bad.get_or_insert(Reason::LeaseUnparsable);
@@ -423,11 +425,11 @@ fn decide_candidate(
             first_bad.get_or_insert(Reason::LeaseNotRegular);
             continue;
         }
-        let mut file = match OpenOptions::new().read(true).write(true).open(&lease_path) {
+        let mut file = match OpenOptions::new().read(true).write(true).open(lease_path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
                 problems.push(Problem {
-                    path: lease_path,
+                    path: lease_path.clone(),
                     message: e.to_string(),
                 });
                 first_bad.get_or_insert(Reason::LeaseUnparsable);
@@ -442,7 +444,7 @@ fn decide_candidate(
             }
             Err(std::fs::TryLockError::Error(e)) => {
                 problems.push(Problem {
-                    path: lease_path,
+                    path: lease_path.clone(),
                     message: e.to_string(),
                 });
                 first_bad.get_or_insert(Reason::LeaseUnparsable);
@@ -452,7 +454,7 @@ fn decide_candidate(
         }
         // 锁身份按文件对象：加锁后再看名字是否还指向一个普通文件。名字被换掉时
         // 手里的锁证明不了任何事，本轮不动（与写入者的第 4 步核验同理）。
-        match fs::symlink_metadata(&lease_path) {
+        match fs::symlink_metadata(lease_path) {
             Ok(meta) if meta.file_type().is_file() => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             _ => {
@@ -467,13 +469,14 @@ fn decide_candidate(
                 continue;
             }
         };
-        match parse_lease(&text, &id) {
+        match parse_lease(&text, id) {
             // `parse_lease` 已保证 `id=` 与文件名一致，认出归属就够了。
             Ok(temp) if temp == name => claimants.push(Claim {
-                path: lease_path,
+                path: lease_path.clone(),
                 _lock: file,
             }),
-            // 不认领本候选：立刻放开，别让手里的锁妨碍别的决策。
+            // 不认领本候选：提前放开。句柄析构本来也会释放锁，这里提前只是为了
+            // 让并发清理者不必等本轮这个句柄析构。
             Ok(_) => {
                 let _ = file.unlock();
             }
@@ -1004,6 +1007,11 @@ mod tests {
         std::fs::write(dir.join(name), b"partial").unwrap();
     }
 
+    /// 设计第 2 步的“列出租约”，测试里由调用方代劳。
+    fn leases(dir: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+        lease_entries(dir).unwrap()
+    }
+
     fn keep_reason(item: &Item) -> Reason {
         match item.outcome {
             Outcome::Keep(reason) => reason,
@@ -1075,7 +1083,7 @@ mod tests {
             ),
         ];
         for (text, expected) in cases {
-            // 最后一项故意传入与文件 id 不同的实参，验证 id= 与文件名比对。
+            // `LeaseIdMismatch` 那一行传的实参故意与内容里的 `id=` 不同，验证比对的是文件名 id。
             let file_id = if expected == Reason::LeaseIdMismatch {
                 hex_id(9)
             } else {
@@ -1136,7 +1144,15 @@ mod tests {
         let mut protected = empty_protected();
         protected.insert(name.clone());
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &protected, true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &protected,
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::RecoveryReferenced);
         assert!(dir.join(&name).exists(), "受保护项绝不能被删");
         assert!(problems.is_empty());
@@ -1148,12 +1164,28 @@ mod tests {
         let relative = format!("sub/{name}");
         let mut protected = empty_protected();
         protected.insert(relative.clone());
-        let item = decide_candidate(&sub, &name, &relative, &protected, true, &mut problems);
+        let item = decide_candidate(
+            &sub,
+            &name,
+            &relative,
+            &leases(&sub),
+            &protected,
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::RecoveryReferenced);
         // 反例：集合里只有裸名时不该命中。
         let mut protected = empty_protected();
         protected.insert(name.clone());
-        let item = decide_candidate(&sub, &name, &relative, &protected, true, &mut problems);
+        let item = decide_candidate(
+            &sub,
+            &name,
+            &relative,
+            &leases(&sub),
+            &protected,
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::TempWithoutLease);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1167,7 +1199,15 @@ mod tests {
         let id = hex_id(11);
         dead_lease(&dir, &id, &name);
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::TempNotRegular);
         assert!(dir.join(&name).is_dir(), "非普通文件绝不能被删");
         std::fs::remove_dir_all(dir).unwrap();
@@ -1181,7 +1221,15 @@ mod tests {
         let outside = tempfile_target(&dir);
         std::os::unix::fs::symlink(&outside, dir.join(&name)).unwrap();
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::TempNotRegular);
         assert!(outside.exists(), "链接目标不得被删");
         std::fs::remove_dir_all(dir).unwrap();
@@ -1195,7 +1243,15 @@ mod tests {
         let id = hex_id(13);
         dead_lease(&dir, &id, &name);
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(item.outcome, Outcome::Remove);
         assert!(item.acted, "真删掉的项必须标记 acted");
         assert!(problems.is_empty(), "{problems:?}");
@@ -1212,7 +1268,15 @@ mod tests {
         let id = hex_id(15);
         dead_lease(&dir, &id, &name);
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), false, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            false,
+            &mut problems,
+        );
         assert_eq!(item.outcome, Outcome::Remove);
         assert!(!item.acted, "预览不得删除任何东西");
         assert!(dir.join(&name).is_file());
@@ -1228,7 +1292,15 @@ mod tests {
         dead_lease(&dir, &hex_id(17), &name);
         dead_lease(&dir, &hex_id(18), &name);
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::TempAmbiguous);
         assert!(dir.join(&name).is_file(), "歧义时绝不猜主人");
         assert_eq!(lease_paths(&dir).len(), 2);
@@ -1248,7 +1320,15 @@ mod tests {
         )
         .unwrap();
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::LeaseUnparsable);
         assert!(dir.join(&name).is_file());
         assert_eq!(lease_paths(&dir).len(), 2);
@@ -1268,7 +1348,15 @@ mod tests {
         )
         .unwrap();
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::TempAmbiguous);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1280,12 +1368,20 @@ mod tests {
         write_temp(&dir, &name);
         let holder = Lease::hold(&dir, &name).unwrap();
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
-        // 同进程跨句柄互斥只在 Windows 上观测成立，见设计“已知限制”。
-        #[cfg(windows)]
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
+        // 两个平台都会跨句柄报出冲突：Windows 靠共享/锁机制，Unix 上 `File::try_lock`
+        // 是 `flock(2)`、锁属于打开文件描述，同进程两次独立 `open(2)` 也互斥，第二次拿
+        // `EWOULDBLOCK`。Windows 做不到的是阻止不配合的进程重命名或删除已加锁的文件，
+        // 那是设计的“已知限制”，与这条断言无关。
         assert_eq!(keep_reason(&item), Reason::LeaseBusy);
-        #[cfg(not(windows))]
-        assert!(matches!(item.outcome, Outcome::Remove) || keep_reason(&item) == Reason::LeaseBusy);
         drop(holder);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1299,7 +1395,15 @@ mod tests {
         // 目录冒充租约：必须报 LeaseNotRegular 而不是当作“没有租约”去删候选。
         std::fs::create_dir(dir.join(format!(".ziyuan-lease-{id}"))).unwrap();
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         assert_eq!(keep_reason(&item), Reason::LeaseNotRegular);
         assert!(dir.join(&name).is_file(), "读不懂的归属证据必须保护候选");
         std::fs::remove_dir_all(dir).unwrap();
@@ -1364,7 +1468,15 @@ mod tests {
         dead_lease(&dir, &id, &name);
         tests_hooks::arm_vanish(&dir.join(&name));
         let mut problems = Vec::new();
-        let item = decide_candidate(&dir, &name, &name, &empty_protected(), true, &mut problems);
+        let item = decide_candidate(
+            &dir,
+            &name,
+            &name,
+            &leases(&dir),
+            &empty_protected(),
+            true,
+            &mut problems,
+        );
         tests_hooks::clear();
         assert_eq!(keep_reason(&item), Reason::TempAlreadyAbsent);
         assert!(problems.is_empty(), "已不存在不是失败");
