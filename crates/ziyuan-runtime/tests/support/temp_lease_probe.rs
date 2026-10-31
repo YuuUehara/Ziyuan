@@ -339,6 +339,28 @@ fn classify_line(line: &str, id: &str) -> Result<LeaseContent, KeepReason> {
     }
 }
 
+// Test-only interleaving point: it fires immediately before the first deletion,
+// which is after the lease lock is dropped in a buggy "verify, release, delete"
+// order and while it is still held in the correct order. Installing a barrier
+// here makes the double-delete race deterministic instead of timing-dependent.
+type DeleteHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+static DELETE_HOOK: std::sync::Mutex<Option<DeleteHook>> = std::sync::Mutex::new(None);
+
+pub fn install_delete_hook(hook: DeleteHook) {
+    *DELETE_HOOK.lock().unwrap() = Some(hook);
+}
+
+pub fn clear_delete_hook() {
+    *DELETE_HOOK.lock().unwrap() = None;
+}
+
+fn run_delete_hook() {
+    let hook = DELETE_HOOK.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 // Temp-recovery entry point: never waits on a lease lock, only probes.
 pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseDecision> {
     let temp = root.join(temp_name);
@@ -378,8 +400,10 @@ pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseD
         }
         Ok(_) => {}
     }
-    // Order is load-bearing: the temp file goes first, the lease last.
-    drop(held);
+    // Order is load-bearing: the temp file goes first, the lease last. The
+    // lease handle stays locked until both are gone, so a second cleaner cannot
+    // verify and delete concurrently; it observes Busy or a vanished lease.
+    run_delete_hook();
     match std::fs::remove_file(&temp) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -388,6 +412,7 @@ pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseD
         Err(e) => return Err(error("cleaner temp removal", e)),
     }
     std::fs::remove_file(&lease_path).map_err(|e| error("cleaner lease removal", e))?;
+    drop(held);
     Ok(LeaseDecision::remove(RemoveReason::WriterDeadLeaseVerified))
 }
 
@@ -416,8 +441,8 @@ pub fn reclaim_orphan_lease(root: &Path, id: &str) -> io::Result<LeaseDecision> 
     if root.join(&temp).exists() {
         return Ok(LeaseDecision::keep(KeepReason::TempStillPresent));
     }
-    drop(held);
     std::fs::remove_file(&lease_path).map_err(|e| error("orphan lease removal", e))?;
+    drop(held);
     Ok(LeaseDecision::remove(RemoveReason::OrphanLease))
 }
 

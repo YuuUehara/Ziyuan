@@ -789,6 +789,115 @@ fn lease_lock_wait_has_deadline() {
 }
 
 #[test]
+fn two_cleaners_never_double_delete() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let mut child = support::ChildGuard::spawn("handshake").unwrap();
+    let mut stream = child.ready("connected", support::DEFAULT_TIMEOUT).unwrap();
+    let root = child.root().to_path_buf();
+    let id = child.id().to_owned();
+    let lease = root.join(support::lease_file_name(&id));
+    std::fs::write(&lease, support::lease_line("temp", &id)).unwrap();
+    std::fs::write(root.join("temp"), support::COMPLETE_NEW).unwrap();
+
+    // Deterministic interleaving, not a timing race: cleaner A is held inside
+    // verification until B has had its chance. If the lease lock were released
+    // before deletion, B would also reach verification; while it is held, B can
+    // only observe Busy.
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicBool::new(false));
+    {
+        let arrived = Arc::clone(&arrived);
+        let released = Arc::clone(&released);
+        support::install_delete_hook(Arc::new(move || {
+            arrived.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !released.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }));
+    }
+
+    let wait_for = |target: usize, limit: Duration| {
+        let deadline = Instant::now() + limit;
+        while arrived.load(Ordering::SeqCst) < target && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        arrived.load(Ordering::SeqCst)
+    };
+
+    let outcomes = std::thread::scope(|scope| {
+        let first = {
+            let root = root.clone();
+            let id = id.clone();
+            scope.spawn(move || support::recover_temp(&root, &id, "temp"))
+        };
+        // A must be inside verification before B starts, so B cannot win the
+        // lock simply by arriving first.
+        assert_eq!(
+            wait_for(1, Duration::from_secs(2)),
+            1,
+            "first cleaner never reached verification"
+        );
+        let second = {
+            let root = root.clone();
+            let id = id.clone();
+            scope.spawn(move || support::recover_temp(&root, &id, "temp"))
+        };
+        // B gets a full window to reach verification before A is released.
+        let observed = wait_for(2, Duration::from_millis(300));
+        released.store(true, Ordering::SeqCst);
+        let results = vec![first.join().unwrap(), second.join().unwrap()];
+        (results, observed)
+    });
+    support::clear_delete_hook();
+
+    let (results, observed) = outcomes;
+    let decisions: Vec<_> = results
+        .into_iter()
+        .map(|result| result.expect("cleaners must not error on a live lease"))
+        .collect();
+    assert_eq!(
+        observed, 1,
+        "only the lock holder may reach verification; a second arrival proves the lease lock was released before deletion"
+    );
+    let removals = decisions
+        .iter()
+        .filter(|decision| matches!(decision, support::LeaseDecision::Remove { .. }))
+        .count();
+    assert_eq!(removals, 1, "exactly one cleaner may remove: {decisions:?}");
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|decision| {
+                matches!(
+                    decision,
+                    support::LeaseDecision::Keep {
+                        reason: support::KeepReason::LeaseBusy
+                    }
+                )
+            })
+            .count(),
+        1,
+        "the losing cleaner must report a busy lease, not a silent skip: {decisions:?}"
+    );
+    eprintln!("native double cleaner: {decisions:?}");
+    assert!(!root.join("temp").exists());
+    assert!(!lease.exists());
+    assert!(dir_names(&root).is_empty(), "directory must be clean");
+
+    support::send_message(
+        &mut stream,
+        "CONTINUE",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent double cleaner CONTINUE",
+    )
+    .unwrap();
+    child.finish(support::DEFAULT_TIMEOUT).unwrap();
+}
+
+#[test]
 fn probe_child_entry() {
     if std::env::var_os("ZIYUAN_TEMP_LEASE_PROBE").is_none() {
         return;

@@ -227,6 +227,87 @@ jj commit -m "docs(runtime): 记录临时租约验证结果与实现门槛" -m "
 
 交付实验报告、具体协议（若已闭合）、测试证据及限制。等待用户批准设计补充后，使用 @writing-plans 编写生产清理实施计划，不能直接执行下面的后续范围。
 
+## Chunk 2: 租约载体验证（2026-10-31 第二轮，用户已批准）
+
+第一轮结论是"临时文件的锁不足以防误删"，且关闭句柄到改名之间必然失守。本轮只验证一个候选载体能否补上这段：**租约文件先于临时文件存在，且租约句柄一直持有到改名完成**，清理者靠"租约锁能否取得"判断写入者是否存活，靠租约内容判断它属于哪个临时文件。
+
+仍是实验，不是实现。不改 `replace.rs`、不加 CLI、不加依赖、不写版本。
+
+### 本轮假设与格式
+
+租约文件与临时文件同目录，命名为 `.ziyuan-lease-<id>`，`<id>` 为 32 位小写十六进制随机值，由 `create_new` 创建。内容为单行：
+
+```
+ziyuan-lease v1 temp=<temp-file-name> id=<32 hex>
+```
+
+`temp=` 记录它保护的临时文件名（不含目录）。持有顺序固定为：建租约 → 租约加锁 → 建临时文件 → 写 → 同步 → 改名 → 关闭租约句柄 → 删租约。
+
+### 文件职责
+
+| 操作 | 路径 | 职责 |
+| --- | --- | --- |
+| 修改 | `crates/ziyuan-runtime/tests/support/temp_lease_probe.rs` | 增加租约读写、加锁、非阻塞探测、安全清理的测试辅助 |
+| 修改 | `crates/ziyuan-runtime/tests/temp_lease_probe.rs` | 新增租约生命周期、竞争、强杀残留、旧文件与损坏租约的用例 |
+| 修改 | `docs/acceptance/1.2.2-temp-lease-feasibility.md` | 记录本轮证据、未决项与结论 |
+| 不改 | `crates/ziyuan-runtime/src/**`、CLI、manifests、工作流、版本 | 生产行为一律不动 |
+
+### Task 5: 租约载体生命周期
+
+- [x] **Step 1: 写 `lease_covers_close_before_rename_window` 的失败测试。**
+
+子进程按上述顺序建租约、加锁、建临时文件、写入、`sync_all`、**关闭临时文件句柄**，然后在改名前 READY。父进程观察两点：临时文件本身可以取锁（证明第一轮的窗口仍在），但**租约**是 Busy。断言必须能失败：先让辅助在关闭临时句柄时一并释放租约，确认测试报错，再改为持续持有。
+
+- [x] **Step 2: 写 `cleaner_keeps_temp_while_lease_is_held`。**
+
+父进程只做非阻塞探测，不得等待。断言租约为 Busy 时决策为保留，临时文件与租约都不变；子进程 CONTINUE 后改名成功，父进程随后可取得租约锁。
+
+- [x] **Step 3: 写 `killed_writer_lease_is_reclaimable`。**
+
+子进程持租约与临时文件时被强杀。父进程取得租约锁后，必须核验：租约内容版本为 v1、`temp=` 与实际文件名一致、临时文件是普通文件。三者齐全才删除临时文件、再删租约，并断言目录内无其他文件被改动。任一核验失败则保留并报告，测试要覆盖"内容对不上"和"临时文件已不在"两种保留分支。
+
+- [x] **Step 4: 写 `killed_before_temp_creation_leaves_only_lease`。**
+
+子进程建好并锁住租约、尚未建临时文件时被强杀。父进程应只删租约，目录清空，不得因"没有临时文件"去猜别的东西。
+
+- [x] **Step 5: 写 `temp_without_lease_and_foreign_leases_are_retained`。**
+
+覆盖三种保留：符合命名但没有租约的旧临时文件、租约为未知版本或无法解析、租约 `id` 与文件名不匹配。三者都必须原样保留并给出可区分的原因；`--yes` 之类的强制语义不在本轮实现。
+
+- [x] **Step 6: 写 `second_creator_conflicts_instead_of_overwriting`。**
+
+同名租约已存在时，`create_new` 必须返回 `AlreadyExists`，第二个写入者据此报冲突并退出，不得截断或复用别人的租约。断言原租约内容未变。
+
+- [x] **Step 7: 写 `lease_lock_wait_has_deadline`。**
+
+写入者等待已被占用的租约锁时必须有时限并超时返回，不能无限等待；清理者一侧只允许非阻塞探测。用 300 毫秒量级的上限验证，并断言超时后双方仍能各自收尾，不留下未回收的子进程。
+
+- [x] **Step 8: 全量运行并提交。**
+
+```powershell
+cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
+cargo test -p ziyuan-runtime --locked --lib tools::replace::tests::
+cargo fmt --all -- --check
+cargo clippy -p ziyuan-runtime --all-targets --locked -- -D warnings
+```
+
+- [x] **Step 9: 更新可行性报告并停止。**
+
+报告新增一节记录：租约格式、生命周期、强杀后各阶段的可回收性、保留分支、锁等待行为，以及仍未验证的项。结论若支持，就写成"候选协议可闭合，待用户审阅后写入设计"；若不支持，如实写"仍不闭合"并说明卡在哪一步。不得在报告里直接宣布 1.2.2 已可实施。
+
+### 本轮执行记录
+
+Task 5 九步已完成，另补一项计划外但必需的安全修正：
+
+- 初版辅助在"核验后、删除前"释放租约锁，使"核验 + 删除"不再原子，两个清理者可能各删一次。已改为租约句柄保持加锁直到临时文件与租约都被删除，并新增 `two_cleaners_never_double_delete`。
+- 该用例经过两轮修正才真正有效：最初两线程同时启动，看似并发，但在缺陷顺序下 15 次全过（第二个清理者常先拿到 Busy）；改为受控交错（先让第一个停在核验后，再启动第二个，300 毫秒后放行）后，缺陷顺序 **10 次全部失败**，正确顺序 5 次全部通过。
+- 提交：`fdb56882`（Task 5 主体）；顺序修正与报告更新见本轮最后一个提交。
+- 全量：`temp_lease_probe` 26 passed、`tools::replace::tests` 16 passed、fmt 与 clippy 通过、`cargo +1.90 check` 通过。
+
+### 本轮停止点
+
+以上完成即停。把租约协议写进设计文档、以及生产清理实施计划，都需要用户另行批准；本轮不进入 `replace.rs`。
+
 ## 门槛通过后的生产计划输入（非可执行任务）
 
 下一份计划须固定以下文件责任和逐项 RED/GREEN 命令，不允许跳过本章安全条件：
