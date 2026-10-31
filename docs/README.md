@@ -26,6 +26,8 @@
 
 每份只记录当时实际做过的检查和未测项目。
 
+- [1.2.2](acceptance/1.2.2.md)
+- [1.2.2 临时租约可行性报告](acceptance/1.2.2-temp-lease-feasibility.md)
 - [1.2.1](acceptance/1.2.1.md)
 - [1.2.0](acceptance/1.2.0.md)
 - [1.1.0](acceptance/1.1.0.md)

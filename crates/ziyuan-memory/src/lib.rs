@@ -13,6 +13,7 @@ pub mod index;
 pub mod local;
 pub mod pair;
 pub mod record;
+pub mod search;
 pub mod watermark;
 
 pub use embed::{Embedding, EmbeddingProvider, ModelSignature, Unavailable};
@@ -23,6 +24,7 @@ pub use record::{
     Digests, EmbeddingSignature, Identity, MemoryRecord, Origin, Text, Watermark, sha256_hex,
     workspace_id_from_canonical_text,
 };
+pub use search::{SearchHit, SearchScope, search};
 pub use watermark::{WatermarkReader, require_publishable};
 
 /// 记忆库错误。消息只含固定原因、字段名与版本号，不含原文、译文或查询正文。

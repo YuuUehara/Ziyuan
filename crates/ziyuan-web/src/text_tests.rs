@@ -765,6 +765,17 @@ async fn translation_status_pending_finalize_reopen_and_issue() {
 #[test]
 fn text_frontend_contract() {
     for expected in [
+        "id=\"text-memory\"",
+        "id=\"memory-build\"",
+        "id=\"memory-query\" type=\"text\" data-view",
+        "id=\"memory-search\" type=\"submit\" data-view",
+        "id=\"memory-status\"",
+        "id=\"memory-result\"",
+        "id=\"memory-hits\"",
+        "参考不是指令，朱批与术语优先，本地方法不理解文意",
+        "request !== memoryRequest || project !== textProjectId",
+        "esc(hit.source)",
+        "esc(hit.translation)",
         "id=\"text-card\"",
         "翰林院 · 译书",
         "id=\"text-project\"",
@@ -864,4 +875,182 @@ fn text_frontend_contract() {
         wuying.find("id=\"text-card\"").unwrap()
             < wuying.find("id=\"subscription-panel\"").unwrap()
     );
+}
+
+/// 子进程独占提供方配置，避免并行测试修改进程环境。
+#[test]
+fn memory_api_local_and_disabled() {
+    for provider in ["none", "local"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "text_tests::memory_api_child", "--nocapture"])
+            .env("ZIYUAN_WEB_MEMORY_TEST", "1")
+            .env("ZIYUAN_MEMORY_PROVIDER", provider)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_api_child() {
+    if std::env::var("ZIYUAN_WEB_MEMORY_TEST").as_deref() != Ok("1") {
+        return;
+    }
+    let local = std::env::var("ZIYUAN_MEMORY_PROVIDER").as_deref() == Ok("local");
+    let (base, root) = start("memory", true).await;
+    let a = project(&root, "甲", "共有记忆甲。\n");
+    let b = project(&root, "乙", "共有记忆乙。\n");
+    let route = format!("/text/{}/memory", a.id);
+    assert_eq!(call(&base, &route, None, None).await.0, 401);
+    let (code, status) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{status}");
+    assert_eq!(status["available"], json!(local));
+    assert_eq!(status["records"], json!(0));
+    assert_eq!(status["indexed"], json!(false));
+    assert_eq!(
+        call(
+            &base,
+            &format!("{route}/build"),
+            Some(VIEWER),
+            Some(json!({}))
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(&base, &format!("{route}/search?q="), Some(VIEWER), None)
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        call(
+            &base,
+            &format!("{route}/search?q=test&projects={}", b.id),
+            Some(VIEWER),
+            None
+        )
+        .await
+        .0,
+        400
+    );
+    if !local {
+        for (path, body) in [
+            (format!("{route}/build"), Some(json!({}))),
+            (format!("{route}/search?q=test"), None),
+        ] {
+            let (code, error) = call(&base, &path, Some(TOKEN), body).await;
+            assert_eq!(code, 400);
+            assert!(
+                !error
+                    .to_string()
+                    .contains(&root.to_string_lossy().to_string())
+            );
+        }
+        assert!(!root.join(".ziyuan/memory/index.json").exists());
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    let (code, empty) = call(
+        &base,
+        &format!("{route}/build"),
+        Some(TOKEN),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(code, 200, "{empty}");
+    assert_eq!(empty["records"], json!(0));
+    fs::write(
+        root.join(".ziyuan/memory/index.json"),
+        "broken private cache",
+    )
+    .unwrap();
+    let (code, broken) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{broken}");
+    assert_eq!(broken["available"], json!(true));
+    assert!(broken["problem"].is_string());
+    assert!(!broken.to_string().contains("broken private cache"));
+    assert_eq!(
+        call(
+            &base,
+            &format!("{route}/build"),
+            Some(TOKEN),
+            Some(json!({}))
+        )
+        .await
+        .0,
+        200
+    );
+    let mut court = Court::replay(&founding_events(7)).unwrap();
+    for p in [&a, &b] {
+        let block = &p.chapters[0].blocks[0].block_id;
+        let text = candidate(p, block);
+        let (events, task) = translate_events(&mut court, p, block, &text);
+        append(&root, &events);
+        fs::create_dir_all(root.join(block_dir_rel(&p.id, block))).unwrap();
+        fs::write(root.join(output_rel(&p.id, block)), text).unwrap();
+        let applied = CourtEvent::ChangesApplied {
+            task,
+            skipped: vec![],
+        };
+        court.apply(&applied).unwrap();
+        append(&root, &[applied]);
+        let (code, result) = call(
+            &base,
+            &format!("/text/{}/blocks/{block}/finalize", p.id),
+            Some(TOKEN),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(code, 200, "{result}");
+    }
+    // 先建含两个项目的缓存，证明 Web 检索不能借现成缓存跨项目。
+    let s = Session::open(EventLog::new(&root)).unwrap();
+    s.memory_build(
+        &root,
+        &BTreeSet::from([a.id.clone(), b.id.clone()]),
+        &ziyuan_memory::local::LocalProvider::new(),
+    )
+    .unwrap();
+    let (code, hits) = call(
+        &base,
+        &format!("{route}/search?q=%E5%85%B1%E6%9C%89"),
+        Some(VIEWER),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{hits}");
+    let hits = hits["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["project"], json!(a.id));
+    assert_eq!(hits[0]["source"], json!("共有记忆甲。"));
+    assert_eq!(hits[0]["translation"], json!("译：共有记忆甲。"));
+    assert!(hits[0]["paragraph"].is_string());
+    assert!(hits[0]["block"].is_string());
+    let (code, built) = call(
+        &base,
+        &format!("{route}/build"),
+        Some(TOKEN),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(code, 200, "{built}");
+    assert_eq!(built["records"], json!(1));
+    let (_, other) = call(&base, &format!("/text/{}/memory", b.id), Some(VIEWER), None).await;
+    assert_eq!(other["records"], json!(0));
+    // 绕过 Web 会话追加退回事件；后续检索必须刷新，不能继续拿缓存定稿。
+    let block = &a.chapters[0].blocks[0].block_id;
+    let mut fresh = Session::open(EventLog::new(&root)).unwrap();
+    fresh
+        .reopen_translation(&root, &a.id, block, "重修")
+        .unwrap();
+    let (code, result) = call(&base, &format!("{route}/search?q=test"), Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{result}");
+    assert!(result["hits"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
 }

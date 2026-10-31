@@ -14,6 +14,7 @@ mod exam;
 mod follow;
 mod history;
 mod huidian;
+pub mod memory;
 pub mod notes;
 mod personnel;
 mod preview;

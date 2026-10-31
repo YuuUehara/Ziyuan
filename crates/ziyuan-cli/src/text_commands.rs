@@ -44,6 +44,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
 
 pub(crate) enum TextAction {
     Help,
+    Memory(crate::memory_commands::MemoryAction),
     Translation(crate::translation_commands::TranslationAction),
     Recovery(RecoveryAction),
     Init(NewProject),
@@ -101,6 +102,7 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
             _ => return Err(SHOW_USAGE.into()),
         },
         "check" => parse_check(rest)?,
+        "memory" => TextAction::Memory(crate::memory_commands::parse(rest)?),
         "recovery" => parse_recovery(rest)?,
         "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
         | "status" | "resume" => {
@@ -212,14 +214,16 @@ fn parse_recovery(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
 pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> {
     if let TextAction::Help = action {
         println!(
-            "{TEXT_HELP}\n\n{}",
-            crate::translation_commands::TRANSLATION_HELP
+            "{TEXT_HELP}\n\n{}\n\n{}",
+            crate::translation_commands::TRANSLATION_HELP,
+            crate::memory_commands::MEMORY_HELP
         );
         return Ok(());
     }
     let projects = TextProjects::new(env::current_dir()?);
     match action {
         TextAction::Help => unreachable!("已在上面处理"),
+        TextAction::Memory(action) => return crate::memory_commands::run(action, json),
         TextAction::Translation(action) => return crate::translation_commands::run(action, json),
         TextAction::Recovery(action) => return run_recovery(action, json),
         TextAction::Init(metadata) => {

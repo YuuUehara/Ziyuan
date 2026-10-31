@@ -109,6 +109,8 @@ pub(crate) const HELP: &str = concat!(
   ziyuan text translate|review|revise|zhupi|finalize|reopen <项目ID> <块ID> ...
   ziyuan text context approve <项目ID> | status <项目ID> | resume <项目ID> [--yes]
                                        翰林院译书：下诏入队、逐段朱批、上下文批准、御览与续做；text help 查看参数
+  ziyuan text memory status|build|search <项目ID> ...
+                                       本机翻译记忆：只收有效定稿，跨项目须明确指定；text help 查看参数
   ziyuan note add|list|show|edit|remove|promote ...
                                        御笔札记（不需 init）；promote 仅并入草稿，须 text context approve 才生效；
                                        `ziyuan note help` 查看参数
@@ -303,7 +305,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
-         text) words="init import show check recovery translate review revise zhupi finalize reopen context approve status resume help --dept --reason --clear --show --yes --json" ;;
+         text) words="init import show check recovery translate review revise zhupi finalize reopen context approve status resume memory build search help --project --query --limit --dept --reason --clear --show --yes --json" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
          apply) words="--skip --commit" ;;
@@ -339,7 +341,10 @@ complete -F _ziyuan ziyuan
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
-                format!("{} -a 'init import show check recovery translate review revise zhupi finalize reopen context approve status resume help'", seen("text")),
+                format!("{} -a 'init import show check recovery translate review revise zhupi finalize reopen context approve status resume memory build search help'", seen("text")),
+                format!("{} -l project -r", seen("text")),
+                format!("{} -l query -r", seen("text")),
+                format!("{} -l limit -r", seen("text")),
                 format!("{} -a 'add list show edit remove promote help'", seen("note")),
                 format!("{} -l kind -x -a 'word passage'", seen("note")),
                 format!("{} -l source -r", seen("note")),

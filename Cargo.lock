@@ -2351,7 +2351,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "ziyuan-app"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "ring",
  "serde",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-cli"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -2379,6 +2379,7 @@ dependencies = [
  "ziyuan-github",
  "ziyuan-governance",
  "ziyuan-llm",
+ "ziyuan-memory",
  "ziyuan-runtime",
  "ziyuan-storage",
  "ziyuan-tui",
@@ -2387,14 +2388,14 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-core"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ziyuan-github"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "serde_json",
  "ureq",
@@ -2403,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-governance"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "serde",
  "ziyuan-core",
@@ -2411,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-llm"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "ring",
  "serde_json",
@@ -2422,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-memory"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "ring",
  "serde",
@@ -2431,7 +2432,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-runtime"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -2441,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-storage"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "ring",
  "serde",
@@ -2451,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-tui"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "ratatui",
  "tokio",
@@ -2465,7 +2466,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-web"
-version = "1.2.1"
+version = "1.3.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -2477,6 +2478,7 @@ dependencies = [
  "ziyuan-core",
  "ziyuan-github",
  "ziyuan-governance",
+ "ziyuan-memory",
  "ziyuan-runtime",
  "ziyuan-storage",
 ]

@@ -5,6 +5,7 @@ mod args;
 mod backend;
 mod commands;
 mod help;
+mod memory_commands;
 mod note_commands;
 mod output;
 mod subscription_commands;

@@ -606,6 +606,16 @@ fn new_cli_usage_and_completions() {
         vec!["text", "resume", "p", "--yes", "--yes"],
         vec!["text", "context", "approve"],
         vec!["text", "zhupi", "p", "b", "para", "--clear", "text"],
+        vec!["text", "memory", "search", "p"],
+        vec!["text", "memory", "search", "p", "--query", ""],
+        vec![
+            "text", "memory", "search", "p", "--query", "x", "--limit", "0",
+        ],
+        vec![
+            "text", "memory", "search", "p", "--query", "x", "--limit", "51",
+        ],
+        vec!["text", "memory", "build", "p", "--all"],
+        vec!["text", "memory", "status", "p", "--project", "q"],
     ] {
         assert_eq!(code(root, &args), Some(2), "{args:?}");
     }
@@ -621,8 +631,71 @@ fn new_cli_usage_and_completions() {
             "resume",
             // 补全词取自 help.rs 的子命令清单：从任一清单里漏掉 `recovery` 都会在这里失败。
             "recovery",
+            "memory",
+            "query",
         ] {
             assert!(c.contains(word), "{shell}: {word}");
         }
     }
+}
+
+#[test]
+fn memory_cli_is_explicit_and_rebuilds_only_derived_data() {
+    let dir = TempDir::new("memory");
+    let root = dir.path();
+    let project = init_json(root, "记忆库测试", "ja");
+    dir.write("chapter.txt", "夜が明けた。\n\n風が止んだ。\n");
+    ok(root, &["text", "import", &project, "chapter.txt"]);
+    ok(root, &["init"]);
+    let status = ok_json(root, &["text", "memory", "status", &project, "--json"]);
+    assert_eq!(status["built"], false);
+    assert_eq!(status["records"], 0);
+    let disabled = ziyuan(
+        root,
+        &["text", "memory", "search", &project, "--query", "夜"],
+    );
+    assert_eq!(disabled.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&disabled.stderr).contains("ZIYUAN_MEMORY_PROVIDER"));
+    assert!(!root.join(".ziyuan/memory/index.json").exists());
+
+    let local = |args: &[&str]| {
+        let mut command = Command::new(BIN);
+        command.current_dir(root).args(args);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("ZIYUAN_") {
+                command.env_remove(key);
+            }
+        }
+        let result = command
+            .env("ZIYUAN_MEMORY_PROVIDER", "local")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    let before = std::fs::read(root.join(".ziyuan/court.log")).unwrap();
+    let built = local(&["text", "memory", "build", &project, "--json"]);
+    assert_eq!(built["records"], 0, "未定稿不能收录");
+    assert_eq!(built["skipped"].as_array().unwrap().len(), 1);
+    let hits = local(&[
+        "text", "memory", "search", &project, "--query", "夜", "--json",
+    ]);
+    assert!(hits["hits"].as_array().unwrap().is_empty());
+    std::fs::remove_file(root.join(".ziyuan/memory/index.json")).unwrap();
+    assert_eq!(
+        local(&["text", "memory", "build", &project, "--json"])["records"],
+        0
+    );
+    assert_eq!(
+        std::fs::read(root.join(".ziyuan/court.log")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("chapter.txt")).unwrap(),
+        "夜が明けた。\n\n風が止んだ。\n"
+    );
 }

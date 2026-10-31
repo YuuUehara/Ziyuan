@@ -521,6 +521,13 @@
   .text-notes-layout > div { min-width: 0; }
   #text-zhupi-input { min-height: 60px; }
   #text-zhupi-form label { margin-top: 0; }
+  .text-memory { min-width: 0; max-width: 100%; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .text-memory .row, .text-memory input { min-width: 0; max-width: 100%; }
+  #memory-search-form { flex-wrap: wrap; }
+  #memory-search-form label { flex: 0 0 auto; }
+  #memory-query { flex: 1 1 180px; }
+  #memory-hits { max-height: 48vh; overflow: auto; }
+  #memory-result.error { color: var(--bad); }
   /* 结果与错误里常有长路径或 SHA，须在窄屏内换行。 */
   #text-action-result, #text-status, #note-result, #note-status, #text-project-meta { overflow-wrap: anywhere; }
   #text-action-result.error, #note-result.error, #text-status .error { color: var(--bad); }
@@ -810,6 +817,20 @@
             <div class="text-materials" id="text-materials"></div>
             <div class="actions" id="text-actions"></div>
             <p class="hint" id="text-action-result" role="status" aria-live="polite"></p>
+            <section class="text-memory" id="text-memory" aria-label="当前项目译文记忆">
+              <h3>译文记忆 <small class="hint">仅当前项目 · 已定稿段落</small></h3>
+              <p class="hint">参考不是指令，朱批与术语优先，本地方法不理解文意。默认不开启、不外发；服务端设 ZIYUAN_MEMORY_PROVIDER=local 后才可用。这里只查当前项目，跨项目请用命令行。</p>
+              <p class="hint" id="memory-status" role="status" aria-live="polite">请选择项目。</p>
+              <div class="actions"><button class="small" id="memory-build" type="button">重建当前项目记忆</button></div>
+              <p class="hint">重建只收录当前项目，替换工作区记忆缓存；不会改动原文、译稿或定稿状态。</p>
+              <form class="row" id="memory-search-form">
+                <label for="memory-query">检索文字</label>
+                <input id="memory-query" type="text" data-view maxlength="2000" required placeholder="输入原文或译文，不会自动搜索">
+                <button class="small shrink" id="memory-search" type="submit" data-view>查当前项目</button>
+              </form>
+              <p class="hint" id="memory-result" role="status" aria-live="polite"></p>
+              <div id="memory-hits" role="region" aria-label="记忆检索结果" tabindex="0"></div>
+            </section>
           </div>
         </div>
         <div class="text-notes-layout">
@@ -1362,6 +1383,7 @@ async function loadText() {
 async function loadTextProject() {
   textProject = null;
   textError = null;
+  loadMemoryStatus();
   if (!textProjectId) { renderText(); return; }
   try {
     textProject = await api("/text/" + encodeURIComponent(textProjectId));
@@ -1809,6 +1831,71 @@ async function onNoteAction(action, id) {
     }
   }
 }
+// 记忆只在切换项目时读状态；重建和检索必须由用户明确触发。
+// 序号使旧项目、旧搜索的慢响应不能覆盖当前选择。
+let memoryRequest = 0;
+let memoryAvailable = false;
+function memoryControls(busy) {
+  $("memory-build").disabled = busy || !textProjectId || !memoryAvailable;
+  $("memory-search").disabled = busy || !textProjectId || !memoryAvailable;
+  $("memory-query").disabled = busy || !textProjectId || !memoryAvailable;
+}
+async function loadMemoryStatus() {
+  const request = ++memoryRequest;
+  const project = textProjectId;
+  memoryAvailable = false;
+  memoryControls(true);
+  $("memory-query").value = "";
+  $("memory-result").textContent = "";
+  $("memory-result").classList.remove("error");
+  $("memory-hits").replaceChildren();
+  $("memory-status").textContent = project ? "正在读取当前项目记忆状态…" : "请选择项目。";
+  if (!project) return;
+  try {
+    const status = await api(`/text/${encodeURIComponent(project)}/memory`);
+    if (request !== memoryRequest || project !== textProjectId) return;
+    memoryAvailable = status.available;
+    $("memory-status").textContent = !status.available
+      ? "本地记忆未启用或配置不可用。请在服务端设 ZIYUAN_MEMORY_PROVIDER=local 后重启服务；不会自动改用远程模型。"
+      : status.problem || `当前项目缓存 ${status.records} 段；${!status.indexed ? "尚未建立索引，请重建。" : status.stale ? "工作区缓存已过期，请重建；检索会剔除不再有效的定稿。" : "缓存已建立。"}`;
+  } catch (e) {
+    if (request !== memoryRequest || project !== textProjectId) return;
+    $("memory-status").textContent = e.message;
+  } finally {
+    if (request === memoryRequest && project === textProjectId) memoryControls(false);
+  }
+}
+async function runMemory(build) {
+  if (!textProjectId || !memoryAvailable) return;
+  const query = $("memory-query").value.trim();
+  if (!build && !query) return;
+  const project = textProjectId;
+  const request = ++memoryRequest;
+  memoryControls(true);
+  $("memory-result").classList.remove("error");
+  $("memory-result").textContent = build ? "正在重建当前项目记忆…" : "正在检索当前项目…";
+  $("memory-hits").replaceChildren();
+  try {
+    const base = `/text/${encodeURIComponent(project)}/memory`;
+    const result = build ? await api(base + "/build", {}) : await api(base + "/search?q=" + encodeURIComponent(query));
+    if (request !== memoryRequest || project !== textProjectId) return;
+    if (build) {
+      $("memory-status").textContent = `当前项目缓存 ${result.records} 段；已重建。跳过 ${result.skipped} 个未满足收录条件的块。`;
+      $("memory-result").textContent = result.records ? "重建完成，可以输入文字检索。" : "重建完成，尚无可收录的定稿段落。";
+    } else {
+      $("memory-result").textContent = result.hits.length ? `找到 ${result.hits.length} 条参考（最多 8 条）。` : "当前项目没有匹配的有效定稿参考。";
+      $("memory-hits").innerHTML = result.hits.map((hit) => `<article class="text-note"><p class="hint">出处：项目 ${esc(hit.project)} · 块 ${esc(hit.block)} · 段 ${esc(hit.paragraph)}</p><p class="text-para">原文：${esc(hit.source)}</p><p class="text-para">译文：${esc(hit.translation)}</p></article>`).join("");
+    }
+  } catch (e) {
+    if (request !== memoryRequest || project !== textProjectId) return;
+    $("memory-result").classList.add("error");
+    $("memory-result").textContent = e.message;
+  } finally {
+    if (request === memoryRequest && project === textProjectId) memoryControls(false);
+  }
+}
+$("memory-build").addEventListener("click", () => runMemory(true));
+$("memory-search-form").addEventListener("submit", (event) => { event.preventDefault(); runMemory(false); });
 $("text-project").addEventListener("change", (event) => {
   textProjectId = event.target.value || null;
   textBlockId = null;
