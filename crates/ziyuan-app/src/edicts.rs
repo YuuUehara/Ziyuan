@@ -800,8 +800,24 @@ impl<S: EventStore> Session<S> {
         //
         // 清理诊断随成功一起往上交；失败时只剩写入错误这一条路（`AppError` 只装失败原因，
         // 设计明确清理失败不能写成替换失败），同轮另记的清理诊断只能随失败丢掉。
-        let applied = ziyuan_runtime::tools::apply_changes(root, selected)
-            .map_err(|e| AppError::Apply(e.to_string()))?;
+        //
+        // 受保护集合就是本次记录写下的全部目标：清理器据此跳过仍被记录引用的项。
+        // 记录读不出来时**退回不清理**（fail closed）：宁可留下陈旧临时文件，也不误删。
+        let protected = workspace.protected_targets();
+        let mut applied = match &protected {
+            Ok(protected) => {
+                ziyuan_runtime::tools::apply_changes_protected(root, selected, protected)
+            }
+            Err(_) => ziyuan_runtime::tools::apply_changes(root, selected),
+        }
+        .map_err(|e| AppError::Apply(e.to_string()))?;
+        // 上面 `Err(_)` 吞掉的是存储错误，不是诊断：写入照旧，但前端要能报告这一次没清理。
+        if let Err(error) = protected {
+            applied.problems.push(Problem {
+                path: workspace.root().to_path_buf(),
+                message: format!("读取恢复记录失败，本轮未清理临时文件：{error}"),
+            });
+        }
         // 记录预告本批紧接在 `base` 之后。会话里的条数若已被别的提交推动（受管事务之外的
         // 记账，如信使回执），追加就会落在别处，记录与实际从此对不上——此时宁可留下
         // 「已发布 + 奇数世代」让 `text recovery` 核对，也不写出一批与记录不符的事件。

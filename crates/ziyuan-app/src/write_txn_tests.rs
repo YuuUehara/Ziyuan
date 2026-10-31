@@ -658,6 +658,64 @@ impl Drop for LockChild {
     }
 }
 
+#[tokio::test]
+async fn managed_write_sweeps_a_stale_temp_next_to_the_target() {
+    let root = Root::new("sweep-stale");
+    // 已死写入者的残留：一份合法租约，加上它认领的临时文件，与目标同目录。
+    let stale = root.path().join(".ziyuan-tmp-1-1-1");
+    std::fs::write(&stale, "partial").unwrap();
+    std::fs::write(
+        root.path()
+            .join(".ziyuan-lease-0123456789abcdef0123456789abcdef"),
+        "ziyuan-lease v1 temp=.ziyuan-tmp-1-1-1 \
+         id=0123456789abcdef0123456789abcdef\n",
+    )
+    .unwrap();
+
+    let (mut session, task) = prepared().await;
+    session
+        .apply_reviewed(task, root.path(), Vec::new(), None)
+        .unwrap();
+
+    assert_eq!(root.read(), CHANGED);
+    assert!(!stale.exists(), "写入前应清掉目标目录里的陈旧临时文件");
+    assert!(root.temps().is_empty(), "{:?}", root.temps());
+    let leases: Vec<String> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !leases.iter().any(|name| name.starts_with(".ziyuan-lease-")),
+        "{leases:?}"
+    );
+}
+
+#[tokio::test]
+async fn managed_write_leaves_other_directories_alone() {
+    // 同名的陈旧残留若不在本次写入目标所在目录，就不归本轮清理：自动清理只碰目标目录。
+    let root = Root::new("sweep-elsewhere");
+    let elsewhere = root.path().join("docs");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let stale = elsewhere.join(".ziyuan-tmp-1-1-1");
+    std::fs::write(&stale, "partial").unwrap();
+    let lease = elsewhere.join(".ziyuan-lease-0123456789abcdef0123456789abcdef");
+    std::fs::write(
+        &lease,
+        "ziyuan-lease v1 temp=.ziyuan-tmp-1-1-1 \
+         id=0123456789abcdef0123456789abcdef\n",
+    )
+    .unwrap();
+
+    let (mut session, task) = prepared().await;
+    session
+        .apply_reviewed(task, root.path(), Vec::new(), None)
+        .unwrap();
+
+    assert_eq!(root.read(), CHANGED);
+    assert!(stale.exists(), "目标目录之外的陈旧临时文件不得被删");
+    assert!(lease.exists(), "目标目录之外的孤儿租约不得被删");
+}
+
 #[test]
 fn child_holds_the_workspace_lock() {
     let Some(root) = std::env::var_os("ZIYUAN_WRITE_TXN_LOCK_ROOT") else {
