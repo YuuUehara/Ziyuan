@@ -250,6 +250,7 @@ impl App {
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
+                    // 诊断交由下一次状态刷新呈现；此处不写 stderr，免得污染全屏画面。
                     |s| s.apply_changes(task, &root, Vec::new()),
                     |_| format!("诏令 #{} 准奏，改动已写入项目", task.0),
                 );
@@ -259,6 +260,7 @@ impl App {
                 // 落盘成功后提交；提交失败只报告，改动仍已落盘。
                 if self
                     .mutate(
+                        // 诊断交由下一次状态刷新呈现；此处不写 stderr，免得污染全屏画面。
                         |s| s.apply_changes(task, &root, Vec::new()),
                         |_| String::new(),
                     )
@@ -541,6 +543,7 @@ impl App {
                 };
                 let root = self.config.root.clone();
                 self.mutate(
+                    // 诊断交由下一次状态刷新呈现；此处不写 stderr，免得污染全屏画面。
                     |s| s.apply_changes(task, &root, skipped.clone()),
                     |_| {
                         format!(

@@ -164,7 +164,7 @@ fn translated(fx: &Fx, s: &mut Session<EventLog>, block: &str) -> TaskId {
     edict.id
 }
 
-fn apply_error(result: std::result::Result<(), AppError>) -> String {
+fn apply_error<T: std::fmt::Debug>(result: std::result::Result<T, AppError>) -> String {
     match result {
         Err(AppError::Apply(msg)) => msg,
         other => panic!("应被门控拒绝：{other:?}"),

@@ -171,7 +171,15 @@ pub(crate) async fn apply_changes(
             .is_some_and(|c| c.state == ChangeState::Applied);
         // 已落盘而上次未能提交：带 commit 再请求只补提交。
         if !(commit && skipped.is_empty() && applied) {
-            s.apply_reviewed(TaskId(id), &root, skipped, version.as_deref())?;
+            let problems = s.apply_reviewed(TaskId(id), &root, skipped, version.as_deref())?;
+            // 准奏已经成功：清理诊断只记到服务端日志，不进 JSON，也不改成失败。
+            for problem in &problems {
+                eprintln!(
+                    "警告：未能清理临时文件或其租约 {}：{}",
+                    problem.path.display(),
+                    problem.message
+                );
+            }
         }
         if !commit {
             return Ok(json!({ "ok": true }));

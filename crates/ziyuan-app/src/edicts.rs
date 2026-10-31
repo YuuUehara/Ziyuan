@@ -8,6 +8,7 @@ use ziyuan_core::{
 };
 use ziyuan_governance::{ChangeState, Court, GovernanceError, Suspicion, Task, TaskStatus};
 use ziyuan_runtime::guard;
+use ziyuan_runtime::tools::temp_cleanup::Problem;
 use ziyuan_storage::recovery::{
     ApplicationSource, EventBatch, FileState, RecoveryRecord, TargetState,
 };
@@ -415,12 +416,15 @@ impl<S: EventStore> Session<S> {
     /// 写入是一笔受管事务：先取工作区锁、推进世代号、写下「已发布」的恢复记录，再写文件、
     /// 记事件，最后收尾（见 [`Session::write_transaction`]）。真的动到文件之后失败时，
     /// 记录与奇数世代号留在盘上，之后的写入一律被拒，须先经 `ziyuan text recovery` 收尾。
+    ///
+    /// 成功时返回自动清理记下的 I/O 诊断：这一层不打印（库不该往 stdout／stderr 说话，
+    /// 全屏的 TUI 更吃不消），由前端自己决定去处。
     pub fn apply_changes(
         &mut self,
         task: TaskId,
         root: &Path,
         skipped: Vec<u32>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Vec<Problem>, AppError> {
         self.apply_reviewed(task, root, skipped, None)
     }
 
@@ -432,7 +436,7 @@ impl<S: EventStore> Session<S> {
         root: &Path,
         skipped: Vec<u32>,
         version: Option<&str>,
-    ) -> Result<(), AppError> {
+    ) -> Result<Vec<Problem>, AppError> {
         self.reload()?;
         let event = self.court.propose_application(task, skipped)?;
         if let Some(seen) = version {
@@ -457,8 +461,8 @@ impl<S: EventStore> Session<S> {
         }
         // 事件的条数与内容取自既有的事件簿：追记后应得的条数即已知条数加这一条。
         let known = self.len;
-        self.write_transaction(root, &selected, task, skipped, known, event)?;
-        Ok(())
+        let problems = self.write_transaction(root, &selected, task, skipped, known, event)?;
+        Ok(problems)
     }
 
     pub fn check_reply(&mut self, task: TaskId, pull_request: bool) -> Result<(), AppError> {
@@ -722,7 +726,7 @@ impl<S: EventStore> Session<S> {
         skipped: Vec<u32>,
         known: usize,
         event: CourtEvent,
-    ) -> Result<(), AppError> {
+    ) -> Result<Vec<Problem>, AppError> {
         // 根目录尚不存在时，既有行为会在写文件时建出目录；工作区须先有根才能打开。
         if !root.is_dir() {
             std::fs::create_dir_all(root).map_err(|e| AppError::Apply(e.to_string()))?;
@@ -793,7 +797,10 @@ impl<S: EventStore> Session<S> {
         // 从这里起，盘上已有「已发布」的记录；真的动到文件之后失败（写不进去、记事件不成）
         // 即原样留下，不作修补：下一次写入会因之被拒，须先经 `ziyuan text recovery` 核对并收尾。
         // 守卫随函数结束而释放，世代号保持奇数。
-        ziyuan_runtime::tools::apply_changes(root, selected)
+        //
+        // 清理诊断随成功一起往上交；失败时只剩写入错误这一条路（`AppError` 只装失败原因，
+        // 设计明确清理失败不能写成替换失败），同轮另记的清理诊断只能随失败丢掉。
+        let applied = ziyuan_runtime::tools::apply_changes(root, selected)
             .map_err(|e| AppError::Apply(e.to_string()))?;
         // 记录预告本批紧接在 `base` 之后。会话里的条数若已被别的提交推动（受管事务之外的
         // 记账，如信使回执），追加就会落在别处，记录与实际从此对不上——此时宁可留下
@@ -812,6 +819,6 @@ impl<S: EventStore> Session<S> {
         guard.complete(&operation).map_err(workspace_error)?;
         guard.finish().map_err(workspace_error)?;
         guard.remove_record().map_err(workspace_error)?;
-        Ok(())
+        Ok(applied.problems)
     }
 }

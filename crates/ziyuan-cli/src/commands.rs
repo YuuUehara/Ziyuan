@@ -369,7 +369,16 @@ pub(crate) fn execute(
             if commit && skipped.is_empty() && applied(session) {
                 println!("诏令 #{} 的改动早已落盘，补记提交。", task.0);
             } else {
-                session.apply_changes(task, &root, skipped)?;
+                let problems = session.apply_changes(task, &root, skipped)?;
+                // 清理诊断只走 stderr：写入已经成功，它不该混进 stdout 的结果行，
+                // 也不该冒充失败。这里的打印是命令行的决定，运行库只把诊断交出来。
+                for problem in &problems {
+                    eprintln!(
+                        "警告：未能清理临时文件或其租约 {}：{}",
+                        problem.path.display(),
+                        problem.message
+                    );
+                }
                 let skipped = session
                     .court()
                     .task(task)

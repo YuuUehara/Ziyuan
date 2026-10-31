@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -792,14 +792,7 @@ impl Report {
     /// 所以无论哪种情况都不会输出绝对路径。
     pub fn display_relative(&self, path: &Path) -> String {
         let relative = path.strip_prefix(&self.root).unwrap_or(path);
-        relative
-            .components()
-            .filter_map(|component| match component {
-                std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("/")
+        normalize_relative(relative)
     }
 
     /// 扫描范围：调用方给的相对标签（`sweep_dir` 的 `relative_dir`），根记作 `.`。
@@ -1014,6 +1007,18 @@ fn scan_into(
         let item = decide_lease(dir, &path, &id, apply, &mut report.problems);
         report.items.push(item);
     }
+}
+
+/// 路径 → `/` 分隔的普通组件串：只保留 `Normal` 组件，因此盘符、根与前导 `..`
+/// 都被滤掉。`display_relative` 与写入侧拼受保护路径都用它，避免两份实现漂移。
+pub(crate) fn normalize_relative(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// 相对路径一律用 `/` 分隔，与恢复记录同一形式；根目录本身是空串。

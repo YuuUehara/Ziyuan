@@ -173,9 +173,10 @@ fn applied(session: &Session<impl ziyuan_storage::EventStore>) -> usize {
         .count()
 }
 
-fn error(result: Result<(), AppError>) -> String {
+/// 准奏必须被拒；`T` 是成功时返回的清理诊断（被拒时无从谈起）。
+fn error<T: std::fmt::Debug>(result: Result<T, AppError>) -> String {
     match result {
-        Ok(()) => panic!("应被拒绝"),
+        Ok(value) => panic!("应被拒绝：{value:?}"),
         Err(e) => e.to_string(),
     }
 }

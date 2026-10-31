@@ -214,6 +214,41 @@ fn base_state_in(root: &Path, change: &FileChange) -> Result<(BaseState, PathBuf
     Ok((state, target))
 }
 
+/// 一次成功落盘的结果：写入已完成，清理诊断交给调用方决定去处。
+#[derive(Debug)]
+pub struct Applied {
+    /// 自动清理或删租约时的 I/O 失败；写入本身成功。
+    pub problems: Vec<temp_cleanup::Problem>,
+}
+
+/// 落盘失败：`error` 才是失败原因，`problems` 是同一轮里另记下的清理诊断。
+///
+/// 两者分开：设计明确“清理失败不阻断写入、也不能写成替换失败”，所以 `Display`
+/// 只呈现 `error`，调用方可另行报告 `problems`。
+pub struct ApplyFailure {
+    pub error: BoxError,
+    pub problems: Vec<temp_cleanup::Problem>,
+}
+
+impl std::fmt::Display for ApplyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for ApplyFailure {
+    // 手动实现：`BoxError`（`Box<dyn Error + Send + Sync>`）不是 `Debug`，
+    // 且诊断向量不该整份出现在调试输出里。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApplyFailure")
+            .field("error", &self.error.to_string())
+            .field("problems", &self.problems.len())
+            .finish()
+    }
+}
+
+impl std::error::Error for ApplyFailure {}
+
 /// 把皇帝准奏的改动写入项目，**不做**临时文件清理。
 ///
 /// 需要“写入前清掉同目录陈旧临时文件”的调用方一律用 [`apply_changes_protected`]：
@@ -222,13 +257,9 @@ fn base_state_in(root: &Path, change: &FileChange) -> Result<(BaseState, PathBuf
 /// 不该扫的东西——设计明确“集合无法构造时整轮不删”。
 ///
 /// 不清理不等于不管诊断：替换本身若删不掉自己的租约，只会记进线程局部通道；
-/// 本函数取走并报到 stderr，免得那一条漂到下一次调用头上。
-pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError> {
-    let mut problems = Vec::new();
-    let outcome = write_all(root, changes, None, &mut problems);
-    problems.extend(temp_cleanup::drain_problems());
-    report_problems(&problems);
-    outcome
+/// 本函数取走并随返回值交给调用方，免得那一条漂到下一次调用头上。
+pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<Applied, ApplyFailure> {
+    apply(root, changes, None)
 }
 
 /// 同 [`apply_changes`]，另在写每个目标之前清掉该目录里可证明陈旧的临时文件。
@@ -237,40 +268,31 @@ pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError
 /// 不应调用本函数（宁可不清理），传空集合等于“没有受保护项”。
 /// 自动清理绝不阻断写入：任何清理失败都只进诊断，写入照旧。
 ///
-/// 诊断走两条路，取决于写入结果：**成功**时原样交给调用方去报到 stderr（app 那条
-/// 路径如此处理）；**失败**时先在这里报到 stderr 再返回写入错误——清理的失败既不
-/// 能顶替写入失败，也不能被它吞掉，而返回值已经被写入错误占住了。
+/// 诊断一律随返回值交给调用方：设计里的“诊断走 stderr”约束的是命令行前端，
+/// 不是这个库函数——`ziyuan-tui` 在备用屏里调用本函数，往 stderr 写一行就落进
+/// 画面并被下一次重绘抹掉。所以这里既不打印也不丢弃。
 pub fn apply_changes_protected(
     root: &Path,
     changes: &[FileChange],
     protected: &BTreeSet<String>,
-) -> Result<Vec<temp_cleanup::Problem>, BoxError> {
-    // 先取走上次遗留的诊断：线程局部状态不能跨调用漂移，否则失败会被算到别人头上。
-    let mut problems = temp_cleanup::drain_problems();
-    let outcome = write_all(root, changes, Some(protected), &mut problems);
-    // 无论成功还是提前返回，本线程累积的失败都要交出去，不能留在 thread_local 里。
-    problems.extend(temp_cleanup::drain_problems());
-    match outcome {
-        // 写入成功：把清理诊断交给调用方去 stderr 报告。
-        Ok(()) => Ok(problems),
-        // 写入失败：清理诊断不能顶替写入错误，但也不能丢——记进 stderr 再返回原因。
-        Err(e) => {
-            report_problems(&problems);
-            Err(e)
-        }
-    }
+) -> Result<Applied, ApplyFailure> {
+    apply(root, changes, Some(protected))
 }
 
-/// 逐条报到 stderr；自动清理的失败绝不改变写入结果。
-///
-/// 一条诊断的路径可能是临时文件，也可能是它那份租约，所以措辞把两者都算上。
-fn report_problems(problems: &[temp_cleanup::Problem]) {
-    for problem in problems {
-        eprintln!(
-            "警告：未能清理临时文件或其租约 {}：{}",
-            problem.path.display(),
-            problem.message
-        );
+fn apply(
+    root: &Path,
+    changes: &[FileChange],
+    protected: Option<&BTreeSet<String>>,
+) -> Result<Applied, ApplyFailure> {
+    // 先取走上次遗留的诊断：线程局部状态不能跨调用漂移，否则失败会被算到别人头上。
+    let mut problems = temp_cleanup::drain_problems();
+    let outcome = write_all(root, changes, protected, &mut problems);
+    // 无论成功还是提前返回，本线程累积的失败都要交出去，不留在 thread_local 里。
+    problems.extend(temp_cleanup::drain_problems());
+    match outcome {
+        Ok(()) => Ok(Applied { problems }),
+        // 清理诊断不能顶替写入错误，也不能被它吞掉：各占一个字段。
+        Err(error) => Err(ApplyFailure { error, problems }),
     }
 }
 
@@ -292,23 +314,33 @@ fn write_all(
         let (state, target) = base_state_in(&root, change)?;
         match state {
             BaseState::Written => {}
-            BaseState::Original => targets.push((target, &change.after)),
+            BaseState::Original => {
+                // 目录标签取**词法**路径，与 canonical 的 `target` 分开存：受保护集合里的
+                // 条目来自恢复记录的 `targets[].path`，也是词法形式。
+                let relative_parent = relative_parent_of(&change.path);
+                targets.push((target, &change.after, relative_parent));
+            }
             BaseState::Changed => {
                 return Err(format!("{} 自呈报以来已被改动，拒绝落盘", change.path).into());
             }
         }
     }
-    for (target, after) in targets {
+    // 同一个目录只扫一次：一批 50 个同目录文件否则要扫 50 遍，每遍都是 `read_dir` 加
+    // 逐个候选的 `open`／`try_lock`。这不只是省事——第一遍替换之后若有一份租约没删掉，
+    // 第二遍就会把本调用自己的残渣当成孤儿租约处理，而恢复记录正要靠它认领临时文件。
+    let mut swept: BTreeSet<PathBuf> = BTreeSet::new();
+    for (target, after, relative_parent) in targets {
         if let Some(parent) = target.parent() {
             // 先建目录再扫：首次写入新目录时目录尚不存在，`sweep_dir` 会把“读不到”
             // 记成一条 I/O 失败并算作没扫全，正常的第一次写入就被报成清理失败。
             fs::create_dir_all(parent)?;
-            if let Some(protected) = protected {
+            if let Some(protected) = protected
+                && swept.insert(parent.to_path_buf())
+            {
                 // 只清本次写入目标所在目录；不取工作目录锁，调用方本就持锁。
                 // 扫在替换之前：目录里此刻没有本次调用建出的临时文件与租约，
                 // 本轮自己建的写入证据绝不可能被自己判成陈旧删掉。反过来（先写后扫）
                 // 就会把替换失败留下的租约当孤儿处理，恢复记录正要靠它认领临时文件。
-                let relative_parent = relative_dir(&root, parent);
                 let report = temp_cleanup::sweep_dir(parent, &relative_parent, protected, true);
                 problems.extend(report.problems);
             }
@@ -318,19 +350,21 @@ fn write_all(
     Ok(())
 }
 
-/// 工作区相对目录路径（`/` 分隔）；根目录是空串，与受保护集合同一形式。
-fn relative_dir(root: &Path, dir: &Path) -> String {
-    dir.strip_prefix(root)
-        .map(|rel| {
-            rel.components()
-                .filter_map(|component| match component {
-                    Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .unwrap_or_default()
+/// 改动路径的父目录，工作区相对、`/` 分隔；根目录是空串。
+///
+/// 用**词法**路径而不是 canonical 路径：受保护集合里的条目来自恢复记录的
+/// `targets[].path`，也是词法形式。两者一旦用了不同的拼写（符号链接、盘符大小写），
+/// 比较就永远失败，受保护项会被当成普通候选删掉。
+///
+/// 这里不做“从 `root` 剥前缀”那一步，因此也没有剥失败时的回落值：单组件路径
+/// （工作区根下的文件）得到空串，正是根目录的标签。带 `..`、`.` 之外的非普通组件
+/// 或绝对路径的改动在 `contained` 那一步就被拒了，到不了这里，所以“空串＝工作区根”
+/// 没有第二种来源——错把别的目录当成根来扫这条退路根本不存在。
+fn relative_parent_of(change_path: &str) -> String {
+    match Path::new(change_path).parent() {
+        Some(parent) => temp_cleanup::normalize_relative(parent),
+        None => String::new(),
+    }
 }
 
 /// `relative` 在 `root`（canonical）内对应的路径，文件可以尚不存在：取最近的已存在祖先
@@ -1293,8 +1327,13 @@ mod tests {
 
     /// 造一份“已死写入者”的租约与它认领的临时文件。
     fn stale_temp(dir: &Path) -> PathBuf {
-        let id = "0123456789abcdef0123456789abcdef";
-        let temp = dir.join(".ziyuan-tmp-1-1-1");
+        stale_temp_named(dir, ".ziyuan-tmp-1-1-1", "0123456789abcdef0123456789abcdef")
+    }
+
+    /// 同 [`stale_temp`]，名字与租约 id 由调用方给：同一目录里两个陈旧临时文件
+    /// 各要自己的租约，否则会被判成“两个认领者”而整轮不删。
+    fn stale_temp_named(dir: &Path, name: &str, id: &str) -> PathBuf {
+        let temp = dir.join(name);
         fs::write(&temp, b"partial").unwrap();
         // 行尾只能是 `\n`：租约里多一个 `\r` 就解析不出 id，会被判成 LeaseUnparsable
         // 而整轮不删，用例就测不到“陈旧即可清理”这件事。
@@ -1309,7 +1348,7 @@ mod tests {
         temp
     }
 
-    fn change(path: &str, after: &str) -> FileChange {
+    fn file_change(path: &str, after: &str) -> FileChange {
         FileChange {
             path: path.into(),
             before: None,
@@ -1317,18 +1356,30 @@ mod tests {
         }
     }
 
+    fn temp_name(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn relative_parent_of_strips_only_the_last_component() {
+        assert_eq!(relative_parent_of("src/deep/a.rs"), "src/deep");
+        assert_eq!(relative_parent_of("a.rs"), "");
+        // 词法上的 `./` 也一并抹掉：受保护集合里的条目就是这个拼法。
+        assert_eq!(relative_parent_of("./src/a.rs"), "src");
+    }
+
     #[test]
     fn apply_changes_sweeps_a_stale_temp_next_to_the_target() {
         let dir = workspace("sweep-stale");
         let project = dir.join("project");
         let stale = stale_temp(&project.join("src"));
-        let problems = apply_changes_protected(
+        let applied = apply_changes_protected(
             &project,
-            &[change("src/new.rs", "fn main() {}\n")],
+            &[file_change("src/new.rs", "fn main() {}\n")],
             &BTreeSet::new(),
         )
         .unwrap();
-        assert!(problems.is_empty(), "{problems:?}");
+        assert!(applied.problems.is_empty(), "{:?}", applied.problems);
         assert!(!stale.exists(), "写入前应清掉同目录的陈旧临时文件");
         assert_eq!(
             fs::read_to_string(project.join("src/new.rs")).unwrap(),
@@ -1342,10 +1393,18 @@ mod tests {
         let dir = workspace("sweep-protected");
         let project = dir.join("project");
         let stale = stale_temp(&project.join("src"));
-        let name = stale.file_name().unwrap().to_string_lossy().into_owned();
-        let protected: BTreeSet<String> = [format!("src/{name}")].into_iter().collect();
-        apply_changes_protected(&project, &[change("src/new.rs", "x\n")], &protected).unwrap();
+        // 同目录里再放一个不受保护的陈旧临时文件：它必须被删掉，否则“什么都没扫”
+        // 也能让上面那条存活断言通过，用例就证明不了受保护集合真的在起作用。
+        let doomed = stale_temp_named(
+            &project.join("src"),
+            ".ziyuan-tmp-2-2-2",
+            "fedcba9876543210fedcba9876543210",
+        );
+        let protected: BTreeSet<String> =
+            [format!("src/{}", temp_name(&stale))].into_iter().collect();
+        apply_changes_protected(&project, &[file_change("src/new.rs", "x\n")], &protected).unwrap();
         assert!(stale.exists(), "受保护路径不得删除");
+        assert!(!doomed.exists(), "不受保护的陈旧临时文件应被清掉");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1354,9 +1413,45 @@ mod tests {
         let dir = workspace("sweep-other");
         let project = dir.join("project");
         let elsewhere = stale_temp(&project.join("docs"));
-        apply_changes_protected(&project, &[change("src/new.rs", "x\n")], &BTreeSet::new())
-            .unwrap();
+        // 工作区根（`project`）自己的陈旧临时文件：只有“扫根而不是扫父目录”才会碰到它。
+        let at_root = stale_temp(&project);
+        // 目标目录的下一层：`sweep_dir` 不递归，所以它也应当活下来。
+        let nested_dir = project.join("src/nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+        let nested = stale_temp(&nested_dir);
+        apply_changes_protected(
+            &project,
+            &[file_change("src/new.rs", "x\n")],
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert!(elsewhere.exists(), "自动清理只碰目标所在目录");
+        assert!(at_root.exists(), "自动清理不扫工作区根");
+        assert!(nested.exists(), "自动清理不递归子目录");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn apply_changes_labels_the_sweep_from_the_lexical_change_path() {
+        let dir = workspace("sweep-deep");
+        let project = dir.join("project");
+        let deep = project.join("src/deep");
+        fs::create_dir_all(&deep).unwrap();
+        let stale = stale_temp(&deep);
+        let doomed = stale_temp_named(
+            &deep,
+            ".ziyuan-tmp-3-3-3",
+            "00112233445566778899aabbccddeeff",
+        );
+        // 恢复记录的写法：工作区相对、词法拼法，与 `src/deep/a.rs` 的父目录一致。
+        let protected: BTreeSet<String> = [format!("src/deep/{}", temp_name(&stale))]
+            .into_iter()
+            .collect();
+        apply_changes_protected(&project, &[file_change("src/deep/a.rs", "a\n")], &protected)
+            .unwrap();
+        assert!(stale.exists(), "词法标签 src/deep 应与受保护条目对得上");
+        assert!(!doomed.exists(), "同目录里不受保护的陈旧临时文件应被清掉");
+        assert_eq!(fs::read_to_string(deep.join("a.rs")).unwrap(), "a\n");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1364,10 +1459,13 @@ mod tests {
     fn apply_changes_still_writes_when_the_sweep_finds_nothing() {
         let dir = workspace("sweep-clean");
         let project = dir.join("project");
-        let problems =
-            apply_changes_protected(&project, &[change("src/a.rs", "a\n")], &BTreeSet::new())
-                .unwrap();
-        assert!(problems.is_empty());
+        let applied = apply_changes_protected(
+            &project,
+            &[file_change("src/a.rs", "a\n")],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(applied.problems.is_empty());
         assert_eq!(fs::read_to_string(project.join("src/a.rs")).unwrap(), "a\n");
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1378,7 +1476,7 @@ mod tests {
         let dir = workspace("sweep-plain");
         let project = dir.join("project");
         let stale = stale_temp(&project.join("src"));
-        apply_changes(&project, &[change("src/new.rs", "x\n")]).unwrap();
+        apply_changes(&project, &[file_change("src/new.rs", "x\n")]).unwrap();
         assert!(stale.exists(), "apply_changes 不做清理");
         assert!(project.join("src/new.rs").is_file());
         fs::remove_dir_all(dir).unwrap();
