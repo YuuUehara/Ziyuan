@@ -599,7 +599,17 @@ fn non_utf8_workspace_is_not_given_a_lossy_identity() {
     let mut name = f.root.file_name().unwrap().as_encoded_bytes().to_vec();
     name.push(0xff);
     let renamed = f.root.with_file_name(std::ffi::OsString::from_vec(name));
-    fs::rename(&f.root, &renamed).unwrap();
+    let rename = fs::rename(&f.root, &renamed);
+    #[cfg(target_os = "macos")]
+    if let Err(error) = &rename {
+        // macOS 的文件系统可在进入应用前拒绝非法编码（EILSEQ = 92）。
+        // 只接受这一原因，不把权限、磁盘或其他准备失败算作通过。
+        assert_eq!(error.raw_os_error(), Some(92), "{error}");
+        assert!(f.root.is_dir());
+        assert!(!f.root.join(".ziyuan/memory/index.json").exists());
+        return;
+    }
+    rename.unwrap();
     f.root = renamed;
     let error = f
         .session()
