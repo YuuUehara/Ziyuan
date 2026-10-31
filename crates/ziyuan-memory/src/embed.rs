@@ -52,7 +52,11 @@ impl ModelSignature {
 
     /// 五项都要可用：字符串非空（不全是空白）、维度非 0。口径与
     /// [`crate::MemoryRecord::validate_format`] 的 `embedding.*` 各项一致。
-    pub fn validate(&self) -> Result<(), MemoryError> {
+    ///
+    /// 返回的是**原因文本**而不是 [`MemoryError`]：签名不合规只有一种意思（字段不合规），
+    /// 让这里自己选错误种类，调用点就能用一个 `if let` 把别的种类悄悄吞掉。
+    /// 现在调用点拿不到种类，只能自己决定包成什么——想吞也吞不了。
+    pub fn validate(&self) -> Result<(), String> {
         for (name, value) in [
             ("provider", self.provider.as_str()),
             ("model", self.model.as_str()),
@@ -60,11 +64,11 @@ impl ModelSignature {
             ("metric", self.metric.as_str()),
         ] {
             if value.trim().is_empty() {
-                return Err(MemoryError::Invalid(format!("embedding.{name} 不得为空")));
+                return Err(format!("embedding.{name} 不得为空"));
             }
         }
         if self.dim == 0 {
-            return Err(MemoryError::Invalid("embedding.dim 不得为 0".into()));
+            return Err("embedding.dim 不得为 0".into());
         }
         Ok(())
     }
@@ -117,15 +121,18 @@ impl EmbeddingProvider for Unavailable {
 /// 按 [`PROVIDER_ENV`] 选提供方。
 ///
 /// 只读 `ZIYUAN_MEMORY_PROVIDER`：未设置、空串或 `none` ⇒ [`Unavailable`]；
-/// `local` ⇒ [`crate::local::LocalProvider`]；其余值 ⇒ [`MemoryError::Invalid`] 并列出
+/// `local` ⇒ [`crate::local::LocalProvider`]；其余值 ⇒ [`MemoryError::Config`] 并列出
 /// 可接受的值。**绝不**读 `ZIYUAN_LLM_*`，也**绝不**回落到任何 URL。
+///
+/// 取值不认识是**配置**问题，不是记录问题：因此报 [`MemoryError::Config`] 而不是
+/// [`MemoryError::Invalid`]，调用方据此知道该去改环境变量。
 pub fn from_env() -> Result<Box<dyn EmbeddingProvider>, MemoryError> {
     let raw = std::env::var(PROVIDER_ENV).unwrap_or_default();
     match raw.trim() {
         "" | "none" => Ok(Box::new(Unavailable)),
         "local" => Ok(Box::new(crate::local::LocalProvider::new())),
-        other => Err(MemoryError::Invalid(format!(
-            "{PROVIDER_ENV} 只能是 none 或 local，而不是 {other}"
+        other => Err(MemoryError::Config(format!(
+            "{PROVIDER_ENV} 为 {other:?}，无法识别"
         ))),
     }
 }
@@ -222,7 +229,7 @@ mod tests {
         only_dim_missing.revision = "0".into();
         only_dim_missing.metric = "cosine".into();
         match only_dim_missing.validate() {
-            Err(MemoryError::Invalid(reason)) => {
+            Err(reason) => {
                 assert!(reason.contains("embedding.dim"), "{reason}");
             }
             other => panic!("预期因 embedding.dim 被拒，得到 {other:?}"),
@@ -310,12 +317,13 @@ mod tests {
                 assert_eq!(embedded[0].vector.len(), 256);
             }
             "remote" => match from_env() {
-                Err(MemoryError::Invalid(reason)) => {
-                    // 报错须点名变量与可接受的值，并且回显那个不被接受的值。
+                Err(MemoryError::Config(reason)) => {
+                    // 原因点名变量与不被接受的值；可接受的取值由 Display 统一给出。
                     assert!(reason.contains(PROVIDER_ENV), "{reason}");
-                    assert!(reason.contains("none"), "{reason}");
-                    assert!(reason.contains("local"), "{reason}");
                     assert!(reason.contains("remote"), "{reason}");
+                    let message = MemoryError::Config(reason).to_string();
+                    assert!(message.contains("none"), "{message}");
+                    assert!(message.contains("local"), "{message}");
                 }
                 Err(other) => panic!("预期不接受的提供方被拒，得到错误 {other}"),
                 Ok(_) => panic!("预期不接受的提供方被拒，却选出了一个提供方"),

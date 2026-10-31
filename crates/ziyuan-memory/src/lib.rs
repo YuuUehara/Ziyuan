@@ -23,13 +23,20 @@ pub use record::{
     Digests, EmbeddingSignature, Identity, MemoryRecord, Origin, Text, Watermark, sha256_hex,
     workspace_id_from_canonical_text,
 };
-pub use watermark::{require_stable_generation, watermark_is_unchanged};
+pub use watermark::{WatermarkReader, require_publishable};
 
 /// 记忆库错误。消息只含固定原因、字段名与版本号，不含原文、译文或查询正文。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MemoryError {
     /// 记录或输入不合法。
+    ///
+    /// 只用于**记录与输入字段**的问题：字段形状、摘要格式、身份唯一性。
+    /// 配置（如嵌入提供方取值）走 [`Self::Config`]，文件系统形状的问题走 [`Self::Io`]。
     Invalid(String),
+    /// 嵌入提供方的配置不对（取值不认识、彼此矛盾）。
+    ///
+    /// 与 [`Self::Invalid`] 分开：调用方据此知道该去改配置，而不是去查记录。
+    Config(String),
     /// 没有可用的嵌入提供方；这是默认状态，且绝不回落到任何默认端点。
     Unavailable,
     /// 索引损坏、不完整或无法解码。
@@ -40,6 +47,11 @@ pub enum MemoryError {
     SignatureMismatch { expected: String, found: String },
     /// 资料在构建期间有变，本次不得发布。
     Stale { reason: String },
+    /// 工作区有未收尾的受管写入（世代为奇数），本次不得发布。
+    ///
+    /// 与 [`Self::Stale`] 分开：资料面可能一字未动，缺的是「先把上一次写入收尾」这一步，
+    /// 下一步该做什么也不一样。世代号原样带出，便于对上 `ziyuan text recovery status`。
+    RecoveryPending { generation: u64 },
     /// 读写索引或译稿时出错。只保留原因文本。
     ///
     /// 不保留 `std::io::Error` 本身：`io::Error` 不是 `Eq`，留下源值就无法让
@@ -50,6 +62,10 @@ impl fmt::Display for MemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(reason) => write!(f, "记忆库记录不合规: {reason}"),
+            Self::Config(reason) => write!(
+                f,
+                "嵌入提供方配置有误: {reason}；可用值：none（默认，不联网）、local（本地确定性模型）"
+            ),
             Self::Unavailable => write!(
                 f,
                 "记忆库不可用: 未配置嵌入提供方；默认不外发，须显式设置 {env}",
@@ -72,6 +88,10 @@ impl fmt::Display for MemoryError {
                     "记忆库资料在建库期间有变（{reason}），本次不发布索引；请重试"
                 )
             }
+            Self::RecoveryPending { generation } => write!(
+                f,
+                "工作区世代 {generation} 有未收尾的受管写入，本次不发布索引；先运行 ziyuan text recovery status 收尾"
+            ),
             Self::Io { reason } => write!(f, "记忆库读写失败: {reason}；索引损坏可删去，重建即可"),
         }
     }
@@ -96,6 +116,11 @@ mod tests {
         assert_eq!(
             MemoryError::Invalid("b 不能为空".into()).to_string(),
             "记忆库记录不合规: b 不能为空"
+        );
+        assert_eq!(
+            MemoryError::Config("ZIYUAN_MEMORY_PROVIDER 为 \"remote\"，无法识别".into())
+                .to_string(),
+            "嵌入提供方配置有误: ZIYUAN_MEMORY_PROVIDER 为 \"remote\"，无法识别；可用值：none（默认，不联网）、local（本地确定性模型）"
         );
         assert_eq!(
             MemoryError::Unavailable.to_string(),
@@ -127,6 +152,10 @@ mod tests {
             }
             .to_string(),
             "记忆库资料在建库期间有变（translation_edited），本次不发布索引；请重试"
+        );
+        assert_eq!(
+            MemoryError::RecoveryPending { generation: 7 }.to_string(),
+            "工作区世代 7 有未收尾的受管写入，本次不发布索引；先运行 ziyuan text recovery status 收尾"
         );
         assert_eq!(
             MemoryError::Io {
