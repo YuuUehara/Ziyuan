@@ -1,5 +1,5 @@
 use std::collections::hash_map::RandomState;
-use std::fs;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::hash::BuildHasher;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -15,6 +15,49 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const MAX_MESSAGE: usize = 256;
 const ENV: &str = "ZIYUAN_TEMP_LEASE_PROBE";
 static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+pub enum ProbeLock {
+    Acquired(File),
+    Busy,
+}
+
+// Ownership is intentional: success must not silently drop the locked handle.
+pub fn probe_lock(file: File) -> io::Result<ProbeLock> {
+    match file.try_lock() {
+        Ok(()) => {
+            eprintln!("native try_lock: Acquired, raw_os_error=None");
+            Ok(ProbeLock::Acquired(file))
+        }
+        Err(TryLockError::WouldBlock) => {
+            eprintln!("native try_lock: Busy (WouldBlock), raw_os_error=None");
+            Ok(ProbeLock::Busy)
+        }
+        Err(TryLockError::Error(e)) => {
+            eprintln!(
+                "native try_lock: {e:?}, raw_os_error={:?}",
+                e.raw_os_error()
+            );
+            Err(e)
+        }
+    }
+}
+
+pub fn open_probe(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(path)
+}
+
+pub fn acquire_before(path: &Path, timeout: Duration) -> io::Result<File> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match probe_lock(open_probe(path)?)? {
+            ProbeLock::Acquired(file) => return Ok(file),
+            ProbeLock::Busy => {
+                thread::sleep(POLL_INTERVAL.min(remaining(deadline, "lock acquire deadline")?));
+            }
+        }
+    }
+}
 
 fn error(stage: &str, error: io::Error) -> io::Error {
     // Windows reports socket read timeouts as TimedOut; Unix may use WouldBlock.
@@ -283,9 +326,12 @@ fn env_text(name: &str) -> io::Result<String> {
 
 pub fn run_child() -> io::Result<()> {
     // Validate every input before connecting or doing anything with a path.
-    // Never include environment values in errors, and never create child paths.
+    // Never include environment values in errors or mutate paths before validation.
     let case = env_text(ENV)?;
-    if !matches!(case.as_str(), "handshake" | "wrong-id" | "continue-timeout") {
+    if !matches!(
+        case.as_str(),
+        "handshake" | "wrong-id" | "continue-timeout" | "lock-holder"
+    ) {
         return Err(invalid("child configuration: unknown case"));
     }
     let address: SocketAddr = env_text(&format!("{ENV}_ADDR"))?
@@ -310,10 +356,28 @@ pub fn run_child() -> io::Result<()> {
 
     let mut stream = TcpStream::connect_timeout(&address, DEFAULT_TIMEOUT)
         .map_err(|e| error("child connect", e))?;
+    let held = if case == "lock-holder" {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(root.join("held.lock"))?;
+        match probe_lock(file)? {
+            ProbeLock::Acquired(file) => Some(file),
+            ProbeLock::Busy => return Err(io::Error::other("child new lock unexpectedly busy")),
+        }
+    } else {
+        None
+    };
     let ready_id = if case == "wrong-id" { "wrong-id" } else { &id };
+    let stage = if case == "lock-holder" {
+        "locked"
+    } else {
+        "connected"
+    };
     send_message(
         &mut stream,
-        &format!("READY {ready_id} connected"),
+        &format!("READY {ready_id} {stage}"),
         Instant::now() + DEFAULT_TIMEOUT,
         "child READY",
     )?;
@@ -335,5 +399,7 @@ pub fn run_child() -> io::Result<()> {
             io::ErrorKind::InvalidData.into(),
         ));
     }
+    // Keep the owned lock alive across READY and the entire CONTINUE wait.
+    drop(held);
     Ok(())
 }

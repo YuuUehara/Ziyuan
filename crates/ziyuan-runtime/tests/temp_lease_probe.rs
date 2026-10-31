@@ -1,9 +1,91 @@
 #[path = "support/temp_lease_probe.rs"]
 mod support;
 
+use std::fs::OpenOptions;
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
+
+fn assert_live_holder_is_busy(child: &support::ChildGuard) {
+    let observation = support::probe_lock(
+        support::open_probe(&child.root().join("held.lock"))
+            .expect("open independent probe handle"),
+    )
+    .expect("live holder probe IO error");
+    assert!(
+        matches!(observation, support::ProbeLock::Busy),
+        "live child must retain its lock through READY: {observation:?}"
+    );
+}
+
+#[test]
+fn cross_process_lock_blocks_live_holder_and_releases_after_kill() {
+    let mut child = support::ChildGuard::spawn("lock-holder").unwrap();
+    let _stream = child.ready("locked", support::DEFAULT_TIMEOUT).unwrap();
+    assert_live_holder_is_busy(&child);
+    child.kill().unwrap();
+    assert!(!child.reap(support::DEFAULT_TIMEOUT).unwrap().success());
+    let acquired =
+        support::acquire_before(&child.root().join("held.lock"), support::DEFAULT_TIMEOUT).unwrap();
+    drop(acquired);
+}
+
+#[test]
+fn cross_process_lock_releases_after_continue() {
+    let mut child = support::ChildGuard::spawn("lock-holder").unwrap();
+    let mut stream = child.ready("locked", support::DEFAULT_TIMEOUT).unwrap();
+    assert_live_holder_is_busy(&child);
+    support::send_message(
+        &mut stream,
+        "CONTINUE",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent lock release CONTINUE",
+    )
+    .unwrap();
+    child.finish(support::DEFAULT_TIMEOUT).unwrap();
+    let acquired =
+        support::acquire_before(&child.root().join("held.lock"), support::DEFAULT_TIMEOUT).unwrap();
+    drop(acquired);
+}
+
+#[test]
+fn same_process_independent_handles_are_observed() {
+    // The guard owns scratch and is declared first so all handles close before
+    // child teardown/scratch cleanup, including during assertion unwinding.
+    let mut child = support::ChildGuard::spawn("handshake").unwrap();
+    let mut stream = child.ready("connected", support::DEFAULT_TIMEOUT).unwrap();
+    let path = child.root().join("same-process.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    let holder = match support::probe_lock(file).unwrap() {
+        support::ProbeLock::Acquired(file) => file,
+        support::ProbeLock::Busy => panic!("new same-process lock unexpectedly busy"),
+    };
+    eprintln!("same-process independent OpenOptions handle:");
+    let independent = support::probe_lock(support::open_probe(&path).unwrap()).unwrap();
+    eprintln!("same-process try_clone handle:");
+    let cloned = support::probe_lock(holder.try_clone().unwrap()).unwrap();
+    // Either Acquired or Busy is a valid native observation, not evidence of
+    // staleness. Keep acquired handles alive; never explicitly unlock a clone:
+    // it may share the original lock. Make no lock claims while dropping these.
+    drop(cloned);
+    drop(independent);
+    drop(holder);
+    let reacquired = support::acquire_before(&path, support::DEFAULT_TIMEOUT).unwrap();
+    drop(reacquired);
+    support::send_message(
+        &mut stream,
+        "CONTINUE",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent same-process CONTINUE",
+    )
+    .unwrap();
+    child.finish(support::DEFAULT_TIMEOUT).unwrap();
+}
 
 #[test]
 fn probe_child_entry() {
