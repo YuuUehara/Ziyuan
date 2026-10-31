@@ -108,7 +108,7 @@ impl MemoryIndex {
         // 先查重再排序：排序是全序，重复身份也能排出确定顺序，但那会让「同一身份、不同内容」
         // 的两条记录悄悄共存，且谁先谁后由输入顺序决定。设计中重新定稿是换掉现行版本，
         // 因此重复就是调用方的错，宁可编不出来。
-        require_unique_identities(&self.records)?;
+        require_unique_identities(&self.records).map_err(MemoryError::Invalid)?;
         let records = sorted_records(&self.records)?;
         let integrity = Integrity {
             count: records.len(),
@@ -166,6 +166,9 @@ impl MemoryIndex {
                 "记录未按规范顺序排列；索引损坏可删去，重建即可".into(),
             ));
         }
+        // 与 `encode` 对称：手写或旧版写入的文件同样可能带进两条同身份记录，而排序是全序，
+        // 它们会整整齐齐地排在一起、摘要照样配平——不在这里拒，旧译文就能与新译文并存。
+        require_unique_identities(&raw.records).map_err(MemoryError::Corrupt)?;
         for record in &raw.records {
             let label = record_label(&record.identity);
             record
@@ -299,14 +302,17 @@ fn record_bytes(record: &MemoryRecord) -> Result<Vec<u8>, MemoryError> {
 ///
 /// 少了这一关，两条同身份不同内容的记录会被稳定排序按输入顺序编出去，输入顺序一变字节就变，
 /// 而旧版本还能与新的那条共存——检索时命中哪一条全看排序位置。
-fn require_unique_identities(records: &[MemoryRecord]) -> Result<(), MemoryError> {
+///
+/// 返回的是原因文本而非错误变体：同一个不变量在 `encode` 里是调用方给错了记录（`Invalid`），
+/// 在 `decode` 里是文件本身坏了（`Corrupt`），下一步该做什么不一样，由调用方决定归类。
+fn require_unique_identities(records: &[MemoryRecord]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for record in records {
         if !seen.insert(sort_key(&record.identity)) {
-            return Err(MemoryError::Invalid(format!(
+            return Err(format!(
                 "同一段落只能有一条记录: {}",
                 record_label(&record.identity)
-            )));
+            ));
         }
     }
     Ok(())
@@ -891,6 +897,37 @@ mod tests {
             Err(MemoryError::Invalid(reason)) => {
                 assert!(reason.contains("同一段落只能有一条"), "{reason}");
                 // 点名是哪一段，且不回显任何正文。
+                assert!(
+                    reason.contains("p0001/c0001/c0001-b0001/c0001-p0001"),
+                    "{reason}"
+                );
+                assert!(!reason.contains("译文"), "{reason}");
+            }
+            other => panic!("预期重复身份被拒，得到 {other:?}"),
+        }
+    }
+
+    /// 与 `encode` 对称：一份**顺序规范、摘要配平**的重复身份文件也必须拒收。
+    ///
+    /// 只守编码端不够——索引能从磁盘读回来，旧版紫垣或手写的文件照样会把
+    /// 「旧译文 + 新译文」一起送到检索面前，而排序是全序，它们会排得整整齐齐。
+    #[test]
+    fn decode_rejects_duplicate_identities_in_canonical_order() {
+        let mut restated = record("p0001", "c0001-p0001");
+        restated.target = Text::new("重新定稿后的另一版译文");
+        // 先排成规范顺序：这样顺序关能过，剩下的唯一问题就是重复身份。
+        let records = sorted_records(&[record("p0001", "c0001-p0001"), restated]).unwrap();
+        let index = index();
+        let bytes = envelope_bytes(
+            FORMAT_VERSION,
+            &index.signature,
+            &index.watermark,
+            &records,
+            good_integrity(&records),
+        );
+        match MemoryIndex::decode(&bytes) {
+            Err(MemoryError::Corrupt(reason)) => {
+                assert!(reason.contains("同一段落只能有一条"), "{reason}");
                 assert!(
                     reason.contains("p0001/c0001/c0001-b0001/c0001-p0001"),
                     "{reason}"
