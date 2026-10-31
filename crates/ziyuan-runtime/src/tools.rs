@@ -10,7 +10,7 @@
 use crate::BoxError;
 use crate::agent_loop::{Tool, ToolSpec};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
@@ -214,11 +214,78 @@ fn base_state_in(root: &Path, change: &FileChange) -> Result<(BaseState, PathBuf
     Ok((state, target))
 }
 
-/// 把皇帝准奏的改动写入项目。先逐一核对：路径仍在项目内且不属禁区，文件内容与呈报时的原文
+/// 把皇帝准奏的改动写入项目，**不做**临时文件清理。
+///
+/// 需要“写入前清掉同目录陈旧临时文件”的调用方一律用 [`apply_changes_protected`]：
+/// 只有它能拿到调用方从恢复记录构造的受保护集合。这里保持无清理行为，是为了不让
+/// 不知道受保护集合的调用方（含测试与将来的调用者）在有待恢复记录的工作区里扫掉
+/// 不该扫的东西——设计明确“集合无法构造时整轮不删”。
+///
+/// 不清理不等于不管诊断：替换本身若删不掉自己的租约，只会记进线程局部通道；
+/// 本函数取走并报到 stderr，免得那一条漂到下一次调用头上。
+pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError> {
+    let mut problems = Vec::new();
+    let outcome = write_all(root, changes, None, &mut problems);
+    problems.extend(temp_cleanup::drain_problems());
+    report_problems(&problems);
+    outcome
+}
+
+/// 同 [`apply_changes`]，另在写每个目标之前清掉该目录里可证明陈旧的临时文件。
+///
+/// `protected` 是调用方从恢复记录构造的工作区相对路径集合；集合构造失败时调用方
+/// 不应调用本函数（宁可不清理），传空集合等于“没有受保护项”。
+/// 自动清理绝不阻断写入：任何清理失败都只进诊断，写入照旧。
+///
+/// 诊断走两条路，取决于写入结果：**成功**时原样交给调用方去报到 stderr（app 那条
+/// 路径如此处理）；**失败**时先在这里报到 stderr 再返回写入错误——清理的失败既不
+/// 能顶替写入失败，也不能被它吞掉，而返回值已经被写入错误占住了。
+pub fn apply_changes_protected(
+    root: &Path,
+    changes: &[FileChange],
+    protected: &BTreeSet<String>,
+) -> Result<Vec<temp_cleanup::Problem>, BoxError> {
+    // 先取走上次遗留的诊断：线程局部状态不能跨调用漂移，否则失败会被算到别人头上。
+    let mut problems = temp_cleanup::drain_problems();
+    let outcome = write_all(root, changes, Some(protected), &mut problems);
+    // 无论成功还是提前返回，本线程累积的失败都要交出去，不能留在 thread_local 里。
+    problems.extend(temp_cleanup::drain_problems());
+    match outcome {
+        // 写入成功：把清理诊断交给调用方去 stderr 报告。
+        Ok(()) => Ok(problems),
+        // 写入失败：清理诊断不能顶替写入错误，但也不能丢——记进 stderr 再返回原因。
+        Err(e) => {
+            report_problems(&problems);
+            Err(e)
+        }
+    }
+}
+
+/// 逐条报到 stderr；自动清理的失败绝不改变写入结果。
+///
+/// 一条诊断的路径可能是临时文件，也可能是它那份租约，所以措辞把两者都算上。
+fn report_problems(problems: &[temp_cleanup::Problem]) {
+    for problem in problems {
+        eprintln!(
+            "警告：未能清理临时文件或其租约 {}：{}",
+            problem.path.display(),
+            problem.message
+        );
+    }
+}
+
+/// 把改动写入项目。先逐一核对：路径仍在项目内且不属禁区，文件内容与呈报时的原文
 /// 一致（新建文件则仍不存在）；有任何一处不符则一处也不写。已等于改后内容的文件视为已写
 /// （上次落盘写到一半或写完未及记账就中断），跳过不写，重试因此能续完。
 /// 每个文件经同目录临时文件整体替换，不会留下写了一半的文件；多个文件之间不是原子的。
-pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError> {
+///
+/// `protected` 为 `None` 时整轮不清理（给不掌握受保护集合的调用方用）。
+fn write_all(
+    root: &Path,
+    changes: &[FileChange],
+    protected: Option<&BTreeSet<String>>,
+    problems: &mut Vec<temp_cleanup::Problem>,
+) -> Result<(), BoxError> {
     let root = root.canonicalize()?;
     let mut targets = Vec::new();
     for change in changes {
@@ -233,11 +300,37 @@ pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<(), BoxError
     }
     for (target, after) in targets {
         if let Some(parent) = target.parent() {
+            // 先建目录再扫：首次写入新目录时目录尚不存在，`sweep_dir` 会把“读不到”
+            // 记成一条 I/O 失败并算作没扫全，正常的第一次写入就被报成清理失败。
             fs::create_dir_all(parent)?;
+            if let Some(protected) = protected {
+                // 只清本次写入目标所在目录；不取工作目录锁，调用方本就持锁。
+                // 扫在替换之前：目录里此刻没有本次调用建出的临时文件与租约，
+                // 本轮自己建的写入证据绝不可能被自己判成陈旧删掉。反过来（先写后扫）
+                // 就会把替换失败留下的租约当孤儿处理，恢复记录正要靠它认领临时文件。
+                let relative_parent = relative_dir(&root, parent);
+                let report = temp_cleanup::sweep_dir(parent, &relative_parent, protected, true);
+                problems.extend(report.problems);
+            }
         }
         replace::replace_target(&target, after.as_bytes())?;
     }
     Ok(())
+}
+
+/// 工作区相对目录路径（`/` 分隔）；根目录是空串，与受保护集合同一形式。
+fn relative_dir(root: &Path, dir: &Path) -> String {
+    dir.strip_prefix(root)
+        .map(|rel| {
+            rel.components()
+                .filter_map(|component| match component {
+                    Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_default()
 }
 
 /// `relative` 在 `root`（canonical）内对应的路径，文件可以尚不存在：取最近的已存在祖先
@@ -1195,6 +1288,99 @@ mod tests {
             fs::read_to_string(root.join("src/new/b.rs")).unwrap(),
             "second file content"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 造一份“已死写入者”的租约与它认领的临时文件。
+    fn stale_temp(dir: &Path) -> PathBuf {
+        let id = "0123456789abcdef0123456789abcdef";
+        let temp = dir.join(".ziyuan-tmp-1-1-1");
+        fs::write(&temp, b"partial").unwrap();
+        // 行尾只能是 `\n`：租约里多一个 `\r` 就解析不出 id，会被判成 LeaseUnparsable
+        // 而整轮不删，用例就测不到“陈旧即可清理”这件事。
+        fs::write(
+            dir.join(format!(".ziyuan-lease-{id}")),
+            format!(
+                "ziyuan-lease v1 temp={} id={id}\n",
+                temp.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
+        temp
+    }
+
+    fn change(path: &str, after: &str) -> FileChange {
+        FileChange {
+            path: path.into(),
+            before: None,
+            after: after.into(),
+        }
+    }
+
+    #[test]
+    fn apply_changes_sweeps_a_stale_temp_next_to_the_target() {
+        let dir = workspace("sweep-stale");
+        let project = dir.join("project");
+        let stale = stale_temp(&project.join("src"));
+        let problems = apply_changes_protected(
+            &project,
+            &[change("src/new.rs", "fn main() {}\n")],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!stale.exists(), "写入前应清掉同目录的陈旧临时文件");
+        assert_eq!(
+            fs::read_to_string(project.join("src/new.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn apply_changes_keeps_a_protected_temp() {
+        let dir = workspace("sweep-protected");
+        let project = dir.join("project");
+        let stale = stale_temp(&project.join("src"));
+        let name = stale.file_name().unwrap().to_string_lossy().into_owned();
+        let protected: BTreeSet<String> = [format!("src/{name}")].into_iter().collect();
+        apply_changes_protected(&project, &[change("src/new.rs", "x\n")], &protected).unwrap();
+        assert!(stale.exists(), "受保护路径不得删除");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn apply_changes_leaves_other_directories_alone() {
+        let dir = workspace("sweep-other");
+        let project = dir.join("project");
+        let elsewhere = stale_temp(&project.join("docs"));
+        apply_changes_protected(&project, &[change("src/new.rs", "x\n")], &BTreeSet::new())
+            .unwrap();
+        assert!(elsewhere.exists(), "自动清理只碰目标所在目录");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn apply_changes_still_writes_when_the_sweep_finds_nothing() {
+        let dir = workspace("sweep-clean");
+        let project = dir.join("project");
+        let problems =
+            apply_changes_protected(&project, &[change("src/a.rs", "a\n")], &BTreeSet::new())
+                .unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(fs::read_to_string(project.join("src/a.rs")).unwrap(), "a\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn plain_apply_changes_never_sweeps() {
+        // 不掌握受保护集合的调用方不该顺手清理：宁可不删。
+        let dir = workspace("sweep-plain");
+        let project = dir.join("project");
+        let stale = stale_temp(&project.join("src"));
+        apply_changes(&project, &[change("src/new.rs", "x\n")]).unwrap();
+        assert!(stale.exists(), "apply_changes 不做清理");
+        assert!(project.join("src/new.rs").is_file());
         fs::remove_dir_all(dir).unwrap();
     }
 }
