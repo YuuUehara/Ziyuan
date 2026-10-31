@@ -583,6 +583,10 @@ fn blocked(requirement: String) -> String {
 }
 
 /// 工作区控制文件的错误一律转成可执行的 [`AppError::Apply`]，不回显内部路径细节。
+///
+/// 注意：`Unsafe`/`Corrupt` 与 `Workspace::open` 的失败都经 `Display` 原样转述，消息里
+/// 可能带绝对路径，最终由 `main.rs` 的 `错误：{error}` 打到 stderr；只有本轮清理诊断
+/// （[`unprotected_problem`]）承诺给相对路径。这条不对称是既有的、有意保留的。
 fn workspace_error(error: WorkspaceError) -> AppError {
     AppError::Apply(match error {
         WorkspaceError::Timeout { .. } => "另一进程正在写入此工作区，请稍候重试".to_string(),
@@ -615,15 +619,23 @@ fn unprotected_problem(error: &WorkspaceError) -> Problem {
     }
 }
 
-/// 清理诊断里的失败原因，剔除文件路径。
+/// 清理诊断里的失败原因，剔除文件路径，并给出下一步。
 ///
 /// `WorkspaceError` 的 `Display` 是给其他调用方看的，`Unsafe`/`Corrupt` 会连同出差错文件的
 /// 绝对路径一起打印（见 `ziyuan-storage` 的 `check_path`/`read_control`），那些路径同样不该
 /// 从这里漏出去；这里改成不含路径的说法，其余变体原样转述。
+///
+/// 可达性：本函数服务于 `pending_record()`（`workspace.rs`），那条路只可能给出 `Io`、
+/// `Unsafe` 或 `Recovery(_)`——`Corrupt` 只由 `read_control` 产生，走不到这里。保留
+/// `Corrupt` 一支是防御：将来若有调用方接上别的读取路径，给的说法也已备好。
 fn unprotected_reason(error: &WorkspaceError) -> String {
     match error {
-        WorkspaceError::Unsafe(_) => "工作区控制路径不可信".to_string(),
-        WorkspaceError::Corrupt(_) => "工作区控制文件不合规".to_string(),
+        WorkspaceError::Unsafe(_) => {
+            "工作区控制路径不可信（请检查 .ziyuan 是否被替换为链接或指向别处）".to_string()
+        }
+        WorkspaceError::Corrupt(_) => {
+            "工作区控制文件不合规（请运行 ziyuan text recovery status 核对）".to_string()
+        }
         other => other.to_string(),
     }
 }
@@ -876,11 +888,8 @@ impl<S: EventStore> Session<S> {
 }
 
 #[cfg(test)]
-mod diagnostics_tests {
-    use super::{sweep_protection, unprotected_problem};
-    use std::collections::BTreeSet;
-    use std::path::PathBuf;
-    use ziyuan_storage::WorkspaceError;
+mod tests {
+    use super::*;
 
     /// 记录读不出来时必须退回「不清理」——换成空集就会变成「读不出反而照常清理」。
     #[test]
