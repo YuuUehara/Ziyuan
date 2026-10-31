@@ -669,6 +669,46 @@ fn temp_without_lease_and_foreign_leases_are_retained() {
         b"not-a-lease record\n"
     );
 
+    // 2c. Oversized content is not a lease we understand, and must not turn
+    // into an I/O failure that aborts the whole cleanup.
+    let oversized = support::new_lease_id();
+    let oversized_path = root.join(support::lease_file_name(&oversized));
+    std::fs::write(&oversized_path, vec![b'a'; 8192]).unwrap();
+    let decision = support::recover_temp(root, &oversized, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
+    );
+    assert_eq!(std::fs::metadata(&oversized_path).unwrap().len(), 8192);
+
+    // 2d. Non-UTF-8 content takes the same retain path, not an error.
+    let binary = support::new_lease_id();
+    let binary_path = root.join(support::lease_file_name(&binary));
+    std::fs::write(&binary_path, [0xff, 0xfe, 0x00, 0x0a]).unwrap();
+    let decision = support::recover_temp(root, &binary, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
+    );
+    assert_eq!(
+        std::fs::read(&binary_path).unwrap(),
+        [0xff, 0xfe, 0x00, 0x0a]
+    );
+
+    // 2e. Duplicate fields are ambiguous, so the record is not trusted.
+    let duplicate = support::new_lease_id();
+    let duplicate_path = root.join(support::lease_file_name(&duplicate));
+    std::fs::write(
+        &duplicate_path,
+        format!("ziyuan-lease v1 temp=temp temp=other id={duplicate}\n"),
+    )
+    .unwrap();
+    let decision = support::recover_temp(root, &duplicate, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
+    );
+
     // 3. Lease file name and recorded id disagree.
     let name_id = support::new_lease_id();
     let other_id = support::new_lease_id();
@@ -685,13 +725,87 @@ fn temp_without_lease_and_foreign_leases_are_retained() {
         mismatched_line
     );
 
-    // Nothing above authorized any deletion: the temp file and all three
-    // foreign leases are byte-for-byte untouched.
+    // 4. A path-bearing name proves nothing about this directory. `C:temp`
+    //    would even replace the base path when joined, so it must be rejected.
+    let traversal = support::new_lease_id();
+    let traversal_path = root.join(support::lease_file_name(&traversal));
+    std::fs::write(
+        &traversal_path,
+        format!("ziyuan-lease v1 temp=C:temp id={traversal}\n"),
+    )
+    .unwrap();
+    let decision = support::recover_temp(root, &traversal, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
+    );
+    assert!(traversal_path.is_file());
+
+    // Nothing above authorized any deletion: the temp file and all leases are
+    // byte-for-byte untouched.
     assert_eq!(
         std::fs::read(root.join("temp")).unwrap(),
         support::COMPLETE_NEW
     );
-    assert_eq!(dir_names(root).len(), 4);
+    assert_eq!(dir_names(root).len(), 8);
+}
+
+#[test]
+fn uncovered_keep_branches_are_reachable() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // TempNotRegular: the recorded name exists but is a directory, which a
+    // cleaner must never remove.
+    let not_regular = support::new_lease_id();
+    std::fs::write(
+        root.join(support::lease_file_name(&not_regular)),
+        support::lease_line("temp", &not_regular),
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("temp")).unwrap();
+    let decision = support::recover_temp(root, &not_regular, "temp").unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::TempNotRegular)
+    );
+    assert!(root.join("temp").is_dir());
+
+    // TempStillPresent: the lease-garbage path must not delete a lease whose
+    // temp file is still there.
+    let still_present = support::new_lease_id();
+    let still_present_lease = root.join(support::lease_file_name(&still_present));
+    std::fs::write(
+        &still_present_lease,
+        support::lease_line("other", &still_present),
+    )
+    .unwrap();
+    std::fs::write(root.join("other"), support::COMPLETE_NEW).unwrap();
+    let decision = support::reclaim_orphan_lease(root, &still_present).unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::TempStillPresent)
+    );
+    assert!(still_present_lease.is_file());
+    assert!(root.join("other").is_file());
+
+    // LeaseAlreadyAbsent: nothing to reclaim.
+    let absent = support::new_lease_id();
+    let decision = support::reclaim_orphan_lease(root, &absent).unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::LeaseAlreadyAbsent)
+    );
+
+    // And the reclaim path does work on a real orphan, so the branch above is
+    // not simply unreachable-by-construction.
+    std::fs::remove_file(root.join("other")).unwrap();
+    let decision = support::reclaim_orphan_lease(root, &still_present).unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::remove(support::RemoveReason::OrphanLease)
+    );
+    assert!(!still_present_lease.exists());
 }
 
 #[test]
@@ -810,13 +924,16 @@ fn two_cleaners_never_double_delete() {
     {
         let arrived = Arc::clone(&arrived);
         let released = Arc::clone(&released);
-        support::install_delete_hook(Arc::new(move || {
-            arrived.fetch_add(1, Ordering::SeqCst);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !released.load(Ordering::SeqCst) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }));
+        support::install_delete_hook(
+            &root,
+            Arc::new(move || {
+                arrived.fetch_add(1, Ordering::SeqCst);
+                let deadline = Instant::now() + support::DEFAULT_TIMEOUT;
+                while !released.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }),
+        );
     }
 
     let wait_for = |target: usize, limit: Duration| {
@@ -836,7 +953,7 @@ fn two_cleaners_never_double_delete() {
         // A must be inside verification before B starts, so B cannot win the
         // lock simply by arriving first.
         assert_eq!(
-            wait_for(1, Duration::from_secs(2)),
+            wait_for(1, support::DEFAULT_TIMEOUT),
             1,
             "first cleaner never reached verification"
         );
@@ -846,7 +963,7 @@ fn two_cleaners_never_double_delete() {
             scope.spawn(move || support::recover_temp(&root, &id, "temp"))
         };
         // B gets a full window to reach verification before A is released.
-        let observed = wait_for(2, Duration::from_millis(300));
+        let observed = wait_for(2, Duration::from_secs(1));
         released.store(true, Ordering::SeqCst);
         let results = vec![first.join().unwrap(), second.join().unwrap()];
         (results, observed)

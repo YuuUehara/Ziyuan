@@ -218,14 +218,22 @@ fn is_lower_hex_id(text: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+// A lease may only name a plain file in the same directory. Checking for
+// separators is not enough: on Windows `join("C:temp")` or `join("a:b")`
+// replaces the base path entirely, so the name must be exactly one normal
+// path component.
+fn is_bare_file_name(name: &str) -> bool {
+    if name.is_empty() || name.contains(['\n', '\r']) {
+        return false;
+    }
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+}
+
 // create_new is the conflict primitive: a second writer must never truncate
 // or reuse an existing lease. Content is written before the writer locks it.
 pub fn create_lease_file(root: &Path, id: &str, temp_name: &str) -> io::Result<File> {
-    if temp_name.is_empty()
-        || temp_name.contains(['/', '\\', '\n', '\r'])
-        || temp_name == "."
-        || temp_name == ".."
-    {
+    if !is_bare_file_name(temp_name) {
         return Err(invalid("lease temp= must be a bare file name"));
     }
     let mut file = OpenOptions::new()
@@ -266,8 +274,15 @@ pub fn parse_lease(line: &str, expected_id: &str) -> LeaseContent {
     let mut id = None;
     for field in fields {
         if let Some(value) = field.strip_prefix("temp=") {
+            // Duplicates are ambiguous: a cleaner must not guess which wins.
+            if temp.is_some() {
+                return LeaseContent::Unparsable;
+            }
             temp = Some(value.to_owned());
         } else if let Some(value) = field.strip_prefix("id=") {
+            if id.is_some() {
+                return LeaseContent::Unparsable;
+            }
             id = Some(value.to_owned());
         } else {
             return LeaseContent::Unparsable;
@@ -279,7 +294,7 @@ pub fn parse_lease(line: &str, expected_id: &str) -> LeaseContent {
     if !is_lower_hex_id(&id) || id != expected_id {
         return LeaseContent::IdMismatch;
     }
-    if temp.is_empty() || temp.contains(['/', '\\']) || temp == "." || temp == ".." {
+    if !is_bare_file_name(&temp) {
         return LeaseContent::Unparsable;
     }
     LeaseContent::Valid { temp }
@@ -323,11 +338,23 @@ impl LeaseDecision {
     }
 }
 
-fn read_text(file: &File) -> io::Result<String> {
-    let mut text = String::new();
+/// Lease content is one short line. A larger or non-UTF-8 file is not a lease
+/// we understand, so it must classify as Unparsable and be retained rather than
+/// failing the whole cleanup with an I/O error.
+const MAX_LEASE_BYTES: u64 = 4096;
+
+fn read_lease_text(file: &File) -> io::Result<Result<String, KeepReason>> {
+    let length = file.metadata()?.len();
+    if length > MAX_LEASE_BYTES {
+        return Ok(Err(KeepReason::LeaseUnparsable));
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
     let mut handle = file;
-    handle.read_to_string(&mut text)?;
-    Ok(text)
+    handle.read_to_end(&mut bytes)?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(_) => Err(KeepReason::LeaseUnparsable),
+    })
 }
 
 fn classify_line(line: &str, id: &str) -> Result<LeaseContent, KeepReason> {
@@ -339,23 +366,40 @@ fn classify_line(line: &str, id: &str) -> Result<LeaseContent, KeepReason> {
     }
 }
 
-// Test-only interleaving point: it fires immediately before the first deletion,
-// which is after the lease lock is dropped in a buggy "verify, release, delete"
-// order and while it is still held in the correct order. Installing a barrier
-// here makes the double-delete race deterministic instead of timing-dependent.
-type DeleteHook = std::sync::Arc<dyn Fn() + Send + Sync>;
-static DELETE_HOOK: std::sync::Mutex<Option<DeleteHook>> = std::sync::Mutex::new(None);
+// Unreadable, oversized or non-UTF-8 content is a lease we do not understand:
+// retain it instead of failing the whole cleanup with an I/O error.
+fn classify_lease(file: &File, id: &str) -> Result<LeaseContent, KeepReason> {
+    match read_lease_text(file) {
+        Ok(Ok(text)) => classify_line(&text, id),
+        Ok(Err(reason)) => Err(reason),
+        // A read failure is not proof of anything, so retain rather than fail.
+        Err(_) => Err(KeepReason::LeaseUnparsable),
+    }
+}
 
-pub fn install_delete_hook(hook: DeleteHook) {
-    *DELETE_HOOK.lock().unwrap() = Some(hook);
+// Test-only interleaving point, keyed to one scratch directory: it fires
+// immediately before the first deletion of that directory, which is after the
+// lease lock is dropped in a buggy "verify, release, delete" order and while it
+// is still held in the correct order. The key matters because the test binary
+// runs its tests in parallel and every cleaner calls this path.
+type DeleteHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+static DELETE_HOOK: std::sync::Mutex<Option<(PathBuf, DeleteHook)>> = std::sync::Mutex::new(None);
+
+pub fn install_delete_hook(root: &Path, hook: DeleteHook) {
+    *DELETE_HOOK.lock().unwrap() = Some((root.to_path_buf(), hook));
 }
 
 pub fn clear_delete_hook() {
     *DELETE_HOOK.lock().unwrap() = None;
 }
 
-fn run_delete_hook() {
-    let hook = DELETE_HOOK.lock().unwrap().clone();
+fn run_delete_hook(root: &Path) {
+    let hook = DELETE_HOOK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(scoped, _)| scoped == root)
+        .map(|(_, hook)| std::sync::Arc::clone(hook));
     if let Some(hook) = hook {
         hook();
     }
@@ -380,7 +424,7 @@ pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseD
         ProbeLock::Busy => return Ok(LeaseDecision::keep(KeepReason::LeaseBusy)),
         ProbeLock::Acquired(file) => file,
     };
-    let content = match classify_line(&read_text(&held)?, id) {
+    let content = match classify_lease(&held, id) {
         Ok(content) => content,
         Err(reason) => return Ok(LeaseDecision::keep(reason)),
     };
@@ -403,7 +447,7 @@ pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseD
     // Order is load-bearing: the temp file goes first, the lease last. The
     // lease handle stays locked until both are gone, so a second cleaner cannot
     // verify and delete concurrently; it observes Busy or a vanished lease.
-    run_delete_hook();
+    run_delete_hook(root);
     match std::fs::remove_file(&temp) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -431,7 +475,7 @@ pub fn reclaim_orphan_lease(root: &Path, id: &str) -> io::Result<LeaseDecision> 
         ProbeLock::Busy => return Ok(LeaseDecision::keep(KeepReason::LeaseBusy)),
         ProbeLock::Acquired(file) => file,
     };
-    let content = match classify_line(&read_text(&held)?, id) {
+    let content = match classify_lease(&held, id) {
         Ok(content) => content,
         Err(reason) => return Ok(LeaseDecision::keep(reason)),
     };
