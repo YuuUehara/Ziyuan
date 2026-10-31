@@ -616,6 +616,11 @@ fn decide_temp(root: &Path, id: &str, temp_name: &str, dry_run: bool) -> io::Res
         Ok(_) => {}
     }
     if dry_run {
+        // End the preview lock explicitly before a second pass opens the same
+        // lease. Closing alone can leave the lock alive briefly if another
+        // test thread spawned a child while this handle was open.
+        held.unlock()
+            .map_err(|e| error("cleaner preview unlock", e))?;
         drop(held);
         return Ok(LeaseDecision::remove(RemoveReason::WriterDeadLeaseVerified));
     }

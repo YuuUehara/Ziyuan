@@ -4,7 +4,7 @@
 
 ## 触发条件
 
-- 标签须与 `Cargo.toml` 的版本一致，例如版本 `1.3.0` 对应标签 `v1.3.0`；`release.yml` 会先比对，不一致即失败。1.3 尚有下文列出的发布阻塞，不要先推标签再补准备。
+- 标签须与 `Cargo.toml` 的版本一致，例如版本 `1.3.0` 对应标签 `v1.3.0`；`release.yml` 会先比对，不一致即失败。新 crate 须先完成首次发布和可信发布登记，不要先推标签再补准备。
 - 带连字符的版本（如 `1.0.0-rc.1`）按预发布处理，不标为 latest。
 - 发布说明取自 `CHANGELOG.md` 中标题为 `## <版本>`（或版本后接空格及说明）的一节；找不到时由 GitHub 自动生成。发版前把该版本一节写进 CHANGELOG。
 
@@ -42,12 +42,11 @@ ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-runtime
 
 ### 1.3 发布阻塞
 
-当前已知 `ziyuan-memory` 的 crates.io 注册表查询返回 404，尚未建立；本轮没有可用的 crates.io 发布凭据，**没有完成手工首发（bootstrap）或可信发布登记**。GitHub OIDC 的可信发布只能给已存在并配置好的 crate 发后续版本，不能建立首个 crate，也不会因为重跑作业而解除这个阻塞。
+首次发布阻塞已解除：2026-10-31，`ziyuan-memory 1.3.0` 已通过临时 API token 手工发布，注册表下载包的校验值、源码与提交出处均已核对；维护者已确认保存可信发布配置并撤销临时令牌。orb 中的 Cargo 登录凭据也已清除。后续版本无需长期 API token。
 
-发布前须由有权限的维护者完成两件事：
+新包的可信发布登记由维护者在 crates.io 网页完成，本轮手工首发不等于已实测该新包的后续自动发布：1.3 工作流会跳过已经存在的 `ziyuan-memory 1.3.0`。下一个尚未发布的版本才能验证它的自动上传；配置字段仍须与下节一致。
 
-1. 按下节手工发布 `ziyuan-memory` 的首个版本，再为它登记可信发布；不能拿已有十个 crate 的登记代替。
-2. 确认 `release.yml` 包含上面的十一项顺序；本轮已补入 `ziyuan-memory`，但这不替代它的首次发布与配置。
+`release.yml` 已包含上面的十一项顺序。原有十个 crate 的配置不替代新包登记；未来新增 crate 仍须按下节分别完成首次发布与登记。
 
 已发布的 1.2.3 main／标签与资产保留，不重打标签、不覆盖历史包。四平台包验收与 crates.io 是不同结果：Release 已公开也不等于十一个 crate 都已发布。
 
@@ -86,7 +85,7 @@ ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-runtime
 ## 发布前核对
 
 - `Cargo.toml` 与各 crate 的版本一致，标签与之相符。
-- `release.yml` 的循环已覆盖十一个 crate，`ziyuan-memory` 位于 `ziyuan-app` 之前；新 crate 手工首发成功、注册表版本可查询，且逐 crate 的可信发布配置已核对。当前这些阻塞未全部解除，不推 1.3 标签。
+- `release.yml` 的循环已覆盖十一个 crate，`ziyuan-memory` 位于 `ziyuan-app` 之前；新 crate 手工首发成功、注册表版本可查询，且逐 crate 的可信发布配置已核对。新增包的登记由维护者确认，自动上传是否成功仍以实际工作流结果为准。
 - `CHANGELOG.md` 有对应版本的一节，措辞与实际改动一致；未验证的项目照实写在验收记录里。
 - 本地通过 `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --all-features`、`cargo test --workspace` 与 `bash scripts/smoke.sh`。
 - 已知风险与未测项目写进 Release 说明或链接的验收记录，不把候选版或模拟测试当作正式包验收。
