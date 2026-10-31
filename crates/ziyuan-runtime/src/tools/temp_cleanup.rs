@@ -94,7 +94,12 @@ impl Reason {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outcome {
     /// 可删除；`Item::acted` 区分“预览里本可删除”与“真的删掉了”。
-    /// 删除尝试失败时仍是 `Remove` 而 `acted=false`，原因见同一条 `Problem`。
+    ///
+    /// 删除真的失败时两条路径的收尾不一样，报告必须照各自的实情读：
+    /// - 孤儿租约那一支留在 `Remove`，只是 `acted=false`（它确实可清理，本轮没删掉）；
+    /// - 临时文件那一支改成 `Keep(TempStillPresent)`（它还占着盘，不能算可清理）。
+    ///
+    /// 两种情况都会记一条 `Problem`，所以失败本身从不静默。
     Remove,
     Keep(Reason),
 }
@@ -113,9 +118,27 @@ pub struct Item {
     pub outcome: Outcome,
     /// 本轮真的删掉了它。`apply=false`、或删除失败时都是 `false`。
     ///
-    /// 因此 `Apply` 模式下“可删除数 > 已删除数”表示有一次删除尝试失败：`outcome`
-    /// 仍是 `Remove`（它确实可清理），失败原因在同一条 `Problem` 里。
+    /// 失败时 `outcome` 怎么走由各自的处置支路决定，两处都要连着 `acted` 一起看：
+    /// 临时文件删不掉 → `Keep(TempStillPresent)` 且 `acted=false`；孤儿租约删不掉
+    /// → 仍是 `Remove` 且 `acted=false`（于是 `Apply` 模式下“可删除数 > 已删除数”
+    /// 只可能来自后者）。两种情况都会记一条 `Problem`，失败原因在那里。
     pub acted: bool,
+}
+
+impl Item {
+    /// 报告里的原因名：保留原因原样给出；可删除项按设计补上两个删除原因之一。
+    ///
+    /// 删除原因不带字段：`Kind::Temp` 的可删除项只可能来自“持锁核验通过的租约”，
+    /// `Kind::Lease` 的只可能来自“`temp=` 已不存在的合法租约”，一一对应。
+    pub fn reason_name(&self) -> &'static str {
+        match self.outcome {
+            Outcome::Keep(reason) => reason.as_str(),
+            Outcome::Remove => match self.kind {
+                Kind::Temp => "WriterDeadLeaseVerified",
+                Kind::Lease => "OrphanLease",
+            },
+        }
+    }
 }
 
 /// 逐项 I/O 失败：进报告，不改变处置结论。
@@ -713,8 +736,10 @@ pub struct Counts {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Report {
     pub mode: Mode,
-    /// 扫描范围：本次从哪个根开始。
+    /// 扫描范围：调用方给的相对标签，工作区根是空串。报告里的路径也相对同一个根。
     pub root: PathBuf,
+    /// 报告里的“范围”：`root` 的标签，空标签按 `.` 呈现。
+    scope: String,
     pub recursive: bool,
     pub items: Vec<Item>,
     pub problems: Vec<Problem>,
@@ -725,10 +750,11 @@ pub struct Report {
 }
 
 impl Report {
-    fn new(mode: Mode, root: &Path, recursive: bool) -> Self {
+    fn new(mode: Mode, root: &Path, scope: &str, recursive: bool) -> Self {
         Self {
             mode,
             root: root.to_path_buf(),
+            scope: scope.to_owned(),
             recursive,
             items: Vec::new(),
             problems: Vec::new(),
@@ -753,16 +779,28 @@ impl Report {
             .join("/")
     }
 
-    /// 扫描范围：`root` 相对自身的路径，根本身记作 `.`。
+    /// 扫描范围：调用方给的相对标签（`sweep_dir` 的 `relative_dir`），根记作 `.`。
     ///
     /// 返回 `.` 而不是空串：报告是给人看的，`scope: ""` 会被读成“没扫描任何地方”。
+    /// 标签与报告里的路径始终对得上：路径一律相对 `root`，标签说的也是 `root`。
     pub fn scope(&self) -> String {
-        let relative = self.display_relative(&self.root);
-        if relative.is_empty() {
+        if self.scope.is_empty() {
             ".".to_owned()
         } else {
-            relative
+            self.scope.clone()
         }
+    }
+
+    /// 报告里不出现绝对外部路径：消息里若嵌了扫描根，换成 `.`。
+    ///
+    /// std 的 `fs` 错误目前不带路径，所以这条今天多半是空操作；但只要有一处错误
+    /// 带上路径，整份报告的契约就破了，所以在出口处兜住，而不是指望每个调用点自觉。
+    fn scrub(&self, message: &str) -> String {
+        let root = self.root.display().to_string();
+        if root.is_empty() {
+            return message.to_owned();
+        }
+        message.replace(&root, ".")
     }
 
     pub fn counts(&self, kind: Kind) -> Counts {
@@ -796,6 +834,10 @@ impl Report {
     }
 
     /// 报告只列原因名与相对路径，不带内部细节。
+    ///
+    /// `reason` 恒为设计中的 14 个名字之一（12 个保留 + 2 个删除），从不为 `null`：
+    /// 可删除项的删除原因由 `Item::reason_name` 按类型补齐。`problems` 的消息也过
+    /// `scrub`，所以整份 JSON 不含绝对外部路径。
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         let describe = |kind: Kind| {
@@ -822,15 +864,12 @@ impl Report {
                     Outcome::Remove => "remove",
                     Outcome::Keep(_) => "keep",
                 },
-                "reason": match item.outcome {
-                    Outcome::Remove => serde_json::Value::Null,
-                    Outcome::Keep(reason) => json!(reason.as_str()),
-                },
+                "reason": item.reason_name(),
                 "acted": item.acted,
             })).collect::<Vec<_>>(),
             "problems": self.problems.iter().map(|problem| json!({
                 "path": self.display_relative(&problem.path),
-                "message": problem.message,
+                "message": self.scrub(&problem.message),
             })).collect::<Vec<_>>(),
             "unscanned": self.unscanned
                 .iter()
@@ -843,14 +882,19 @@ impl Report {
 /// 扫一个目录（不递归）：候选项逐项决策，再逐个处理孤儿租约。
 ///
 /// `relative_dir` 是相对工作区根的目录路径（根目录传空串），用来拼受保护集合里的
-/// 相对路径；它不是被扫目录内部的位置。
+/// 相对路径，同时作为报告的扫描范围标签；它不是被扫目录内部的位置。
 pub fn sweep_dir(
     dir: &Path,
     relative_dir: &str,
     protected: &BTreeSet<String>,
     apply: bool,
 ) -> Report {
-    let mut report = Report::new(if apply { Mode::Apply } else { Mode::Preview }, dir, false);
+    let mut report = Report::new(
+        if apply { Mode::Apply } else { Mode::Preview },
+        dir,
+        relative_dir,
+        false,
+    );
     scan_into(&mut report, dir, relative_dir, protected, apply);
     report
 }
@@ -866,6 +910,9 @@ fn scan_into(
     // 读不出来就连候选都不判、直接放弃这个目录：`decide_candidate` 的前提是“租约列全了”，
     // 不列租约就送候选进去，会把每一个都判成 `TempWithoutLease`——看着安全，实则让这个
     // 目录永远清不掉，也永远不知道原因。
+    // 单条 entry 出错也走同一条路：不完整的列举证明不了“只有一个认领者”，一个有两个
+    // 活跃租约的临时文件会被读成单认领 `Outcome::Remove` 而遭误删，所以必须与“列不出来”
+    // 一样按失败关闭处理。
     let mut names: Vec<String> = Vec::new();
     let mut leases: Vec<(PathBuf, String)> = Vec::new();
     match fs::read_dir(dir) {
@@ -880,10 +927,14 @@ fn scan_into(
         Ok(entries) => {
             for entry in entries {
                 match entry {
-                    Err(e) => report.problems.push(Problem {
-                        path: dir.to_path_buf(),
-                        message: e.to_string(),
-                    }),
+                    Err(e) => {
+                        report.problems.push(Problem {
+                            path: dir.to_path_buf(),
+                            message: e.to_string(),
+                        });
+                        report.unscanned.push(dir.to_path_buf());
+                        return;
+                    }
                     Ok(entry) => {
                         let file_name = entry.file_name();
                         let Some(name) = file_name.to_str() else {
@@ -923,8 +974,10 @@ fn scan_into(
     let leases = match lease_entries(dir) {
         Ok(leases) => leases,
         Err(e) => {
-            // 只记 I/O 失败，不把目录记成“未扫描”：它刚刚还列得出来，候选已按证据处理完，
-            // 这一趟没走成的只是孤儿租约那一段。
+            // 候选那一段确实走完了，但孤儿租约那一段没走成：所以这个目录算“没扫全”，
+            // 不能只记一条 I/O 失败就算收尾——否则 JSON 里分不出“没有孤儿租约”
+            // 与“孤儿那趟根本没跑”，报告会被读成干净。
+            report.unscanned.push(dir.to_path_buf());
             report.problems.push(Problem {
                 path: dir.to_path_buf(),
                 message: e.to_string(),
@@ -1794,6 +1847,17 @@ mod tests {
         assert_eq!(report.mode, Mode::Apply);
         assert_eq!(report.root, dir.clone());
         assert_eq!(report.scope(), ".");
+        // 删掉的候选在报告里必须带上两个删除原因之一，不能留空。
+        let removed = temp_item(&report, &name);
+        assert_eq!(removed.outcome, Outcome::Remove, "{report:?}");
+        assert_eq!(removed.reason_name(), "WriterDeadLeaseVerified");
+        let json = report.to_json();
+        let items = json["items"].as_array().unwrap();
+        assert!(!items.is_empty(), "{json}");
+        assert!(
+            items.iter().all(|item| !item["reason"].is_null()),
+            "报告里的原因不得为空: {json}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1811,6 +1875,20 @@ mod tests {
         assert_eq!(report.removed_total(), 0);
         assert!(dir.join(&name).is_file(), "预览不得删候选");
         assert_eq!(lease_paths(&dir).len(), before, "预览不得删孤儿租约");
+        // 孤儿租约必须真的被报成可清理项：上面只证明“没删”，一个从不报告孤儿
+        // 租约的回归也能通过。库里两份租约：一份认领仍活着的候选（保留），一份孤儿。
+        let leases = report.counts(Kind::Lease);
+        assert_eq!(leases.candidates, 2, "{report:?}");
+        assert_eq!(leases.removable, 1, "{report:?}");
+        assert_eq!(leases.removed, 0, "{report:?}");
+        assert_eq!(leases.kept, 1, "{report:?}");
+        let orphan_item = report
+            .items
+            .iter()
+            .find(|item| item.kind == Kind::Lease && item.outcome == Outcome::Remove)
+            .unwrap_or_else(|| panic!("没有可清理的租约报告项: {report:?}"));
+        assert_eq!(orphan_item.reason_name(), "OrphanLease");
+        assert!(!orphan_item.acted, "预览不得删孤儿租约: {report:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1826,6 +1904,85 @@ mod tests {
         );
         assert!(dir.join(&name).is_file());
         assert_eq!(report.counts(Kind::Temp).removed, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_keeps_a_nested_protected_candidate() {
+        let root = scratch("sweep-nested-protected");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let name = fresh_temp_name();
+        write_temp(&sub, &name);
+        // 受保护集合存的是相对工作区根的路径，所以只有 `join_relative` 把
+        // `sub` 拼在前面，这条才能命中。
+        let mut protected = empty_protected();
+        protected.insert(format!("sub/{name}"));
+        let report = sweep_dir(&sub, "sub", &protected, true);
+        assert_eq!(report.scope(), "sub", "{report:?}");
+        assert_eq!(
+            keep_reason(temp_item(&report, &name)),
+            Reason::RecoveryReferenced
+        );
+        assert!(sub.join(&name).is_file(), "受保护的嵌套候选不得被删");
+        assert_eq!(report.counts(Kind::Temp).removed, 0, "{report:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn needs_attention_distinguishes_preview_from_failure() {
+        // 预览里有可清理项不是失败：报告已逐项标出可清理数，由脚本决定是否加 `--yes`。
+        let (dir, _name, _id) = sweep_fixture("sweep-attention-preview");
+        let preview = sweep_dir(&dir, "", &empty_protected(), false);
+        assert_eq!(preview.counts(Kind::Temp).removable, 1, "{preview:?}");
+        assert!(!preview.needs_attention(), "{preview:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // 目录没扫全就是失败，哪怕一个项都没判出来。
+        let root = scratch("sweep-attention-unscanned");
+        let not_a_dir = root.join("regular.txt");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        let unscanned = sweep_dir(&not_a_dir, "", &empty_protected(), true);
+        assert!(!unscanned.unscanned.is_empty(), "{unscanned:?}");
+        assert!(unscanned.needs_attention(), "{unscanned:?}");
+        std::fs::remove_dir_all(root).unwrap();
+
+        // 空目录扫得干干净净，也不是失败。
+        let empty = scratch("sweep-attention-empty");
+        let clean = sweep_dir(&empty, "", &empty_protected(), true);
+        assert!(clean.items.is_empty(), "{clean:?}");
+        assert!(!clean.needs_attention(), "{clean:?}");
+        std::fs::remove_dir_all(empty).unwrap();
+    }
+
+    #[test]
+    fn report_never_serializes_an_absolute_path() {
+        let dir = scratch("sweep-absolute");
+        let mut report = Report::new(Mode::Preview, &dir, "", true);
+        // std 的 `fs` 错误今天不带路径，所以这里直接造一条带绝对路径的消息：
+        // 契约要在出口处成立，而不是指望恰好没有错误带路径。
+        report.problems.push(Problem {
+            path: dir.join("leak.txt"),
+            message: format!("删除失败：{}", dir.display()),
+        });
+        let json = report.to_json().to_string();
+        let root = dir.display().to_string();
+        // 两种形态都要断言：JSON 文本里反斜杠是转义的，只查单反斜杠形态在 Windows
+        // 上永远为真（等于没查）。
+        assert!(!json.contains(&root), "绝对根漏进报告: {json}");
+        let escaped_root = root.replace('\\', r"\\");
+        assert!(!json.contains(&escaped_root), "绝对根漏进报告: {json}");
+        // JSON 文本里的 `\\` 是一个反斜杠：路径一律 `/` 分隔，连转义形态都不该有。
+        assert!(!json.contains(r"\\"), "报告里不该有反斜杠路径: {json}");
+        assert!(!json.contains("//"), "报告里不该有 `//` 前缀: {json}");
+        // 盘符形态（`X:`）也不该出现。
+        assert!(
+            !json
+                .as_bytes()
+                .windows(2)
+                .any(|window| window[0].is_ascii_alphabetic() && window[1] == b':'),
+            "报告里出现了盘符形态: {json}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
