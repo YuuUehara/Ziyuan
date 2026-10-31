@@ -2840,20 +2840,26 @@ Expected: 1 failed，`写入前应清掉目标目录里的陈旧临时文件`—
 
 ```rust
         // 受保护集合就是本次记录写下的全部目标：清理器据此跳过仍被记录引用的项。
-        let protected: std::collections::BTreeSet<String> =
-            record.targets.iter().map(|t| t.path.clone()).collect();
-        let problems =
-            ziyuan_runtime::tools::apply_changes_protected(root, selected, &protected)
-                .map_err(|e| AppError::Apply(e.to_string()))?;
-        // 清理失败不阻断写入：落盘结果照旧，诊断只走 stderr。
-        for problem in problems {
-            eprintln!(
-                "警告：未能清理临时文件 {}：{}",
-                problem.path.display(),
-                problem.message
-            );
+        // 记录读不出来时**退回不清理**（fail closed）：宁可留下陈旧临时文件，也不误删。
+        let protected = workspace.protected_targets();
+        let mut applied = match sweep_protection(&protected) {
+            Some(protected) => {
+                ziyuan_runtime::tools::apply_changes_protected(root, selected, protected)
+            }
+            None => ziyuan_runtime::tools::apply_changes(root, selected),
+        }
+        .map_err(|e| AppError::Apply(e.to_string()))?;
+        // 上面 `None` 吞掉的是存储错误，不是诊断：写入照旧，但前端要能报告这一次没清理。
+        if let Err(error) = protected {
+            applied.problems.push(unprotected_problem(&error));
         }
 ```
+
+实做与最初设想的三处偏差，以实做为准：
+
+1. 集合由 `Workspace::protected_targets()` 在 storage 里构造（`ziyuan-cli` 也用同一份，runtime 不该为此依赖 storage），不在 `edicts.rs` 里手拼；`record.targets` 那行只是草案。
+2. 构造失败不视为写入失败，而是 `apply_changes` 兜底——`Err` 分支换成空集会变成「读不出记录反而照常清理」，所以选择被收进纯函数 `sweep_protection`（`edicts.rs`，`Err` 恒为 `None`）并加了单测钉住。
+3. 诊断不再 `eprintln!` 在应用层：`apply_changes` 交出的 `Problem` 随成功结果上抛，由 CLI（`crates/ziyuan-cli/src/commands.rs`）统一打到 stderr；该通道原样打印 `problem.path`，不经过 `Report::display_relative`/`scrub_message`，所以这里推入的 `Problem.path` 是相对的 `.`（`unprotected_problem`），失败原因也剔除了 `WorkspaceError::Unsafe`/`Corrupt` 里的绝对路径。
 
 - [ ] **Step 4: 运行并做仓库标准校验。**
 

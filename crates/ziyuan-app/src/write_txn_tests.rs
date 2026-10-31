@@ -693,6 +693,9 @@ async fn managed_write_sweeps_a_stale_temp_next_to_the_target() {
 #[tokio::test]
 async fn managed_write_leaves_other_directories_alone() {
     // 同名的陈旧残留若不在本次写入目标所在目录，就不归本轮清理：自动清理只碰目标目录。
+    // 本条只有否定的一半（没清就是对的）；正向的一半由
+    // `managed_write_sweeps_a_stale_temp_next_to_the_target` 与运行库的
+    // `apply_changes_leaves_other_directories_alone` 提供，故此处不另设正控。
     let root = Root::new("sweep-elsewhere");
     let elsewhere = root.path().join("docs");
     std::fs::create_dir_all(&elsewhere).unwrap();

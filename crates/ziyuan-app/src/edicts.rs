@@ -1,5 +1,6 @@
 //! 诏令：下诏、入队、评定、准奏落盘与回报。
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use ziyuan_core::{
@@ -589,6 +590,44 @@ fn workspace_error(error: WorkspaceError) -> AppError {
     })
 }
 
+/// 受保护集合构造成功才交给带清理的写入；失败则退回不清理的写入（失败关闭）。
+///
+/// 做成纯函数是为了让「失败即不清理」这一选择只有一处可改：`Err` 换成空集就会变成
+/// 「读不出记录反而照常清理」，那是会误删的真错。
+fn sweep_protection(
+    protected: &Result<BTreeSet<String>, WorkspaceError>,
+) -> Option<&BTreeSet<String>> {
+    protected.as_ref().ok()
+}
+
+/// 本轮没清理的清理诊断：路径只说「工作区」，原因是去掉绝对路径的说法。
+///
+/// 这条诊断经 CLI 原样打到 stderr（`Report::display_relative` 与 `scrub_message` 都不经过），
+/// 所以路径必须是工作区相对的：写 `workspace.root()` 会把 `\\?\C:\…` 送上 stderr，还会让
+/// 「未能清理临时文件 <工作区根>」看起来像是在说根目录本身是临时文件。
+fn unprotected_problem(error: &WorkspaceError) -> Problem {
+    Problem {
+        path: PathBuf::from("."),
+        message: format!(
+            "读取恢复记录失败，本轮未清理临时文件：{}",
+            unprotected_reason(error)
+        ),
+    }
+}
+
+/// 清理诊断里的失败原因，剔除文件路径。
+///
+/// `WorkspaceError` 的 `Display` 是给其他调用方看的，`Unsafe`/`Corrupt` 会连同出差错文件的
+/// 绝对路径一起打印（见 `ziyuan-storage` 的 `check_path`/`read_control`），那些路径同样不该
+/// 从这里漏出去；这里改成不含路径的说法，其余变体原样转述。
+fn unprotected_reason(error: &WorkspaceError) -> String {
+    match error {
+        WorkspaceError::Unsafe(_) => "工作区控制路径不可信".to_string(),
+        WorkspaceError::Corrupt(_) => "工作区控制文件不合规".to_string(),
+        other => other.to_string(),
+    }
+}
+
 impl<S: EventStore> Session<S> {
     /// 本次准奏要落的文件在磁盘上的现状与改后内容：逐文件的路径、前后哈希。
     /// 已等于改后内容的文件视为已写（`apply_changes` 同样跳过），不必再写，也不入记录。
@@ -804,19 +843,16 @@ impl<S: EventStore> Session<S> {
         // 受保护集合就是本次记录写下的全部目标：清理器据此跳过仍被记录引用的项。
         // 记录读不出来时**退回不清理**（fail closed）：宁可留下陈旧临时文件，也不误删。
         let protected = workspace.protected_targets();
-        let mut applied = match &protected {
-            Ok(protected) => {
+        let mut applied = match sweep_protection(&protected) {
+            Some(protected) => {
                 ziyuan_runtime::tools::apply_changes_protected(root, selected, protected)
             }
-            Err(_) => ziyuan_runtime::tools::apply_changes(root, selected),
+            None => ziyuan_runtime::tools::apply_changes(root, selected),
         }
         .map_err(|e| AppError::Apply(e.to_string()))?;
-        // 上面 `Err(_)` 吞掉的是存储错误，不是诊断：写入照旧，但前端要能报告这一次没清理。
+        // 上面 `None` 吞掉的是存储错误，不是诊断：写入照旧，但前端要能报告这一次没清理。
         if let Err(error) = protected {
-            applied.problems.push(Problem {
-                path: workspace.root().to_path_buf(),
-                message: format!("读取恢复记录失败，本轮未清理临时文件：{error}"),
-            });
+            applied.problems.push(unprotected_problem(&error));
         }
         // 记录预告本批紧接在 `base` 之后。会话里的条数若已被别的提交推动（受管事务之外的
         // 记账，如信使回执），追加就会落在别处，记录与实际从此对不上——此时宁可留下
@@ -836,5 +872,48 @@ impl<S: EventStore> Session<S> {
         guard.finish().map_err(workspace_error)?;
         guard.remove_record().map_err(workspace_error)?;
         Ok(applied.problems)
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::{sweep_protection, unprotected_problem};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use ziyuan_storage::WorkspaceError;
+
+    /// 记录读不出来时必须退回「不清理」——换成空集就会变成「读不出反而照常清理」。
+    #[test]
+    fn sweep_protection_fails_closed_when_the_record_is_unreadable() {
+        let unreadable = Err(WorkspaceError::Corrupt("x".into()));
+        assert_eq!(sweep_protection(&unreadable), None);
+    }
+
+    /// 记录读得出来时原样交出受保护集合，清理器据此跳过仍被引用的项。
+    #[test]
+    fn sweep_protection_carries_the_set_when_the_record_reads() {
+        let set = BTreeSet::from(["src/main.rs".to_string()]);
+        let protected = Ok(set.clone());
+        assert_eq!(sweep_protection(&protected), Some(&set));
+    }
+
+    /// 清理诊断的路径只说「工作区」，不把绝对路径交给原样打 stderr 的调用方。
+    #[test]
+    fn unprotected_problem_names_only_the_workspace() {
+        let error = WorkspaceError::Unsafe(r"\\?\C:\work\repo\.ziyuan\recovery.json".into());
+        let problem = unprotected_problem(&error);
+        assert_eq!(problem.path, PathBuf::from("."));
+        assert!(!problem.path.is_absolute());
+        assert!(
+            problem.message.contains("本轮未清理临时文件"),
+            "{}",
+            problem.message
+        );
+        assert!(
+            !problem.message.contains("recovery.json"),
+            "{}",
+            problem.message
+        );
+        assert!(!problem.message.contains(r"\\?\"), "{}", problem.message);
     }
 }
