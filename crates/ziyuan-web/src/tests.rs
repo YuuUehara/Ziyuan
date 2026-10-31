@@ -317,6 +317,18 @@ pub(crate) async fn call(
     body: Option<Value>,
 ) -> (u16, Value) {
     let url = format!("{base}/api{path}");
+    let role = match token {
+        Some(TOKEN) => "owner",
+        Some(VIEWER) => "viewer",
+        Some(_) => "other",
+        None => "anonymous",
+    };
+    let body = body.map(|body| body.to_string());
+    let context = format!(
+        "{} {url} (role={role}, body_bytes={})",
+        if body.is_some() { "POST" } else { "GET" },
+        body.as_ref().map_or(0, String::len)
+    );
     let token = token.map(|t| format!("Bearer {t}"));
     tokio::task::spawn_blocking(move || {
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -331,19 +343,24 @@ pub(crate) async fn call(
                 }
                 request
                     .header("Content-Type", "application/json")
-                    .send(body.to_string())
-                    .unwrap()
+                    .send(body)
+                    .unwrap_or_else(|error| panic!("{context}: {error:?}"))
             }
             None => {
                 let mut request = agent.get(&url);
                 if let Some(t) = &token {
                     request = request.header("Authorization", t);
                 }
-                request.call().unwrap()
+                request
+                    .call()
+                    .unwrap_or_else(|error| panic!("{context}: {error:?}"))
             }
         };
         let status = response.status().as_u16();
-        let text = response.body_mut().read_to_string().unwrap();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .unwrap_or_else(|error| panic!("{context}, status={status}: {error:?}"));
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))
     })
     .await
