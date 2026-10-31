@@ -3,8 +3,7 @@
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// 改名遇到短暂占用时的重试时限与单次等待上限。
 const RENAME_RETRY_BUDGET: Duration = Duration::from_millis(250);
@@ -91,19 +90,10 @@ fn existing_permissions(target: &Path) -> io::Result<Option<Permissions>> {
 }
 
 fn create_temp(target: &Path) -> io::Result<(PathBuf, File)> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = target
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "目标路径缺少所在目录"))?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    // 名字不含目标文件名，长度有界：目标名接近文件名上限时也能建临时文件。
-    let temp = parent.join(format!(
-        ".ziyuan-tmp-{}-{nanos}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temp = parent.join(super::temp_cleanup::fresh_temp_name());
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -350,6 +340,7 @@ pub(crate) mod faults {
 mod tests {
     use super::faults::{Faults, install, installed};
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
 
     const OLD: &str = "old bytes that must survive";

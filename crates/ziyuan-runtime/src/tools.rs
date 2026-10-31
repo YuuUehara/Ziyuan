@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
 
 mod replace;
+pub mod temp_cleanup;
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
