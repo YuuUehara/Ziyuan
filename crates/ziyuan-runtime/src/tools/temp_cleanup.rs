@@ -1,5 +1,6 @@
 //! 原子替换的临时文件与租约：命名、归属核验、清理。
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -146,6 +147,21 @@ impl Item {
 pub struct Problem {
     pub path: PathBuf,
     pub message: String,
+}
+
+thread_local! {
+    /// 不便沿返回值上抛的失败：例如改名已成功却删不掉租约。按线程隔离，
+    /// 由调用方（`apply_changes_protected`、CLI）取走并报到 stderr。
+    static PROBLEMS: RefCell<Vec<Problem>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn note_problem(path: PathBuf, message: String) {
+    PROBLEMS.with(|problems| problems.borrow_mut().push(Problem { path, message }));
+}
+
+/// 取走当前线程累积的失败；空表示没有。
+pub fn drain_problems() -> Vec<Problem> {
+    PROBLEMS.with(|problems| std::mem::take(&mut *problems.borrow_mut()))
 }
 
 /// 一次写入的租约：先于临时文件存在，覆盖到改名完成。
@@ -1003,9 +1019,6 @@ fn join_relative(relative_dir: &str, name: &str) -> String {
 }
 
 /// 只在测试里存在的交错点，线程局部：测试二进制并行时不互相触发。
-///
-/// 只放已经用得到的那个：`Vanish` 随 Task 3 的删除路径加入，
-/// `SwapNextLeaseToDir` 留到 Task 5，免得在更早的 chunk 里留下没人用的死代码。
 #[cfg(test)]
 pub(crate) mod tests_hooks {
     use std::cell::RefCell;
@@ -1016,6 +1029,8 @@ pub(crate) mod tests_hooks {
         Reclaim,
         /// 关句柄之后把租约换成目录：让删除必然失败（两个平台都会报错）。
         SwapToDir(PathBuf),
+        /// 下一次 `release` 关句柄后换目录，不预先知道路径。
+        SwapNextLeaseToDir,
         /// 删除候选之前先把它删掉：覆盖删除时的 `NotFound`。
         Vanish { path: PathBuf },
     }
@@ -1042,7 +1057,12 @@ pub(crate) mod tests_hooks {
         ARMED.with(|slot| slot.borrow_mut().push(Armed::SwapToDir(path.to_owned())));
     }
 
-    pub(super) fn clear() {
+    /// 给 `replace.rs` 的用例用：租约路径由 `hold` 生成，事先不知道。
+    pub(crate) fn arm_swap_next_lease_to_dir() {
+        ARMED.with(|slot| slot.borrow_mut().push(Armed::SwapNextLeaseToDir));
+    }
+
+    pub(crate) fn clear() {
         ARMED.with(|slot| slot.borrow_mut().clear());
     }
 
@@ -1073,6 +1093,11 @@ pub(crate) mod tests_hooks {
     }
 
     pub(super) fn after_close(path: &Path) {
+        // 优先匹配“下一次关句柄”：它不知道路径，所以不能按路径比较。
+        if take(|armed| matches!(armed, Armed::SwapNextLeaseToDir)).is_some() {
+            swap(path);
+            return;
+        }
         if let Some(Armed::SwapToDir(target)) =
             take(|armed| matches!(armed, Armed::SwapToDir(target) if target == path))
         {
@@ -2005,5 +2030,17 @@ mod tests {
         assert!(report.problems.is_empty());
         assert!(report.unscanned.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn problems_recorded_once_are_drained_once() {
+        let _ = drain_problems();
+        let path = std::path::PathBuf::from(".ziyuan-lease-probe");
+        note_problem(path.clone(), "删除失败".into());
+        let drained = drain_problems();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].path, path);
+        assert_eq!(drained[0].message, "删除失败");
+        assert!(drain_problems().is_empty(), "取走后不得重复上报");
     }
 }

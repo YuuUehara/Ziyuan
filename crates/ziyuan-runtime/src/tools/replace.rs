@@ -50,7 +50,21 @@ pub(super) fn replace_target(target: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     faults::begin();
     let permissions = existing_permissions(target)?;
-    let (temp, file) = create_temp(target)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "目标路径缺少所在目录"))?;
+    let temp_name = super::temp_cleanup::fresh_temp_name();
+    // 租约先于临时文件存在，覆盖创建、写入、关句柄与改名整段：它同时也是清理者
+    // 唯一的归属证据。加锁后 `hold` 会再核验路径仍指向自己。
+    let lease = super::temp_cleanup::Lease::hold(parent, &temp_name)?;
+    let temp = parent.join(&temp_name);
+    let file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+        Ok(file) => file,
+        Err(e) => {
+            release_quietly(lease);
+            return Err(e);
+        }
+    };
     let result = fill(file, &temp, bytes, permissions).and_then(|()| {
         #[cfg(test)]
         faults::before_rename(target);
@@ -65,9 +79,23 @@ pub(super) fn replace_target(target: &Path, bytes: &[u8]) -> io::Result<()> {
     match result {
         Ok(()) => {
             sync_parent(target);
+            // 改名已成功：删租约失败不回滚、不报替换失败，只留下一诊断。
+            release_quietly(lease);
             Ok(())
         }
-        Err(primary) => Err(discard(&temp, primary)),
+        Err(primary) => {
+            let error = discard(&temp, primary);
+            release_quietly(lease);
+            Err(error)
+        }
+    }
+}
+
+/// 放弃租约但不上抛它的错误：此刻真正要报告的是原始失败或“替换已完成”。
+fn release_quietly(lease: super::temp_cleanup::Lease) {
+    let path = lease.path().to_path_buf();
+    if let Err(e) = lease.release() {
+        super::temp_cleanup::note_problem(path, e.to_string());
     }
 }
 
@@ -87,18 +115,6 @@ fn existing_permissions(target: &Path) -> io::Result<Option<Permissions>> {
         ));
     }
     Ok(Some(permissions))
-}
-
-fn create_temp(target: &Path) -> io::Result<(PathBuf, File)> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "目标路径缺少所在目录"))?;
-    let temp = parent.join(super::temp_cleanup::fresh_temp_name());
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
-    Ok((temp, file))
 }
 
 /// 复制权限、写入内容并落到磁盘；返回前关闭文件。
@@ -368,6 +384,13 @@ mod tests {
         names
     }
 
+    fn lease_names(dir: &Path) -> Vec<String> {
+        names(dir)
+            .into_iter()
+            .filter(|name| name.starts_with(".ziyuan-lease-"))
+            .collect()
+    }
+
     /// 注入 `faults` 后替换失败：目标保持原样（原文或不存在），不留自己的临时文件，旁边的文件不动。
     fn assert_fault_keeps_target(name: &str, existing: bool, faults: Faults) {
         let dir = scratch(name);
@@ -395,6 +418,7 @@ mod tests {
             fs::read_to_string(dir.join("keep.txt")).unwrap(),
             "unrelated"
         );
+        assert!(lease_names(&dir).is_empty(), "失败路径不得留下租约");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -513,6 +537,72 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("fresh.txt")).unwrap(), "fresh");
         assert_eq!(names(&dir), ["existing.txt", "fresh.txt", "keep.txt"]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replacement_leaves_a_clean_directory() {
+        let dir = scratch("clean");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, OLD).unwrap();
+        replace_target(&target, NEW.as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), NEW);
+        // `scratch` 本来就会放一个 keep.txt：它必须原样在，别的都不许留。
+        assert_eq!(
+            names(&dir),
+            vec!["keep.txt".to_string(), "target.txt".to_string()],
+            "成功替换后不留临时文件或租约"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lease_is_held_after_the_temp_handle_closes_and_before_rename() {
+        let dir = scratch("rename-window");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, OLD).unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot = seen.clone();
+        // `before_rename` 在 `fill` 关闭临时文件之后、改名前调用：正是设计要求的窗口。
+        let _guard = install(Faults {
+            before_rename: Some(Box::new(move |target: &Path| {
+                let leases = lease_names(target.parent().unwrap());
+                *slot.lock().unwrap() = Some(leases);
+            })),
+            ..Faults::default()
+        });
+        replace_target(&target, NEW.as_bytes()).unwrap();
+        let leases = seen.lock().unwrap().take().expect("before_rename 未被调用");
+        assert_eq!(leases.len(), 1, "改名窗口内必须恰好有一份租约: {leases:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), NEW);
+        assert!(lease_names(&dir).is_empty(), "成功路径必须清掉租约");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lease_delete_failure_does_not_fail_the_replacement() {
+        let _ = super::super::temp_cleanup::drain_problems();
+        let dir = scratch("lease-stuck");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, OLD).unwrap();
+        super::super::temp_cleanup::tests_hooks::arm_swap_next_lease_to_dir();
+        let result = replace_target(&target, NEW.as_bytes());
+        super::super::temp_cleanup::tests_hooks::clear();
+        assert!(result.is_ok(), "删租约失败不得报替换失败: {result:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), NEW);
+        let problems = super::super::temp_cleanup::drain_problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0]
+                .path
+                .to_string_lossy()
+                .contains(".ziyuan-lease-"),
+            "{problems:?}"
+        );
+        // 把换名成目录的租约清掉，供后面的用例复用目录无关的假设。
+        for name in lease_names(&dir) {
+            let _ = std::fs::remove_dir_all(dir.join(name));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
