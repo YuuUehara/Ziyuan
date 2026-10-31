@@ -106,7 +106,7 @@ impl MemoryIndex {
             integrity,
         };
         let mut bytes = serde_json::to_vec_pretty(&envelope)
-            .map_err(|e| MemoryError::Corrupt(format!("索引无法编码: {e}")))?;
+            .map_err(|e| MemoryError::Corrupt(format!("索引无法序列化: {e}")))?;
         bytes.push(b'\n');
         Ok(bytes)
     }
@@ -114,7 +114,7 @@ impl MemoryIndex {
     /// 解码并校验整份索引；任一处不合格即整份拒收，**绝不**返回部分索引。
     pub fn decode(bytes: &[u8]) -> Result<Self, MemoryError> {
         let raw: RawEnvelope = serde_json::from_slice(bytes)
-            .map_err(|e| MemoryError::Corrupt(format!("索引无法解码: {e}")))?;
+            .map_err(|e| MemoryError::Corrupt(format!("无法解码: {e}")))?;
         if raw.format_version > FORMAT_VERSION {
             return Err(MemoryError::Newer {
                 found: raw.format_version,
@@ -122,24 +122,26 @@ impl MemoryIndex {
             });
         }
         if let Err(MemoryError::Invalid(reason)) = raw.signature.validate() {
-            return Err(MemoryError::Corrupt(format!("信封签名不合法: {reason}")));
+            return Err(MemoryError::Corrupt(format!("信封签名不合规: {reason}")));
         }
         if raw.integrity.count != raw.records.len() {
             return Err(MemoryError::Corrupt(format!(
-                "integrity.count 为 {}，记录实为 {} 条",
+                "记录条数不符: integrity.count 为 {}，实有 {} 条",
                 raw.integrity.count,
                 raw.records.len()
             )));
         }
         let canonical = canonical_record_bytes(&raw.records)?;
         if raw.integrity.sha256 != sha256_hex(&canonical) {
-            return Err(MemoryError::Corrupt("integrity.sha256 与记录不符".into()));
+            return Err(MemoryError::Corrupt(
+                "integrity.sha256 与记录内容不符".into(),
+            ));
         }
         for record in &raw.records {
             let label = record_label(&record.identity);
             record
                 .validate_format()
-                .map_err(|e| corrupt_record(&label, "格式不合法", &e))?;
+                .map_err(|e| corrupt_record(&label, "格式不合规", &e))?;
             // 记录里的签名／水位是冗余副本：一旦与信封走散，检索就会拿着与构建时不同的
             // 签名或水位去算，而这种错配没有别的地方能发现。逐条比对，任一条不符即整份拒收。
             if !raw.signature.matches(&record.embedding) {
@@ -220,7 +222,7 @@ fn sort_key(identity: &Identity) -> (&str, &str, &str, &str, &str) {
 /// 记录的规范编码：先排序，再 `serde_json::to_vec`。`integrity.sha256` 就是这个摘要。
 fn canonical_record_bytes(records: &[MemoryRecord]) -> Result<Vec<u8>, MemoryError> {
     serde_json::to_vec(&sorted_records(records))
-        .map_err(|e| MemoryError::Corrupt(format!("记录无法编码: {e}")))
+        .map_err(|e| MemoryError::Corrupt(format!("记录无法序列化: {e}")))
 }
 
 /// 记录的身份标签：只含 ID，不含原文、译文或路径。
@@ -551,7 +553,7 @@ mod tests {
         );
         match MemoryIndex::decode(&bytes) {
             Err(MemoryError::Corrupt(reason)) => {
-                assert!(reason.contains("格式不合法"), "{reason}");
+                assert!(reason.contains("格式不合规"), "{reason}");
                 assert!(reason.contains("embedding.dim"), "{reason}");
             }
             other => panic!("预期记录不合格式，得到 {other:?}"),

@@ -49,9 +49,15 @@ pub enum MemoryError {
 impl fmt::Display for MemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Invalid(reason) => write!(f, "记忆库记录不合法: {reason}"),
-            Self::Unavailable => write!(f, "记忆库不可用: 未配置可用的嵌入提供方"),
-            Self::Corrupt(reason) => write!(f, "记忆库索引损坏: {reason}"),
+            Self::Invalid(reason) => write!(f, "记忆库记录不合规: {reason}"),
+            Self::Unavailable => write!(
+                f,
+                "记忆库不可用: 未配置嵌入提供方；默认不外发，须显式设置 {env}",
+                env = embed::PROVIDER_ENV
+            ),
+            Self::Corrupt(reason) => {
+                write!(f, "记忆库索引损坏: {reason}；索引可删，重建即可")
+            }
             Self::Newer { found, supported } => write!(
                 f,
                 "记忆库索引格式 {found} 由更新版本的紫垣写入，本版只支持 {supported}，请升级 ziyuan 后重建索引"
@@ -61,9 +67,12 @@ impl fmt::Display for MemoryError {
                 "嵌入签名不符: 索引为 {found}，当前为 {expected}，须重建索引"
             ),
             Self::Stale { reason } => {
-                write!(f, "记忆库资料已变（{reason}），本次不发布索引")
+                write!(
+                    f,
+                    "记忆库资料在建库期间有变（{reason}），本次不发布索引；请重试"
+                )
             }
-            Self::Io { reason } => write!(f, "记忆库读写失败: {reason}"),
+            Self::Io { reason } => write!(f, "记忆库读写失败: {reason}；索引损坏可删去，重建即可"),
         }
     }
 }
@@ -81,20 +90,20 @@ mod tests {
     use super::*;
 
     /// 逐条钉住消息用的字：这些行会进日志与命令行输出，措辞随改动漂移就算回归。
-    /// 冒号一律是 ASCII `: `，与 `RecoveryError` 一致。
+    /// 冒号一律是 ASCII `: `，与 `RecoveryError` 一致；每条都要说清下一步。
     #[test]
     fn display_messages_pin_each_variant() {
         assert_eq!(
             MemoryError::Invalid("b 不能为空".into()).to_string(),
-            "记忆库记录不合法: b 不能为空"
+            "记忆库记录不合规: b 不能为空"
         );
         assert_eq!(
             MemoryError::Unavailable.to_string(),
-            "记忆库不可用: 未配置可用的嵌入提供方"
+            "记忆库不可用: 未配置嵌入提供方；默认不外发，须显式设置 ZIYUAN_MEMORY_PROVIDER"
         );
         assert_eq!(
             MemoryError::Corrupt("integrity".into()).to_string(),
-            "记忆库索引损坏: integrity"
+            "记忆库索引损坏: integrity；索引可删，重建即可"
         );
         assert_eq!(
             MemoryError::Newer {
@@ -117,14 +126,14 @@ mod tests {
                 reason: "translation_edited".into()
             }
             .to_string(),
-            "记忆库资料已变（translation_edited），本次不发布索引"
+            "记忆库资料在建库期间有变（translation_edited），本次不发布索引；请重试"
         );
         assert_eq!(
             MemoryError::Io {
                 reason: "not found".into()
             }
             .to_string(),
-            "记忆库读写失败: not found"
+            "记忆库读写失败: not found；索引损坏可删去，重建即可"
         );
     }
 
@@ -133,7 +142,10 @@ mod tests {
     fn display_adds_nothing_beyond_the_reason() {
         let reason = "记录无法解码: EOF while parsing";
         let message = MemoryError::Corrupt(reason.into()).to_string();
-        assert_eq!(message, format!("记忆库索引损坏: {reason}"));
+        assert_eq!(
+            message,
+            format!("记忆库索引损坏: {reason}；索引可删，重建即可")
+        );
         assert_eq!(message.matches(reason).count(), 1, "{message}");
         assert!(!message.contains(['/', '\\', '"']), "{message}");
     }

@@ -60,7 +60,7 @@ impl ModelSignature {
             ("metric", self.metric.as_str()),
         ] {
             if value.trim().is_empty() {
-                return Err(MemoryError::Invalid(format!("embedding.{name} 不能为空")));
+                return Err(MemoryError::Invalid(format!("embedding.{name} 不得为空")));
             }
         }
         if self.dim == 0 {
