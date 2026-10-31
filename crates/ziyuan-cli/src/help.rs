@@ -303,7 +303,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
-         text) words="init import show check translate review revise zhupi finalize reopen context approve status resume help --dept --reason --clear --show --yes --json" ;;
+         text) words="init import show check recovery translate review revise zhupi finalize reopen context approve status resume help --dept --reason --clear --show --yes --json" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
          apply) words="--skip --commit" ;;
@@ -339,7 +339,7 @@ complete -F _ziyuan ziyuan
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
-                format!("{} -a 'init import show check translate review revise zhupi finalize reopen context approve status resume help'", seen("text")),
+                format!("{} -a 'init import show check recovery translate review revise zhupi finalize reopen context approve status resume help'", seen("text")),
                 format!("{} -a 'add list show edit remove promote help'", seen("note")),
                 format!("{} -l kind -x -a 'word passage'", seen("note")),
                 format!("{} -l source -r", seen("note")),

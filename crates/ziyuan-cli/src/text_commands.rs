@@ -1,5 +1,6 @@
 //! `ziyuan text`：离线文本项目与译书命令分派。不读模型配置、不联网。
 
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::io::Read;
@@ -37,6 +38,9 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        不重做业务写入，也不重算目标文件
   ziyuan text recovery abandon <操作ID> --yes
                                        仅在目标仍是旧状态、未落盘任何字节时放弃那次写入
+  ziyuan text recovery temps [--yes]
+                                       列出工作目录里遗留的 .ziyuan-tmp-* 与其租约；
+                                       默认只预览，加 --yes 才删除可证明陈旧的项
   以上命令均可加 --json，以 JSON 输出到标准输出。项目存于 .ziyuan/text-projects/<项目ID>/。"#;
 
 pub(crate) enum TextAction {
@@ -58,13 +62,21 @@ const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <章节.txt>..
 const SHOW_USAGE: &str = "用法: ziyuan text show <项目ID>";
 const CHECK_USAGE: &str =
     "用法: ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]";
-const RECOVERY_USAGE: &str = "用法: ziyuan text recovery status [--json] | ziyuan text recovery finish <操作ID> --yes | ziyuan text recovery abandon <操作ID> --yes";
+const RECOVERY_USAGE: &str = "用法: ziyuan text recovery status [--json] | ziyuan text recovery finish <操作ID> --yes | ziyuan text recovery abandon <操作ID> --yes | ziyuan text recovery temps [--json] [--yes]";
 
 /// 受管写入（准奏落盘）的恢复操作：只处理先前遗留的恢复记录，不执行业务写入。
 pub(crate) enum RecoveryAction {
     Status,
-    Finish { operation_id: String },
-    Abandon { operation_id: String },
+    Finish {
+        operation_id: String,
+    },
+    Abandon {
+        operation_id: String,
+    },
+    /// 清理遗留的 `.ziyuan-tmp-*`：默认只预览，`--yes` 才删。
+    Temps {
+        apply: bool,
+    },
 }
 /// 候选译稿的读取上限：远大于单个提示块（48 KiB），只为挡住误给的巨型文件。
 const CANDIDATE_BYTES: u64 = 16 * 1024 * 1024;
@@ -187,6 +199,11 @@ fn parse_recovery(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
             RecoveryAction::Abandon {
                 operation_id: id.clone(),
             }
+        }
+        // 清理同样默认不动手：不加 `--yes` 只预览，删掉的临时文件找不回来。
+        [action] if action == "temps" => RecoveryAction::Temps { apply: false },
+        [action, yes] if action == "temps" && yes == "--yes" => {
+            RecoveryAction::Temps { apply: true }
         }
         _ => return Err(RECOVERY_USAGE.into()),
     };
@@ -349,6 +366,7 @@ fn print_chapters(projects: &TextProjects, project: &Project) -> Result<(), Box<
 fn run_recovery(action: RecoveryAction, json: bool) -> Result<(), Box<dyn Error>> {
     let workspace = Workspace::open(env::current_dir()?)?;
     match action {
+        RecoveryAction::Temps { apply } => return run_temps(&workspace, apply, json),
         RecoveryAction::Status => {
             let generation = workspace.generation()?;
             let record = workspace.pending_record()?;
@@ -475,6 +493,96 @@ fn run_recovery(action: RecoveryAction, json: bool) -> Result<(), Box<dyn Error>
         }
     }
     Ok(())
+}
+
+/// 手工清理遗留临时文件。默认预览；`--yes` 才真删。
+///
+/// 不取工作目录锁：那会把正在写入的进程挡到超时，而非阻塞试探已经足够给出可信判定。
+fn run_temps(workspace: &Workspace, apply: bool, json: bool) -> Result<(), Box<dyn Error>> {
+    use ziyuan_runtime::tools::temp_cleanup::{Kind, Outcome};
+    // 集合构造失败就整轮不清理：宁可什么都不做，也不要误删恢复记录引用的项。
+    let protected = protected_targets(workspace)?;
+    let report =
+        ziyuan_runtime::tools::temp_cleanup::sweep_workspace(workspace.root(), &protected, apply);
+    if json {
+        print_json(report.to_json())?;
+    } else {
+        let temps = report.counts(Kind::Temp);
+        let leases = report.counts(Kind::Lease);
+        println!("范围：{}（含子目录）", report.scope());
+        println!(
+            "模式：{}",
+            if apply {
+                "删除"
+            } else {
+                "预览，加 --yes 才删"
+            }
+        );
+        println!(
+            "临时文件：候选 {}，可清理 {}，已删除 {}，保留 {}",
+            temps.candidates, temps.removable, temps.removed, temps.kept
+        );
+        println!(
+            "租约：候选 {}，可清理 {}，已删除 {}，保留 {}",
+            leases.candidates, leases.removable, leases.removed, leases.kept
+        );
+        if !report.skipped.is_empty() {
+            // 报路径而不是名字：两个子目录里各有一个 `target` 时，光看名字分不出没扫的是哪个。
+            println!("未进入的目录（按路径跳过）：{}", report.skipped.join("、"));
+        }
+        if !report.capped.is_empty() {
+            // 深度上限不是失败：只说明这一层没进去，不影响退出码。
+            println!("  达到深度上限未进入：{}", report.capped.join("、"));
+        }
+        for item in &report.items {
+            // 原因名与 JSON 的 `reason` 出自同一处：可删除项照样显示
+            // WriterDeadLeaseVerified / OrphanLease，不在这里手拼第二套名字。
+            let reason = item.reason_name();
+            // 已删除与可清理分开写：预览里的“可清理”是待办提示，不是这一轮做了什么。
+            let status = match item.outcome {
+                Outcome::Remove if item.acted => "已删除",
+                Outcome::Remove => "可清理",
+                Outcome::Keep(_) => "保留",
+            };
+            // 报告只出相对路径：绝对路径不外泄。
+            println!(
+                "  {status} {reason:<22} {}",
+                report.display_relative(&item.path)
+            );
+        }
+        for problem in &report.problems {
+            println!(
+                "  失败：{}：{}",
+                report.display_relative(&problem.path),
+                problem.message
+            );
+        }
+        for dir in &report.unscanned {
+            println!("  读不了的目录：{}", report.display_relative(dir));
+        }
+    }
+    // 只有扫描/删除的 I/O 失败与读不了的目录才退 1；预览发现可清理项仍算成功，
+    // 报告里的“可清理 N”就是待办提示（设计：仅保留活跃或未知项不算执行失败）。
+    if report.needs_attention() {
+        return Err("临时文件清理未能完成；见上面的逐项报告".into());
+    }
+    Ok(())
+}
+
+/// 受保护集合：恢复记录里全部目标路径（`/` 分隔的工作区相对路径）。
+///
+/// 注意它今天**护住的不是临时文件**：记录里存的是目标文件的最终路径（如 `src/main.rs`），
+/// 而候选的名字是 `.ziyuan-tmp-…`，两者不可能相等。这套集合是为“将来记录若开始携带
+/// 临时文件声明”留的接口，也是设计要求的构造点；真正阻止误删的是租约核验。
+/// 记录读不出来时整轮不清理，宁可什么都不做。
+fn protected_targets(workspace: &Workspace) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let mut protected = BTreeSet::new();
+    if let Some(record) = workspace.pending_record()? {
+        for target in &record.targets {
+            protected.insert(target.path.clone());
+        }
+    }
+    Ok(protected)
 }
 
 /// 收尾：只推进世代并清理记录，绝不重做业务写入。

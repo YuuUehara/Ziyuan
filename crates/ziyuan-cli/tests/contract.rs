@@ -358,3 +358,107 @@ fn invalid_context_threshold_does_not_start_or_change_tasks() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// 造一个“写入者已死”的工作目录：临时文件加一份认领它的租约。
+fn stale_temp_workspace(name: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("ziyuan-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let temp = dir.join(".ziyuan-tmp-4242-1-1");
+    std::fs::write(&temp, b"partial").unwrap();
+    std::fs::write(
+        dir.join(".ziyuan-lease-0123456789abcdef0123456789abcdef"),
+        "ziyuan-lease v1 temp=.ziyuan-tmp-4242-1-1 id=0123456789abcdef0123456789abcdef\n",
+    )
+    .unwrap();
+    (dir, temp)
+}
+
+#[test]
+fn text_recovery_temps_previews_then_deletes() {
+    let (dir, temp) = stale_temp_workspace("recovery-temps");
+    let preview = ziyuan(&dir, &["text", "recovery", "temps", "--json"]);
+    // 预览不是失败：设计写明“仅保留活跃或未知项不算执行失败”，可清理数写在报告里。
+    assert_eq!(preview.status.code(), Some(0), "{:?}", preview.stdout);
+    let report: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(report["mode"], "preview");
+    assert_eq!(report["scope"], ".");
+    assert_eq!(report["temps"]["removable"], 1);
+    assert_eq!(report["temps"]["removed"], 0);
+    // 报告里只出现相对路径，不泄露绝对路径。
+    assert_eq!(report["items"][0]["path"], ".ziyuan-tmp-4242-1-1");
+    assert!(
+        !String::from_utf8_lossy(&preview.stdout).contains(r"\\?\"),
+        "报告不得包含绝对路径"
+    );
+    assert!(temp.is_file(), "预览不得删除");
+
+    let applied = ziyuan(&dir, &["text", "recovery", "temps", "--yes", "--json"]);
+    assert_eq!(applied.status.code(), Some(0), "{:?}", applied.stdout);
+    let report: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(report["mode"], "apply");
+    assert_eq!(report["temps"]["removed"], 1);
+    assert!(!temp.exists(), "确认后应删除");
+    assert!(
+        !dir.join(".ziyuan-lease-0123456789abcdef0123456789abcdef")
+            .exists()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_recovery_temps_keeps_a_temp_without_a_lease() {
+    // 旧版遗留或 PID 复用：名字合法但没有租约，没有归属证据，一律保留。
+    let dir = std::env::temp_dir().join(format!("ziyuan-cli-temps-reuse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let orphan = dir.join(".ziyuan-tmp-4242-1-1");
+    std::fs::write(&orphan, b"partial").unwrap();
+    let out = ziyuan(&dir, &["text", "recovery", "temps", "--yes", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{:?}", out.stdout);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["temps"]["kept"], 1);
+    assert_eq!(report["temps"]["removed"], 0);
+    assert_eq!(report["items"][0]["reason"], "TempWithoutLease");
+    assert!(orphan.is_file(), "无归属证据的文件绝不删除");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_recovery_temps_is_clean_on_an_empty_workspace() {
+    let dir = std::env::temp_dir().join(format!("ziyuan-cli-temps-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = ziyuan(&dir, &["text", "recovery", "temps", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["temps"]["candidates"], 0);
+    assert_eq!(report["leases"]["candidates"], 0);
+    assert_eq!(report["removed_total"], 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_recovery_temps_reports_capped_without_failing() {
+    // 33 层目录只是建 33 次，代价可忽略；深度上限是 32，所以第 32 层会被记进 `capped`。
+    let dir = std::env::temp_dir().join(format!("ziyuan-cli-temps-capped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut deep = dir.clone();
+    for _ in 0..33 {
+        deep = deep.join("d");
+        std::fs::create_dir_all(&deep).unwrap();
+    }
+    // 工作区根算第 0 层，上限 32：第 32 层那个目录本身不进入，报的相对路径就是 32 段。
+    let expected = vec!["d"; 32].join("/");
+    let out = ziyuan(&dir, &["text", "recovery", "temps", "--json"]);
+    // 深度上限不是 I/O 失败：它只说明没走到那一层，本轮仍然算成功。
+    assert_eq!(out.status.code(), Some(0), "{:?}", out.stdout);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let capped = report["capped"].as_array().unwrap();
+    assert!(
+        capped.iter().any(|entry| entry == expected.as_str()),
+        "{expected} 未出现在 capped 中：{capped:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
