@@ -1,8 +1,5 @@
 //! 原子替换的临时文件与租约：命名、归属核验、清理。
 
-// Chunk 1-3 还没有生产调用点；Task 4 用 sweep_dir 打通后必须删掉本行。
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -685,6 +682,271 @@ fn lease_entries(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(entries)
+}
+
+/// 两种模式：预览只报“本可删除”，删数为 0。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Preview,
+    Apply,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::Apply => "apply",
+        }
+    }
+}
+
+/// 某一类对象的计数：可清理数与实际删除数分列，预览才说得清。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Counts {
+    pub candidates: usize,
+    pub removable: usize,
+    pub removed: usize,
+    pub kept: usize,
+}
+
+/// 一轮扫描的报告：计数与逐项明细都出自同一次判定，不再二次统计。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Report {
+    pub mode: Mode,
+    /// 扫描范围：本次从哪个根开始。
+    pub root: PathBuf,
+    pub recursive: bool,
+    pub items: Vec<Item>,
+    pub problems: Vec<Problem>,
+    /// 读不了的目录：既不算扫描成功，也不中止整轮。
+    pub unscanned: Vec<PathBuf>,
+    /// 主动不进入的目录名（只报名字，报告仍不含绝对路径）。
+    pub skipped: Vec<String>,
+}
+
+impl Report {
+    fn new(mode: Mode, root: &Path, recursive: bool) -> Self {
+        Self {
+            mode,
+            root: root.to_path_buf(),
+            recursive,
+            items: Vec::new(),
+            problems: Vec::new(),
+            unscanned: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    /// 报告里的路径形式：相对 `root`、`/` 分隔。绝对路径不外泄。
+    ///
+    /// 不在 `root` 之下时只保留 `Normal` 组件（盘符、根与前导 `..` 都被滤掉），
+    /// 所以无论哪种情况都不会输出绝对路径。
+    pub fn display_relative(&self, path: &Path) -> String {
+        let relative = path.strip_prefix(&self.root).unwrap_or(path);
+        relative
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// 扫描范围：`root` 相对自身的路径，根本身记作 `.`。
+    ///
+    /// 返回 `.` 而不是空串：报告是给人看的，`scope: ""` 会被读成“没扫描任何地方”。
+    pub fn scope(&self) -> String {
+        let relative = self.display_relative(&self.root);
+        if relative.is_empty() {
+            ".".to_owned()
+        } else {
+            relative
+        }
+    }
+
+    pub fn counts(&self, kind: Kind) -> Counts {
+        let mut counts = Counts::default();
+        for item in self.items.iter().filter(|item| item.kind == kind) {
+            counts.candidates += 1;
+            match item.outcome {
+                Outcome::Remove => {
+                    counts.removable += 1;
+                    if item.acted {
+                        counts.removed += 1;
+                    }
+                }
+                Outcome::Keep(_) => counts.kept += 1,
+            }
+        }
+        counts
+    }
+
+    /// 本次实际删掉的对象数（候选与租约都算）。
+    pub fn removed_total(&self) -> usize {
+        self.items.iter().filter(|item| item.acted).count()
+    }
+
+    /// 按设计的退出码判定：只有扫描／删除的 I/O 失败、或读不了的目录才算“需要处理”。
+    ///
+    /// 预览里“本可删除但没删”**不是**失败：报告已经逐项标出可清理数，脚本据此决定
+    /// 是否加 `--yes`；设计明确“仅保留活跃或未知项不算执行失败”。
+    pub fn needs_attention(&self) -> bool {
+        !self.problems.is_empty() || !self.unscanned.is_empty()
+    }
+
+    /// 报告只列原因名与相对路径，不带内部细节。
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let describe = |kind: Kind| {
+            let counts = self.counts(kind);
+            json!({
+                "candidates": counts.candidates,
+                "removable": counts.removable,
+                "removed": counts.removed,
+                "kept": counts.kept,
+            })
+        };
+        json!({
+            "mode": self.mode.as_str(),
+            "scope": self.scope(),
+            "recursive": self.recursive,
+            "temps": describe(Kind::Temp),
+            "leases": describe(Kind::Lease),
+            "removed_total": self.removed_total(),
+            "skipped": self.skipped,
+            "items": self.items.iter().map(|item| json!({
+                "path": self.display_relative(&item.path),
+                "kind": match item.kind { Kind::Temp => "temp", Kind::Lease => "lease" },
+                "outcome": match item.outcome {
+                    Outcome::Remove => "remove",
+                    Outcome::Keep(_) => "keep",
+                },
+                "reason": match item.outcome {
+                    Outcome::Remove => serde_json::Value::Null,
+                    Outcome::Keep(reason) => json!(reason.as_str()),
+                },
+                "acted": item.acted,
+            })).collect::<Vec<_>>(),
+            "problems": self.problems.iter().map(|problem| json!({
+                "path": self.display_relative(&problem.path),
+                "message": problem.message,
+            })).collect::<Vec<_>>(),
+            "unscanned": self.unscanned
+                .iter()
+                .map(|path| self.display_relative(path))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// 扫一个目录（不递归）：候选项逐项决策，再逐个处理孤儿租约。
+///
+/// `relative_dir` 是相对工作区根的目录路径（根目录传空串），用来拼受保护集合里的
+/// 相对路径；它不是被扫目录内部的位置。
+pub fn sweep_dir(
+    dir: &Path,
+    relative_dir: &str,
+    protected: &BTreeSet<String>,
+    apply: bool,
+) -> Report {
+    let mut report = Report::new(if apply { Mode::Apply } else { Mode::Preview }, dir, false);
+    scan_into(&mut report, dir, relative_dir, protected, apply);
+    report
+}
+
+fn scan_into(
+    report: &mut Report,
+    dir: &Path,
+    relative_dir: &str,
+    protected: &BTreeSet<String>,
+    apply: bool,
+) {
+    // 第一次列举：候选名与租约清单出自同一次 `read_dir`，两者一起决定本轮删不删。
+    // 读不出来就连候选都不判、直接放弃这个目录：`decide_candidate` 的前提是“租约列全了”，
+    // 不列租约就送候选进去，会把每一个都判成 `TempWithoutLease`——看着安全，实则让这个
+    // 目录永远清不掉，也永远不知道原因。
+    let mut names: Vec<String> = Vec::new();
+    let mut leases: Vec<(PathBuf, String)> = Vec::new();
+    match fs::read_dir(dir) {
+        Err(e) => {
+            report.unscanned.push(dir.to_path_buf());
+            report.problems.push(Problem {
+                path: dir.to_path_buf(),
+                message: e.to_string(),
+            });
+            return;
+        }
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Err(e) => report.problems.push(Problem {
+                        path: dir.to_path_buf(),
+                        message: e.to_string(),
+                    }),
+                    Ok(entry) => {
+                        let file_name = entry.file_name();
+                        let Some(name) = file_name.to_str() else {
+                            continue;
+                        };
+                        names.push(name.to_owned());
+                        if let Some(id) = lease_id_of(name) {
+                            leases.push((entry.path(), id.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    names.sort();
+    // 租约顺序也固定：报告要能逐字比较，不能跟着文件系统的返回次序走。
+    leases.sort_by(|left, right| left.0.cmp(&right.0));
+    let candidates: Vec<String> = names
+        .into_iter()
+        .filter(|name| is_candidate_name(name))
+        .collect();
+    for name in candidates {
+        let relative = join_relative(relative_dir, &name);
+        let item = decide_candidate(
+            dir,
+            &name,
+            &relative,
+            &leases,
+            protected,
+            apply,
+            &mut report.problems,
+        );
+        report.items.push(item);
+    }
+    // 租约清单在候选处理之后再取一次，不能复用第一次的清单：随候选一起被删掉的租约
+    // 不该再报一条“已不存在”。复用旧清单会让报告凭空多出与候选同样多的假问题项。
+    let leases = match lease_entries(dir) {
+        Ok(leases) => leases,
+        Err(e) => {
+            // 只记 I/O 失败，不把目录记成“未扫描”：它刚刚还列得出来，候选已按证据处理完，
+            // 这一趟没走成的只是孤儿租约那一段。
+            report.problems.push(Problem {
+                path: dir.to_path_buf(),
+                message: e.to_string(),
+            });
+            return;
+        }
+    };
+    for (path, id) in leases {
+        // 不按类型预过滤：目录或链接冒充的租约要交给 decide_lease 报
+        // LeaseNotRegular，不能被当成“没有租约”。
+        let item = decide_lease(dir, &path, &id, apply, &mut report.problems);
+        report.items.push(item);
+    }
+}
+
+/// 相对路径一律用 `/` 分隔，与恢复记录同一形式；根目录本身是空串。
+fn join_relative(relative_dir: &str, name: &str) -> String {
+    if relative_dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{relative_dir}/{name}")
+    }
 }
 
 /// 只在测试里存在的交错点，线程局部：测试二进制并行时不互相触发。
@@ -1485,6 +1747,106 @@ mod tests {
             1,
             "候选没了就不动租约，留给孤儿路径"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn temp_item<'a>(report: &'a Report, name: &str) -> &'a Item {
+        report
+            .items
+            .iter()
+            .find(|item| {
+                item.kind == Kind::Temp
+                    && item
+                        .path
+                        .file_name()
+                        .is_some_and(|file| file.to_string_lossy() == name)
+            })
+            .unwrap_or_else(|| panic!("没有 {name} 的报告项: {report:?}"))
+    }
+
+    fn sweep_fixture(tag: &str) -> (std::path::PathBuf, String, String) {
+        let dir = scratch(tag);
+        let name = fresh_temp_name();
+        write_temp(&dir, &name);
+        let id = hex_id(31);
+        dead_lease(&dir, &id, &name);
+        (dir, name, id)
+    }
+
+    #[test]
+    fn sweep_reports_candidates_and_leases_separately() {
+        let (dir, name, _id) = sweep_fixture("sweep-counts");
+        // 一个普通文件冒充候选形状但不符合严格命名。
+        std::fs::write(dir.join(".ziyuan-tmp-not-a-candidate"), b"x").unwrap();
+        let report = sweep_dir(&dir, "", &empty_protected(), true);
+        let temps = report.counts(Kind::Temp);
+        let leases = report.counts(Kind::Lease);
+        assert_eq!(temps.candidates, 1, "{report:?}");
+        assert_eq!(temps.removable, 1, "{report:?}");
+        assert_eq!(temps.removed, 1, "{report:?}");
+        assert_eq!(temps.kept, 0, "{report:?}");
+        assert_eq!(leases.candidates, 0, "{report:?}");
+        // 候选先被删掉，租约随之消失，孤儿路径看不到它。
+        assert_eq!(report.removed_total(), 1);
+        assert!(report.problems.is_empty(), "{report:?}");
+        assert!(!dir.join(&name).exists());
+        assert!(lease_paths(&dir).is_empty());
+        assert_eq!(report.mode, Mode::Apply);
+        assert_eq!(report.root, dir.clone());
+        assert_eq!(report.scope(), ".");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_preview_deletes_nothing_and_reports_removable() {
+        let (dir, name, _id) = sweep_fixture("sweep-preview");
+        let gone = fresh_temp_name();
+        let orphan = hex_id(32);
+        dead_lease(&dir, &orphan, &gone);
+        let before = lease_paths(&dir).len();
+        let report = sweep_dir(&dir, "", &empty_protected(), false);
+        assert_eq!(report.mode, Mode::Preview);
+        assert_eq!(report.counts(Kind::Temp).removable, 1, "{report:?}");
+        assert_eq!(report.counts(Kind::Temp).removed, 0, "{report:?}");
+        assert_eq!(report.removed_total(), 0);
+        assert!(dir.join(&name).is_file(), "预览不得删候选");
+        assert_eq!(lease_paths(&dir).len(), before, "预览不得删孤儿租约");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_keeps_a_protected_candidate() {
+        let (dir, name, _id) = sweep_fixture("sweep-protected");
+        let mut protected = empty_protected();
+        protected.insert(name.clone());
+        let report = sweep_dir(&dir, "", &protected, true);
+        assert_eq!(
+            keep_reason(temp_item(&report, &name)),
+            Reason::RecoveryReferenced
+        );
+        assert!(dir.join(&name).is_file());
+        assert_eq!(report.counts(Kind::Temp).removed, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_records_a_directory_it_cannot_list() {
+        let dir = scratch("sweep-unscanned");
+        let not_a_dir = dir.join("regular.txt");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        let report = sweep_dir(&not_a_dir, "", &empty_protected(), true);
+        assert_eq!(report.unscanned, vec![not_a_dir.clone()], "{report:?}");
+        assert!(report.items.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_never_reports_an_empty_directory_as_failure() {
+        let dir = scratch("sweep-empty");
+        let report = sweep_dir(&dir, "", &empty_protected(), true);
+        assert!(report.items.is_empty());
+        assert!(report.problems.is_empty());
+        assert!(report.unscanned.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
