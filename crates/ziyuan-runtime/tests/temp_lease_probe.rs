@@ -810,6 +810,372 @@ fn uncovered_keep_branches_are_reachable() {
 }
 
 #[test]
+fn recovery_referenced_temp_is_retained() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // A project file may legitimately carry the temp naming shape: the recovery
+    // record then names it by workspace-relative path, and a leaked lease beside
+    // it looks exactly like a dead writer's leftovers. Both must survive.
+    let temp_name = format!(".ziyuan-tmp-{}-1-1", std::process::id());
+    let id = support::new_lease_id();
+    let lease = root.join(support::lease_file_name(&id));
+    let leak = || {
+        std::fs::write(root.join(&temp_name), support::COMPLETE_NEW).unwrap();
+        std::fs::write(&lease, support::lease_line(&temp_name, &id)).unwrap();
+    };
+    leak();
+
+    // The check is load-bearing: the same bytes and the same lease are removed
+    // without the protected set, so the assertion below is not vacuous.
+    let unprotected = support::recover_temp(root, &id, &temp_name).unwrap();
+    assert_eq!(
+        unprotected,
+        support::LeaseDecision::remove(support::RemoveReason::WriterDeadLeaseVerified)
+    );
+    assert!(!root.join(&temp_name).exists());
+
+    leak();
+    let decision =
+        support::recover_temp_protected(root, &id, &temp_name, &temp_name, &[temp_name.as_str()])
+            .unwrap();
+    assert_eq!(
+        decision,
+        support::LeaseDecision::keep(support::KeepReason::RecoveryReferenced)
+    );
+    assert_eq!(
+        std::fs::read(root.join(&temp_name)).unwrap(),
+        support::COMPLETE_NEW
+    );
+    // The lease stays too: it is the only remaining evidence of who wrote the
+    // file, and the orphan path keeps it anyway while the temp is present.
+    assert!(lease.is_file());
+    assert_eq!(
+        support::reclaim_orphan_lease(root, &id).unwrap(),
+        support::LeaseDecision::keep(support::KeepReason::TempStillPresent)
+    );
+
+    // A recursive scan sees a nested candidate as `sub/<name>`, so the set must
+    // be compared in the same relative form the record uses.
+    std::fs::remove_file(&lease).unwrap();
+    std::fs::remove_file(root.join(&temp_name)).unwrap();
+    let nested = root.join("sub");
+    std::fs::create_dir(&nested).unwrap();
+    let relative = format!("sub/{temp_name}");
+    let nested_lease = |id: &str| {
+        std::fs::write(
+            nested.join(support::lease_file_name(id)),
+            support::lease_line(&temp_name, id),
+        )
+        .unwrap();
+    };
+    std::fs::write(nested.join(&temp_name), support::COMPLETE_NEW).unwrap();
+    let id = support::new_lease_id();
+    nested_lease(&id);
+    assert_eq!(
+        support::recover_temp_protected(&nested, &id, &relative, &temp_name, &[relative.as_str()])
+            .unwrap(),
+        support::LeaseDecision::keep(support::KeepReason::RecoveryReferenced)
+    );
+    assert!(nested.join(&temp_name).is_file());
+
+    // Matching on the bare name instead would miss, and the candidate would be
+    // deleted. This is the mismatch the production scan must not have.
+    assert_eq!(
+        support::recover_temp_protected(&nested, &id, &relative, &temp_name, &[temp_name.as_str()])
+            .unwrap(),
+        support::LeaseDecision::remove(support::RemoveReason::WriterDeadLeaseVerified)
+    );
+    assert!(!nested.join(&temp_name).exists());
+
+    // The protected check must run before any lease is opened: with no lease at
+    // all, an implementation that opened first would answer TempWithoutLease.
+    std::fs::write(nested.join(&temp_name), support::COMPLETE_NEW).unwrap();
+    assert_eq!(
+        support::recover_temp_protected(
+            &nested,
+            &support::new_lease_id(),
+            &relative,
+            &temp_name,
+            &[relative.as_str()],
+        )
+        .unwrap(),
+        support::LeaseDecision::keep(support::KeepReason::RecoveryReferenced)
+    );
+    assert!(nested.join(&temp_name).is_file());
+
+    // The directory scan must compare in the same relative form: with the
+    // prefix it keeps the candidate, and with the bare name it does not even
+    // reach the protected branch.
+    let kept = support::sweep(&nested, "sub/", &[relative.as_str()]).unwrap();
+    assert_eq!(
+        kept,
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::keep(support::KeepReason::RecoveryReferenced)
+        )]
+    );
+    assert!(nested.join(&temp_name).is_file());
+    let wrong_form = support::sweep(&nested, "", &[relative.as_str()]).unwrap();
+    assert_eq!(
+        wrong_form,
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::keep(support::KeepReason::TempWithoutLease)
+        )]
+    );
+}
+
+#[test]
+fn sweep_finds_the_lease_that_names_the_temp() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // Two leases in one directory: only the one whose content names the temp is
+    // the owner. A cleaner cannot derive the id from the temp name, so it must
+    // enumerate leases and read them.
+    let temp_name = format!(".ziyuan-tmp-{}-{}-1", std::process::id(), 7);
+    let owner = support::new_lease_id();
+    let other = support::new_lease_id();
+    std::fs::write(root.join(&temp_name), support::COMPLETE_NEW).unwrap();
+    std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+    std::fs::write(
+        root.join(support::lease_file_name(&other)),
+        support::lease_line("keep.txt", &other),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(support::lease_file_name(&owner)),
+        support::lease_line(&temp_name, &owner),
+    )
+    .unwrap();
+
+    assert_eq!(
+        support::sweep(root, "", &[]).unwrap(),
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::remove(support::RemoveReason::WriterDeadLeaseVerified)
+        )]
+    );
+    assert!(!root.join(&temp_name).exists());
+    // Only the owner's lease is consumed; the unrelated lease and its file stay.
+    assert!(!root.join(support::lease_file_name(&owner)).exists());
+    assert!(root.join(support::lease_file_name(&other)).is_file());
+    assert_eq!(std::fs::read(root.join("keep.txt")).unwrap(), b"keep");
+}
+
+#[test]
+fn sweep_keeps_temp_claimed_by_two_leases() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // Two unlocked leases both name the same temp. The protocol has no rule for
+    // which writer owns it, so the candidate must be retained, not guessed at.
+    let temp_name = format!(".ziyuan-tmp-{}-{}-2", std::process::id(), 9);
+    std::fs::write(root.join(&temp_name), support::COMPLETE_NEW).unwrap();
+    for _ in 0..2 {
+        let id = support::new_lease_id();
+        std::fs::write(
+            root.join(support::lease_file_name(&id)),
+            support::lease_line(&temp_name, &id),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        support::sweep(root, "", &[]).unwrap(),
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::keep(support::KeepReason::TempAmbiguous)
+        )]
+    );
+    assert_eq!(
+        std::fs::read(root.join(&temp_name)).unwrap(),
+        support::COMPLETE_NEW
+    );
+    assert_eq!(dir_names(root).len(), 3);
+}
+
+#[test]
+fn sweep_refuses_a_directory_with_an_unreadable_lease() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // A corrupt lease might also name this candidate, so one valid claim plus
+    // one unreadable lease is not enough to delete anything here.
+    let temp_name = format!(".ziyuan-tmp-{}-{}-4", std::process::id(), 13);
+    std::fs::write(root.join(&temp_name), support::COMPLETE_NEW).unwrap();
+    let owner = support::new_lease_id();
+    std::fs::write(
+        root.join(support::lease_file_name(&owner)),
+        support::lease_line(&temp_name, &owner),
+    )
+    .unwrap();
+    let broken = support::new_lease_id();
+    std::fs::write(root.join(support::lease_file_name(&broken)), b"garbage").unwrap();
+
+    assert_eq!(
+        support::sweep(root, "", &[]).unwrap(),
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
+        )]
+    );
+    assert_eq!(
+        std::fs::read(root.join(&temp_name)).unwrap(),
+        support::COMPLETE_NEW
+    );
+    // Removing the unreadable lease unblocks the same directory.
+    std::fs::remove_file(root.join(support::lease_file_name(&broken))).unwrap();
+    assert_eq!(
+        support::sweep(root, "", &[]).unwrap(),
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::remove(support::RemoveReason::WriterDeadLeaseVerified)
+        )]
+    );
+    assert!(!root.join(&temp_name).exists());
+}
+
+#[test]
+fn sweep_checks_candidate_type_before_looking_for_a_lease() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // A directory named like a temp file is not a temp file, even in a directory
+    // with no leases at all. Reporting TempWithoutLease here would be a weaker
+    // answer than the truth, and the type check must not depend on a lease.
+    let name = format!(".ziyuan-tmp-{}-{}-5", std::process::id(), 17);
+    std::fs::create_dir(root.join(&name)).unwrap();
+    assert_eq!(
+        support::sweep(root, "", &[]).unwrap(),
+        vec![(
+            name.clone(),
+            support::LeaseDecision::keep(support::KeepReason::TempNotRegular)
+        )]
+    );
+    assert!(root.join(&name).is_dir());
+}
+
+#[test]
+fn lease_that_is_not_a_file_is_never_followed() {
+    let scratch = support::Scratch::create().unwrap();
+    let root = scratch.path();
+
+    // A directory (or, on a host that allows it, a link) sitting at the lease
+    // path must not be opened, locked or treated as evidence of anything.
+    let temp_name = format!(".ziyuan-tmp-{}-{}-3", std::process::id(), 11);
+    let id = support::new_lease_id();
+    std::fs::write(root.join(&temp_name), support::COMPLETE_NEW).unwrap();
+    std::fs::create_dir(root.join(support::lease_file_name(&id))).unwrap();
+
+    assert_eq!(
+        support::sweep(root, "", &[]).unwrap(),
+        vec![(
+            temp_name.clone(),
+            support::LeaseDecision::keep(support::KeepReason::LeaseNotRegular)
+        )]
+    );
+    assert_eq!(
+        support::reclaim_orphan_lease(root, &id).unwrap(),
+        support::LeaseDecision::keep(support::KeepReason::LeaseNotRegular)
+    );
+    assert_eq!(
+        std::fs::read(root.join(&temp_name)).unwrap(),
+        support::COMPLETE_NEW
+    );
+}
+
+#[test]
+fn writer_aborts_when_its_lease_was_reclaimed_before_the_lock() {
+    // Between "content synced" and "lock taken" the lease is valid, unlocked and
+    // points at a temp file that does not exist yet, so the orphan-lease path may
+    // reclaim it even though the writer is alive. What happens next decides
+    // whether that is harmless.
+    let setup = |case: &str| -> (support::ChildGuard, TcpStream, std::path::PathBuf, String) {
+        let mut child = support::ChildGuard::spawn(case).unwrap();
+        let stream = child
+            .ready("lease-unlocked", support::DEFAULT_TIMEOUT)
+            .unwrap();
+        let root = child.root().to_path_buf();
+        let id = child.id().to_owned();
+        assert_eq!(
+            std::fs::read_to_string(root.join(support::lease_file_name(&id))).unwrap(),
+            support::lease_line("temp", &id)
+        );
+        assert!(!root.join("temp").exists());
+        (child, stream, root, id)
+    };
+
+    // Without the check the writer proceeds and leaves a temp file that no lease
+    // claims, so no cleaner can ever prove it stale. This is the defect model.
+    {
+        let (mut child, mut stream, root, id) = setup("lease-stolen-before-lock-unchecked");
+        assert_eq!(
+            support::reclaim_orphan_lease(&root, &id).unwrap(),
+            support::LeaseDecision::remove(support::RemoveReason::OrphanLease)
+        );
+        assert!(!root.join(support::lease_file_name(&id)).exists());
+        support::send_message(
+            &mut stream,
+            "CONTINUE",
+            Instant::now() + support::DEFAULT_TIMEOUT,
+            "parent CONTINUE",
+        )
+        .unwrap();
+        let message = support::read_message(
+            &mut stream,
+            Instant::now() + support::DEFAULT_TIMEOUT,
+            "parent reclaimed lease result",
+        )
+        .unwrap();
+        assert!(message.starts_with("LEASE_PROCEED"), "{message}");
+        // The point of the defect model: locking still succeeded on a lease that
+        // no longer exists, so the lock result alone proves nothing.
+        assert!(message.contains("locked=true"), "{message}");
+        assert!(message.contains("gone=true"), "{message}");
+        eprintln!("native reclaimed-lease window (unchecked): {message}");
+        child.finish(support::DEFAULT_TIMEOUT).unwrap();
+        assert!(root.join("temp").exists());
+        // The leftover is unrecoverable by design: no lease names it.
+        assert_eq!(
+            support::recover_temp(&root, &id, "temp").unwrap(),
+            support::LeaseDecision::keep(support::KeepReason::TempWithoutLease)
+        );
+    }
+
+    // With the check the writer aborts before creating anything, so the same
+    // reclaim leaves an empty directory.
+    {
+        let (mut child, mut stream, root, id) = setup("lease-stolen-before-lock");
+        assert_eq!(
+            support::reclaim_orphan_lease(&root, &id).unwrap(),
+            support::LeaseDecision::remove(support::RemoveReason::OrphanLease)
+        );
+        support::send_message(
+            &mut stream,
+            "CONTINUE",
+            Instant::now() + support::DEFAULT_TIMEOUT,
+            "parent CONTINUE",
+        )
+        .unwrap();
+        let message = support::read_message(
+            &mut stream,
+            Instant::now() + support::DEFAULT_TIMEOUT,
+            "parent reclaimed lease result",
+        )
+        .unwrap();
+        assert!(message.starts_with("LEASE_ABORTED"), "{message}");
+        assert!(message.contains("locked=true"), "{message}");
+        assert!(message.contains("gone=true"), "{message}");
+        eprintln!("native reclaimed-lease window (checked): {message}");
+        child.finish(support::DEFAULT_TIMEOUT).unwrap();
+        assert!(!root.join("temp").exists(), "no temp may be created");
+        assert!(dir_names(&root).is_empty(), "{:?}", dir_names(&root));
+    }
+}
+
+#[test]
 fn second_creator_conflicts_instead_of_overwriting() {
     let mut child = support::ChildGuard::spawn("lease-conflict").unwrap();
     let mut stream = child

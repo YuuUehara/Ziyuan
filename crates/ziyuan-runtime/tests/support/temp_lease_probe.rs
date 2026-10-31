@@ -320,6 +320,9 @@ pub enum KeepReason {
     LeaseContentMismatch,
     LeaseAlreadyAbsent,
     TempStillPresent,
+    RecoveryReferenced,
+    LeaseNotRegular,
+    TempAmbiguous,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,18 +408,186 @@ fn run_delete_hook(root: &Path) {
     }
 }
 
-// Temp-recovery entry point: never waits on a lease lock, only probes.
+// Temp-recovery primitive: a caller that already knows which lease file it is
+// asking about. Never waits on the lease lock, only probes.
 pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseDecision> {
+    recover_temp_protected(root, id, temp_name, temp_name, &[])
+}
+
+/// `relative` is the candidate's workspace-relative path and `protected` the
+/// paths the caller must not delete, such as the targets a pending recovery
+/// record still names. Both are inputs, not something read here: a project file
+/// may legitimately carry the temp naming shape, and the runtime crate must not
+/// depend on the storage layer to notice. A protected candidate is returned
+/// before any handle is opened, so the cleaner performs no I/O on it.
+pub fn recover_temp_protected(
+    root: &Path,
+    id: &str,
+    relative: &str,
+    temp_name: &str,
+    protected: &[&str],
+) -> io::Result<LeaseDecision> {
+    if protected.contains(&relative) {
+        return Ok(LeaseDecision::keep(KeepReason::RecoveryReferenced));
+    }
+    decide_temp(root, id, temp_name, false)
+}
+
+/// Directory scan entry: the same rule a real cleaner must use, because a temp
+/// name carries no lease id. Lease ids are read off the `.ziyuan-lease-<id>`
+/// file names, never derived from the candidate.
+///
+/// `prefix` is the directory's workspace-relative prefix (`""` at the root,
+/// `sub/` one level down) and exists only so the protected set can be compared
+/// in the same form the recovery record uses. It is not joined to any path here.
+pub fn sweep(
+    root: &Path,
+    prefix: &str,
+    protected: &[&str],
+) -> io::Result<Vec<(String, LeaseDecision)>> {
+    let mut temps = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if strict_temp_name(&name) {
+            temps.push(name);
+        }
+    }
+    temps.sort();
+    let ids = lease_ids(root)?;
+    let mut decisions = Vec::new();
+    for name in temps {
+        let relative = format!("{prefix}{name}");
+        let decision = if protected.contains(&relative.as_str()) {
+            LeaseDecision::keep(KeepReason::RecoveryReferenced)
+        } else {
+            // The candidate's own type comes before any lease is opened: a
+            // directory or link is never a temp file, whatever the leases say.
+            match std::fs::symlink_metadata(root.join(&name)) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    LeaseDecision::keep(KeepReason::TempAlreadyAbsent)
+                }
+                Err(e) => return Err(error("cleaner temp metadata", e)),
+                Ok(metadata) if !metadata.file_type().is_file() => {
+                    LeaseDecision::keep(KeepReason::TempNotRegular)
+                }
+                Ok(_) if ids.is_empty() => LeaseDecision::keep(KeepReason::TempWithoutLease),
+                Ok(_) => decide_temp_with_all(root, &name, &ids)?,
+            }
+        };
+        decisions.push((name, decision));
+    }
+    Ok(decisions)
+}
+
+/// Strict candidate name: `.ziyuan-tmp-<u32>-<u128>-<u64>`, nothing else.
+fn strict_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".ziyuan-tmp-") else {
+        return false;
+    };
+    let parts = rest.split('-').collect::<Vec<_>>();
+    matches!(parts.as_slice(), [pid, nanos, counter]
+        if pid.parse::<u32>().is_ok()
+            && nanos.parse::<u128>().is_ok()
+            && counter.parse::<u64>().is_ok())
+}
+
+fn lease_ids(root: &Path) -> io::Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if let Some(id) = entry
+            .file_name()
+            .to_string_lossy()
+            .strip_prefix(".ziyuan-lease-")
+            && is_lower_hex_id(id)
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+fn keep_if_present(root: &Path, name: &str, reason: KeepReason) -> io::Result<LeaseDecision> {
+    match std::fs::symlink_metadata(root.join(name)) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Ok(LeaseDecision::keep(KeepReason::TempAlreadyAbsent))
+        }
+        Err(e) => Err(error("cleaner temp metadata", e)),
+        Ok(_) => Ok(LeaseDecision::keep(reason)),
+    }
+}
+
+/// One candidate against every lease in its directory. A lease that is locked
+/// may be the owner, so a busy lease settles the candidate; otherwise the one
+/// unlocked lease whose content names it is the owner. Two claimants are
+/// ambiguous and never deleted.
+fn decide_temp_with_all(root: &Path, name: &str, ids: &[String]) -> io::Result<LeaseDecision> {
+    let mut claimants: Vec<&String> = Vec::new();
+    let mut uncertain: Option<KeepReason> = None;
+    for id in ids {
+        match decide_temp(root, id, name, true)? {
+            LeaseDecision::Remove { .. } => claimants.push(id),
+            LeaseDecision::Keep {
+                reason: KeepReason::LeaseBusy,
+            } => {
+                return Ok(LeaseDecision::keep(KeepReason::LeaseBusy));
+            }
+            LeaseDecision::Keep {
+                reason: KeepReason::TempNotRegular,
+            }
+            | LeaseDecision::Keep {
+                reason: KeepReason::TempAlreadyAbsent,
+            } => return keep_if_present(root, name, KeepReason::TempNotRegular),
+            LeaseDecision::Keep { reason } => {
+                // Unknown, unparsable, mismatched or not a lease file: this one
+                // is not a claimant, but the first such observation is worth
+                // reporting when nobody claims the candidate. A lease naming a
+                // different temp is the normal case for a busy directory.
+                if uncertain.is_none() && reason != KeepReason::LeaseContentMismatch {
+                    uncertain = Some(reason);
+                }
+            }
+        }
+    }
+    match claimants.as_slice() {
+        // Two claimants are ambiguous rather than merely uncertain, so that
+        // reason wins when both apply.
+        [_, _, ..] => Ok(LeaseDecision::keep(KeepReason::TempAmbiguous)),
+        // A lease we locked but could not understand might also name this
+        // candidate, so nothing in the directory is deleted until it is
+        // resolved: a single valid claim is not enough evidence.
+        _ => match uncertain {
+            Some(reason) => Ok(LeaseDecision::keep(reason)),
+            None => match claimants.as_slice() {
+                [id] => decide_temp(root, id, name, false),
+                _ => keep_if_present(root, name, KeepReason::TempWithoutLease),
+            },
+        },
+    }
+}
+
+/// `dry_run` stops before the deletions and reports the verdict instead.
+fn decide_temp(root: &Path, id: &str, temp_name: &str, dry_run: bool) -> io::Result<LeaseDecision> {
     let temp = root.join(temp_name);
     let lease_path = root.join(lease_file_name(id));
+    // Non-following metadata both ways: a link or junction is never a lease and
+    // never a temp file a cleaner may delete.
+    match std::fs::symlink_metadata(&lease_path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return keep_if_present(root, temp_name, KeepReason::TempWithoutLease);
+        }
+        Err(e) => return Err(error("cleaner lease metadata", e)),
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Ok(LeaseDecision::keep(KeepReason::LeaseNotRegular));
+        }
+        Ok(_) => {}
+    }
     let lease = match open_probe(&lease_path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(if temp.exists() {
-                LeaseDecision::keep(KeepReason::TempWithoutLease)
-            } else {
-                LeaseDecision::keep(KeepReason::TempAlreadyAbsent)
-            });
+            return keep_if_present(root, temp_name, KeepReason::TempWithoutLease);
         }
         Err(e) => return Err(error("cleaner lease open", e)),
     };
@@ -434,15 +605,19 @@ pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseD
     if recorded != temp_name {
         return Ok(LeaseDecision::keep(KeepReason::LeaseContentMismatch));
     }
-    match std::fs::metadata(&temp) {
+    match std::fs::symlink_metadata(&temp) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(LeaseDecision::keep(KeepReason::TempAlreadyAbsent));
         }
         Err(e) => return Err(error("cleaner temp metadata", e)),
-        Ok(metadata) if !metadata.is_file() => {
+        Ok(metadata) if !metadata.file_type().is_file() => {
             return Ok(LeaseDecision::keep(KeepReason::TempNotRegular));
         }
         Ok(_) => {}
+    }
+    if dry_run {
+        drop(held);
+        return Ok(LeaseDecision::remove(RemoveReason::WriterDeadLeaseVerified));
     }
     // Order is load-bearing: the temp file goes first, the lease last. The
     // lease handle stays locked until both are gone, so a second cleaner cannot
@@ -464,6 +639,16 @@ pub fn recover_temp(root: &Path, id: &str, temp_name: &str) -> io::Result<LeaseD
 // gone) is removed, and only after the same version/id/content checks.
 pub fn reclaim_orphan_lease(root: &Path, id: &str) -> io::Result<LeaseDecision> {
     let lease_path = root.join(lease_file_name(id));
+    match std::fs::symlink_metadata(&lease_path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(LeaseDecision::keep(KeepReason::LeaseAlreadyAbsent));
+        }
+        Err(e) => return Err(error("orphan lease metadata", e)),
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Ok(LeaseDecision::keep(KeepReason::LeaseNotRegular));
+        }
+        Ok(_) => {}
+    }
     let lease = match open_probe(&lease_path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -482,7 +667,7 @@ pub fn reclaim_orphan_lease(root: &Path, id: &str) -> io::Result<LeaseDecision> 
     let LeaseContent::Valid { temp } = content else {
         return Err(invalid("orphan lease: unexpected content shape"));
     };
-    if root.join(&temp).exists() {
+    if std::fs::symlink_metadata(root.join(&temp)).is_ok() {
         return Ok(LeaseDecision::keep(KeepReason::TempStillPresent));
     }
     std::fs::remove_file(&lease_path).map_err(|e| error("orphan lease removal", e))?;
@@ -767,11 +952,30 @@ fn env_text(name: &str) -> io::Result<String> {
 // handle (and temp handle) is owned until the flow says otherwise.
 enum LeaseCase {
     None,
-    CloseBeforeRename { lease: Option<File> },
-    Held { _lease: File, _temp: File },
-    OnlyLease { _lease: File },
-    Conflict { path: PathBuf },
-    LockWait { path: PathBuf },
+    CloseBeforeRename {
+        lease: Option<File>,
+    },
+    Held {
+        _lease: File,
+        _temp: File,
+    },
+    OnlyLease {
+        _lease: File,
+    },
+    Conflict {
+        path: PathBuf,
+    },
+    LockWait {
+        path: PathBuf,
+    },
+    /// The writer is stopped between "content synced" and "lock taken", the one
+    /// window where a cleaner can still reclaim a live writer's lease. `verify`
+    /// models the writer checking that the path still names its own file.
+    StolenBeforeLock {
+        lease: File,
+        path: PathBuf,
+        verify: bool,
+    },
 }
 
 impl LeaseCase {
@@ -783,6 +987,7 @@ impl LeaseCase {
             Self::OnlyLease { .. } => Some("lease-only"),
             Self::Conflict { .. } => Some("lease-conflict"),
             Self::LockWait { .. } => Some("lease-wait"),
+            Self::StolenBeforeLock { .. } => Some("lease-unlocked"),
         }
     }
 }
@@ -826,6 +1031,15 @@ fn prepare_lease_case(case: &str, root: &Path, id: &str) -> io::Result<LeaseCase
         }),
         "lease-conflict" => Ok(LeaseCase::Conflict { path }),
         "lease-wait" => Ok(LeaseCase::LockWait { path }),
+        "lease-stolen-before-lock" | "lease-stolen-before-lock-unchecked" => {
+            // Created and written but deliberately not locked yet: the cleaner
+            // may reclaim it, and the writer's own handle outlives the name.
+            Ok(LeaseCase::StolenBeforeLock {
+                lease: create_lease_file(root, id, "temp")?,
+                path,
+                verify: case == "lease-stolen-before-lock",
+            })
+        }
         _ => Err(invalid("child lease: unknown case")),
     }
 }
@@ -854,6 +1068,8 @@ pub fn run_child() -> io::Result<()> {
             | "lease-only-kill"
             | "lease-conflict"
             | "lease-wait"
+            | "lease-stolen-before-lock"
+            | "lease-stolen-before-lock-unchecked"
     ) {
         return Err(invalid("child configuration: unknown case"));
     }
@@ -912,6 +1128,8 @@ pub fn run_child() -> io::Result<()> {
             | "lease-only-kill"
             | "lease-conflict"
             | "lease-wait"
+            | "lease-stolen-before-lock"
+            | "lease-stolen-before-lock-unchecked"
     ) {
         prepare_lease_case(&case, &root, &id)?
     } else {
@@ -1026,6 +1244,49 @@ pub fn run_child() -> io::Result<()> {
     }
     // Keep the owned lock alive across READY and the entire CONTINUE wait.
     drop(held);
+    if let LeaseCase::StolenBeforeLock {
+        lease,
+        path,
+        verify,
+    } = &lease_case
+    {
+        // A cleaner reclaimed this lease while the writer sat between "content
+        // synced" and "lock taken". The writer's handle outlives the name, so
+        // locking may still succeed on an object nobody can find. Either way the
+        // writer must confirm the path still names its own file before creating
+        // a temp: otherwise it leaves a temp with no evidence tying it to a
+        // writer, which no cleaner could ever prove stale.
+        let locked = match lease.lock() {
+            Ok(()) => true,
+            Err(e) => {
+                let _ = writeln!(io::stderr().lock(), "native: lock after reclaim: {e}");
+                false
+            }
+        };
+        let gone = std::fs::symlink_metadata(path).is_err();
+        let abort = !locked || (gone && *verify);
+        let message = format!(
+            "{} locked={locked} gone={gone}",
+            if abort {
+                "LEASE_ABORTED"
+            } else {
+                "LEASE_PROCEED"
+            }
+        );
+        send_message(
+            &mut stream,
+            &message,
+            Instant::now() + DEFAULT_TIMEOUT,
+            "child reclaimed lease result",
+        )?;
+        if abort {
+            // Abort before creating anything: the directory stays clean.
+            return Ok(());
+        }
+        let mut temp = create_temp(&root, false)?;
+        write_complete(&mut temp)?;
+        return Ok(());
+    }
     let rename_after_close = matches!(
         case.as_str(),
         "close-before-rename" | "close-prewritten-before-rename"

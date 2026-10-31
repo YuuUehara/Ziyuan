@@ -229,7 +229,7 @@ jj commit -m "docs(runtime): 记录临时租约验证结果与实现门槛" -m "
 
 ## Chunk 2: 租约载体验证（2026-10-31 第二轮，用户已批准）
 
-第一轮结论是"临时文件的锁不足以防误删"，且关闭句柄到改名之间必然失守。本轮只验证一个候选载体能否补上这段：**租约文件先于临时文件存在，且租约句柄一直持有到改名完成**，清理者靠"租约锁能否取得"判断写入者是否存活，靠租约内容判断它属于哪个临时文件。
+第一轮结论是“临时文件的锁不足以防误删”，且关闭句柄到改名之间必然失守。本轮只验证一个候选载体能否补上这段：**租约文件先于临时文件存在，且租约句柄一直持有到改名完成**，清理者靠“租约锁能否取得”判断写入者是否存活，靠租约内容判断它属于哪个临时文件。
 
 仍是实验，不是实现。不改 `replace.rs`、不加 CLI、不加依赖、不写版本。
 
@@ -264,11 +264,11 @@ ziyuan-lease v1 temp=<temp-file-name> id=<32 hex>
 
 - [x] **Step 3: 写 `killed_writer_lease_is_reclaimable`。**
 
-子进程持租约与临时文件时被强杀。父进程取得租约锁后，必须核验：租约内容版本为 v1、`temp=` 与实际文件名一致、临时文件是普通文件。三者齐全才删除临时文件、再删租约，并断言目录内无其他文件被改动。任一核验失败则保留并报告，测试要覆盖"内容对不上"和"临时文件已不在"两种保留分支。
+子进程持租约与临时文件时被强杀。父进程取得租约锁后，必须核验：租约内容版本为 v1、`temp=` 与实际文件名一致、临时文件是普通文件。三者齐全才删除临时文件、再删租约，并断言目录内无其他文件被改动。任一核验失败则保留并报告，测试要覆盖“内容对不上”和“临时文件已不在”两种保留分支。
 
 - [x] **Step 4: 写 `killed_before_temp_creation_leaves_only_lease`。**
 
-子进程建好并锁住租约、尚未建临时文件时被强杀。父进程应只删租约，目录清空，不得因"没有临时文件"去猜别的东西。
+子进程建好并锁住租约、尚未建临时文件时被强杀。父进程应只删租约，目录清空，不得因“没有临时文件”去猜别的东西。
 
 - [x] **Step 5: 写 `temp_without_lease_and_foreign_leases_are_retained`。**
 
@@ -293,13 +293,13 @@ cargo clippy -p ziyuan-runtime --all-targets --locked -- -D warnings
 
 - [x] **Step 9: 更新可行性报告并停止。**
 
-报告新增一节记录：租约格式、生命周期、强杀后各阶段的可回收性、保留分支、锁等待行为，以及仍未验证的项。结论若支持，就写成"候选协议可闭合，待用户审阅后写入设计"；若不支持，如实写"仍不闭合"并说明卡在哪一步。不得在报告里直接宣布 1.2.2 已可实施。
+报告新增一节记录：租约格式、生命周期、强杀后各阶段的可回收性、保留分支、锁等待行为，以及仍未验证的项。结论若支持，就写成“候选协议可闭合，待用户审阅后写入设计”；若不支持，如实写“仍不闭合”并说明卡在哪一步。不得在报告里直接宣布 1.2.2 已可实施。
 
 ### 本轮执行记录
 
 Task 5 九步已完成，另补一项计划外但必需的安全修正：
 
-- 初版辅助在"核验后、删除前"释放租约锁，使"核验 + 删除"不再原子，两个清理者可能各删一次。已改为租约句柄保持加锁直到临时文件与租约都被删除，并新增 `two_cleaners_never_double_delete`。
+- 初版辅助在“核验后、删除前”释放租约锁，使“核验 + 删除”不再原子，两个清理者可能各删一次。已改为租约句柄保持加锁直到临时文件与租约都被删除，并新增 `two_cleaners_never_double_delete`。
 - 该用例经过两轮修正才真正有效：最初两线程同时启动，看似并发，但在缺陷顺序下 15 次全过（第二个清理者常先拿到 Busy）；改为受控交错（先让第一个停在核验后，再启动第二个，300 毫秒后放行）后，缺陷顺序 **10 次全部失败**，正确顺序 5 次全部通过。
 - 提交：`fdb56882`（Task 5 主体）；顺序修正与报告更新见 `f5548554`；审查后修正见本阶段最后一个提交。
 - 第二轮独立审查又发现五处问题并已修正：交错点原为进程级全局（并行时误触发，已按目录绑定）、`temp=` 允许 Windows 驱动器前缀（已要求单一文件名组件）、租约读取无上限且非 UTF-8 会以 I/O 错误中止（已加上限并归入保留）、三个保留分支无用例（已补）、报告状态行与结论矛盾（已限定为第一轮）。
@@ -307,16 +307,86 @@ Task 5 九步已完成，另补一项计划外但必需的安全修正：
 
 ### 本轮停止点
 
-以上完成即停。把租约协议写进设计文档、以及生产清理实施计划，都需要用户另行批准；本轮不进入 `replace.rs`。
+第二轮到此为止。租约协议写入设计文档已在用户批准后由第三轮完成（见 Chunk 3）；生产清理实施计划仍未获批准，`replace.rs` 本阶段一律不动。
+
+## Chunk 3: 协议入文与两项结清（2026-10-31 第三轮，用户已批准）
+
+用户批准把已验证的租约协议写进设计文档，并补齐状态机、锁顺序与失败降级；同时要求说明“清理器与工作目录锁的锁顺序”和“恢复记录引用核验”这两项未测项现在能否补做。
+
+仍是文档与测试，不是实现。不改 `replace.rs`、不加 CLI、不加依赖、不写版本。
+
+### 文件职责
+
+| 操作 | 路径 | 职责 |
+| --- | --- | --- |
+| 修改 | `docs/superpowers/specs/2026-10-31-temp-recovery-design.md` | 写入租约协议：载体与版本、写入者与清理者状态机、锁顺序、身份复核、强杀残留、失败降级、受保护路径、共享模块位置、已知限制 |
+| 修改 | `crates/ziyuan-runtime/tests/support/temp_lease_probe.rs` | 增加 `RecoveryReferenced`、`LeaseNotRegular`、`TempAmbiguous` 与目录级 `sweep`；受保护集合按工作区相对路径比较，类型判断改用 `symlink_metadata` |
+| 修改 | `crates/ziyuan-runtime/tests/temp_lease_probe.rs` | 新增 `recovery_referenced_temp_is_retained`、`sweep_finds_the_lease_that_names_the_temp`、`sweep_keeps_temp_claimed_by_two_leases`、`lease_that_is_not_a_file_is_never_followed`、`writer_aborts_when_its_lease_was_reclaimed_before_the_lock` |
+| 修改 | `docs/acceptance/1.2.2-temp-lease-feasibility.md` | 新增“锁顺序与恢复记录引用”一节，更新保留分支表与未验证清单 |
+| 不改 | `crates/ziyuan-runtime/src/**`、CLI、manifests、工作流、版本 | 生产行为一律不动 |
+
+### Task 6: 结清锁顺序
+
+- [x] **Step 1: 判断是否需要新实验。** 结论：不需要。等待结构已由 `ziyuan-storage` 与 `ziyuan-app` 的实际代码确定：工作目录锁的两处等待共用同一截止（最坏 `Timeout`），受管事务在持锁状态下调用 `apply_changes`，租约一侧只有非阻塞试探与自建文件取锁。既有用例 `independent_handles_exclude_and_drop_releases` 已证明同进程第二个句柄会超时而非重入。
+- [x] **Step 2: 写成规则。** 设计文档“锁顺序”一节写明：清理器在任何入口都不取工作目录锁；写入者顺序为工作目录锁 → 自建租约 → 临时文件；没有主体在持锁时等待另一把锁，构不成等待环。
+- [x] **Step 3: 记录未取证据的部分。** 若日后把清理器嵌进写入事务，需要一条“事务内调用清理不会取锁”的回归用例；它依赖生产接口定形，本阶段写不出来，已在设计文档与报告中声明。
+
+### Task 7: 结清恢复记录引用核验
+
+- [x] **Step 1: 核对记录能否引用临时文件。** `targets[].path` 是可移植相对路径，临时文件名只在 `replace_target` 内部生成、从不入记录，所以记录不会引用“临时文件本身”；真实碰撞是项目文件恰好与临时名同形。
+- [x] **Step 2: 降级为受保护集合。** 核验器接受“受保护相对路径集合”，命中即保留且不打开句柄；集合由 app／cli 从 `pending_record()` 构造，runtime 不引入对 storage 的依赖。
+- [x] **Step 3: 写 `recovery_referenced_temp_is_retained`。** 同一份同形文件与合法租约：不传集合时返回 `Remove { WriterDeadLeaseVerified }` 并删除文件（证明断言非恒真）；传入后返回 `Keep { RecoveryReferenced }`，文件与租约都保留。
+- [x] **Step 4: 全量运行。**
+
+```powershell
+cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
+```
+
+结果：28 passed，0 failed（第三轮补齐后目标整体为 34 passed）。
+
+### Task 8: 补上加锁前回收窗口
+
+- [x] **Step 1: 识别缺口。** 孤儿租约路径可能在写入者“已写内容、未加锁”时回收一个活跃租约。原生 Windows 实测：名字删掉后写入者句柄再加锁仍成功（`locked=true gone=true`），所以只看加锁结果发现不了。
+- [x] **Step 2: 补协议。** 写入者加锁后核验路径仍指向自己的文件，不成立即关闭句柄、报错，且不建临时文件。写入设计文档的状态机、锁顺序与失败降级表。
+- [x] **Step 3: 写 `writer_aborts_when_its_lease_was_reclaimed_before_the_lock`。** 受控交错：子进程写好租约、未加锁时停住，父进程按孤儿路径回收，再放行。不核验的缺陷分支返回 `LEASE_PROCEED` 并留下一个只能判为 `TempWithoutLease` 的临时文件；核验分支返回 `LEASE_ABORTED` 且目录为空。
+
+### Task 9: 按独立审查修正归属方向
+
+独立审查发现设计里有一处不可实现：候选名不含 `id`，却写成“看同目录有没有 `.ziyuan-lease-<id>`”。
+
+- [x] **Step 1: 改为目录扫描。** 列出租约、逐个非阻塞试锁、取得锁后读 `temp=` 才算认领；认领者唯一才删，多个保留为 `TempAmbiguous`，目录里有租约被占用则保留为 `LeaseBusy`。设计文档与报告同步改写。
+- [x] **Step 2: 写 `sweep_finds_the_lease_that_names_the_temp` 与 `sweep_keeps_temp_claimed_by_two_leases`。** RED：把 `temp=` 比对改成恒真，前者的决策变成 `TempAmbiguous`，0 passed / 1 failed；把 `TempAmbiguous` 改成“取第一个认领者删除”，后者 0 passed / 1 failed。
+- [x] **Step 3: 补齐非普通文件与受保护路径。** 类型判断改 `symlink_metadata`；新增 `LeaseNotRegular` 与 `lease_that_is_not_a_file_is_never_followed`；受保护集合改按工作区相对路径比较，并在嵌套目录上断言“裸文件名比较会漏保护”，以及“受保护判断先于任何租约打开”。
+- [x] **Step 4: 让读不懂的租约阻断目录。** 新增 `sweep_refuses_a_directory_with_an_unreadable_lease`：一份合法认领加一份坏租约仍保留，删掉坏租约后立刻可清理。RED：改成“有唯一认领者就删”，0 passed / 1 failed。
+- [x] **Step 5: 按第二次审查补齐三处。**
+  - 目录扫描入口带工作区相对前缀（`""`、`sub/`），受保护集合按相对路径比较；RED：收回裸文件名后用例 0 passed / 1 failed。
+  - 候选类型判断移到租约判断之前；新增 `sweep_checks_candidate_type_before_looking_for_a_lease`，RED：去掉前置判断后 0 passed / 1 failed。
+  - 说明多份坏租约时的报告选取顺序（按 `id` 排序取第一）与 `TempAmbiguous` 的优先级；`temp=` 元数据读取失败按 `TempStillPresent` 保留并另记 I/O 失败。
+- [x] **Step 6: 全量运行。**
+
+```powershell
+cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
+cargo test -p ziyuan-runtime --locked --lib tools::replace::tests::
+cargo fmt --all -- --check
+cargo clippy -p ziyuan-runtime --all-targets --locked -- -D warnings
+cargo +1.90 check -p ziyuan-runtime --all-targets --locked
+```
+
+结果：34 passed、16 passed、fmt／clippy／MSRV 均通过。
+
+### Task 10: 停下来交审阅
+
+- [x] **Step 1: 复核差异后提交。** 提交信息为 `docs(runtime): 写入租约协议并补齐归属扫描与锁顺序证据`，只含两个测试文件与四份文档。
+- [ ] **Step 2: 停止，等用户审阅。** 生产清理实施计划仍须用户另行批准后才能编写。
 
 ## 门槛通过后的生产计划输入（非可执行任务）
 
 下一份计划须固定以下文件责任和逐项 RED/GREEN 命令，不允许跳过本章安全条件：
 
-1. **共用核验器与协议实现**：根据已验证的载体和依赖方向选择唯一公共模块位置；runtime 和 CLI 共用，不能产生 runtime↔storage 环依赖。名称严格解析，普通文件／硬链接检查，不跟随 symlink、junction、reparse point。锁冲突、未知及身份变化一律保留。
+1. **共用核验器与协议实现**：根据已验证的载体和依赖方向选择唯一公共模块位置；runtime 和 CLI 共用，不能产生 runtime↔storage 环依赖。归属只能反向找：列出租约、逐个非阻塞试锁、读 `temp=` 认领；认领者唯一才删，多个保留，有租约被占用则整目录本轮不动。名称严格解析，普通文件／硬链接检查，不跟随 symlink、junction、reparse point。锁冲突、未知及身份变化一律保留。
 2. **正常替换接入**：修改 `crates/ziyuan-runtime/src/tools/replace.rs`，使连续保护覆盖创建至丢弃；写前只扫描目标父目录，不阻断新写入。保留权限收紧、同步、原子改名、Windows 重试和原始错误语义。确定清理报告如何从 runtime 进入既有诊断通道，不污染 JSON 或把替换成功误报为失败。
 3. **显式命令**：修改 `crates/ziyuan-cli/src/text_commands.rs`，新增 `temps`，默认预览只读，`--yes` 逐项复核后删除；确认全局 `--json` 解析位置及选项顺序。冻结报告字段、跳过原因及 0/1/2 退出码，并在 `crates/ziyuan-cli/tests/contract.rs` 加黑盒契约测试。
-4. **恢复兼容**：明确如何从 runtime 局部入口获得可信的工作目录身份及恢复引用信息，或在无法获取时安全保留；恢复状态不可读不得猜测。清理不推进世代、不删除恢复引用材料，不以删除临时文件解锁业务恢复。
+4. **恢复兼容**：runtime 侧核验器接受“受保护相对路径集合”输入，`ziyuan-app` / `ziyuan-cli` 从 `pending_record()` 的所有 `targets[].path` 构造后传入；集合构造失败或记录不可读时整轮不删。清理不推进世代、不删除受保护材料，不以删除临时文件解锁业务恢复。
 5. **完整安全验收**：独立进程强杀后清理、全生命周期活跃文件、同进程与双清理者、旧版未知所有权、相似名称、链接／junction／硬链接、扫描及删除失败、业务恢复引用、Windows 原生共享冲突及目标 old/new 完整性。
 6. **产品文档与回归**：更新 `docs/text-projects.md`、必要的 `docs/stability.md` 新增契约、`CHANGELOG.md` 的 Unreleased 与 `docs/roadmap.md`。先跑受影响 crate、CLI 契约，再按现有 CI 跑 fmt、workspace clippy、MSRV、workspace 测试和各原生平台验收。1.2.2 版本登记、tag、推送、GitHub Release 与 crates.io 均另行授权。
 
