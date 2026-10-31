@@ -71,9 +71,14 @@ fn create_temp(root: &Path, share_delete: bool) -> io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        // std already defaults to read|write|delete sharing on Windows, so an
+        // unrestricted case must be told apart by narrowing the other one.
         if share_delete {
             // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE.
             options.share_mode(1 | 2 | 4);
+        } else {
+            // FILE_SHARE_READ | FILE_SHARE_WRITE: no FILE_SHARE_DELETE.
+            options.share_mode(1 | 2);
         }
     }
     #[cfg(not(windows))]
@@ -465,8 +470,8 @@ pub fn run_child() -> io::Result<()> {
             | "close-prewritten-before-rename"
             | "create-before-lock"
             | "legacy-unleased"
-            | "live-normal-lock-first"
-            | "live-normal-prewritten"
+            | "live-restricted-share-lock-first"
+            | "live-restricted-share-prewritten"
             | "live-share-delete-lock-first"
             | "live-share-delete-prewritten"
     ) {

@@ -12,6 +12,8 @@
 
 设计依据：[临时文件清理设计](../specs/2026-10-31-temp-recovery-design.md)。向量记忆库不在本计划实施范围内。
 
+执行状态：Task 1 至 Task 3 完成（提交 c5310854、8aec5639、47a8cbff）；Task 4 第 1、3 步完成，第 2 步部分完成（1.89 缺失、Linux/macOS 证据未取得），第 4 步因证据不足未执行，停在第 6 步等待用户审阅。证据见[可行性报告](../../acceptance/1.2.2-temp-lease-feasibility.md)。
+
 ## Chunk 1: 活跃保护可行性与设计停止点
 
 ### 执行边界
@@ -44,7 +46,7 @@ $env:CARGO_TARGET_DIR = 'D:/rust-project/ziyuan/target'
 
 ### Task 1: 固定基线与可重复的子进程测试框架
 
-- [ ] **Step 1: 检查工作副本并记录现有替换测试。**
+- [x] **Step 1: 检查工作副本并记录现有替换测试。**
 
 ```powershell
 jj status
@@ -53,13 +55,13 @@ cargo test -p ziyuan-runtime --locked tools::replace::tests:: -- --nocapture
 
 预期：工作副本无无关改动，现有替换测试通过。失败则先按 @systematic-debugging 定位，不把基线失败算作新增测试的 RED。
 
-- [ ] **Step 2: 新建入口及辅助模块，先写 `probe_child_handshake_has_deadline` 测试。**
+- [x] **Step 2: 新建入口及辅助模块，先写 `probe_child_handshake_has_deadline` 测试。**
 
 定义父子协议：父进程创建 loopback `TcpListener`，子进程接收地址及随机生成的本次测试标识并连接。只传测试目录内路径、阶段名和固定测试内容，不传用户文件或凭据。监听地址仅 `127.0.0.1`，不得暴露外网。协议逐行发送 `READY <id> <stage>`，父进程核对 id 后发 `CONTINUE`；所有读写、接受连接、子进程退出等待均有 10 秒截止时间。
 
 先让握手辅助函数明确返回 `Unsupported`，测试断言成功，确保 RED 来自未实现行为。辅助实现用非阻塞 accept 加短暂让步及截止时间检查，不能无界等待或仅靠固定 sleep 猜就绪。
 
-- [ ] **Step 3: 运行 RED。**
+- [x] **Step 3: 运行 RED。**
 
 ```powershell
 cargo test -p ziyuan-runtime --locked --test temp_lease_probe probe_child_handshake_has_deadline -- --exact --nocapture
@@ -67,7 +69,7 @@ cargo test -p ziyuan-runtime --locked --test temp_lease_probe probe_child_handsh
 
 预期：测试断言握手失败，不是编译错误或错误筛选导致的零测试。未匹配到测试名必须停止修正。
 
-- [ ] **Step 4: 实现最小握手与子进程守卫。**
+- [x] **Step 4: 实现最小握手与子进程守卫。**
 
 子入口为普通 `#[test] fn probe_child_entry()`；未设置专属测试环境变量时立即返回，不执行实验。父进程使用以下参数启动当前测试二进制，子进程只运行该入口：
 
@@ -83,7 +85,7 @@ let child = std::process::Command::new(std::env::current_exe()?)
 
 辅助模块的 `ChildGuard` 必须在 `Drop` 中先 `kill` 再 `wait`，包含断言 panic 的路径；正常结束也须回收子进程。父进程自己的测试目录使用 PID、纳秒和进程内计数通过 `create_dir` 防碰撞，不先删除同名目录。清理守卫只删除本次成功创建的测试目录，绝不扫描用户工作目录。IPC 失败时给出阶段名及操作系统错误，不打印完整环境。
 
-- [ ] **Step 5: 重跑握手测试及 `probe_child_entry`，断言有实际测试执行并通过。**
+- [x] **Step 5: 重跑握手测试及 `probe_child_entry`，断言有实际测试执行并通过。**
 
 用父进程不发 `CONTINUE` 的故障用例确认子进程等待也会在截止时间内退出；握手错误 ID 必须拒绝。测试通过后提交本任务的两个测试文件：
 
@@ -97,7 +99,7 @@ jj commit -m "test(runtime): 增加临时租约跨进程实验框架" -m "Co-aut
 
 ### Task 2: 验证 OS 锁、强杀释放与同进程行为
 
-- [ ] **Step 1: 写 `cross_process_lock_blocks_live_holder_and_releases_after_kill` 的失败测试。**
+- [x] **Step 1: 写 `cross_process_lock_blocks_live_holder_and_releases_after_kill` 的失败测试。**
 
 子进程创建独立测试文件，获取排他锁后发送 READY。父进程通过另一个句柄非阻塞试锁，必须得到 `WouldBlock`，不能把所有 I/O 错误都当作活跃。父进程强杀并回收子进程后，重新打开文件并在截止时间内取得锁。先让辅助函数错误地提前释放锁，确认测试能检出活跃期失守，再实现持续持有。
 
@@ -113,7 +115,7 @@ match file.try_lock() {
 
 `ProbeLock::Acquired` 持有 `File`，不得返回 bool 后立即丢弃句柄。
 
-- [ ] **Step 2: 执行 RED，然后实现并执行 GREEN。**
+- [x] **Step 2: 执行 RED，然后实现并执行 GREEN。**
 
 ```powershell
 cargo test -p ziyuan-runtime --locked --test temp_lease_probe cross_process_lock_blocks_live_holder_and_releases_after_kill -- --exact --nocapture
@@ -121,11 +123,11 @@ cargo test -p ziyuan-runtime --locked --test temp_lease_probe cross_process_lock
 
 每次恰有一项父测试执行；测试中的子入口不算第二个父测试。记录正常释放和强杀释放两种结果。
 
-- [ ] **Step 3: 添加 `same_process_independent_handles_are_observed`。**
+- [x] **Step 3: 添加 `same_process_independent_handles_are_observed`。**
 
 测试同进程另开句柄和 `try_clone`，记录各平台实际排斥／共享行为。不要强加某个平台的观察为通用保证；测试只核对结果分类完整、无挂起且所有锁在守卫离开后可重新取得。报告中明确：无论观察如何，生产清理仍需同进程活跃集合或等效互斥，不能据此删除。
 
-- [ ] **Step 4: 重跑整个实验目标，提交锁实验。**
+- [x] **Step 4: 重跑整个实验目标，提交锁实验。**
 
 ```powershell
 cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
@@ -135,7 +137,7 @@ jj commit -m "test(runtime): 验证跨进程租约与强杀释放" -m "Co-author
 
 ### Task 3: 验证 Windows 共享语义与替换窗口
 
-- [ ] **Step 1: 写 `rename_with_live_handle_records_native_semantics` 和 `delete_with_live_handle_records_native_semantics`。**
+- [x] **Step 1: 写 `rename_with_live_handle_records_native_semantics` 和 `delete_with_live_handle_records_native_semantics`。**
 
 全部使用自建测试目录和固定字节 `old` / `complete-new`。覆盖目标不存在和已存在；子进程持有、写入并同步临时文件，父进程观察临时文件能否打开／锁定／改名／删除。实验允许“操作被系统拒绝”，但必须记录错误码及目标最终内容；不能把拒绝改名伪装成成功。
 
@@ -151,19 +153,19 @@ fn share_delete(options: &mut std::fs::OpenOptions) {
 
 对持锁后写入、`sync_all`、保持租约时改名、成功后关闭句柄逐项断言。若结果只支持“独立锁载体而非临时文件句柄”，写为证据，不在本任务顺手新增生产控制文件。
 
-- [ ] **Step 2: 写 `close_before_rename_exposes_unprotected_interval`。**
+- [x] **Step 2: 写 `close_before_rename_exposes_unprotected_interval`。**
 
 用与现有 `fill` 一致的实验顺序：创建→文件锁→写入／同步→关闭句柄→在改名前 READY 暂停。父进程此时能取得临时文件锁，证明仅在 `fill` 中锁定不足。此测试断言“观察到窗口”，通过不意味着协议通过。
 
-- [ ] **Step 3: 写 `create_before_lock_exposes_unprotected_interval`。**
+- [x] **Step 3: 写 `create_before_lock_exposes_unprotected_interval`。**
 
 子进程在创建临时文件后、加锁前 READY 暂停，父进程取得锁。断言该窗口存在，记录连续保护必须从文件可见之前开始。实验只观察，不因拿到锁而删文件。
 
-- [ ] **Step 4: 写 `legacy_unleased_file_is_never_proven_stale_by_lock_alone`。**
+- [x] **Step 4: 写 `legacy_unleased_file_is_never_proven_stale_by_lock_alone`。**
 
 子进程用旧版方式打开未加锁文件并暂停；父进程即使取得锁，也只返回测试状态 `OwnershipUnknown`。断言文件和内容不变。此用例把“锁可得”和“陈旧已证明”拆开，后续清理器必须继承此测试意图。
 
-- [ ] **Step 5: 完整运行并提交生命周期实验。**
+- [x] **Step 5: 完整运行并提交生命周期实验。**
 
 ```powershell
 cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
@@ -174,7 +176,7 @@ jj commit -m "test(runtime): 记录临时文件锁与原子替换窗口" -m "Co-
 
 ### Task 4: 平台证据、协议补充与停止点
 
-- [ ] **Step 1: 在原生 Windows 执行窄测、格式及 lints。**
+- [x] **Step 1: 在原生 Windows 执行窄测、格式及 lints。**
 
 ```powershell
 cargo fmt --all -- --check
@@ -185,7 +187,7 @@ cargo test -p ziyuan-runtime --locked
 
 预期全部通过；“观察到危险窗口”的测试通过不能写成“删除协议已安全”。新增测试不依赖管理员权限、网络服务或第三方程序；loopback IPC 失败应如实失败，不静默跳过。
 
-- [ ] **Step 2: 检查 MSRV，收集原生 Linux 与 macOS 结果。**
+- [ ] **Step 2: 检查 MSRV，收集原生 Linux 与 macOS 结果。**（部分完成：`cargo +1.90 check` 通过；Rust 1.89 未安装，Linux/macOS 原生语义证据未取得，Windows 语义证据已取得）
 
 ```powershell
 cargo +1.89 check -p ziyuan-runtime --all-targets --locked
@@ -201,13 +203,13 @@ cargo test -p ziyuan-runtime --locked --test temp_lease_probe -- --nocapture
 
 若只有普通 CI 绿灯，报告须区分“回归断言通过”和“原生语义输出未取得”，后者不能填为已经验证的观察。没有原生执行者时，继续标为“语义证据未取得”并保留停止点；另请用户授权增加保留 `--nocapture` 输出的定向 CI 步骤或提供原生环境后再收证据。本计划不隐含授权修改工作流或推送，不能为跑 CI 自行推送。
 
-- [ ] **Step 3: 新建可行性报告，分清事实和未决问题。**
+- [x] **Step 3: 新建可行性报告，分清事实和未决问题。**
 
 报告逐项列出平台／文件系统／Rust 版本、命令、退出状态、测试数量、锁行为、Windows 共享模式、创建及关句柄窗口、强杀释放、未测项。还必须评估：稳定锁身份、同进程活跃集合、锁顺序及非阻塞清理、可信协议归属证据、旧版混用、控制文件自身强杀垃圾、业务恢复引用核验。
 
 本实验不能证明网络文件系统可靠，不扩大到 SMB／NFS；支持范围待协议补充明确。任一关键维度只有推断没有证据时，结论是“尚未闭合”，不是“通过”。
 
-- [ ] **Step 4: 仅在证据充分时补充一个具体协议。**
+- [ ] **Step 4: 仅在证据充分时补充一个具体协议。**（未执行：证据不足，按停止点转为下一轮有界验证，见可行性报告）
 
 设计补充必须明确载体路径及版本、创建到改名／丢弃的状态机、何时登记活跃、如何证明归属、写入与清理的完整锁顺序、句柄生命周期、身份复核、控制文件遗留处置、失败降级和未来共享模块位置。必要的完整生命周期实验须在本目标内验证，不能只画状态图。
 
