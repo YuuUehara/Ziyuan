@@ -151,7 +151,7 @@ pub struct Problem {
 
 thread_local! {
     /// 不便沿返回值上抛的失败：例如改名已成功却删不掉租约。按线程隔离，
-    /// 由调用方（`apply_changes_protected`、CLI）取走并报到 stderr。
+    /// 由制造失败的调用方在同线程取走并报到 stderr。
     static PROBLEMS: RefCell<Vec<Problem>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -160,7 +160,12 @@ pub(crate) fn note_problem(path: PathBuf, message: String) {
 }
 
 /// 取走当前线程累积的失败；空表示没有。
-pub fn drain_problems() -> Vec<Problem> {
+///
+/// 只在 crate 内可用：诊断归属于制造它的那次调用，跨 crate 暴露会让别的
+/// 调用方取走不是自己产生的诊断。目前只有用例取用，非测试构建里还没有
+/// 汇报调用方，所以暂时允许未使用；有调用方后这条不再生效。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn drain_problems() -> Vec<Problem> {
     PROBLEMS.with(|problems| std::mem::take(&mut *problems.borrow_mut()))
 }
 
@@ -201,6 +206,8 @@ impl Lease {
             let result = (|| {
                 file.write_all(lease_line(temp_name, &id).as_bytes())?;
                 file.sync_all()?;
+                #[cfg(test)]
+                tests_hooks::note_claim(temp_name);
                 #[cfg(test)]
                 tests_hooks::before_lock(&path);
                 acquire(&file, LEASE_LOCK_WAIT)?;
@@ -1037,6 +1044,18 @@ pub(crate) mod tests_hooks {
 
     thread_local! {
         static ARMED: RefCell<Vec<Armed>> = const { RefCell::new(Vec::new()) };
+        static CLAIMS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// 记下这份租约认领的临时文件名：写入者持锁期间，第二个句柄读不到内容，
+    /// 用例只能从写入侧拿到它。
+    pub(crate) fn note_claim(name: &str) {
+        CLAIMS.with(|claims| claims.borrow_mut().push(name.to_owned()));
+    }
+
+    /// 取走已记录的认领，供用例与 `before_rename` 窗口比对。
+    pub(crate) fn take_claims() -> Vec<String> {
+        CLAIMS.with(|claims| std::mem::take(&mut *claims.borrow_mut()))
     }
 
     pub(super) fn arm_reclaim() {
@@ -1057,9 +1076,20 @@ pub(crate) mod tests_hooks {
         ARMED.with(|slot| slot.borrow_mut().push(Armed::SwapToDir(path.to_owned())));
     }
 
+    /// 布防句柄：析构时清掉本线程所有布防，用例 panic 也不会把状态漏给下一个用例。
+    #[must_use]
+    pub(crate) struct ArmedGuard(());
+
+    impl Drop for ArmedGuard {
+        fn drop(&mut self) {
+            clear();
+        }
+    }
+
     /// 给 `replace.rs` 的用例用：租约路径由 `hold` 生成，事先不知道。
-    pub(crate) fn arm_swap_next_lease_to_dir() {
+    pub(crate) fn arm_swap_next_lease_to_dir() -> ArmedGuard {
         ARMED.with(|slot| slot.borrow_mut().push(Armed::SwapNextLeaseToDir));
+        ArmedGuard(())
     }
 
     pub(crate) fn clear() {
@@ -1093,15 +1123,17 @@ pub(crate) mod tests_hooks {
     }
 
     pub(super) fn after_close(path: &Path) {
-        // 优先匹配“下一次关句柄”：它不知道路径，所以不能按路径比较。
-        if take(|armed| matches!(armed, Armed::SwapNextLeaseToDir)).is_some() {
-            swap(path);
-            return;
-        }
+        // 先按路径匹配：`SwapToDir` 点名了要破坏哪份租约，信息更足；`SwapNextLeaseToDir`
+        // 只是不知道名字的用例用的兜底，若先取它会吞掉同一事件上的定向布防。
         if let Some(Armed::SwapToDir(target)) =
             take(|armed| matches!(armed, Armed::SwapToDir(target) if target == path))
         {
             swap(&target);
+            return;
+        }
+        // 没有定向布防时才轮到“下一次关句柄”：它不知道路径，所以不能按路径比较。
+        if take(|armed| matches!(armed, Armed::SwapNextLeaseToDir)).is_some() {
+            swap(path);
         }
     }
 }

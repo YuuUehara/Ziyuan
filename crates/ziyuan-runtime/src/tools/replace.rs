@@ -61,7 +61,7 @@ pub(super) fn replace_target(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let file = match OpenOptions::new().write(true).create_new(true).open(&temp) {
         Ok(file) => file,
         Err(e) => {
-            release_quietly(lease);
+            release_recording_failure(lease);
             return Err(e);
         }
     };
@@ -80,19 +80,21 @@ pub(super) fn replace_target(target: &Path, bytes: &[u8]) -> io::Result<()> {
         Ok(()) => {
             sync_parent(target);
             // 改名已成功：删租约失败不回滚、不报替换失败，只留下一诊断。
-            release_quietly(lease);
+            release_recording_failure(lease);
             Ok(())
         }
         Err(primary) => {
             let error = discard(&temp, primary);
-            release_quietly(lease);
+            release_recording_failure(lease);
             Err(error)
         }
     }
 }
 
 /// 放弃租约但不上抛它的错误：此刻真正要报告的是原始失败或“替换已完成”。
-fn release_quietly(lease: super::temp_cleanup::Lease) {
+///
+/// 错误不丢弃，只是改道：记到诊断通道，由同线程的调用方取走并报到 stderr。
+fn release_recording_failure(lease: super::temp_cleanup::Lease) {
     let path = lease.path().to_path_buf();
     if let Err(e) = lease.release() {
         super::temp_cleanup::note_problem(path, e.to_string());
@@ -557,14 +559,35 @@ mod tests {
 
     #[test]
     fn lease_is_held_after_the_temp_handle_closes_and_before_rename() {
+        use super::super::temp_cleanup::tests_hooks::take_claims;
+        // 同线程上一个用例留下的认领会污染下面的比对：先丢掉。
+        let _ = take_claims();
         let dir = scratch("rename-window");
         let target = dir.join("target.txt");
         std::fs::write(&target, OLD).unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot = seen.clone();
-        // `before_rename` 在 `fill` 关闭临时文件之后、改名前调用：正是设计要求的窗口。
+        let temp_seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let temp_slot = temp_seen.clone();
+        // `before_first_write` 的参数就是临时文件路径：租约认领的名字只能从写入侧拿到，
+        // 写入者持锁期间第二个句柄读不到租约内容。
         let _guard = install(Faults {
+            before_first_write: Some(Box::new(move |temp: &Path| {
+                *temp_slot.lock().unwrap() = Some(temp.to_path_buf());
+            })),
+            // `before_rename` 在 `fill` 关闭临时文件之后、改名前调用：正是设计要求的窗口。
             before_rename: Some(Box::new(move |target: &Path| {
+                let temp = temp_seen
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("before_first_write 未被调用");
+                let claims = take_claims();
+                assert_eq!(
+                    claims,
+                    vec![temp.file_name().unwrap().to_string_lossy().into_owned()],
+                    "租约必须认领本次写入的临时文件，而不只是存在一份租约"
+                );
                 let leases = lease_names(target.parent().unwrap());
                 *slot.lock().unwrap() = Some(leases);
             })),
@@ -584,13 +607,17 @@ mod tests {
         let dir = scratch("lease-stuck");
         let target = dir.join("target.txt");
         std::fs::write(&target, OLD).unwrap();
-        super::super::temp_cleanup::tests_hooks::arm_swap_next_lease_to_dir();
+        let _armed = super::super::temp_cleanup::tests_hooks::arm_swap_next_lease_to_dir();
         let result = replace_target(&target, NEW.as_bytes());
-        super::super::temp_cleanup::tests_hooks::clear();
         assert!(result.is_ok(), "删租约失败不得报替换失败: {result:?}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), NEW);
         let problems = super::super::temp_cleanup::drain_problems();
         assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(
+            problems[0].path.parent(),
+            Some(dir.as_path()),
+            "诊断必须指向本次写入所在目录的那份租约: {problems:?}"
+        );
         assert!(
             problems[0]
                 .path
