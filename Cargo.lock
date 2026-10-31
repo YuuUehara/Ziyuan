@@ -2420,6 +2420,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziyuan-memory"
+version = "1.2.1"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
+ "ziyuan-core",
+]
+
+[[package]]
 name = "ziyuan-runtime"
 version = "1.2.1"
 dependencies = [

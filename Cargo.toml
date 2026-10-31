@@ -6,6 +6,7 @@ members = [
     "crates/ziyuan-llm",
     "crates/ziyuan-github",
     "crates/ziyuan-storage",
+    "crates/ziyuan-memory",
     "crates/ziyuan-app",
     "crates/ziyuan-web",
     "crates/ziyuan-tui",
@@ -27,6 +28,7 @@ ziyuan-runtime = { path = "crates/ziyuan-runtime", version = "=1.2.1" }
 ziyuan-llm = { path = "crates/ziyuan-llm", version = "=1.2.1" }
 ziyuan-github = { path = "crates/ziyuan-github", version = "=1.2.1" }
 ziyuan-storage = { path = "crates/ziyuan-storage", version = "=1.2.1" }
+ziyuan-memory = { path = "crates/ziyuan-memory", version = "=1.2.1" }
 ziyuan-app = { path = "crates/ziyuan-app", version = "=1.2.1" }
 ziyuan-web = { path = "crates/ziyuan-web", version = "=1.2.1" }
 ziyuan-tui = { path = "crates/ziyuan-tui", version = "=1.2.1" }
