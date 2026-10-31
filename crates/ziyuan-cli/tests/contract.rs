@@ -462,3 +462,76 @@ fn text_recovery_temps_reports_capped_without_failing() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn text_recovery_temps_usage_error_exits_two() {
+    // 参数不对是用法错误：按稳定性约定退 2，与“运行中出错”分开。
+    let dir = std::env::temp_dir().join(format!("ziyuan-cli-temps-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = ziyuan(&dir, &["text", "recovery", "temps", "--yes", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2), "{:?}", out.stderr);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("用法"), "{stderr}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_recovery_temps_refuses_when_the_record_is_unreadable() {
+    // 记录读不出来时整轮不清理：宁可一份都不删，也不猜哪些路径受保护。
+    let (dir, temp) = stale_temp_workspace("recovery-temps-corrupt");
+    std::fs::create_dir_all(dir.join(".ziyuan")).unwrap();
+    std::fs::write(dir.join(".ziyuan").join("recovery.json"), b"garbage").unwrap();
+    let out = ziyuan(&dir, &["text", "recovery", "temps", "--yes", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{:?}", out.stdout);
+    assert!(temp.is_file(), "记录不可读时不得删除任何临时文件");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("读取恢复记录失败"), "{stderr}");
+    assert!(stderr.contains("本次未清理任何临时文件"), "{stderr}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn text_recovery_temps_text_mode_reports_the_same_verdict() {
+    // 文本模式与 JSON 是同一份判定，只是呈现不同：这里核对人看的几行。
+    let (dir, temp) = stale_temp_workspace("recovery-temps-text");
+    let preview = ziyuan(&dir, &["text", "recovery", "temps"]);
+    assert_eq!(preview.status.code(), Some(0), "{:?}", preview.stderr);
+    let text = String::from_utf8_lossy(&preview.stdout).to_string();
+    assert!(text.contains("模式：预览，加 --yes 才删"), "{text}");
+    assert!(
+        text.contains("临时文件：候选 1，可清理 1，已删除 0，未删除 0"),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| line
+            .trim_start()
+            .starts_with("可清理 WriterDeadLeaseVerified")),
+        "{text}"
+    );
+    assert!(temp.is_file(), "预览不得删除");
+
+    let applied = ziyuan(&dir, &["text", "recovery", "temps", "--yes"]);
+    assert_eq!(applied.status.code(), Some(0), "{:?}", applied.stderr);
+    let text = String::from_utf8_lossy(&applied.stdout).to_string();
+    assert!(text.contains("模式：删除"), "{text}");
+    // `可清理` 是候选的性质（本可清理），不随模式变；变的是这一轮做没做。
+    assert!(
+        text.contains("临时文件：候选 1，可清理 1，已删除 1，未删除 0"),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| line
+            .trim_start()
+            .starts_with("已删除 WriterDeadLeaseVerified")),
+        "{text}"
+    );
+    assert!(
+        !text.lines().any(|line| line
+            .trim_start()
+            .starts_with("可清理 WriterDeadLeaseVerified")),
+        "删过之后不该再有“可清理”的逐项行: {text}"
+    );
+    assert!(!temp.exists(), "确认后应删除");
+    std::fs::remove_dir_all(dir).unwrap();
+}

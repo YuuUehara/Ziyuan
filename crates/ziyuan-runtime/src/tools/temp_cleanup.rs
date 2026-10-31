@@ -871,7 +871,10 @@ impl Report {
     ///
     /// std 的 `fs` 错误目前不带路径，所以这条今天多半是空操作；但只要有一处错误
     /// 带上路径，整份报告的契约就破了，所以在出口处兜住，而不是指望每个调用点自觉。
-    fn scrub(&self, message: &str) -> String {
+    ///
+    /// 公开给调用方：文本报告与 JSON 必须走同一个出口。文本模式若直接打印
+    /// `problem.message`，脱敏就只护住了 JSON 一半。
+    pub fn scrub_message(&self, message: &str) -> String {
         let root = self.root.display().to_string();
         if root.is_empty() {
             return message.to_owned();
@@ -917,7 +920,7 @@ impl Report {
     ///
     /// `reason` 恒为设计中的 14 个名字之一（12 个保留 + 2 个删除），从不为 `null`：
     /// 可删除项的删除原因由 `Item::reason_name` 按类型补齐。`problems` 的消息也过
-    /// `scrub`，所以整份 JSON 不含绝对外部路径。
+    /// `scrub_message`，所以整份 JSON 不含绝对外部路径。
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         let describe = |kind: Kind| {
@@ -950,7 +953,7 @@ impl Report {
             })).collect::<Vec<_>>(),
             "problems": self.problems.iter().map(|problem| json!({
                 "path": self.display_relative(&problem.path),
-                "message": self.scrub(&problem.message),
+                "message": self.scrub_message(&problem.message),
             })).collect::<Vec<_>>(),
             "unscanned": self.unscanned
                 .iter()
@@ -1001,7 +1004,10 @@ const SKIPPED_DIRS: [&str; 5] = [".ziyuan", ".git", ".jj", "target", "node_modul
 /// 进 `capped` 而不是 `unscanned`：上限是设计内的边界，不是这一轮读失败了。混进
 /// `unscanned` 会让 `needs_attention()` 一直为真——一棵合法的深目录树（vendored SDK、
 /// `.venv`、生成目录）从此每次运行都退 1。
-const MAX_DEPTH: usize = 32;
+///
+/// 公开是为了让调用方在报告里写出真实数字（如 CLI 的“超过 N 层深度上限”），
+/// 而不是各自抄一份常量、改名时悄悄失真。
+pub const MAX_DEPTH: usize = 32;
 
 /// 手工入口用：从工作区根开始递归清理。
 pub fn sweep_workspace(root: &Path, protected: &BTreeSet<String>, apply: bool) -> Report {

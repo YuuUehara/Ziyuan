@@ -619,6 +619,8 @@ fn new_cli_usage_and_completions() {
             "zhupi",
             "finalize",
             "resume",
+            // 补全词取自 help.rs 的子命令清单：从任一清单里漏掉 `recovery` 都会在这里失败。
+            "recovery",
         ] {
             assert!(c.contains(word), "{shell}: {word}");
         }

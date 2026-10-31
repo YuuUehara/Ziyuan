@@ -3,7 +3,7 @@
 //! Control files are replaced atomically; this does not promise power-loss safety.
 //! Static symlinks/reparse points are refused. Concurrent malicious path replacement
 //! is outside this API's threat model.
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
@@ -210,6 +210,26 @@ impl Workspace {
             return Ok(None);
         }
         read_record(&dir.join(RECORD_FILE))
+    }
+
+    /// 未收尾恢复记录里引用的全部目标路径（`/` 分隔的工作区相对路径）。
+    ///
+    /// 清理临时文件时用它作受保护集合：记录引用的路径一律不动。
+    /// 记录读不出来是错误而不是空集——宁可整轮不清理，也不要误删记录引用的项。
+    ///
+    /// 记录里的路径确实是目标文件的**最终**路径（如 `src/main.rs`），通常与临时名不同；
+    /// 但项目文件可以恰好就叫 `.ziyuan-tmp-<pid>-<nanos>-<counter>`（写入禁区只排除
+    /// `.ziyuan`、`.git`、`.jj`、`.env*`），那时它按严格命名正是清理候选，集合命中是
+    /// 真实的保护而不只是接口。集合构造放在 storage：`ziyuan-app` 与 `ziyuan-cli` 都要
+    /// 用同一份，runtime 不该为此依赖 storage。
+    pub fn protected_targets(&self) -> Result<BTreeSet<String>, WorkspaceError> {
+        let mut protected = BTreeSet::new();
+        if let Some(record) = self.pending_record()? {
+            for target in &record.targets {
+                protected.insert(target.path.clone());
+            }
+        }
+        Ok(protected)
     }
 
     /// Refuse ordinary managed writes while an interrupted or unfinished operation

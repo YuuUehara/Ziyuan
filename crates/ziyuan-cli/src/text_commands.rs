@@ -1,6 +1,5 @@
 //! `ziyuan text`：离线文本项目与译书命令分派。不读模型配置、不联网。
 
-use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::io::Read;
@@ -495,15 +494,33 @@ fn run_recovery(action: RecoveryAction, json: bool) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+/// 失败项的文本行：路径与消息都过报告的脱敏出口（与 JSON 同一个函数）。
+///
+/// 单独提出来的理由是可测：报告里的消息今天都不带路径，但契约要求文本与 JSON 走同一条
+/// 脱敏路径，所以用例要能直接喂一条带绝对路径的消息。
+fn problem_line(
+    report: &ziyuan_runtime::tools::temp_cleanup::Report,
+    problem: &ziyuan_runtime::tools::temp_cleanup::Problem,
+) -> String {
+    format!(
+        "  失败：{}：{}",
+        report.display_relative(&problem.path),
+        report.scrub_message(&problem.message)
+    )
+}
+
 /// 手工清理遗留临时文件。默认预览；`--yes` 才真删。
 ///
 /// 不取工作目录锁：那会把正在写入的进程挡到超时，而非阻塞试探已经足够给出可信判定。
 fn run_temps(workspace: &Workspace, apply: bool, json: bool) -> Result<(), Box<dyn Error>> {
-    use ziyuan_runtime::tools::temp_cleanup::{Kind, Outcome};
+    use ziyuan_runtime::tools::temp_cleanup::{Kind, MAX_DEPTH, Outcome, sweep_workspace};
+
     // 集合构造失败就整轮不清理：宁可什么都不做，也不要误删恢复记录引用的项。
-    let protected = protected_targets(workspace)?;
-    let report =
-        ziyuan_runtime::tools::temp_cleanup::sweep_workspace(workspace.root(), &protected, apply);
+    // 报错文案要说清“一份都没删”，否则用户会以为报告没打全。
+    let protected = workspace
+        .protected_targets()
+        .map_err(|e| format!("读取恢复记录失败，本次未清理任何临时文件：{e}"))?;
+    let report = sweep_workspace(workspace.root(), &protected, apply);
     if json {
         print_json(report.to_json())?;
     } else {
@@ -519,30 +536,40 @@ fn run_temps(workspace: &Workspace, apply: bool, json: bool) -> Result<(), Box<d
             }
         );
         println!(
-            "临时文件：候选 {}，可清理 {}，已删除 {}，保留 {}",
+            "临时文件：候选 {}，可清理 {}，已删除 {}，未删除 {}",
             temps.candidates, temps.removable, temps.removed, temps.kept
         );
         println!(
-            "租约：候选 {}，可清理 {}，已删除 {}，保留 {}",
+            "租约：候选 {}，可清理 {}，已删除 {}，未删除 {}",
             leases.candidates, leases.removable, leases.removed, leases.kept
         );
+        // skipped 与 capped 是平级的两类“没进去”，缩进也一致。
         if !report.skipped.is_empty() {
             // 报路径而不是名字：两个子目录里各有一个 `target` 时，光看名字分不出没扫的是哪个。
-            println!("未进入的目录（按路径跳过）：{}", report.skipped.join("、"));
+            println!(
+                "  未进入的目录（按路径跳过）：{}",
+                report.skipped.join("、")
+            );
         }
         if !report.capped.is_empty() {
             // 深度上限不是失败：只说明这一层没进去，不影响退出码。
-            println!("  达到深度上限未进入：{}", report.capped.join("、"));
+            println!(
+                "  未扫描（超过 {MAX_DEPTH} 层深度上限）：{}",
+                report.capped.join("、")
+            );
+            println!("  这些目录里的遗留文件不在本次报告范围内。");
         }
         for item in &report.items {
             // 原因名与 JSON 的 `reason` 出自同一处：可删除项照样显示
             // WriterDeadLeaseVerified / OrphanLease，不在这里手拼第二套名字。
             let reason = item.reason_name();
             // 已删除与可清理分开写：预览里的“可清理”是待办提示，不是这一轮做了什么。
+            // 保留项写“未删除”而不是“保留”：既让三种状态同为三字（列不歪），
+            // 也不让“保留 TempAlreadyAbsent”读成自相矛盾。
             let status = match item.outcome {
                 Outcome::Remove if item.acted => "已删除",
                 Outcome::Remove => "可清理",
-                Outcome::Keep(_) => "保留",
+                Outcome::Keep(_) => "未删除",
             };
             // 报告只出相对路径：绝对路径不外泄。
             println!(
@@ -551,11 +578,8 @@ fn run_temps(workspace: &Workspace, apply: bool, json: bool) -> Result<(), Box<d
             );
         }
         for problem in &report.problems {
-            println!(
-                "  失败：{}：{}",
-                report.display_relative(&problem.path),
-                problem.message
-            );
+            // 与 JSON 同一个脱敏出口：文本模式也不能带出绝对路径。
+            println!("{}", problem_line(&report, problem));
         }
         for dir in &report.unscanned {
             println!("  读不了的目录：{}", report.display_relative(dir));
@@ -564,25 +588,13 @@ fn run_temps(workspace: &Workspace, apply: bool, json: bool) -> Result<(), Box<d
     // 只有扫描/删除的 I/O 失败与读不了的目录才退 1；预览发现可清理项仍算成功，
     // 报告里的“可清理 N”就是待办提示（设计：仅保留活跃或未知项不算执行失败）。
     if report.needs_attention() {
-        return Err("临时文件清理未能完成；见上面的逐项报告".into());
+        // 失败提示要说清去哪儿看：`--json` 下标准输出是 JSON，没有“上面”的报告。
+        return Err(match json {
+            true => "临时文件清理未能完成：见报告中的 problems 与 unscanned".into(),
+            false => "临时文件清理未能完成；见上面的逐项报告".into(),
+        });
     }
     Ok(())
-}
-
-/// 受保护集合：恢复记录里全部目标路径（`/` 分隔的工作区相对路径）。
-///
-/// 注意它今天**护住的不是临时文件**：记录里存的是目标文件的最终路径（如 `src/main.rs`），
-/// 而候选的名字是 `.ziyuan-tmp-…`，两者不可能相等。这套集合是为“将来记录若开始携带
-/// 临时文件声明”留的接口，也是设计要求的构造点；真正阻止误删的是租约核验。
-/// 记录读不出来时整轮不清理，宁可什么都不做。
-fn protected_targets(workspace: &Workspace) -> Result<BTreeSet<String>, Box<dyn Error>> {
-    let mut protected = BTreeSet::new();
-    if let Some(record) = workspace.pending_record()? {
-        for target in &record.targets {
-            protected.insert(target.path.clone());
-        }
-    }
-    Ok(protected)
 }
 
 /// 收尾：只推进世代并清理记录，绝不重做业务写入。
@@ -774,5 +786,33 @@ fn print_report(report: &ValidationReport) {
             (None, None) => String::new(),
         };
         println!("  - [{kind}]{place}：{}", issue.message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ziyuan_runtime::tools::temp_cleanup::{Problem, sweep_workspace};
+
+    #[test]
+    fn problem_line_scrubs_the_workspace_root() {
+        let root = env::temp_dir().join(format!("ziyuan-cli-problem-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let report = sweep_workspace(&root, &std::collections::BTreeSet::new(), false);
+        // `Report` 没有公开构造器，但 `problems` 是公开字段：直接造一条带扫描根的消息，
+        // 就能回答“文本模式会不会把绝对路径打出去”，而不必等某次 fs 错误恰好带上路径。
+        let problem = Problem {
+            path: root.join("leftover.tmp"),
+            message: format!("删除失败：{}", root.display()),
+        };
+        let line = problem_line(&report, &problem);
+        assert!(
+            !line.contains(&root.display().to_string()),
+            "绝对根漏进文本报告: {line}"
+        );
+        assert!(line.contains("leftover.tmp"), "{line}");
+        assert!(line.contains("删除失败：."), "{line}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
