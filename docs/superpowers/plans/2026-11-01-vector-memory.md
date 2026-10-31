@@ -8,7 +8,7 @@
 
 | 做 | 不做（本计划明确排除） |
 | --- | --- |
-| 记录契约：身份、版本、来源定位、摘要、嵌入签名、水位、失效态 | 选定远程嵌入模型与服务商 |
+| 记录契约：身份、版本、来源定位、摘要、嵌入签名、水位、内容种类；失效状态读取时重算、不入库 | 选定远程嵌入模型与服务商 |
 | 资格判定：只收当前 `Finalized` 且版本核验通过的逐段对 | 冻结相似度阈值（接口只回分数，不设门槛） |
 | 嵌入接口 + 确定性本地提供方（零外发） | 实现任何远程嵌入提供方 |
 | 可重建索引：完整性标记、格式／维度校验、先建后切换 | 训练／微调模型 |
@@ -37,8 +37,7 @@
 | 文件 | 责任 |
 | --- | --- |
 | `crates/ziyuan-memory/src/lib.rs` | crate 根、模块声明、错误类型 |
-| `crates/ziyuan-memory/src/record.rs` | 记录契约、身份、来源定位、摘要、嵌入签名、水位、失效态 |
-| `crates/ziyuan-memory/src/eligibility.rs` | 纯函数：给定块状态与磁盘事实，判定是否收录 |
+| `crates/ziyuan-memory/src/record.rs` | 记录契约、身份、来源定位、摘要、嵌入签名、水位、内容种类；**不含**失效状态 |
 | `crates/ziyuan-memory/src/pair.rs` | 纯函数：按 ID 配对原文／译文段落，结构不合格即整块不收 |
 | `crates/ziyuan-memory/src/embed.rs` | `EmbeddingProvider` trait、`Embedding`、`ModelSignature`、`Unavailable` |
 | `crates/ziyuan-memory/src/local.rs` | 确定性本地提供方（零外发） |
@@ -48,6 +47,10 @@
 | `crates/ziyuan-app/src/memory.rs` | 把 app 的权威状态接进 memory：`Session::memory_pairs` 等 |
 | `crates/ziyuan-cli/src/memory_commands.rs` | `ziyuan text memory …` |
 
+**失效状态不入库**：记录里**没有**也不该有 `status`／`stale` 字段。失效与否是从权威状态（`block_states`、水印、磁盘摘要）**读取时重算**的结论，不是记录自带的属性；存下来就会过期，且会让「删掉索引可重建」这条不变量失效。子代理再想加 `status` 字段时，先看这一行。
+
+**`embedding.input_sha256` 不记输入种类**：首版只对**原文**算摘要（`source.text`），记录里并不写明「这是原文的摘要」。因此改变这条策略（例如改成对原文＋上下文拼接后取摘要）**是格式破坏**，必须提升 `FORMAT_VERSION` 并重建，不能靠重算摘要蒙混过去。
+
 ## 不变量（每个任务都要守）
 
 - 索引是**可重建派生数据**：删掉不损失任何权威资料；损坏、格式更新、维度变化一律拒绝使用并提示重建，绝不重置为空后假装最新。
@@ -55,6 +58,7 @@
 - 检索**先按授权范围过滤，再做向量召回**；不允许「先全库召回再隐藏」。
 - 嵌入**默认零外发**；无可用提供方时明确报不可用，不静默降级为「没有参考也不说」。
 - 上报数字必须可复核：`events` 与 `history_sha256` 同时记录，读取前后不一致即拒绝发布。
+- 索引信封与每条记录的 `signature`／`watermark` 必须完全一致；任一条不同即拒绝整份索引，绝不允许混合签名或混合水位的索引被读出。
 - 日志与报告不含原文、译文、查询正文或密钥。
 - 新增内容只增不改：不动既有子命令、参数、退出码与 `--json` 字段。
 
@@ -71,6 +75,7 @@ pub struct MemoryRecord {
     pub identity: Identity,          // workspace_id, project, chapter, block, paragraph
     pub source_language: String,
     pub target_language: String,
+    pub content_type: String,        // 首版恒为 "paragraph"；为将来的代码等适配器占位
     pub source: Text,                // text + sha256
     pub target: Text,
     pub digests: Digests,            // block_source_sha256, block_target_sha256
@@ -80,32 +85,47 @@ pub struct MemoryRecord {
 }
 ```
 
-- `Identity` 的 `workspace_id` 来自工作区根路径的规范化文本摘要（**不存绝对路径**），迁移后须重新绑定：记录它以便发现不匹配，而不是认定相符。
+- `content_type` 现在就占位：首版只有 `"paragraph"`（一段原文对一段译文），将来的适配器（如代码）可以用别的值。加这一项是为了**一种新内容种类不必改格式版本、不必逼所有人重建索引**；读取方须先看它再解释 `source`／`target`。空或只有空白即不合法。
+- `Identity` 的 `workspace_id` 来自 `workspace_id_from_canonical_text`：工作区根的**规范化文本**摘要，截取前 32 位（**不存绝对路径**），迁移后须重新绑定：记录它以便发现不匹配，而不是认定相符。调用方须先规范化路径（绝对、消掉 `.`／`..`、分隔符统一、末尾不带分隔符）、在 Windows 上按平台大小写折叠规则处理，并在调用前挡掉非 UTF-8 与空输入（空输入返回 `MemoryError::Invalid`，绝不拿空串算出一个看似合法的 ID）。
 - 所有结构 `deny_unknown_fields`，`serde(rename_all = "snake_case")`。
-- 校验函数 `MemoryRecord::validate()`：拒绝空字段、非法摘要格式（64 位小写十六进制）、`source.text` 空、维度为 0。
-- 不写 I/O，不读事件簿。
+- 校验函数 `MemoryRecord::validate_format()`：拒绝空字段（含 `content_type` 与 `embedding.revision`——修订号形状随提供方而异，只要求非空）、非法摘要格式（64 位小写十六进制）、`workspace_id` 非 32 位小写十六进制、`source.text` 空、维度为 0、`finalized_events` 空／乱序／`last() >= watermark.events`（事件下标只在本记录的水位内才有意义）。
+- 摘要自洽另走 `verify_digests()`：它只重算**记录自己能重算**的 `source.sha256`／`target.sha256`。`digests.*`、`origin.translation_hash`、`embedding.input_sha256` 是**别的文件**的摘要，记录里没有那些字节，必须由调用方拿真实文件核对——文档里要写明，不许假装核对过。
+- 索引解码走 `MemoryRecord::decode(bytes)`（反序列化 + `validate_format`），**不得**直接用 `serde_json::from_slice`。
+- 不写 I/O，不读事件簿。`MemoryError` 用 `Io { reason }` 包 I/O 原因（不保留 `io::Error` 源值，否则不再是 `Eq`）。
 
 **验收**：往返序列化、`deny_unknown_fields`、各字段缺失或非法时拒绝、`workspace_id` 不含绝对路径。
 
 ### Task 2：配对与资格判定（纯函数）
 
-**Files:** `src/pair.rs`、`src/eligibility.rs`。
+**Files:** `src/pair.rs`（`ziyuan-memory`）；资格判定落在 `crates/ziyuan-app/src/memory.rs`（见下）。
 
 ```rust
 pub fn pair_paragraphs(
     expected: &PromptBlock,
     candidate: &PromptBlock,
 ) -> Result<Vec<ParagraphPair>, PairingErrors>;
-
-pub enum Eligibility { Eligible, Ineligible(IneligibleReason) }
-pub fn eligibility(state: &BlockState, disk_sha256: Option<&str>) -> Eligibility;
 ```
 
-- `pair_paragraphs` 的检查必须与 `validate_ids` 等价（缺失／重复／陌生／乱序／空译文／块 ID 不符／schema 版本），但返回按 ID 配好的对；**不得按下标 zip**。
-- `eligibility` 只认 `BlockState::Finalized { translation_hash, .. }` **且** `disk_sha256 == Some(translation_hash)`。其它一切状态（含 `Stale`、`Uncertain`、`Applied`）返回带原因的非资格。
-- `ziyuan-memory` 不能依赖 `ziyuan-app` 的类型。因此 `pair_paragraphs` 接受**本 crate 自己的**最小视图类型（`ParaId`/`ParaText`），由 app 侧适配；`eligibility` 接受 `(state_kind, translation_hash)` 的扁平参数而不是 `BlockState`。若这样会丢失语义，改为在 app 侧实现资格映射、memory 只收已判定合格的输入——**选后者**，保持 memory 无 app 依赖。
+- `pair_paragraphs` 的检查必须与 `TextProjects::check` 等价（`check` 先看块 ID 与 schema 版本、JSON 不成形时报 `InvalidJson`，再跑 `validate_ids`：缺失／重复／陌生／乱序／空译文），但返回按 ID 配好的对；**不得按下标 zip**。版本要分方向报：更新（`NewerVersion`）提示升级，更旧（`UnsupportedVersion`）只说本版不支持。
+- 两 crate 的一致性**不靠手抄样例**：`ziyuan-app` 依赖 `ziyuan-memory`，在 `crates/ziyuan-app/tests/text_project.rs` 里对同一批候选字节分别跑 `check()` 与 `pair_paragraphs`，逐元素比对 kind、段落 ID 与 1 起始位置；`IssueKind` → `PairingProblem` 的映射写成穷尽 `match`，新增任一变体都会编译失败。
+- `ziyuan-memory` 不能依赖 `ziyuan-app` 的类型。因此 `pair_paragraphs` 接受**本 crate 自己的**最小视图类型（`ParaPairInput`／`PromptBlockView`），由 app 侧适配。`PromptBlockView.schema_version` 是 `u32`，app 侧 `Header` 是 `u64`：Task 6 **必须先按 `u64` 解码表头**，确认等于 1 之后再转 `u32`，否则「版本号很大的 v2 文件」会被报成解码错误而不是版本错误。
 
-**验收**：下标错位但 ID 正确时配对仍正确（正例）；缺段／重复／乱序／陌生／空译文各拒（负例）；资格判定对 10 种 `BlockState` 的映射在 app 侧逐项有测试。
+**资格判定（`Eligibility`）的归属：在 `ziyuan-app` 实现，不在 `ziyuan-memory`。** 理由：它要消费 `BlockState`，而 `BlockState` 是 app 的类型；把这个判定硬塞进 memory 就要么拖进 app 依赖，要么把状态压扁成丢语义的 tuple。因此 Task 6 必须在 `crates/ziyuan-app/src/memory.rs` 里对全部 10 种 `BlockState` 逐一映射：
+
+| `BlockState` | 资格 |
+| --- | --- |
+| `Finalized { translation_hash, .. }` | **唯一可能合格**：且须 `sha256(disk_bytes) == translation_hash`，否则不合格 |
+| `Stale { reasons, .. }` | 不合格（原文变、上下文变、磁盘手改都在这里） |
+| `Uncertain { reason }` | 不合格（须先对账，不猜） |
+| `Applied { task, next }` | 不合格（已准奏但未定稿） |
+| `AwaitingYulan { task }` | 不合格（待御览，未定稿） |
+| `AwaitingApproval { task }` | 不合格 |
+| `Running { tasks }` | 不合格 |
+| `NotStarted` | 不合格 |
+| `Failed { task, reason }` | 不合格 |
+| `Cancelled { task }` | 不合格 |
+
+`Stale`／`Uncertain`／`Applied`／`AwaitingYulan` 必须**全部**不合格——它们是本设计最容易误收的四种「看起来像已经译好了」的状态。**验收**：这 10 种状态在 app 侧逐项有测试；`Finalized` 但磁盘摘要不符时也不合格；`pair_paragraphs` 的缺段／重复／乱序／陌生／空译文各拒（负例）；下标错位但 ID 正确时配对仍正确（正例，且该正例只证明配对核心，公开路径对乱序是拒收的）。
 
 ### Task 3：嵌入接口与确定性本地提供方
 
@@ -135,6 +155,7 @@ pub struct Unavailable;  // 默认：任何调用都返回 MemoryError::Unavaila
 
 - `FORMAT_VERSION = 1`。
 - 解码时校验：格式版本更高 → 明确报「索引由更新版本写入」；`signature` 与当前提供方不一致（provider/model/revision/dim/metric 任一不同）→ 报「签名不符，须重建」；`integrity` 不符 → 报「索引损坏」；`records.len() != integrity.count` → 损坏。
+- **每条记录的 `signature`／`watermark` 必须与信封完全一致**：解码器逐条比对，只要有一条记录的签名或水位与信封不同，就报自己的错误（如「记录与信封签名／水位不一致」）并拒绝整份索引——**绝不**混合签名或混合水位读出。理由：记录里的 `embedding`／`watermark` 是冗余副本，一旦与信封走散，检索就会拿着与索引构建时不同的签名或水位去算，而这种错配没有任何别的地方能发现。**验收**要专门有一条用例：改掉其中一条记录的 `signature`（以及另一条用例改 `watermark`）即整份拒收。
 - **绝不**在签名不符或损坏时「尽力使用」部分记录。
 - 路径 `.ziyuan/memory/index.json`；写入走 `DirLock`（crate 内自实现，`File::try_lock` + 超时，模式照 `translation::DirLock`，超时 5 秒）。
 - 发布前比对水位：构建开始时记下的 `history_sha256`／`events`／`generation`，与发布前重读的一致才切换；不一致即放弃本次构建并报「资料在构建期间有变」。

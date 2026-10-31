@@ -12,7 +12,7 @@ pub mod record;
 pub use pair::{PairingProblem, ParaPairInput, ParagraphPair, PromptBlockView, pair_paragraphs};
 pub use record::{
     Digests, EmbeddingSignature, Identity, MemoryRecord, Origin, Text, Watermark, sha256_hex,
-    workspace_id,
+    workspace_id_from_canonical_text,
 };
 
 /// 记忆库错误。消息只含固定原因、字段名与版本号，不含原文、译文或查询正文。
@@ -30,12 +30,17 @@ pub enum MemoryError {
     SignatureMismatch { expected: String, found: String },
     /// 资料在构建期间有变，本次不得发布。
     Stale { reason: String },
+    /// 读写索引或译稿时出错。只保留原因文本。
+    ///
+    /// 不保留 `std::io::Error` 本身：`io::Error` 不是 `Eq`，留下源值就无法让
+    /// 本错误类型继续 `Clone, PartialEq, Eq`，测试与会话也就没法直接比对错误。
+    Io { reason: String },
 }
 impl fmt::Display for MemoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(reason) => write!(f, "记忆库记录不合法: {reason}"),
-            Self::Unavailable => write!(f, "记忆库不可用：未配置可用的嵌入提供方"),
+            Self::Unavailable => write!(f, "记忆库不可用: 未配置可用的嵌入提供方"),
             Self::Corrupt(reason) => write!(f, "记忆库索引损坏: {reason}"),
             Self::Newer { found, supported } => write!(
                 f,
@@ -43,12 +48,98 @@ impl fmt::Display for MemoryError {
             ),
             Self::SignatureMismatch { expected, found } => write!(
                 f,
-                "嵌入签名不符：索引为 {found}，当前为 {expected}，须重建索引"
+                "嵌入签名不符: 索引为 {found}，当前为 {expected}，须重建索引"
             ),
             Self::Stale { reason } => {
                 write!(f, "记忆库资料已变（{reason}），本次不发布索引")
             }
+            Self::Io { reason } => write!(f, "记忆库读写失败: {reason}"),
         }
     }
 }
 impl std::error::Error for MemoryError {}
+impl From<std::io::Error> for MemoryError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io {
+            reason: e.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 逐条钉住消息用的字：这些行会进日志与命令行输出，措辞随改动漂移就算回归。
+    /// 冒号一律是 ASCII `: `，与 `RecoveryError` 一致。
+    #[test]
+    fn display_messages_pin_each_variant() {
+        assert_eq!(
+            MemoryError::Invalid("b 不能为空".into()).to_string(),
+            "记忆库记录不合法: b 不能为空"
+        );
+        assert_eq!(
+            MemoryError::Unavailable.to_string(),
+            "记忆库不可用: 未配置可用的嵌入提供方"
+        );
+        assert_eq!(
+            MemoryError::Corrupt("integrity".into()).to_string(),
+            "记忆库索引损坏: integrity"
+        );
+        assert_eq!(
+            MemoryError::Newer {
+                found: 2,
+                supported: 1
+            }
+            .to_string(),
+            "记忆库索引格式 2 由更新版本的紫垣写入，本版只支持 1，请升级 ziyuan 后重建索引"
+        );
+        assert_eq!(
+            MemoryError::SignatureMismatch {
+                expected: "p/m/1".into(),
+                found: "p/m/0".into()
+            }
+            .to_string(),
+            "嵌入签名不符: 索引为 p/m/0，当前为 p/m/1，须重建索引"
+        );
+        assert_eq!(
+            MemoryError::Stale {
+                reason: "translation_edited".into()
+            }
+            .to_string(),
+            "记忆库资料已变（translation_edited），本次不发布索引"
+        );
+        assert_eq!(
+            MemoryError::Io {
+                reason: "not found".into()
+            }
+            .to_string(),
+            "记忆库读写失败: not found"
+        );
+    }
+
+    /// 消息是「固定前缀 + 原因」，不另加引号、路径或事件内容，也不重复原因。
+    #[test]
+    fn display_adds_nothing_beyond_the_reason() {
+        let reason = "记录无法解码: EOF while parsing";
+        let message = MemoryError::Corrupt(reason.into()).to_string();
+        assert_eq!(message, format!("记忆库索引损坏: {reason}"));
+        assert_eq!(message.matches(reason).count(), 1, "{message}");
+        assert!(!message.contains(['/', '\\', '"']), "{message}");
+    }
+
+    /// `From<io::Error>` 只留原因文本：不保留源值，错误类型才继续是 `Eq`／`Clone`。
+    #[test]
+    fn io_errors_become_a_comparable_reason() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let error = MemoryError::from(io);
+        assert_eq!(
+            error,
+            MemoryError::Io {
+                reason: "gone".into()
+            }
+        );
+        assert_eq!(error.clone(), error);
+        assert!(std::error::Error::source(&error).is_none());
+    }
+}

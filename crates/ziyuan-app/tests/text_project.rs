@@ -394,3 +394,245 @@ fn rejects_text_too_large_for_one_project_before_staging() {
     assert_eq!(staged, 0);
     assert!(service.show(&p.id).unwrap().chapters.is_empty());
 }
+
+// ---- Cross-crate drift guard: `ziyuan-memory` pairing vs `TextProjects::check` ----
+//
+// `ziyuan_memory::pair_paragraphs` claims to be equivalent to `check`. A hand-copied fixture
+// cannot hold that claim (it drifts silently), so this compares the two implementations on the
+// same bytes, element by element: same kind, same paragraph ID, same 1-based position, same order.
+
+/// A problem reduced to its comparable parts: kind, paragraph ID, 1-based position.
+type ProblemKey = (MemoryShape, Option<String>, Option<usize>);
+
+/// The kind of problem `ziyuan-memory` reports, without its payload.
+///
+/// `NotVisibleToMemory` marks app-side kinds the memory path cannot see at all: it decodes the
+/// candidate itself, so malformed JSON stops it before any structural check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryShape {
+    NewerVersion,
+    UnsupportedVersion,
+    WrongBlock,
+    Missing,
+    Duplicate,
+    OutOfOrder,
+    Unknown,
+    EmptyText,
+    NotVisibleToMemory,
+}
+
+/// Maps an app-side `IssueKind` to the memory-side shape it must correspond to.
+///
+/// Exhaustive on purpose: adding an `IssueKind` variant becomes a compile error here instead of
+/// silently passing, which is the whole point of this check.
+fn memory_shape(kind: IssueKind) -> MemoryShape {
+    match kind {
+        IssueKind::InvalidJson => MemoryShape::NotVisibleToMemory,
+        IssueKind::NewerVersion => MemoryShape::NewerVersion,
+        IssueKind::UnsupportedVersion => MemoryShape::UnsupportedVersion,
+        IssueKind::WrongBlock => MemoryShape::WrongBlock,
+        IssueKind::Missing => MemoryShape::Missing,
+        IssueKind::Duplicate => MemoryShape::Duplicate,
+        IssueKind::OutOfOrder => MemoryShape::OutOfOrder,
+        IssueKind::Unknown => MemoryShape::Unknown,
+        IssueKind::EmptyText => MemoryShape::EmptyText,
+    }
+}
+
+/// Reduces a memory-side problem to the same comparable parts. Also exhaustive, so a new
+/// `PairingProblem` variant cannot slip past this test either.
+fn memory_problem(problem: &ziyuan_memory::PairingProblem) -> ProblemKey {
+    use ziyuan_memory::PairingProblem as P;
+    match problem {
+        P::NewerVersion { .. } => (MemoryShape::NewerVersion, None, None),
+        P::UnsupportedVersion { .. } => (MemoryShape::UnsupportedVersion, None, None),
+        P::WrongBlock { .. } => (MemoryShape::WrongBlock, None, None),
+        P::Missing { id } => (MemoryShape::Missing, Some(id.clone()), None),
+        P::Duplicate { id, position } => {
+            (MemoryShape::Duplicate, Some(id.clone()), Some(*position))
+        }
+        P::OutOfOrder { id, position } => {
+            (MemoryShape::OutOfOrder, Some(id.clone()), Some(*position))
+        }
+        P::Unknown { id, position } => (MemoryShape::Unknown, Some(id.clone()), Some(*position)),
+        P::EmptyText { id, position } => {
+            (MemoryShape::EmptyText, Some(id.clone()), Some(*position))
+        }
+    }
+}
+
+fn memory_view(block: &PromptBlock) -> ziyuan_memory::PromptBlockView {
+    ziyuan_memory::PromptBlockView {
+        schema_version: block.schema_version,
+        block_id: block.block_id.clone(),
+        paragraphs: block
+            .paragraphs
+            .iter()
+            .map(|p| ziyuan_memory::ParaPairInput {
+                id: p.id.clone(),
+                text: p.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Runs the memory path over the same bytes; `None` means it cannot even decode them.
+fn memory_problems(expected: &PromptBlock, bytes: &[u8]) -> Option<Vec<ProblemKey>> {
+    let candidate: PromptBlock = serde_json::from_slice(bytes).ok()?;
+    Some(
+        match ziyuan_memory::pair_paragraphs(&memory_view(expected), &memory_view(&candidate)) {
+            Ok(_) => Vec::new(),
+            Err(problems) => problems.iter().map(memory_problem).collect(),
+        },
+    )
+}
+
+#[test]
+fn memory_pairing_and_check_agree_on_kind_id_and_position() {
+    let f = Fixture::new();
+    let p = imported(&f);
+    let block = p.chapters[0].blocks[0].clone();
+    let id = &block.block_id;
+    let cases: [(&str, Vec<u8>); 11] = [
+        (
+            "well_formed",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0002","text":"二"},
+                    {"id":"c0001-p0003","text":"三"},
+                    {"id":"c0001-p0004","text":"四"}
+                ]),
+            ),
+        ),
+        (
+            "missing",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0002","text":"二"}
+                ]),
+            ),
+        ),
+        ("no_paragraphs", candidate(id, serde_json::json!([]))),
+        (
+            "duplicated",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0001","text":"甲"},
+                    {"id":"c0001-p0002","text":"二"},
+                    {"id":"c0001-p0003","text":"三"},
+                    {"id":"c0001-p0004","text":"四"}
+                ]),
+            ),
+        ),
+        (
+            "reordered",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0002","text":"二"},
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0003","text":"三"},
+                    {"id":"c0001-p0004","text":"四"}
+                ]),
+            ),
+        ),
+        (
+            "unknown_id",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0002","text":"二"},
+                    {"id":"c0001-p0003","text":"三"},
+                    {"id":"c0001-p0004","text":"四"},
+                    {"id":"c0002-p0001","text":"别章"}
+                ]),
+            ),
+        ),
+        (
+            "empty_text",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0002","text":"二"},
+                    {"id":"c0001-p0003","text":"三"},
+                    {"id":"c0001-p0004","text":"　 \r\n"}
+                ]),
+            ),
+        ),
+        (
+            "wrong_block",
+            candidate(
+                "c0002-b0001",
+                serde_json::json!([{"id":"c0001-p0001","text":"一"}]),
+            ),
+        ),
+        (
+            "everything_at_once",
+            candidate(
+                id,
+                serde_json::json!([
+                    {"id":"c0001-p0002","text":"二"},
+                    {"id":"c0001-p0001","text":"一"},
+                    {"id":"c0001-p0002","text":"重复"},
+                    {"id":"c0002-p0001","text":"别章"},
+                    {"id":"c0001-p0004","text":"　 \r\n"}
+                ]),
+            ),
+        ),
+        (
+            "version_2",
+            br#"{"schema_version":2,"block_id":"c0001-b0001","paragraphs":[]}"#.to_vec(),
+        ),
+        (
+            "version_0",
+            br#"{"schema_version":0,"block_id":"c0001-b0001","paragraphs":[]}"#.to_vec(),
+        ),
+    ];
+    for (label, bytes) in cases {
+        let report = f.service().check(&p.id, id, &bytes).unwrap();
+        let mut app: Vec<ProblemKey> = Vec::new();
+        let mut app_version: Option<MemoryShape> = None;
+        let mut unreadable = false;
+        for issue in &report.issues {
+            match memory_shape(issue.kind) {
+                MemoryShape::NotVisibleToMemory => {
+                    assert_eq!(issue.kind, IssueKind::InvalidJson, "{label}: {report:?}");
+                    unreadable = true;
+                }
+                shape @ (MemoryShape::NewerVersion | MemoryShape::UnsupportedVersion) => {
+                    app_version = Some(shape);
+                }
+                shape => app.push((shape, issue.paragraph_id.clone(), issue.position)),
+            }
+        }
+        assert_eq!(
+            report.valid,
+            app.is_empty() && app_version.is_none() && !unreadable,
+            "{label}: {report:?}"
+        );
+        let memory = memory_problems(&block, &bytes);
+        if unreadable {
+            // The memory path decodes before it looks at structure, so it must see nothing.
+            assert!(
+                memory.is_none(),
+                "{label}: 记忆库不该解得出 check 读不了的字节"
+            );
+            continue;
+        }
+        let memory = memory.unwrap_or_else(|| panic!("{label}: 记忆库解不出 check 读得了的字节"));
+        if let Some(shape) = app_version {
+            // Both sides stop at the version and report nothing else.
+            assert_eq!(memory, vec![(shape, None, None)], "{label}");
+            continue;
+        }
+        assert_eq!(memory, app, "{label}");
+    }
+}

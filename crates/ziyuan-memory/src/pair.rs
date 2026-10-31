@@ -1,7 +1,10 @@
 //! 按 ID 配对原文／译文段落，绝不按数组下标。
 //!
-//! 检查范围与 `ziyuan-app` 的 `validate_ids` 等价（缺段、重复、陌生、乱序、空译文、
-//! 块 ID 不符、schema 版本），但结果按 ID 配好：候选顺序变了不会把译文配错段。
+//! 检查范围与 `ziyuan-app` 的 `TextProjects::check` 等价：`check` 先看块 ID 与 schema 版本
+//! （并在 JSON 不成形时报 `InvalidJson`），再跑 `validate_ids`（缺段、重复、陌生、乱序、
+//! 空译文）；本模块把这些合在一处，只是结果按 ID 配好——候选顺序变了不会把译文配错段。
+//! 两边一致性由 `crates/ziyuan-app/tests/text_project.rs` 的跨 crate 用例守住，
+//! 不是靠手抄一份固定样例。
 //! 任何结构问题都不返回部分结果——宁可整块不收录，也不产出错配的参考译法。
 //!
 //! 本模块只看结构，不判断译文质量。
@@ -21,6 +24,12 @@ pub struct ParaPairInput {
 /// 提示块的最小视图：由 app 侧从 `PromptBlock` 转换而来，故本 crate 不依赖 `ziyuan-app`。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptBlockView {
+    /// 候选的格式版本。
+    ///
+    /// 注意宽度：这里是 `u32`，app 侧的 `Header` 是 `u64`。因此 `check()` 能看懂的
+    /// 「版本号很大的 v2 文件」，在按 `u32` 解码时会直接失败，报成解码错误而不是版本错误。
+    /// Task 6 接入时必须**先按 `u64` 解码表头**，确认为 `1` 之后才转成 `u32` 填进本字段；
+    /// 不要拿 `u32` 解码结果去判断版本。
     pub schema_version: u32,
     pub block_id: String,
     pub paragraphs: Vec<ParaPairInput>,
@@ -37,7 +46,11 @@ pub struct ParagraphPair {
 /// 配对遇到的结构问题。`position` 是候选中的位置，从 1 开始，与 `validate_ids` 一致。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PairingProblem {
-    /// 候选的 schema 版本不受支持；此时只报这一条，其余字段不可信。
+    /// 候选的 schema 版本比本版更新（`> 1`）；此时只报这一条，其余字段不可信。
+    NewerVersion {
+        found: u32,
+    },
+    /// 候选的 schema 版本比本版更旧（`< 1`）；同样只报这一条。
     UnsupportedVersion {
         found: u32,
     },
@@ -73,7 +86,8 @@ pub enum PairingProblem {
 
 /// 按 ID 配对，绝不按数组下标。任何结构问题都不返回部分结果。
 ///
-/// 检查与 `ziyuan-app` 的 `validate_ids` 等价，因此**乱序本身**就是结构问题：
+/// 检查与 `ziyuan-app` 的 `TextProjects::check` 等价（`check` 先看块 ID 与版本，
+/// 再跑 `validate_ids`），因此**乱序本身**就是结构问题：
 /// 候选段落顺序与原文不符时返回 [`PairingProblem::OutOfOrder`]，不会借机按下标配对。
 /// 结构检查通过后，配对按 ID 查表（见 [`pairs_by_id`]），候选位置不参与决定谁配谁——
 /// 即便将来放宽顺序检查，也不会把译文配错段。
@@ -82,9 +96,18 @@ pub fn pair_paragraphs(
     candidate: &PromptBlockView,
 ) -> Result<Vec<ParagraphPair>, Vec<PairingProblem>> {
     if candidate.schema_version != SUPPORTED_SCHEMA_VERSION {
-        return Err(vec![PairingProblem::UnsupportedVersion {
-            found: candidate.schema_version,
-        }]);
+        // 分两个方向报：更新要说「请升级」，更旧只能说「不支持」——让人改错方向的提示
+        // 比没有提示更糟。
+        let problem = if candidate.schema_version > SUPPORTED_SCHEMA_VERSION {
+            PairingProblem::NewerVersion {
+                found: candidate.schema_version,
+            }
+        } else {
+            PairingProblem::UnsupportedVersion {
+                found: candidate.schema_version,
+            }
+        };
+        return Err(vec![problem]);
     }
     let mut problems = Vec::new();
     if candidate.block_id != expected.block_id {
@@ -247,15 +270,17 @@ mod tests {
         );
     }
 
-    /// 直接证明配对按 ID 查表、不按下标 zip：候选顺序全变，每段仍配到自己的译文。
+    /// 只证明配对核心查表与位置无关——**不是**公开行为。
     ///
-    /// `validate_ids` 把乱序视为结构问题，所以 `pair_paragraphs` 对这一候选返回
-    /// `OutOfOrder`（见下一个用例）；配对核心本身与位置无关这件事由本用例守住。
+    /// 公开路径（`pair_paragraphs`）对乱序候选一律返回 `OutOfOrder`（见下一个用例），
+    /// 所以这个候选根本到不了这里。本用例守的是「即便将来放宽顺序检查，也不会把译文
+    /// 配错段」：证明 `pairs_by_id` 认 ID 不认下标，属纵深防御。
     #[test]
     fn pairs_by_id_ignores_candidate_positions() {
         let expected = block("b1", &[("p1", "One"), ("p2", "Two"), ("p3", "Three")]);
         let candidate = block("b1", &[("p3", "三"), ("p1", "一"), ("p2", "二")]);
         let pairs = pairs_by_id(&expected, &candidate).unwrap();
+        // 按下标 zip 会得到「一／二／三」以外的错配，这里逐个对上 ID。
         assert_eq!(
             pairs,
             vec![
@@ -264,10 +289,6 @@ mod tests {
                 pair("p3", "Three", "三"),
             ]
         );
-        // 按下标 zip 会把 p1 配到「三」、p2 配到「一」、p3 配到「二」。
-        assert_eq!(pairs[0].target, "一");
-        assert_eq!(pairs[1].target, "二");
-        assert_eq!(pairs[2].target, "三");
     }
 
     /// 顺序不符本身就是结构问题，整块不收——绝不会退化成按下标硬配。
@@ -390,8 +411,17 @@ mod tests {
         candidate.schema_version = 2;
         assert_eq!(
             problems(&expected_block(), &candidate),
-            vec![PairingProblem::UnsupportedVersion { found: 2 }]
+            vec![PairingProblem::NewerVersion { found: 2 }]
         );
+        candidate.schema_version = u32::MAX;
+        assert_eq!(
+            problems(&expected_block(), &candidate),
+            vec![PairingProblem::NewerVersion { found: u32::MAX }]
+        );
+    }
+
+    #[test]
+    fn older_version_reports_only_the_version() {
         let mut candidate = block("c0001-b0001", &[]);
         candidate.schema_version = 0;
         assert_eq!(
@@ -407,9 +437,29 @@ mod tests {
         assert_eq!(pair_paragraphs(&expected, &candidate), Ok(Vec::new()));
     }
 
-    /// `candidate_collects_missing_duplicate_order_unknown_and_empty_together`
-    /// （`crates/ziyuan-app/tests/text_project.rs`）的同一份候选，
-    /// 断言问题种类与顺序与 `validate_ids` 一致。
+    #[test]
+    fn empty_expected_with_a_nonempty_candidate_reports_every_id_unknown() {
+        let expected = block("b1", &[]);
+        let candidate = block("b1", &[("p1", "一"), ("p2", "二")]);
+        assert_eq!(
+            problems(&expected, &candidate),
+            vec![
+                PairingProblem::Unknown {
+                    id: "p1".into(),
+                    position: 1,
+                },
+                PairingProblem::Unknown {
+                    id: "p2".into(),
+                    position: 2,
+                },
+            ]
+        );
+    }
+
+    /// 手抄自 `crates/ziyuan-app/tests/text_project.rs` 的同一份候选，只当作本 crate 内的
+    /// 快速回归：手抄的东西会与真身走散，**不**算两 crate 一致的证据。
+    /// 真正的守门用例是 `crates/ziyuan-app/tests/text_project.rs` 里
+    /// `memory_pairing_and_check_agree_on_kind_id_and_position`（跨 crate，逐元素比对）。
     #[test]
     fn problems_match_validate_ids_fixture_in_kind_and_order() {
         let candidate = block(

@@ -5,10 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "向量翻译记忆库的派生索引：紫垣（ZiYuan）的内部组件，供 ziyuan-cli 使用；Rust API 不保证稳定。"
+description = "向量翻译记忆库的派生索引：紫垣（ZiYuan）的内部组件，供 ziyuan-app 使用；Rust API 不保证稳定。"
 
 [dependencies]
-ziyuan-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ring.workspace = true

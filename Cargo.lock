@@ -2363,6 +2363,7 @@ dependencies = [
  "ziyuan-core",
  "ziyuan-github",
  "ziyuan-governance",
+ "ziyuan-memory",
  "ziyuan-runtime",
  "ziyuan-storage",
 ]
@@ -2426,7 +2427,6 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "ziyuan-core",
 ]
 
 [[package]]
