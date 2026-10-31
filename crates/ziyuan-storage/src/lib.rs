@@ -669,7 +669,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 19] = [
+pub const RELEASES: [&str; 20] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -691,6 +691,7 @@ pub const RELEASES: [&str; 19] = [
     // 没有任何事件要求它们，旧事件簿的 `readable_since` 不会变成 1.2.1 或 1.2.2。
     "1.2.1",
     "1.2.2",
+    "1.2.3",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。

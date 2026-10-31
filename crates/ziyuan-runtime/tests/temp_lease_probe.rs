@@ -28,16 +28,19 @@ fn observe_live_operation(operation: LiveOperation) {
     // Two genuinely different Windows share modes: narrowed (read|write, no
     // delete) and std's default (read|write|delete). Other platforms have no
     // share-mode dimension, so they run the plain case once.
-    let mut cases = vec![
+    let cases = vec![
         "live-restricted-share-lock-first",
         "live-restricted-share-prewritten",
     ];
     #[cfg(windows)]
-    cases.extend([
-        "live-share-delete-lock-first",
-        "live-share-delete-prewritten",
-    ]);
-    let cases = cases;
+    let cases = {
+        let mut cases = cases;
+        cases.extend([
+            "live-share-delete-lock-first",
+            "live-share-delete-prewritten",
+        ]);
+        cases
+    };
     let mut attempted_operations = 0;
     let mut refused_writes = 0;
     for case in &cases {
@@ -725,21 +728,29 @@ fn temp_without_lease_and_foreign_leases_are_retained() {
         mismatched_line
     );
 
-    // 4. A path-bearing name proves nothing about this directory. `C:temp`
-    //    would even replace the base path when joined, so it must be rejected.
-    let traversal = support::new_lease_id();
-    let traversal_path = root.join(support::lease_file_name(&traversal));
-    std::fs::write(
-        &traversal_path,
-        format!("ziyuan-lease v1 temp=C:temp id={traversal}\n"),
-    )
-    .unwrap();
-    let decision = support::recover_temp(root, &traversal, "temp").unwrap();
-    assert_eq!(
-        decision,
-        support::LeaseDecision::keep(support::KeepReason::LeaseUnparsable)
-    );
-    assert!(traversal_path.is_file());
+    // 4. Traversal is unparsable on every platform. The native probe uses
+    // Path::components: `C:temp` is a drive-relative path on Windows, but a
+    // single normal file name on Unix. Unix must still retain it because it
+    // does not name the requested temp. Production cleanup deliberately uses
+    // a stricter, platform-independent name grammar (rejecting every colon).
+    for recorded in ["../temp", "C:temp"] {
+        let traversal = support::new_lease_id();
+        let traversal_path = root.join(support::lease_file_name(&traversal));
+        let line = support::lease_line(recorded, &traversal);
+        std::fs::write(&traversal_path, &line).unwrap();
+        let expected = if recorded == "C:temp" && !cfg!(windows) {
+            support::KeepReason::LeaseContentMismatch
+        } else {
+            support::KeepReason::LeaseUnparsable
+        };
+        let decision = support::recover_temp(root, &traversal, "temp").unwrap();
+        assert_eq!(
+            decision,
+            support::LeaseDecision::keep(expected),
+            "{recorded}"
+        );
+        assert_eq!(std::fs::read(&traversal_path).unwrap(), line.as_bytes());
+    }
 
     // Nothing above authorized any deletion: the temp file and all leases are
     // byte-for-byte untouched.
@@ -747,7 +758,7 @@ fn temp_without_lease_and_foreign_leases_are_retained() {
         std::fs::read(root.join("temp")).unwrap(),
         support::COMPLETE_NEW
     );
-    assert_eq!(dir_names(root).len(), 8);
+    assert_eq!(dir_names(root).len(), 9);
 }
 
 #[test]
