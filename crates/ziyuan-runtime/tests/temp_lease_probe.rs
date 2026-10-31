@@ -770,6 +770,7 @@ fn uncovered_keep_branches_are_reachable() {
         support::LeaseDecision::keep(support::KeepReason::TempNotRegular)
     );
     assert!(root.join("temp").is_dir());
+    assert!(root.join(support::lease_file_name(&not_regular)).is_file());
 
     // TempStillPresent: the lease-garbage path must not delete a lease whose
     // temp file is still there.
