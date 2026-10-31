@@ -491,6 +491,37 @@ fn text_recovery_temps_refuses_when_the_record_is_unreadable() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn text_recovery_temps_exits_one_when_a_delete_fails() {
+    // 退出码 1 的另一半：不是“记录读不出来就整轮不清理”，而是删除真的出错
+    // （`text_commands.rs` 里 `needs_attention()` 那条分支）。
+    // 造法：本进程用一个不共享删除的句柄占住候选，命令行子进程删它就会报共享冲突。
+    // 这是真实的删除失败，不靠故障注入；Unix 上没有等价的“占住即删不掉”语义，
+    // 所以这条只在 Windows 上有意义。
+    use std::os::windows::fs::OpenOptionsExt;
+    let (dir, temp) = stale_temp_workspace("recovery-temps-delete-fails");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&temp)
+        .unwrap();
+    let out = ziyuan(&dir, &["text", "recovery", "temps", "--yes", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{:?}", out.stdout);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        report["problems"].as_array().map(Vec::len),
+        Some(1),
+        "{report}"
+    );
+    assert_eq!(report["items"][0]["reason"], "TempStillPresent");
+    assert!(temp.is_file(), "删不掉的候选必须保留");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("临时文件清理未能完成"), "{stderr}");
+    drop(held);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn text_recovery_temps_text_mode_reports_the_same_verdict() {
     // 文本模式与 JSON 是同一份判定，只是呈现不同：这里核对人看的几行。

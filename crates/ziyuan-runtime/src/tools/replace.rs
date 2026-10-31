@@ -588,7 +588,27 @@ mod tests {
                     vec![temp.file_name().unwrap().to_string_lossy().into_owned()],
                     "租约必须认领本次写入的临时文件，而不只是存在一份租约"
                 );
-                let leases = lease_names(target.parent().unwrap());
+                let parent = target.parent().unwrap();
+                let leases = lease_names(parent);
+                // 光有租约文件不够：句柄若在改名前被关掉或丢掉，文件还在、锁却没了，
+                // 清理者立刻就能把这次写入判成陈旧。改名窗口内必须**仍持有**锁。
+                assert_eq!(leases.len(), 1, "改名窗口内必须恰好有一份租约: {leases:?}");
+                #[cfg(windows)]
+                {
+                    // 同进程跨句柄互斥只在 Windows 上成立（见设计记录的平台事实）；
+                    // Unix 上 `flock(2)` 的语义不同，这里只断言 Windows 观察到的事实，
+                    // 不在 Unix 上假装验证了同一件事。
+                    let lease_path = parent.join(&leases[0]);
+                    let probe = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&lease_path)
+                        .unwrap_or_else(|e| panic!("改名窗口内租约必须仍然存在: {e}"));
+                    assert!(
+                        matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                        "改名前租约必须仍被持有"
+                    );
+                }
                 *slot.lock().unwrap() = Some(leases);
             })),
             ..Faults::default()

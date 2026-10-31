@@ -4,12 +4,30 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use ziyuan_app::{ABOLITION_NOTE, duzhi_report, kaocheng_report, skipped_note};
 use ziyuan_core::{Department, GovernanceMode, Seal, Verdict};
 use ziyuan_runtime::Outcome;
+use ziyuan_runtime::tools::temp_cleanup::Problem;
 
 use crate::App;
 use crate::app::{
     ChooseKind, ConfirmKind, DiffView, InputKind, Message, Modal, TABS, Tab, appointable, drawable,
     nominable,
 };
+
+/// 清理诊断的条数后缀；没有诊断时是空串。
+///
+/// 全屏画面里往 stderr 写一行会被下一次重绘抹掉，所以诊断的**条数**进状态栏那一行
+/// （它随画面一起重绘，留得住）；路径与原因仍只在 `ziyuan text recovery temps` 这类
+/// 显式入口的完整报告里给出。
+fn cleanup_note(problems: &[Problem]) -> String {
+    match problems.len() {
+        0 => String::new(),
+        count => format!("（{count} 项临时文件未能清理）"),
+    }
+}
+
+/// 成功提示加清理后缀：写入成功与“清理跳过了几项”是两件事，同一行一起说清。
+pub(crate) fn apply_note(message: String, problems: &[Problem]) -> String {
+    format!("{message}{}", cleanup_note(problems))
+}
 
 impl App {
     pub fn handle(&mut self, message: Message) {
@@ -250,30 +268,31 @@ impl App {
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
-                    // 诊断交由下一次状态刷新呈现；此处不写 stderr，免得污染全屏画面。
                     |s| s.apply_changes(task, &root, Vec::new()),
-                    |_| format!("诏令 #{} 准奏，改动已写入项目", task.0),
+                    |problems| {
+                        // 清理诊断进状态栏：全屏画面里写 stderr 会被下一次重绘抹掉，
+                        // 也不能就这样丢掉——自动入口必须说明这一轮跳过了几项。
+                        apply_note(format!("诏令 #{} 准奏，改动已写入项目", task.0), problems)
+                    },
                 );
             }
             KeyCode::Char('m') => {
                 let root = self.config.root.clone();
                 // 落盘成功后提交；提交失败只报告，改动仍已落盘。
-                if self
-                    .mutate(
-                        // 诊断交由下一次状态刷新呈现；此处不写 stderr，免得污染全屏画面。
-                        |s| s.apply_changes(task, &root, Vec::new()),
-                        |_| String::new(),
-                    )
-                    .is_some()
-                {
+                if let Some(problems) = self.mutate(
+                    |s| s.apply_changes(task, &root, Vec::new()),
+                    |_| String::new(),
+                ) {
+                    let note = cleanup_note(&problems);
                     match self.session.commit_applied(task, &root) {
                         Ok(made) => self.info(format!(
-                            "诏令 #{} 准奏，改动已写入项目，记为 {} 提交 {}",
+                            "诏令 #{} 准奏，改动已写入项目，记为 {} 提交 {}{note}",
                             task.0, made.vcs, made.id
                         )),
-                        Err(e) => {
-                            self.error(format!("诏令 #{} 已准奏落盘，但未能提交：{e}", task.0))
-                        }
+                        Err(e) => self.error(format!(
+                            "诏令 #{} 已准奏落盘，但未能提交：{e}{note}",
+                            task.0
+                        )),
                     }
                 }
             }
@@ -543,13 +562,15 @@ impl App {
                 };
                 let root = self.config.root.clone();
                 self.mutate(
-                    // 诊断交由下一次状态刷新呈现；此处不写 stderr，免得污染全屏画面。
                     |s| s.apply_changes(task, &root, skipped.clone()),
-                    |_| {
-                        format!(
-                            "诏令 #{} 准奏，改动已写入项目{}",
-                            task.0,
-                            skipped_note(&skipped)
+                    |problems| {
+                        apply_note(
+                            format!(
+                                "诏令 #{} 准奏，改动已写入项目{}",
+                                task.0,
+                                skipped_note(&skipped)
+                            ),
+                            problems,
                         )
                     },
                 );

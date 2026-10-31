@@ -27,7 +27,7 @@ pub(crate) fn fresh_temp_name() -> String {
 /// 严格匹配 `.ziyuan-tmp-<u32>-<u128>-<u64>`。
 ///
 /// 这是删除的准入门槛，不是提示：放宽一点就会把用户的普通文件当成自己的残留删掉。
-pub fn is_candidate_name(name: &str) -> bool {
+pub(crate) fn is_candidate_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix(TEMP_PREFIX) else {
         return false;
     };
@@ -162,9 +162,7 @@ pub(crate) fn note_problem(path: PathBuf, message: String) {
 /// 取走当前线程累积的失败；空表示没有。
 ///
 /// 只在 crate 内可用：诊断归属于制造它的那次调用，跨 crate 暴露会让别的
-/// 调用方取走不是自己产生的诊断。目前只有用例取用，非测试构建里还没有
-/// 汇报调用方，所以暂时允许未使用；有调用方后这条不再生效。
-#[cfg_attr(not(test), allow(dead_code))]
+/// 调用方取走不是自己产生的诊断。
 pub(crate) fn drain_problems() -> Vec<Problem> {
     PROBLEMS.with(|problems| std::mem::take(&mut *problems.borrow_mut()))
 }
@@ -587,8 +585,17 @@ struct Claim {
 /// 各自核验通过、各删一次（设计“身份复核”与锁顺序）。
 fn remove_as_owner(claim: &Claim, path: &Path, problems: &mut Vec<Problem>) -> Outcome {
     #[cfg(test)]
-    tests_hooks::before_remove(path);
-    match fs::remove_file(path) {
+    let injected = tests_hooks::before_remove(path);
+    #[cfg(not(test))]
+    let injected = false;
+    // 注入的失败与真实的删除失败走完全同一条收尾：记一条诊断、保留候选、
+    // 绝不上抛——自动清理失败不许阻断随后的写入。
+    let removal = if injected {
+        Err(io::Error::other("injected remove failure"))
+    } else {
+        fs::remove_file(path)
+    };
+    match removal {
         Ok(()) => {}
         // 已不存在不视为失败；租约仍在，下一轮按孤儿处理。
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -967,7 +974,7 @@ impl Report {
 ///
 /// `relative_dir` 是相对工作区根的目录路径（根目录传空串），用来拼受保护集合里的
 /// 相对路径，同时作为报告的扫描范围标签；它不是被扫目录内部的位置。
-pub fn sweep_dir(
+pub(crate) fn sweep_dir(
     dir: &Path,
     relative_dir: &str,
     protected: &BTreeSet<String>,
@@ -1266,6 +1273,8 @@ pub(crate) mod tests_hooks {
         SwapNextLeaseToDir,
         /// 删除候选之前先把它删掉：覆盖删除时的 `NotFound`。
         Vanish { path: PathBuf },
+        /// 删除候选时注入失败：覆盖「删不掉只记诊断、不阻断后续写入」。
+        FailRemove { path: PathBuf },
     }
 
     thread_local! {
@@ -1300,6 +1309,17 @@ pub(crate) mod tests_hooks {
     /// 记下要换名的租约路径；真正换名发生在 `release` 关句柄之后。
     pub(super) fn arm_swap_to_dir(path: &Path) {
         ARMED.with(|slot| slot.borrow_mut().push(Armed::SwapToDir(path.to_owned())));
+    }
+
+    /// 记下要「删不掉」的候选路径：真实的删除失败只在特定文件系统与权限下出现，
+    /// 用例需要一条确定的注入路径来验证「清理失败不阻断写入」。
+    pub(crate) fn arm_fail_remove(path: &Path) -> ArmedGuard {
+        ARMED.with(|slot| {
+            slot.borrow_mut().push(Armed::FailRemove {
+                path: path.to_owned(),
+            })
+        });
+        ArmedGuard(())
     }
 
     /// 布防句柄：析构时清掉本线程所有布防，用例 panic 也不会把状态漏给下一个用例。
@@ -1341,11 +1361,14 @@ pub(crate) mod tests_hooks {
         }
     }
 
-    pub(super) fn before_remove(path: &Path) {
+    /// 删候选之前调用；返回 `true` 表示本次删除要按失败收尾。
+    pub(super) fn before_remove(path: &Path) -> bool {
         if take(|armed| matches!(armed, Armed::Vanish { path: target } if target == path)).is_some()
         {
             let _ = std::fs::remove_file(path);
         }
+        take(|armed| matches!(armed, Armed::FailRemove { path: target } if target == path))
+            .is_some()
     }
 
     pub(super) fn after_close(path: &Path) {

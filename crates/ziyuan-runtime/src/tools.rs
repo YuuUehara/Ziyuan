@@ -1471,6 +1471,45 @@ mod tests {
     }
 
     #[test]
+    fn apply_changes_still_writes_when_the_sweep_fails() {
+        let dir = workspace("sweep-fails");
+        let project = dir.join("project");
+        let src = project.join("src");
+        let stale = stale_temp(&src);
+        // `write_all` 先把根与目标目录 canonicalize，扫描时的候选路径就是那个拼法
+        // （Windows 上是 `\\?\` 前缀的 verbatim 路径），布防必须用同一拼法才对得上。
+        let swept_dir = src.canonicalize().unwrap();
+        let armed = swept_dir.join(stale.file_name().unwrap());
+        // 真实的“删不掉”只在特定权限与文件系统下出现，所以用测试钩子注入一次确定
+        // 的删除失败：清理诊断要进报告，写入必须照旧落地（自动清理绝不阻断写入）。
+        let _armed = temp_cleanup::tests_hooks::arm_fail_remove(&armed);
+        let applied = apply_changes_protected(
+            &project,
+            &[file_change("src/new.rs", "written anyway\n")],
+            &BTreeSet::new(),
+        )
+        .expect("清理失败不得让写入失败");
+        assert!(
+            !applied.problems.is_empty(),
+            "删除失败必须留一条诊断: {:?}",
+            applied.problems
+        );
+        assert_eq!(
+            applied.problems[0].path.parent(),
+            Some(swept_dir.as_path()),
+            "诊断必须指向本次写入所在目录的那个候选: {:?}",
+            applied.problems
+        );
+        assert!(stale.exists(), "注入的是删除失败，候选应当还在");
+        assert_eq!(
+            fs::read_to_string(project.join("src/new.rs")).unwrap(),
+            "written anyway\n",
+            "清理失败后目标文件仍须写入新内容"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn plain_apply_changes_never_sweeps() {
         // 不掌握受保护集合的调用方不该顺手清理：宁可不删。
         let dir = workspace("sweep-plain");

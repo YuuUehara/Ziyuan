@@ -508,6 +508,22 @@ fn z_cycles_the_diff_view_only_when_git_delta_is_usable() {
 }
 
 #[test]
+fn status_line_reports_how_many_temp_cleanups_were_skipped() {
+    use ziyuan_runtime::tools::temp_cleanup::Problem;
+    let problem = |name: &str| Problem {
+        path: PathBuf::from(name),
+        message: "删除失败".into(),
+    };
+    // 没有诊断时不许多出一对括号：成功提示要保持原样。
+    assert_eq!(crate::input::apply_note("已写入".into(), &[]), "已写入");
+    assert_eq!(
+        crate::input::apply_note("已写入".into(), &[problem("a"), problem("b")]),
+        "已写入（2 项临时文件未能清理）",
+        "自动入口必须说明这一轮跳过了几项"
+    );
+}
+
+#[test]
 fn blocked_dag_subtask_uses_the_blocked_status_badge() {
     let mut court = Court::replay(&founding_events(1)).unwrap();
     let edict = court
