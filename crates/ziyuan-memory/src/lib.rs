@@ -1,19 +1,29 @@
-//! 翻译记忆库的派生索引：记录契约与按 ID 配对。
+//! 翻译记忆库的派生索引：记录契约、按 ID 配对、嵌入接口与可重建索引。
 //!
 //! 记忆库是**可重建的派生数据**，不是译稿的事实来源：删掉不损失任何权威资料，
-//! 索引只能从当前有效的定稿重建。本 crate 只含纯数据与纯函数——不读文件、不联网、
-//! 不读事件簿，也不依赖 `ziyuan-app`；属于 app 的权威状态与磁盘事实由适配层传入。
+//! 索引只能从当前有效的定稿重建。本 crate 只含纯数据与纯函数，唯一的例外是
+//! [`index`] 里索引自身的发布与读取（只碰工作区根下的 `.ziyuan/memory/`）——
+//! 它不联网、不读事件簿、不读译稿，也不依赖 `ziyuan-app`；属于 app 的权威状态与磁盘
+//! 事实由适配层传入。
 
 use std::fmt;
 
+pub mod embed;
+pub mod index;
+pub mod local;
 pub mod pair;
 pub mod record;
+pub mod watermark;
 
+pub use embed::{Embedding, EmbeddingProvider, ModelSignature, Unavailable};
+pub use index::{FORMAT_VERSION, MemoryIndex};
+pub use local::LocalProvider;
 pub use pair::{PairingProblem, ParaPairInput, ParagraphPair, PromptBlockView, pair_paragraphs};
 pub use record::{
     Digests, EmbeddingSignature, Identity, MemoryRecord, Origin, Text, Watermark, sha256_hex,
     workspace_id_from_canonical_text,
 };
+pub use watermark::{require_stable_generation, watermark_is_unchanged};
 
 /// 记忆库错误。消息只含固定原因、字段名与版本号，不含原文、译文或查询正文。
 #[derive(Clone, Debug, PartialEq, Eq)]
