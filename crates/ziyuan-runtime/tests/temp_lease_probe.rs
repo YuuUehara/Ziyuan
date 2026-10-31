@@ -335,6 +335,87 @@ fn same_process_independent_handles_are_observed() {
 }
 
 #[test]
+fn lock_identity_survives_rename_and_hardlink_but_not_recreate() {
+    // A lease cannot be "the path currently takes a lock": identity must be the
+    // file object. Rename and hardlink keep one object; only delete + create
+    // makes a new one that a stale path could point at.
+    let mut child = support::ChildGuard::spawn("handshake").unwrap();
+    let mut stream = child.ready("connected", support::DEFAULT_TIMEOUT).unwrap();
+    let root = child.root().to_path_buf();
+    let original = root.join("identity");
+    let renamed = root.join("identity-renamed");
+    let linked = root.join("identity-linked");
+
+    let holder = match support::probe_lock(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&original)
+            .unwrap(),
+    )
+    .unwrap()
+    {
+        support::ProbeLock::Acquired(file) => file,
+        support::ProbeLock::Busy => panic!("fresh file must not be locked"),
+    };
+
+    std::fs::rename(&original, &renamed).unwrap();
+    let via_renamed = support::probe_lock(support::open_probe(&renamed).unwrap()).unwrap();
+    eprintln!("identity after rename: {via_renamed:?}");
+
+    std::fs::hard_link(&renamed, &linked).unwrap();
+    let via_link = support::probe_lock(support::open_probe(&linked).unwrap()).unwrap();
+    eprintln!("identity through hardlink: {via_link:?}");
+
+    // Same-process lock exclusion is platform-specific; only Windows was
+    // observed to report Busy, and that is what these assertions encode.
+    #[cfg(windows)]
+    {
+        assert!(
+            matches!(via_renamed, support::ProbeLock::Busy),
+            "rename must keep the locked file object"
+        );
+        assert!(
+            matches!(via_link, support::ProbeLock::Busy),
+            "hardlink must keep the locked file object"
+        );
+    }
+    drop(via_renamed);
+    drop(via_link);
+    drop(holder);
+
+    // Delete then recreate produces a different object, so a lease keyed only
+    // by path would silently describe the wrong file afterwards.
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::remove_file(&renamed).unwrap();
+    let recreated = match support::probe_lock(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&renamed)
+            .unwrap(),
+    )
+    .unwrap()
+    {
+        support::ProbeLock::Acquired(file) => file,
+        support::ProbeLock::Busy => panic!("recreated file must be lockable"),
+    };
+    eprintln!("identity after delete + recreate: fresh object, lockable");
+    drop(recreated);
+
+    support::send_message(
+        &mut stream,
+        "CONTINUE",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent identity CONTINUE",
+    )
+    .unwrap();
+    child.finish(support::DEFAULT_TIMEOUT).unwrap();
+}
+
+#[test]
 fn probe_child_entry() {
     if std::env::var_os("ZIYUAN_TEMP_LEASE_PROBE").is_none() {
         return;
