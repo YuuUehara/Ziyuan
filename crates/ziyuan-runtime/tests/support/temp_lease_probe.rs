@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const COMPLETE_NEW: &[u8] = b"complete-new";
 const CONTINUE_TIMEOUT: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const MAX_MESSAGE: usize = 256;
@@ -20,6 +21,132 @@ static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
 pub enum ProbeLock {
     Acquired(File),
     Busy,
+}
+
+// This is an experimental observation, never a successful write in disguise.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WriteObservation {
+    Complete,
+    Blocked { kind: io::ErrorKind, raw: i32 },
+}
+
+impl WriteObservation {
+    fn message(&self) -> String {
+        match self {
+            Self::Complete => "WRITE_OK".to_owned(),
+            Self::Blocked { kind, raw } => format!("WRITE_BLOCKED {raw} {kind:?}"),
+        }
+    }
+
+    pub fn receive(stream: &mut TcpStream) -> io::Result<Self> {
+        let message = read_message(
+            stream,
+            Instant::now() + DEFAULT_TIMEOUT,
+            "parent write observation",
+        )?;
+        if message == "WRITE_OK" {
+            return Ok(Self::Complete);
+        }
+        if let Some(raw) = message
+            .strip_prefix("WRITE_BLOCKED ")
+            .and_then(|rest| rest.split_once(' '))
+            .and_then(|(raw, _)| raw.parse::<i32>().ok())
+            .filter(|raw| cfg!(windows) && *raw == 33)
+        {
+            let observation = Self::Blocked {
+                kind: io::Error::from_raw_os_error(raw).kind(),
+                raw,
+            };
+            if observation.message() == message {
+                return Ok(observation);
+            }
+        }
+        Err(invalid("parent write observation: unexpected result"))
+    }
+}
+
+fn create_temp(root: &Path, share_delete: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        if share_delete {
+            // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE.
+            options.share_mode(1 | 2 | 4);
+        }
+    }
+    #[cfg(not(windows))]
+    assert!(!share_delete, "explicit share modes are Windows-only");
+    options.open(root.join("temp"))
+}
+
+fn lock_new(file: File) -> io::Result<File> {
+    match probe_lock(file)? {
+        ProbeLock::Acquired(file) => Ok(file),
+        ProbeLock::Busy => Err(io::Error::other("child new lock unexpectedly busy")),
+    }
+}
+
+fn write_complete(file: &mut File) -> io::Result<()> {
+    file.write_all(COMPLETE_NEW)?;
+    file.sync_all()
+}
+
+struct ReplacementState {
+    held: Option<File>,
+    stage: &'static str,
+    observation: Option<WriteObservation>,
+}
+
+fn prepare_replacement(case: &str, root: &Path) -> io::Result<ReplacementState> {
+    let mut file = create_temp(root, case.starts_with("live-share-delete-"))?;
+    let (stage, observation) = match case {
+        "create-before-lock" => ("created-before-lock", None),
+        "legacy-unleased" => {
+            write_complete(&mut file)?;
+            ("legacy-unleased", None)
+        }
+        _ if case.ends_with("-prewritten") || case == "close-prewritten-before-rename" => {
+            write_complete(&mut file)?;
+            file = lock_new(file)?;
+            ("live-handle", Some(WriteObservation::Complete))
+        }
+        _ => {
+            file = lock_new(file)?;
+            let observation = match file.write_all(COMPLETE_NEW) {
+                Ok(()) => WriteObservation::Complete,
+                Err(e) if cfg!(windows) && e.raw_os_error() == Some(33) => {
+                    WriteObservation::Blocked {
+                        kind: e.kind(),
+                        raw: 33,
+                    }
+                }
+                Err(e) => return Err(error("child same-handle write", e)),
+            };
+            // sync_all must succeed, including after an observed refused write.
+            file.sync_all()?;
+            ("live-handle", Some(observation))
+        }
+    };
+    if matches!(
+        case,
+        "close-before-rename" | "close-prewritten-before-rename"
+    ) {
+        // Preserve the actual lock-first observation; a refused write is never
+        // renamed. The separately named prewritten case tests the same gap.
+        drop(file);
+        return Ok(ReplacementState {
+            held: None,
+            stage: "closed-before-rename",
+            observation,
+        });
+    }
+    Ok(ReplacementState {
+        held: Some(file),
+        stage,
+        observation,
+    })
 }
 
 // Ownership is intentional: success must not silently drop the locked handle.
@@ -330,7 +457,18 @@ pub fn run_child() -> io::Result<()> {
     let case = env_text(ENV)?;
     if !matches!(
         case.as_str(),
-        "handshake" | "wrong-id" | "continue-timeout" | "lock-holder"
+        "handshake"
+            | "wrong-id"
+            | "continue-timeout"
+            | "lock-holder"
+            | "close-before-rename"
+            | "close-prewritten-before-rename"
+            | "create-before-lock"
+            | "legacy-unleased"
+            | "live-normal-lock-first"
+            | "live-normal-prewritten"
+            | "live-share-delete-lock-first"
+            | "live-share-delete-prewritten"
     ) {
         return Err(invalid("child configuration: unknown case"));
     }
@@ -356,6 +494,18 @@ pub fn run_child() -> io::Result<()> {
 
     let mut stream = TcpStream::connect_timeout(&address, DEFAULT_TIMEOUT)
         .map_err(|e| error("child connect", e))?;
+    let replacement = if case.starts_with("live-")
+        || matches!(
+            case.as_str(),
+            "close-before-rename"
+                | "close-prewritten-before-rename"
+                | "create-before-lock"
+                | "legacy-unleased"
+        ) {
+        Some(prepare_replacement(&case, &root)?)
+    } else {
+        None
+    };
     let held = if case == "lock-holder" {
         let file = OpenOptions::new()
             .read(true)
@@ -370,7 +520,9 @@ pub fn run_child() -> io::Result<()> {
         None
     };
     let ready_id = if case == "wrong-id" { "wrong-id" } else { &id };
-    let stage = if case == "lock-holder" {
+    let stage = if let Some(state) = &replacement {
+        state.stage
+    } else if case == "lock-holder" {
         "locked"
     } else {
         "connected"
@@ -381,6 +533,17 @@ pub fn run_child() -> io::Result<()> {
         Instant::now() + DEFAULT_TIMEOUT,
         "child READY",
     )?;
+    if let Some(observation) = replacement
+        .as_ref()
+        .and_then(|state| state.observation.as_ref())
+    {
+        send_message(
+            &mut stream,
+            &observation.message(),
+            Instant::now() + DEFAULT_TIMEOUT,
+            "child write observation",
+        )?;
+    }
     let timeout = if case == "continue-timeout" {
         CONTINUE_TIMEOUT
     } else {
@@ -401,5 +564,26 @@ pub fn run_child() -> io::Result<()> {
     }
     // Keep the owned lock alive across READY and the entire CONTINUE wait.
     drop(held);
+    let rename_after_close = matches!(
+        case.as_str(),
+        "close-before-rename" | "close-prewritten-before-rename"
+    ) && replacement
+        .as_ref()
+        .is_some_and(|state| state.observation == Some(WriteObservation::Complete));
+    if case == "create-before-lock" {
+        let mut file = replacement
+            .and_then(|state| state.held)
+            .ok_or_else(|| invalid("child create-before-lock: missing handle"))?;
+        // Evidence window only. After CONTINUE use the explicitly distinct
+        // prewrite-then-lock ordering, not a claim of protected writing.
+        write_complete(&mut file)?;
+        let file = lock_new(file)?;
+        drop(file);
+    } else {
+        drop(replacement);
+    }
+    if rename_after_close {
+        fs::rename(root.join("temp"), root.join("target"))?;
+    }
     Ok(())
 }

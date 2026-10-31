@@ -6,6 +6,227 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
+fn continue_and_finish(child: &mut support::ChildGuard, stream: &mut TcpStream) {
+    support::send_message(
+        stream,
+        "CONTINUE",
+        Instant::now() + support::DEFAULT_TIMEOUT,
+        "parent experiment CONTINUE",
+    )
+    .unwrap();
+    child.finish(support::DEFAULT_TIMEOUT).unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LiveOperation {
+    Rename,
+    Delete,
+}
+
+fn observe_live_operation(operation: LiveOperation) {
+    let cases = [
+        "live-normal-lock-first",
+        "live-normal-prewritten",
+        #[cfg(windows)]
+        "live-share-delete-lock-first",
+        #[cfg(windows)]
+        "live-share-delete-prewritten",
+    ];
+    let mut completed_operations = 0;
+    for case in &cases {
+        for existing_target in [false, true] {
+            let scenario = if existing_target {
+                "existing-old"
+            } else {
+                "absent"
+            };
+            let mut child = support::ChildGuard::spawn(case).unwrap();
+            let source = child.root().join("temp");
+            let target = child.root().join("target");
+            if existing_target {
+                std::fs::write(&target, b"old").unwrap();
+            }
+            let mut stream = child
+                .ready("live-handle", support::DEFAULT_TIMEOUT)
+                .unwrap();
+            let write = support::WriteObservation::receive(&mut stream).unwrap();
+            eprintln!(
+                "native {operation:?}: mode={case}, target={scenario}, write-observation={write:?}"
+            );
+            let lock = support::probe_lock(support::open_probe(&source).unwrap()).unwrap();
+            assert!(
+                matches!(lock, support::ProbeLock::Busy),
+                "{case}: live lease lost"
+            );
+            drop(lock);
+            if let support::WriteObservation::Blocked { kind, raw } = write {
+                assert!(
+                    case.ends_with("-lock-first"),
+                    "prewritten case cannot skip writing"
+                );
+                assert!(cfg!(windows) && raw == 33);
+                eprintln!(
+                    "native {operation:?}: mode={case}, target={scenario}, NOT ATTEMPTED: write kind={kind:?}, raw_os_error={raw}; separate prewritten case required"
+                );
+                continue_and_finish(&mut child, &mut stream);
+                assert_eq!(std::fs::read(&source).unwrap(), b"");
+                if existing_target {
+                    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+                } else {
+                    assert!(!target.exists());
+                }
+                continue;
+            }
+
+            let result = match operation {
+                LiveOperation::Rename => std::fs::rename(&source, &target),
+                LiveOperation::Delete => std::fs::remove_file(&source),
+            };
+            match &result {
+                Ok(()) => eprintln!(
+                    "native {operation:?}: mode={case}, target={scenario}, success, kind=None, raw_os_error=None"
+                ),
+                Err(error) => {
+                    eprintln!(
+                        "native {operation:?}: mode={case}, target={scenario}, failure, kind={:?}, raw_os_error={:?}",
+                        error.kind(),
+                        error.raw_os_error()
+                    );
+                    assert!(
+                        cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33)),
+                        "unexpected native {operation:?} failure: {error:?}"
+                    );
+                }
+            }
+            completed_operations += 1;
+            // No byte reads while the child's Windows byte-range lock exists.
+            continue_and_finish(&mut child, &mut stream);
+            if result.is_ok() {
+                assert!(!source.exists());
+                if matches!(operation, LiveOperation::Rename) {
+                    assert_eq!(std::fs::read(&target).unwrap(), support::COMPLETE_NEW);
+                    continue;
+                }
+            } else {
+                assert_eq!(std::fs::read(&source).unwrap(), support::COMPLETE_NEW);
+            }
+            if existing_target {
+                assert_eq!(std::fs::read(&target).unwrap(), b"old");
+            } else {
+                assert!(!target.exists());
+            }
+        }
+    }
+    // A protocol handshake or a refused same-handle write is not an operation
+    // observation. Every sharing mode must reach both prewritten scenarios.
+    assert!(completed_operations >= cases.len());
+}
+
+#[test]
+fn rename_with_live_handle_records_native_semantics() {
+    observe_live_operation(LiveOperation::Rename);
+}
+
+#[test]
+fn delete_with_live_handle_records_native_semantics() {
+    observe_live_operation(LiveOperation::Delete);
+}
+
+#[test]
+fn close_before_rename_exposes_unprotected_interval() {
+    for case in ["close-before-rename", "close-prewritten-before-rename"] {
+        let mut child = support::ChildGuard::spawn(case).unwrap();
+        let mut stream = child
+            .ready("closed-before-rename", support::DEFAULT_TIMEOUT)
+            .unwrap();
+        let write = support::WriteObservation::receive(&mut stream).unwrap();
+        let path = child.root().join("temp");
+        let lock = support::probe_lock(support::open_probe(&path).unwrap()).unwrap();
+        assert!(
+            matches!(lock, support::ProbeLock::Acquired(_)),
+            "closed handle must expose a lockable interval: {lock:?}"
+        );
+        eprintln!(
+            "evidence window only: {case}, write={write:?} -> close -> parent Acquired -> child rename if complete; not a protected replacement protocol"
+        );
+        drop(lock);
+        continue_and_finish(&mut child, &mut stream);
+        let target = child.root().join("target");
+        match write {
+            support::WriteObservation::Complete => {
+                assert_eq!(std::fs::read(&target).unwrap(), support::COMPLETE_NEW);
+                assert!(!path.exists());
+            }
+            support::WriteObservation::Blocked { .. } => {
+                assert_eq!(case, "close-before-rename");
+                assert_eq!(std::fs::read(&path).unwrap(), b"");
+                assert!(!target.exists(), "refused write must not be renamed");
+            }
+        }
+    }
+}
+
+#[test]
+fn create_before_lock_exposes_unprotected_interval() {
+    let mut child = support::ChildGuard::spawn("create-before-lock").unwrap();
+    let mut stream = child
+        .ready("created-before-lock", support::DEFAULT_TIMEOUT)
+        .unwrap();
+    let path = child.root().join("temp");
+    let lock = support::probe_lock(support::open_probe(&path).unwrap()).unwrap();
+    assert!(
+        matches!(lock, support::ProbeLock::Acquired(_)),
+        "created but unleased file must be lockable: {lock:?}"
+    );
+    eprintln!(
+        "evidence window only: child create -> parent Acquired -> child prewrite/lock after CONTINUE; no deletion, no stale inference"
+    );
+    drop(lock);
+    continue_and_finish(&mut child, &mut stream);
+    assert_eq!(std::fs::read(&path).unwrap(), support::COMPLETE_NEW);
+    assert!(!child.root().join("target").exists());
+}
+
+#[test]
+fn legacy_unleased_file_is_never_proven_stale_by_lock_alone() {
+    // Test-only evidence model: none of these decisions authorizes deletion.
+    #[derive(Debug, PartialEq, Eq)]
+    enum OwnershipDecision {
+        OwnershipUnknown,
+        LeaseNotHeld,
+        LeaseHeld,
+    }
+    let mut child = support::ChildGuard::spawn("legacy-unleased").unwrap();
+    let mut stream = child
+        .ready("legacy-unleased", support::DEFAULT_TIMEOUT)
+        .unwrap();
+    let path = child.root().join("temp");
+    let lock = support::probe_lock(support::open_probe(&path).unwrap()).unwrap();
+    let support::ProbeLock::Acquired(ref file) = lock else {
+        panic!("legacy open-but-unleased writer should allow lock acquisition");
+    };
+    // Metadata is safe under Windows locking; defer byte reads until both the
+    // parent lock and the child legacy holder are closed.
+    assert_eq!(
+        file.metadata().unwrap().len(),
+        support::COMPLETE_NEW.len() as u64
+    );
+    let decision = |known_lease_protocol: bool| match (known_lease_protocol, &lock) {
+        (false, _) => OwnershipDecision::OwnershipUnknown,
+        (true, support::ProbeLock::Acquired(_)) => OwnershipDecision::LeaseNotHeld,
+        (true, support::ProbeLock::Busy) => OwnershipDecision::LeaseHeld,
+    };
+    assert_eq!(decision(false), OwnershipDecision::OwnershipUnknown);
+    assert_eq!(decision(true), OwnershipDecision::LeaseNotHeld);
+    eprintln!(
+        "legacy active open holder: parent Acquired, unknown protocol -> OwnershipUnknown; no mutation/deletion"
+    );
+    drop(lock);
+    continue_and_finish(&mut child, &mut stream);
+    assert_eq!(std::fs::read(&path).unwrap(), support::COMPLETE_NEW);
+    assert_eq!(std::fs::read_dir(child.root()).unwrap().count(), 1);
+}
+
 fn assert_live_holder_is_busy(child: &support::ChildGuard) {
     let observation = support::probe_lock(
         support::open_probe(&child.root().join("held.lock"))
