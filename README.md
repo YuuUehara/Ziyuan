@@ -107,7 +107,7 @@ ziyuan history
 
 ## 开发与发布
 
-发布产品由十一个 crate 组成：`core` 定义任务与角色，`governance` 执行分配规则，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`memory` 提供本地译文记忆索引与检索，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互。工作区另有未发布的 `sandbox-windows` 独立启动探针，尚待原生验收，不接入生产；Windows 受保护执行仍失败关闭，见 [ADR-0001](docs/adr/0001-windows-sandbox.md)。其余分层说明见[体系结构](docs/architecture.md)。
+发布产品由十一个 crate 组成：`core` 定义任务与角色，`governance` 执行分配规则，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`memory` 提供本地译文记忆索引与检索，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互。工作区另有未发布的 `sandbox-windows` 独立启动探针，已通过 Server 2025 CI 基线的启动、身份、Job 与句柄检查，尚未完成文件／网络隔离验收，不接入生产；Windows 受保护执行仍失败关闭，见 [ADR-0001](docs/adr/0001-windows-sandbox.md)。其余分层说明见[体系结构](docs/architecture.md)。
 
 在仓库根目录检查和构建：
 

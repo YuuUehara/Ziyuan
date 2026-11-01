@@ -89,7 +89,7 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 
 **W0 当时结果：** 已完成源码、现有原生 CI 和官方接口约束的设计核对，选定有边界的 LPAC＋Job 原型及上述验收顺序。W0 时尚未实现平台 crate、运行隔离探针或完成 unsafe／独立安全审阅；这些是 W1／W2 的继续条件，不虚构为已通过。W1 有条件推进，R0 本地代码索引契约可按正式计划独立安排，不因 Windows 生产接入未完成而无限搁置。
 
-### W1a 实现：独立启动探针，原生验收待 CI
+### W1a 实现：独立启动探针，Server 2025 CI 基线已通过
 
 新增未发布的 `ziyuan-sandbox-windows` 工作区成员，仅含独立探针可执行文件；不是通用命令启动 API，不接受用户测试命令，也没有 runtime／MCP 调用者。生产十一 crate 和发布流程不变。根 `unsafe_code = "forbid"` 不动；该实验 crate 使用 `deny`，只有私有 Win32 模块显式允许 FFI，逐处记录指针、所有权、对齐与释放约束。这是实现者自查，不是独立安全签核。
 
@@ -100,7 +100,7 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 - 关闭句柄、删除自建文件后删除 profile，同时检查存储路径已消失，不把删除 API 返回成功等同无残留。完整进程树、父进程崩溃、超时取消与并发资源生命周期仍属 W1d；当前只运行自己的单进程探针。
 - 原生 Windows 测试运行普通容器、LPAC 与恢复前拒绝三个公开可执行入口。CI 固定 `windows-2025`，记录 OS、镜像、宿主提升状态与父 Job 状态；非 Windows 跳过原生测试不是隔离证据，手动运行探针会明确失败，不伪装成功。普通用户及桌面系统对照仍待补验。
 
-本地已通过 Windows MSVC 交叉目标 Clippy 与工作区 Clippy；这不包含 Windows 原生执行。原生全部对照和具体提交的六项 CI 未通过前，W1a 不结项、不进入 W1b，不升级任何隔离能力。合成 DACL 检查是目标版本上的 AAP 授权行为验证，不是微软承诺的通用 LPAC 检测 API，也未证明宿主文件不可访问、网络被拒或后代进程全部正确收尾。
+本地 Windows MSVC 交叉目标 Clippy 与 Rust 1.89 检查通过；原生结果以以下验收记录为准。合成 DACL 检查是目标版本上的 AAP 授权行为验证，不是微软承诺的通用 LPAC 检测 API，也未证明宿主文件不可访问、网络被拒或后代进程全部正确收尾。以下失败轮次保留定位依据，不代表当前仍在等待同一批验收。
 
 **首轮原生失败记录：** [f0e0c21 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347088703)五项通过，Windows 两条探针各自及证据步骤重试均报 Win32 203；没有拿到子进程身份／Job／句柄通过证据。实际平台是 Server 2025 `26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。原始空环境块是启动兼容性假设，不将错误号直接解释为 LPAC／Job 不可用。随后仅选择 `SystemRoot` 并增加错误调用位置与环境哨兵，原生结果见下。
 
@@ -111,6 +111,17 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 **第四轮分段结果：** [67e96e1 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41349478196)中恢复前拒绝对照已通过，含挂起 LPAC 的身份、AAP 拒绝、Job 与零输出清理检查。普通容器的挂起检查亦已通过，但恢复后以 `0xc0000008`（无效句柄）退出，尚无入口输出，后续 LPAC 正常运行对照未执行。入口原本先等待故意缺失的哨兵，与异常码吻合但尚无调用栈证明；现改用句柄信息查询，并增加首行启动标记，仍需原生 CI 确认原因和正常运行结果，不将该异常算作句柄隔离成功。
 
 **第五轮入口定位：** [149f6ca 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41350205175)确实收到 `CHILD_ENTERED=1`，随后仍以 `0xc0000008` 退出，恢复前拒绝对照通过；把等待改成 `GetHandleInformation` 并未解决异常。微软[严格句柄策略文档](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-process_mitigation_strict_handle_check_policy)说明无效句柄引用可触发异常；本轮尚无该策略标志或调用栈实测，不把它定为已证明的原因。当前改为上述父进程挂起查询，增加正对照并记录策略，正常普通容器与 LPAC 的结果仍待原生 CI。
+
+**2026-11-01 原生基线验收：** 实现提交 [922af58](https://github.com/YuuUehara/Ziyuan/commit/922af58b985395c722b96bd809bcfa24f08b3f99) 的[六项 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41350809351)全部通过。[Windows 原生日志](https://github.com/YuuUehara/Ziyuan/actions/runs/41350809351/job/124980335319)在工作区测试和单独证据步骤各运行两项测试，均为 `2 passed; 0 failed`；后者实际输出如下：
+
+| 对照 | 实测结果 |
+| --- | --- |
+| 普通 AppContainer | `CHILD_ENTERED=1`、`APP=1 AAP_ACCESS=1 JOB=1 ENV=1`、`PROFILE_CLEANED=1` |
+| LPAC | `CHILD_ENTERED=1`、`APP=1 AAP_ACCESS=0 JOB=1 ENV=1`、`PROFILE_CLEANED=1` |
+| 恢复前拒绝 | `FAULT_BEFORE_RESUME=1 CHILD_BYTES=0 PROFILE_CLEANED=1`，无子进程入口标记 |
+| 三个对照共同的挂起检查 | `CHILD_OUTPUT_HANDLE=1 CHILD_SENTINEL_ABSENT=1`、`CHILD_STRICT_HANDLE_FLAGS=3` |
+
+实际平台为 Server 2025 Datacenter `10.0.26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。严格句柄标志证实本基线启用了无效句柄异常且永久生效；移除子进程内的无效句柄引用后，正常探针已通过，不声称获得了旧崩溃的调用栈。W1a 按此原生 CI 基线结项，允许继续 W1b；普通用户与桌面 Windows 补验、文件／网络隔离及后代生命周期仍未完成。实验 crate 仍不发布、不接生产，Windows 受保护执行继续失败关闭，未升级支持等级。
 
 ## 参考
 
