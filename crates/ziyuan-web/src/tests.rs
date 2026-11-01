@@ -341,8 +341,11 @@ pub(crate) async fn call(
                 if let Some(t) = &token {
                     request = request.header("Authorization", t);
                 }
+                // Auth can reject before reading the body; negotiate before uploading so an
+                // early 401/403 is observed instead of racing a closed socket. Never replay POSTs.
                 request
                     .header("Content-Type", "application/json")
+                    .header("Expect", "100-continue")
                     .send(body)
                     .unwrap_or_else(|error| panic!("{context}: {error:?}"))
             }
@@ -490,7 +493,8 @@ async fn viewer_token_can_only_look() {
     for (path, body) in [
         (
             "/edicts",
-            json!({ "department": "works", "text": "观政者下诏" }),
+            // A large denied upload must still return 403 without mutating the court.
+            json!({ "department": "works", "text": "x".repeat(1024 * 1024) }),
         ),
         ("/reform", json!({ "mode": "direct" })),
         ("/budget", json!({ "scope": "court", "tokens": 1 })),
