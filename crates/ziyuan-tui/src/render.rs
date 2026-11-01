@@ -552,11 +552,17 @@ impl App {
                     format!("都察院{}　", c.verdict.label()),
                     Style::new().fg(color).bold(),
                 ),
-                Span::raw(format!("左都御史{censor}；证据核验：{}", c.evidence)),
+                Span::raw(format!("左都御史{censor}；复核时记录：{}", c.evidence)),
             ]));
             lines.extend(c.note.lines().map(|l| Line::from(l.to_owned())));
         }
         if let Some(changes) = &task.changes {
+            let tests = self
+                .session
+                .history()
+                .map(|history| ziyuan_app::test_evidence(task, history).to_string())
+                .unwrap_or_else(|error| format!("读取失败：{error}"));
+            lines.push(Line::from(format!("验功所据：{tests}")));
             let state = match changes.state {
                 ChangeState::Proposed => "待准奏（w 全部落盘，m 落盘并提交，W 逐段驳回，u 驳回）",
                 ChangeState::Applied => "已落盘",

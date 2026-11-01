@@ -1170,7 +1170,10 @@ function taskHtml(t) {
   if (t.censure) {
     const c = t.censure;
     body += `<div class="censure ${c.verdict}"><b>都察院${esc(c.label)}</b>　左都御史${esc(c.censor || "?")}${c.model ? `（${esc(c.model)}）` : ""}：${esc(c.note)}
-<span class="ev">证据核验：${esc(c.evidence)}${c.verified ? " · 有据可查" : ""}</span></div>`;
+<span class="ev">复核时记录：${esc(c.evidence)}${c.verified ? " · 当时有据可查" : ""}</span></div>`;
+  }
+  if (t.test_evidence && (t.changes || t.censure || t.test_evidence.last_result !== null)) {
+    body += `<div class="hint">验功所据：${esc(t.test_evidence.text)}</div>`;
   }
   const censorBtn = t.status === "completed" && !t.censure
     ? `<button class="small" data-censor="${t.id}">都察院复核</button>` : "";

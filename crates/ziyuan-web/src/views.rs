@@ -32,6 +32,25 @@ pub(crate) async fn state(
         .with_session(move |s| {
             let mut value = court_json(s.court(), backend.as_ref(), recent);
             mark_stale(&mut value, s.court(), &root);
+            if let Some(tasks) = value["tasks"].as_array_mut() {
+                let ids: Vec<_> = tasks
+                    .iter()
+                    .filter_map(|t| t["id"].as_u64().map(TaskId))
+                    .collect();
+                let evidence = s.test_evidence_for(&ids)?;
+                for entry in tasks {
+                    if let Some(tests) = entry["id"]
+                        .as_u64()
+                        .and_then(|id| evidence.get(&TaskId(id)))
+                    {
+                        entry["test_evidence"] = json!({
+                            "last_result": tests.last_result,
+                            "applicable": tests.applicable,
+                            "text": tests.to_string(),
+                        });
+                    }
+                }
+            }
             Ok(value)
         })
         .await?;

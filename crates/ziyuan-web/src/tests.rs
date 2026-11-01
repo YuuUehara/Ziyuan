@@ -1133,6 +1133,9 @@ async fn edict_runs_in_background_and_can_be_reviewed() {
     let censure = &state["tasks"][0]["censure"];
     assert_eq!(censure["evidence"], "回奏未引用代码位置；未跑测试");
     assert_eq!(censure["verified"], false);
+    let tests = &state["tasks"][0]["test_evidence"];
+    assert!(tests["last_result"].is_null());
+    assert_eq!(tests["applicable"], false);
     let (_, kaocheng) = call(&base, "/kaocheng", t, None).await;
     let report = kaocheng["report"].as_str().unwrap();
     assert!(

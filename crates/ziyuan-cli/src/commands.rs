@@ -335,6 +335,10 @@ pub(crate) fn execute(
                 return Ok(());
             };
             println!("诏令 #{} 呈报改动{}：", task.0, changes_note(entry));
+            println!(
+                "验功所据：{}",
+                ziyuan_app::test_evidence(entry, session.history()?)
+            );
             // 在终端且找到 git-delta 时经它显示（段头附段号）；管道、--plain 或 delta 出错时印统一 diff。
             let shown = !plain
                 && io::stdout().is_terminal()
@@ -510,6 +514,11 @@ pub(crate) fn execute(
                     task.0,
                     censure.verdict.label(),
                     censure.evidence
+                );
+                let entry = court.task(task).expect("刚复核的诏令");
+                println!(
+                    "验功所据：{}",
+                    ziyuan_app::test_evidence(entry, session.history()?)
                 );
                 for line in censure.note.lines().filter(|l| !l.trim().is_empty()) {
                     println!("  {line}");

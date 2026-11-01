@@ -15,6 +15,54 @@ use crate::{AppError, Session, truncate};
 /// 平反时的史官记。
 pub const ACQUITTAL_NOTE: &str = "史官记：成化二年，复于少保官，遣官赐祭——冤者得白，虽迟犹胜于无。";
 
+/// 历史测试结果与本件工具时序的适用性；不是被测内容或外部依赖的快照证明。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestEvidence {
+    pub last_result: Option<bool>,
+    /// 仅表示记录中此后无成功写入，且未逐段取舍；不保证磁盘或依赖未变化。
+    pub applicable: bool,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for TestEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let result = match self.last_result {
+            Some(true) => "当次测试通过",
+            Some(false) => "当次测试未通过",
+            None => "本次指派未见测试记录",
+        };
+        write!(f, "{result}；{}", self.reason)
+    }
+}
+
+/// 从本件最近一次指派后的审计记录推导，不改变历史复核或批准状态。
+pub fn test_evidence(task: &Task, history: &[CourtEvent]) -> TestEvidence {
+    let calls = tool_calls(history, task.edict.id);
+    let last = calls
+        .iter()
+        .rposition(|(tool, _, _)| tool == Capability::RunTests.code());
+    let last_result = last.map(|i| calls[i].2);
+    let (applicable, reason) = match last {
+        None => (false, "当前改动是否通过未知"),
+        Some(_) if task.changes.as_ref().is_some_and(|c| !c.skipped.is_empty()) => {
+            (false, "逐段准奏已改变组合，当前组合须另验")
+        }
+        Some(i)
+            if calls[i + 1..]
+                .iter()
+                .any(|(tool, _, ok)| *ok && tool == Capability::WriteFile.code()) =>
+        {
+            (false, "测试后又有成功暂存写入，当前改动须另验")
+        }
+        Some(_) => (true, "此后未见成功暂存写入（仅据本件记录，非内容快照校验）"),
+    };
+    TestEvidence {
+        last_result,
+        applicable,
+        reason,
+    }
+}
+
 /// 检出的处置状态，如「（刑部复勘：误报——…；已平反）」；未复勘、未平反为空。
 pub fn suspicion_status(s: &Suspicion) -> String {
     let mut parts = Vec::new();
@@ -212,6 +260,31 @@ pub(crate) fn parse_censure(reply: &str) -> Option<CensorVerdict> {
 }
 
 impl<S: EventStore> Session<S> {
+    /// 批量读取所选诏令的验功所据；只取指派与工具审计，避免页面轮询载入整本事件簿。
+    pub fn test_evidence_for(
+        &self,
+        tasks: &[TaskId],
+    ) -> Result<std::collections::BTreeMap<TaskId, TestEvidence>, AppError> {
+        let keep = |event: &CourtEvent| match event {
+            CourtEvent::TaskAssigned { task, .. } | CourtEvent::ToolInvoked { task, .. } => {
+                tasks.contains(task)
+            }
+            _ => false,
+        };
+        let history: Vec<_> = match self.history.get() {
+            Some(events) => events.iter().filter(|e| keep(e)).cloned().collect(),
+            None => self.store.load_where(self.len, &keep)?,
+        };
+        Ok(tasks
+            .iter()
+            .filter_map(|id| {
+                self.court
+                    .task(*id)
+                    .map(|task| (*id, test_evidence(task, &history)))
+            })
+            .collect())
+    }
+
     /// 都察院复核一件已完成的诏令：先机械核验证据（回奏引用的文件与行号是否存在于 `root`
     /// 下的项目、最近一次 `run_tests` 是否通过），再请左都御史（其官职所配模型，否则默认模型）
     /// 据此背书或弹劾（核验结果另计入考绩的「实证」，不随御史结论改变）。模型不可用（含演示后端）或回复无结论时，
@@ -232,6 +305,7 @@ impl<S: EventStore> Session<S> {
         let entry = court.task(task).expect("已确认存在");
         let history = self.task_events(task)?;
         let (evidence, findings) = check_evidence(root, entry, &history);
+        let tests = test_evidence(entry, &history);
         let model = court
             .model_of(censor.id)
             .or(backend.model_name())
@@ -285,7 +359,7 @@ impl<S: EventStore> Session<S> {
             let mark = if ok { "成功" } else { "失败" };
             user.push_str(&format!("- {tool} {}（{mark}）\n", truncate(&args, 200)));
         }
-        user.push_str(&format!("\n证据核验：{evidence}\n"));
+        user.push_str(&format!("\n历史证据核验：{evidence}\n验功所据：{tests}\n测试结果不等于准奏；不得将失效的当次通过称为当前改动已验。\n"));
         if let Some(note) = criteria_note(entry) {
             user.push_str(&format!("\n{note}\n"));
         }
@@ -317,7 +391,13 @@ impl<S: EventStore> Session<S> {
                 truncate(&diff, 6000)
             ));
         }
-        let by_evidence = if evidence.verified() {
+        let current_evidence = Evidence {
+            tests: tests
+                .last_result
+                .filter(|result| !*result || tests.applicable),
+            ..evidence
+        };
+        let by_evidence = if current_evidence.verified() {
             CensorVerdict::Endorsed
         } else {
             CensorVerdict::Impeached
@@ -336,7 +416,7 @@ impl<S: EventStore> Session<S> {
                     None => (
                         by_evidence,
                         format!(
-                            "御史未下结论，按证据例{}。原文：{reply}",
+                            "御史未下结论，按证据例{}；验功所据：{tests}。原文：{reply}",
                             by_evidence.label()
                         ),
                         model,
@@ -347,7 +427,7 @@ impl<S: EventStore> Session<S> {
             Err(e) => (
                 by_evidence,
                 format!(
-                    "都察院未能以模型复核（{e}），按证据例{}：{evidence}。",
+                    "都察院未能以模型复核（{e}），按证据例{}：历史记录为{evidence}；验功所据：{tests}。",
                     by_evidence.label()
                 ),
                 None,

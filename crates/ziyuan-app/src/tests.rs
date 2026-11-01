@@ -2339,6 +2339,159 @@ impl WorkerBackend for Cited {
 }
 
 #[tokio::test]
+async fn test_evidence_keeps_history_but_refuses_stale_success() {
+    struct Sequence(&'static [(&'static str, bool)]);
+    impl WorkerBackend for Sequence {
+        fn execute(&self, _: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            for (tool, ok) in self.0 {
+                hooks.tool_invoked(tool, "{}", *ok);
+            }
+            hooks.changes_proposed(vec![
+                FileChange {
+                    path: "a.txt".into(),
+                    before: Some("old\n".into()),
+                    after: "new\n".into(),
+                },
+                FileChange {
+                    path: "b.txt".into(),
+                    before: Some("old\n".into()),
+                    after: "new\n".into(),
+                },
+            ]);
+            Ok("改毕".into())
+        }
+    }
+    let root =
+        std::env::temp_dir().join(format!("ziyuan-evidence-freshness-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(root.join(name), "old\n").unwrap();
+    }
+    for (calls, last, applicable) in [
+        (
+            &[("write_file", true), ("run_tests", true)][..],
+            Some(true),
+            true,
+        ),
+        (
+            &[("run_tests", true), ("write_file", true)][..],
+            Some(true),
+            false,
+        ),
+        (
+            &[("run_tests", true), ("write_file", false)][..],
+            Some(true),
+            true,
+        ),
+        (
+            &[("run_tests", true), ("run_tests", false)][..],
+            Some(false),
+            true,
+        ),
+        (&[("write_file", true)][..], None, false),
+    ] {
+        let mut store = MemoryEventLog::default();
+        let mut session = Session::found(&mut store).unwrap();
+        let censor = session.recruit(None, Department::Justice).unwrap();
+        session.appoint(censor, Office::Censor).unwrap();
+        let task = session
+            .issue(
+                Department::Works,
+                "修改".into(),
+                Seal {
+                    capabilities: [Capability::WriteFile, Capability::RunTests].into(),
+                    ..Seal::default()
+                },
+            )
+            .unwrap()
+            .id;
+        // 上次执行在测试成功后中断；重新指派不能借用上一尝试的通过记录。
+        let worker = session
+            .court()
+            .route(&session.court().task(task).unwrap().edict)
+            .unwrap()
+            .worker;
+        drop(session);
+        let count = store.load().unwrap().len();
+        store
+            .append(
+                count,
+                &[
+                    CourtEvent::TaskAssigned {
+                        task,
+                        worker,
+                        model: None,
+                    },
+                    CourtEvent::ToolInvoked {
+                        task,
+                        tool: "run_tests".into(),
+                        args_json: "{}".into(),
+                        ok: true,
+                    },
+                ],
+            )
+            .unwrap();
+        let mut session = Session::open(&mut store).unwrap();
+        run_all(&mut session, &scheduler(Sequence(calls))).await;
+        let tests = test_evidence(
+            session.court().task(task).unwrap(),
+            session.history().unwrap(),
+        );
+        assert_eq!((tests.last_result, tests.applicable), (last, applicable));
+        let verdict = session.censor(task, &root, &DemoBackend).unwrap();
+        assert_eq!(
+            verdict == CensorVerdict::Endorsed,
+            last == Some(true) && applicable
+        );
+        assert_eq!(
+            session
+                .court()
+                .task(task)
+                .unwrap()
+                .censure
+                .as_ref()
+                .unwrap()
+                .evidence
+                .tests,
+            last
+        );
+        if applicable && last == Some(true) {
+            session.apply_changes(task, &root, vec![2]).unwrap();
+            let tests = test_evidence(
+                session.court().task(task).unwrap(),
+                session.history().unwrap(),
+            );
+            assert_eq!((tests.last_result, tests.applicable), (Some(true), false));
+            assert!(tests.to_string().contains("逐段准奏"));
+            assert_eq!(
+                std::fs::read_to_string(root.join("a.txt")).unwrap(),
+                "new\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("b.txt")).unwrap(),
+                "old\n"
+            );
+            for name in ["a.txt", "b.txt"] {
+                std::fs::write(root.join(name), "old\n").unwrap();
+            }
+        }
+        drop(session);
+        let reopened = Session::open(&mut store).unwrap();
+        let tests = test_evidence(
+            reopened.court().task(task).unwrap(),
+            reopened.history().unwrap(),
+        );
+        assert_eq!(tests.last_result, last);
+        assert_eq!(tests.applicable, applicable && last != Some(true));
+        let selected = reopened.test_evidence_for(&[task]).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[&task], tests);
+        assert!(reopened.test_evidence_for(&[]).unwrap().is_empty());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn censorate_checks_evidence_and_kaocheng_grades_officials() {
     let root = std::env::temp_dir().join(format!("ziyuan-app-censor-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

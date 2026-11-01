@@ -28,7 +28,7 @@ pub mod translation;
 mod vcs;
 
 pub use cabinet::{ScheduledSubtask, criteria_note, debate_minutes};
-pub use censorate::{ACQUITTAL_NOTE, suspicion_status};
+pub use censorate::{ACQUITTAL_NOTE, TestEvidence, suspicion_status, test_evidence};
 pub use courier::{PullReport, changelog_commits};
 pub use delta::{
     AnsiStyle, Delta, DeltaStyle, DeltaTheme, ansi_html, ansi_lines, delta, unified_diff,
