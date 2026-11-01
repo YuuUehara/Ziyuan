@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- 4A：区分历史测试结果与当前改动的适用性；成功写入或部分准奏后明确提示旧测试不再覆盖当前状态，保留历史证据与人工审批，三端提示及跨平台 CI 已通过。详见[正式分批计划](docs/code-task-next-batch.md)。
+- W1a：新增未发布、未接入生产的 Windows LPAC／Job 启动探针及恢复前拒绝、句柄白名单对照，原生 Windows CI 验收待完成；不表示文件／网络隔离或生产号舍已经可用，`auto`／`require` 仍失败关闭。边界见 [Windows ADR](docs/adr/0001-windows-sandbox.md)。
+
 ## 1.4.1
 
 - 调整 Web 导入预览与原文区的 ruby 注音字号，从正文的 72% 缩为 60%；正文大小、读音与基字的配对及长读音折行规则不变。

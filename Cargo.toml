@@ -11,6 +11,7 @@ members = [
     "crates/ziyuan-web",
     "crates/ziyuan-tui",
     "crates/ziyuan-cli",
+    "crates/ziyuan-sandbox-windows",
 ]
 resolver = "3"
 

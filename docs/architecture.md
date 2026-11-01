@@ -48,6 +48,8 @@ ziyuan-cli ──┬──▶ ziyuan-web (axum, SSE) ──┐
 （所有 crate 依赖 ziyuan-core 领域类型；runtime 不依赖 governance）
 ```
 
+上图为生产依赖。工作区另有未发布、无生产调用者的 `ziyuan-sandbox-windows` W1a 启动探针；私有 FFI 边界及待验收项见 [Windows ADR](adr/0001-windows-sandbox.md)，不表示 Windows 原生号舍已经可用。
+
 - `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
 - `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。官制（`Office::all` / `exists_in` / `rank`）定义在 core，署理规则在 `Court::route`。`names::NameGenerator` 由种子生成姓名；种子由 `ziyuan-app` 随机给出，生成的姓名随 `AgentRegistered` 落盘，回放不依赖随机数。官职代码与 v0.1 兼容，旧事件簿可直接回放。`WorkerBackend::model_name` / `ModelProvider::model_name` 供各前端显示承办模型，`price()` 返回单价（`ziyuan_core::Price`）供估算花费；单价表与 `ZIYUAN_LLM_PRICE` 解析在 `ziyuan-llm::price_for`。
   - 官职配置由 `OfficeModelSet` / `OfficeCeilingSet` 事件记录；`Session::run` 在指派时以 `Court::effective_seal`（`Seal::within`）求出受上限约束的玉玺、以 `Court::model_of` 选模型，写入 `Job` 与 `TaskAssigned.model`；`WorkerBackend::execute(&Job, hooks)`，`AgentBackend` 经 `ModelCatalog`（`ziyuan-llm::Catalog`）按名构造模型并查单价，`ziyuan-app::estimate_cost` 按各诏令实际模型汇总花费。
