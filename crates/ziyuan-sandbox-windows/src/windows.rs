@@ -268,7 +268,13 @@ fn child_probe(secret: usize) -> io::Result<()> {
     let app = token_flag(process, TokenIsAppContainer)?;
     let lpac = token_flag(process, TokenIsLessPrivilegedAppContainer)?;
     let job = in_job(process, null_mut())?;
+    let directory = std::env::current_dir()?;
     let environment_ok = std::env::var_os("SystemRoot").is_some_and(|value| !value.is_empty())
+        && std::env::var_os("LOCALAPPDATA").is_some_and(|value| {
+            // This checks the supplied environment value, not filesystem
+            // isolation or reparse-point safety (which remain W1b work).
+            PathBuf::from(value).starts_with(&directory)
+        })
         && std::env::var_os("ZIYUAN_W1A_HOST_ONLY").is_none();
     writeln!(
         io::stdout(),
@@ -278,7 +284,9 @@ fn child_probe(secret: usize) -> io::Result<()> {
         u8::from(environment_ok)
     )?;
     if app != 1 || lpac != 1 || !job || secret_available || !environment_ok {
-        return Err(io::Error::other("child identity / handle check failed"));
+        return Err(io::Error::other(
+            "child identity / handle / environment check failed",
+        ));
     }
     Ok(())
 }
@@ -369,17 +377,20 @@ pub(super) fn run() -> io::Result<()> {
         program.display(),
         sentinel.as_raw_handle() as usize
     ));
-    // Supply only the explicitly selected Windows installation root, never the
-    // complete host environment (which may contain credentials). One entry is
-    // already sorted; wide supplies its NUL and push terminates the whole block.
+    // AppContainer startup also needs LOCALAPPDATA. It is task-private, never
+    // copied from the host. Entries are in Unicode name order; each wide call
+    // supplies an entry NUL, then push terminates the whole environment block.
     let root = std::env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             io::Error::other("SystemRoot unavailable; refusing to inherit the host environment")
         })?;
+    let mut entry = std::ffi::OsString::from("LOCALAPPDATA=");
+    entry.push(&profile.path);
+    let mut environment = wide(entry);
     let mut entry = std::ffi::OsString::from("SystemRoot=");
     entry.push(root);
-    let mut environment = wide(entry);
+    environment.extend(wide(entry));
     environment.push(0);
     // SAFETY: extended startup cb, valid aligned attributes and mutable command
     // buffer; strings and allowlisted Unicode environment live through creation.
@@ -470,6 +481,11 @@ pub(super) fn run() -> io::Result<()> {
     drop(output);
     drop(sentinel);
     let text = std::fs::read_to_string(&output_path)?;
+    if result.is_err() && !text.is_empty() {
+        // Only our trusted probe's fixed evidence/error output, never an
+        // arbitrary user command or a dump of the host environment.
+        eprintln!("W1a child evidence: {text}");
+    }
     std::fs::remove_file(&program)?;
     std::fs::remove_file(&output_path)?;
     profile.cleanup()?;

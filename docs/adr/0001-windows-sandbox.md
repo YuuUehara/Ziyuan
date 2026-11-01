@@ -93,15 +93,17 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 
 新增未发布的 `ziyuan-sandbox-windows` 工作区成员，仅含独立探针可执行文件；不是通用命令启动 API，不接受用户测试命令，也没有 runtime／MCP 调用者。生产十一 crate 和发布流程不变。根 `unsafe_code = "forbid"` 不动；该实验 crate 使用 `deny`，只有私有 Win32 模块显式允许 FFI，逐处记录指针、所有权、对齐与释放约束。这是实现者自查，不是独立安全签核。
 
-- 每次新建 profile，把自身受信探针复制进去；不复用可写 profile，不给宿主目录加 ACL。显式 Unicode 环境只选择 `SystemRoot`，缺失则拒绝，不回退继承宿主环境；不授 capability、LPAC 属性、挂起创建、加入 kill-on-close Job 后核对身份与**本任务** Job 归属，再恢复线程。
-- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。子进程必须实际写出 `APP=1 LPAC=1 JOB=1 SECRET=0 ENV=1`；此处 `SECRET` 是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、宿主注入的模拟秘密变量未传入，不据此声称文件隔离通过。
+- 每次新建 profile，把自身受信探针复制进去；不复用可写 profile，不给宿主目录加 ACL。显式 Unicode 环境只选择 `SystemRoot` 与指向本任务 profile 的 `LOCALAPPDATA`，按变量名排序；系统根变量缺失则拒绝，不回退继承宿主环境，也不传入宿主 AppData 路径。不授 capability，设置 LPAC 属性，挂起创建、加入 kill-on-close Job 后核对身份与**本任务** Job 归属，再恢复线程。
+- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。子进程必须实际写出 `APP=1 LPAC=1 JOB=1 SECRET=0 ENV=1`；此处 `SECRET` 是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、LocalAppData 值位于本任务 profile、宿主注入的模拟秘密变量未传入。这是环境值检查，不是路径防换链或文件隔离证明。
 - 故障对照在所有挂起身份检查成功后注入恢复前拒绝，走同一终止／等待／清理路径，检查子进程输出为空；不能把入 Job 本身失败误当故障对照通过。等待有时限，无法确认结束时保留 profile 并诊断，不删除或复用不确定资源。
 - 关闭句柄、删除自建文件后删除 profile，同时检查存储路径已消失，不把删除 API 返回成功等同无残留。完整进程树、父进程崩溃、超时取消与并发资源生命周期仍属 W1d；当前只运行自己的单进程探针。
 - 原生 Windows 测试运行正常／拒绝两个公开可执行入口。CI 固定 `windows-2025`，记录 OS、镜像、宿主提升状态与父 Job 状态；非 Windows 跳过原生测试不是隔离证据，手动运行探针会明确失败，不伪装成功。普通用户及桌面系统对照仍待补验。
 
 本地已通过 Windows MSVC 交叉目标 Clippy 与工作区 Clippy；这不包含 Windows 原生执行。原生两条对照和具体提交的六项 CI 未通过前，W1a 不结项、不进入 W1b，不升级任何隔离能力。当前仍未证明宿主文件不可访问、网络被拒或后代进程全部正确收尾。
 
-**首轮原生失败记录：** [f0e0c21 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347088703)五项通过，Windows 两条探针各自及证据步骤重试均报 Win32 203；没有拿到子进程身份／Job／句柄通过证据。实际平台是 Server 2025 `26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。原始空环境块是待原生验证的启动兼容性假设，不将错误号直接解释为 LPAC／Job 不可用。本次改为仅选择 `SystemRoot`，增加错误调用位置与环境哨兵；仍需原生 CI 确认结果，不放宽身份、Job 或句柄检查，也不据提升权限宿主外推普通用户支持。
+**首轮原生失败记录：** [f0e0c21 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347088703)五项通过，Windows 两条探针各自及证据步骤重试均报 Win32 203；没有拿到子进程身份／Job／句柄通过证据。实际平台是 Server 2025 `26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。原始空环境块是启动兼容性假设，不将错误号直接解释为 LPAC／Job 不可用。随后仅选择 `SystemRoot` 并增加错误调用位置与环境哨兵，原生结果见下。
+
+**第二轮定位：** [3837fa3 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347867878)仍是五项通过、Windows 两条失败；位置诊断确认 `CreateProcessW` 返回 203，说明仅补 `SystemRoot` 不足。外部 AppContainer 的[逐变量对照](https://github.com/janhq/jan/issues/9101)指向缺失 `LOCALAPPDATA`，但不代替本仓库的 LPAC 实测。本次只新增指向本任务 profile 的 `LOCALAPPDATA`，并核对子进程实际环境；失败时保留受信探针输出用于诊断。原生 CI 确认前仍不结项，不放宽身份、Job 或句柄检查，也不据提升权限宿主外推普通用户支持。
 
 ## 参考
 
