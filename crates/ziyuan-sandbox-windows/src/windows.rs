@@ -25,9 +25,14 @@ fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value.as_ref().encode_wide().chain(Some(0)).collect()
 }
 
+#[track_caller]
 fn checked(value: i32) -> io::Result<()> {
     if value == 0 {
-        Err(io::Error::last_os_error())
+        let error = io::Error::last_os_error();
+        Err(io::Error::new(
+            error.kind(),
+            format!("{}: {error}", std::panic::Location::caller()),
+        ))
     } else {
         Ok(())
     }
@@ -263,13 +268,16 @@ fn child_probe(secret: usize) -> io::Result<()> {
     let app = token_flag(process, TokenIsAppContainer)?;
     let lpac = token_flag(process, TokenIsLessPrivilegedAppContainer)?;
     let job = in_job(process, null_mut())?;
+    let environment_ok = std::env::var_os("SystemRoot").is_some_and(|value| !value.is_empty())
+        && std::env::var_os("ZIYUAN_W1A_HOST_ONLY").is_none();
     writeln!(
         io::stdout(),
-        "APP={app} LPAC={lpac} JOB={} SECRET={}",
+        "APP={app} LPAC={lpac} JOB={} SECRET={} ENV={}",
         u8::from(job),
-        u8::from(secret_available)
+        u8::from(secret_available),
+        u8::from(environment_ok)
     )?;
-    if app != 1 || lpac != 1 || !job || secret_available {
+    if app != 1 || lpac != 1 || !job || secret_available || !environment_ok {
         return Err(io::Error::other("child identity / handle check failed"));
     }
     Ok(())
@@ -361,9 +369,20 @@ pub(super) fn run() -> io::Result<()> {
         program.display(),
         sentinel.as_raw_handle() as usize
     ));
-    let environment = [0u16, 0u16];
+    // Supply only the explicitly selected Windows installation root, never the
+    // complete host environment (which may contain credentials). One entry is
+    // already sorted; wide supplies its NUL and push terminates the whole block.
+    let root = std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            io::Error::other("SystemRoot unavailable; refusing to inherit the host environment")
+        })?;
+    let mut entry = std::ffi::OsString::from("SystemRoot=");
+    entry.push(root);
+    let mut environment = wide(entry);
+    environment.push(0);
     // SAFETY: extended startup cb, valid aligned attributes and mutable command
-    // buffer; strings and empty Unicode environment live through creation.
+    // buffer; strings and allowlisted Unicode environment live through creation.
     let child = unsafe {
         let mut startup: STARTUPINFOEXW = zeroed();
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -471,7 +490,7 @@ pub(super) fn run() -> io::Result<()> {
         println!("FAULT_BEFORE_RESUME=1 CHILD_BYTES=0 PROFILE_CLEANED=1");
     } else {
         result?;
-        if text.trim() != "APP=1 LPAC=1 JOB=1 SECRET=0" {
+        if text.trim() != "APP=1 LPAC=1 JOB=1 SECRET=0 ENV=1" {
             return Err(io::Error::other(format!(
                 "unexpected child evidence: {text:?}"
             )));
