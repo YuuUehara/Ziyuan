@@ -16,6 +16,8 @@ mod gate;
 mod references;
 mod session;
 mod status;
+mod usage;
+mod verification;
 mod zhupi;
 
 #[cfg(test)]
@@ -35,6 +37,16 @@ pub use session::{ResumeOutcome, block_source_hash};
 pub use status::{
     BlockFacts, BlockState, BlockStatus, ContextFacts, NextStep, ResumeOptions, StaleReason,
     block_states, resume_plan,
+};
+pub use usage::{
+    StageUsage, TranslationTaskUsage, TranslationUsage, UsageCharge, UsageRate, UsageTotals,
+    translation_usage,
+};
+pub use verification::{
+    AdviceLink, Disposition, EvidenceInput, EvidenceStatus, GlossaryHint, LexicalEvidence,
+    ParagraphVerification, Resolution, ReviewAdvice, SemanticCategory, SemanticCheck,
+    TranslationChange, VerificationInput, VerificationRecord, VerificationRecordView,
+    VerificationSnapshot, VerificationView,
 };
 pub use zhupi::{BlockZhupi, ZhupiNote};
 

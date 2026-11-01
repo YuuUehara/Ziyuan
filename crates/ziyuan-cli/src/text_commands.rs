@@ -39,6 +39,9 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        TXT 使用新解析/BOM 处理也须 preview + --confirm；不加选项仍走旧 TXT 导入
                                        重复 --chapter-title 按章序覆盖全部章名；确认时须保持文件顺序与选项不变
   ziyuan text show <项目ID>            核对原文副本后列出章节、段落与提示块
+  ziyuan text usage <项目ID>           只读汇总四阶段用量记录、状态与分币种估价；需已有朝廷，不调用模型
+                                       缺失用量为未知；用量记录和工具调用不是 HTTP 请求数，估价不是账单
+                                       未设本件预算不等于免费，也不取消朝廷或官员限额
   ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md]
                             [--layout chapters|book] [--output <new.tar>]
                                        导出有效定稿，默认 TXT、按章；缺块或失效则整批拒绝，需要朝廷
@@ -68,12 +71,14 @@ pub(crate) enum TextAction {
     Help,
     Memory(crate::memory_commands::MemoryAction),
     Translation(crate::translation_commands::TranslationAction),
+    Verification(crate::verification_commands::Action),
     Recovery(RecoveryAction),
     Init(NewProject),
     Import(String, Vec<PathBuf>),
     Preview(String, Vec<ImportSource>, ImportOptions),
     ImportPrepared(String, Vec<ImportSource>, ImportOptions, String),
     Show(String),
+    Usage(String),
     Export {
         project: String,
         options: ExportOptions,
@@ -133,9 +138,16 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
             [id] if !id.starts_with("--") => TextAction::Show(id.clone()),
             _ => return Err(SHOW_USAGE.into()),
         },
+        "usage" => match rest {
+            [id] if !id.starts_with('-') && !id.trim().is_empty() => TextAction::Usage(id.clone()),
+            _ => return Err("用法: ziyuan text usage <项目ID> [--json]".into()),
+        },
         "check" => parse_check(rest)?,
         "memory" => TextAction::Memory(crate::memory_commands::parse(rest)?),
         "recovery" => parse_recovery(rest)?,
+        "evidence" | "verification" => {
+            TextAction::Verification(crate::verification_commands::parse(&args)?)
+        }
         "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
         | "status" | "resume" | "references" => {
             TextAction::Translation(crate::translation_commands::parse(&args)?)
@@ -359,9 +371,10 @@ fn parse_recovery(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
 pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> {
     if let TextAction::Help = action {
         println!(
-            "{TEXT_HELP}\n\n{}\n\n{}",
+            "{TEXT_HELP}\n\n{}\n\n{}\n\n{}",
             crate::translation_commands::TRANSLATION_HELP,
-            crate::memory_commands::MEMORY_HELP
+            crate::memory_commands::MEMORY_HELP,
+            crate::verification_commands::HELP
         );
         return Ok(());
     }
@@ -370,7 +383,9 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
         TextAction::Help => unreachable!("已在上面处理"),
         TextAction::Memory(action) => return crate::memory_commands::run(action, json),
         TextAction::Translation(action) => return crate::translation_commands::run(action, json),
+        TextAction::Verification(action) => return crate::verification_commands::run(action, json),
         TextAction::Recovery(action) => return run_recovery(action, json),
+        TextAction::Usage(project) => return run_usage(&project, json),
         TextAction::Export {
             project,
             options,
@@ -452,6 +467,138 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
         }
     }
     Ok(())
+}
+
+fn run_usage(project: &str, json: bool) -> Result<(), Box<dyn Error>> {
+    let root = env::current_dir()?;
+    // Validate the project and its original copies before consulting the ledger.
+    TextProjects::new(&root).show(project)?;
+    let usage = match Session::open(EventLog::new(&root)) {
+        Ok(session) => session.translation_usage(project, ziyuan_llm::price_quote)?,
+        Err(ziyuan_app::AppError::NotFounded) => {
+            return Err("用量账本需要朝廷：请先运行 ziyuan init（本命令不会自动建立朝廷）".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if json {
+        return print_json(serde_json::to_value(&usage)?);
+    }
+    println!(
+        "项目 {}：译书用量账本（已报告小计，不是完整调用计量）",
+        usage.project
+    );
+    println!(
+        "token 是模型计量文本的单位；估价不是账单。未设本件限额不等于免费，也不取消朝廷或官员限额。"
+    );
+    for stage in &usage.stages {
+        println!("阶段 {}：", stage.kind.label());
+        print_usage_totals(&stage.totals);
+    }
+    for task in &usage.tasks {
+        let budget = task
+            .budget
+            .map_or_else(|| "未设本件限额".to_owned(), |n| format!("{n} tokens"));
+        let recorded = task
+            .recorded_execution_usage
+            .map_or_else(|| "未知".to_owned(), |u| u.to_string());
+        let status = match task.status.as_str() {
+            "pending" => "待办",
+            "assigned" => "已指派",
+            "completed" => "已完成",
+            "failed" => "失败",
+            "cancelled" => "已撤销",
+            other => other,
+        };
+        println!(
+            "任务 #{} / {} / {}：状态={}；指派尝试={}；本件预算={}；已记录承办用量={}；已记录小计与任务累计相符={}",
+            task.task.0,
+            task.block,
+            task.kind.label(),
+            status,
+            task.attempts,
+            budget,
+            recorded,
+            if task.usage_reconciled { "是" } else { "否" }
+        );
+        print_usage_totals(&task.totals);
+        for charge in &task.charges {
+            let model = charge.model.as_deref().unwrap_or("未知");
+            let purpose = match charge.purpose.as_str() {
+                "execution" => "承办",
+                "draft" => "票拟",
+                "split" => "分办",
+                "censure" => "都察院审查",
+                "recheck" => "复勘",
+                "debate" => "廷议",
+                other => other,
+            };
+            println!("  记账项：{}；模型={}；{}", purpose, model, charge.usage);
+            match &charge.rate {
+                Some(rate) => println!(
+                    "    费率：输入={} / 输出={} 每百万 tokens，币种={}；来源={}",
+                    rate.input_per_million, rate.output_per_million, rate.currency, rate.source
+                ),
+                None => println!("    费率与来源：未知（未定价）"),
+            }
+            match (charge.estimated_cost, charge.rate.as_ref()) {
+                (Some(cost), Some(rate)) => {
+                    println!("    已定价估算：{cost:.6} {}（非账单）", rate.currency)
+                }
+                _ => println!("    估算费用：未知"),
+            }
+        }
+    }
+    println!("项目合计：");
+    print_usage_totals(&usage.totals);
+    for note in &usage.notes {
+        let note = note
+            .replace("缺失 usage 为未知", "未报告用量视为未知")
+            .replace("有 usage 的任务", "有用量记录的任务")
+            .replace("usage 事件数", "用量记录数")
+            .replace("usage", "用量")
+            .replace("trace", "追踪标识")
+            .replace("全局/官员余额", "朝廷或官员剩余额度")
+            .replace("操作者用时", "人工用时");
+        println!("说明：{note}");
+    }
+    Ok(())
+}
+
+fn print_usage_totals(totals: &ziyuan_app::translation::UsageTotals) {
+    let recorded = totals
+        .recorded_usage
+        .map_or_else(|| "未知".to_owned(), |u| u.to_string());
+    let statuses = totals
+        .statuses
+        .iter()
+        .map(|(status, count)| {
+            let label = match status.as_str() {
+                "pending" => "待办",
+                "assigned" => "已指派",
+                "completed" => "已完成",
+                "failed" => "失败",
+                "cancelled" => "已撤销",
+                other => other,
+            };
+            format!("{label}={count}")
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    println!(
+        "  任务={}；状态=[{}]；已记录 tokens={}；缺承办用量的任务={}",
+        totals.tasks, statuses, recorded, totals.tasks_without_execution_usage
+    );
+    println!(
+        "  用量记录={}；工具调用={}；工具失败={}（均非 HTTP 请求数）",
+        totals.usage_events, totals.tool_calls, totals.tool_failures
+    );
+    if totals.estimates.is_empty() {
+        println!("  已定价小计：无（费用未知，不作零费用承诺）");
+    }
+    for (currency, amount) in &totals.estimates {
+        println!("  已定价小计：{amount:.6} {currency}（估算，非账单）");
+    }
+    println!("  未定价 tokens：{}", totals.unpriced_usage);
 }
 
 fn run_export(

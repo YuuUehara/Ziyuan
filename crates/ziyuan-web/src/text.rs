@@ -14,8 +14,8 @@ use std::path::Path;
 use ziyuan_app::notes::{NewNote, NoteEdit, NoteFilter, NoteKind, Notes};
 use ziyuan_app::text_project::{ImportOptions, ImportSource, Project};
 use ziyuan_app::translation::{
-    BlockStatus, ExportFormat, ExportLayout, ExportOptions, ReferenceRequest, ReferenceSubmission,
-    TranslationError, Translations,
+    BlockStatus, EvidenceInput, ExportFormat, ExportLayout, ExportOptions, ReferenceRequest,
+    ReferenceSubmission, TranslationError, Translations, VerificationInput,
 };
 use ziyuan_app::{AppError, selected_files};
 use ziyuan_core::TranslationKind;
@@ -32,6 +32,89 @@ fn missing_block(project: &str, block: &str) -> ApiError {
     material(TranslationError::Invalid(format!(
         "项目 {project} 没有块 {block}"
     )))
+}
+
+fn verification_error(_: impl std::fmt::Display) -> ApiError {
+    ApiError::bad("词证或复核不可用：请检查段落、关联依据与材料；材料变化后请重新读取再复核。")
+}
+
+pub(crate) async fn evidence_add(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<EvidenceInput>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let value = blocking(move || {
+        Translations::new(&root)
+            .add_evidence(&project, &block, &body)
+            .map(|v| json!(v))
+            .map_err(verification_error)
+    })
+    .await?;
+    app.emit("changed", json!({}));
+    Ok(Json(value))
+}
+
+pub(crate) async fn verification(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let result = app
+        .session_result({
+            let (root, project, block) = (root.clone(), project.clone(), block.clone());
+            move |s| Ok(Translations::new(&root).verification(Some(s.court()), &project, &block)?)
+        })
+        .await?;
+    let view = match result {
+        Ok(view) => view,
+        Err(AppError::NotFounded) => {
+            blocking(move || {
+                Translations::new(&root)
+                    .verification(None, &project, &block)
+                    .map_err(verification_error)
+            })
+            .await?
+        }
+        Err(e) => return Err(verification_error(e)),
+    };
+    Ok(Json(json!(view)))
+}
+
+pub(crate) async fn verification_record(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<VerificationInput>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let result = app
+        .session_result({
+            let (root, project, block, body) =
+                (root.clone(), project.clone(), block.clone(), body.clone());
+            move |s| {
+                Ok(Translations::new(&root).record_verification(
+                    Some(s.court()),
+                    &project,
+                    &block,
+                    &body,
+                )?)
+            }
+        })
+        .await?;
+    let record = match result {
+        Ok(record) => record,
+        Err(AppError::NotFounded) => {
+            blocking(move || {
+                Translations::new(&root)
+                    .record_verification(None, &project, &block, &body)
+                    .map_err(verification_error)
+            })
+            .await?
+        }
+        Err(e) => return Err(verification_error(e)),
+    };
+    app.emit("changed", json!({}));
+    Ok(Json(json!(record)))
 }
 
 #[derive(Default, serde::Deserialize)]

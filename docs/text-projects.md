@@ -232,6 +232,166 @@ ziyuan text export-finished $project --format txt --layout chapters --output exp
 
 第二批的跨平台 CI 须按具体提交核对，正式发布验收尚未进行；第一批 CI 不覆盖这些新增代码。参考选择／接入和新增文学质量收益均不在本批交付中。
 
+<a id="unreleased--14-第三批-b词证与操作者语义复核"></a>
+<a id="unreleased--14-第三批-b词证与逐段复核"></a>
+<a id="unreleased--14-第三批-b词证与逐段勘校"></a>
+
+## Unreleased / 1.4 第三批 B：词证与逐段勘校
+
+**Linux 本地工程验收通过；版本保持 1.3.0，未发布。本次与 3C 组合提交，跨平台结果以该提交的 CI 为准，未做付费模型文学质量验收。** 以下是当前 CLI／Web 行为，不是发布质量承诺；检查及限制见[本批验收记录](acceptance/1.4-third-batch-3b.md)。
+
+### 先加词证，再读取当前材料
+
+词证是词义核对的出处和说明。“逐段勘校”逐段记录六类核对结果；“人工复核”仍是独立状态，不因标题改名而改变判定。
+
+六事逐项勘校，记录所据与存疑。此为人工核对记录，不代准奏，亦非御览定稿。
+
+```text
+ziyuan text evidence add <项目ID> <块ID> --file <evidence.json> [--json]
+ziyuan text verification show <项目ID> <块ID> [--json]
+ziyuan text verification record <项目ID> <块ID> --file <checks.json> [--json]
+```
+
+请求是单个严格 JSON 对象（不是数组、不是含 `project`／`block` 的外壳），所有列出的字段必填，未知字段拒绝；文件最多 16 MiB。项目／块由命令参数指定，段号取自自己的 `text show`。沿用退出码 0／1／2，失败检查退出码及 stderr，不假定错误也有 JSON。
+
+`evidence.json` 示例沿用本页两段自写原文；用于其他项目须替换段号与短引：
+
+```json
+{
+  "paragraph": "c0001-p0001",
+  "quote": "窓を開けた",
+  "source": "作者自写练习原稿",
+  "locator": "第一章第一段",
+  "explanation": "动作是打开窗户；此处未单独明示主语。",
+  "context": "仅适用于此练习段，不据此推断其他章节说话者。",
+  "status": "tentative"
+}
+```
+
+`status` 仅 `tentative|confirmed`（暂定／确认），是人工判断，不是系统认证。`quote` 必须是关联原段中真实、非空的连续短引，最多 1000 字；`source`（URL 或书目文字）2000 字、`locator` 1000 字、`explanation` 4000 字、`context` 2000 字，均非空。返回 `id` 为项目内数字序号，供复核关联；不自动访问来源 URL。
+
+Bash（PowerShell 用 `$project`／`$block` 同样逐行执行），先替换自己的编号、准备并检查文件：
+
+```bash
+project='替换为实际项目ID'
+block='c0001-b0001'
+ziyuan text evidence add "$project" "$block" --file evidence.json --json
+ziyuan text verification show "$project" "$block" --json
+# 停下阅读原译文、结构、朱批、审校与词证；将本次 fingerprint 填入 checks.json
+ziyuan text verification record "$project" "$block" --file checks.json --json
+ziyuan text verification show "$project" "$block" --json
+```
+
+添加词证后再 `show`，因为追加也会改变确认指纹（用来确认保存时材料和项目记录未变的标识）。`show` 在无译稿时仍可展示原文及历史；**保存复核则必须已有结构有效的现行译稿**，没有译稿、漏段等结构错误都拒绝，不能用人工清单绕过结构检查。
+
+<a id="六类清单意见处理与问题状态分开记录"></a>
+<a id="逐段勘校六事意见处理与问题状态分开记录"></a>
+
+### 逐段勘校六事：意见处理与问题状态分开记录
+
+六项标题用于文案，内部 JSON 键不变；说明与短例只提示人工核对，不是自动判错规则。
+
+| 标题 | 内部 JSON 键 | 直白说明 | 短例 |
+| --- | --- | --- | --- |
+| 言行归属 | `subject_speaker` | 核对谁说话、谁做事，勿张冠李戴。 | “清替我换钱”不是“我替清换钱”。 |
+| 事理正反 | `agency_negation` | 核对动作方向与肯否。 | “借给他”不是“向他借”；“并非主任”不能漏“并非”。 |
+| 数目分寸 | `quantity` | 核对金额、人数、约数与倍数。 | “约三圆”不是“恰好三圆”。 |
+| 前后次第 | `timeline` | 核对时间先后和是否已发生。 | “来年暑假回去”不是“今年暑假回过”。 |
+| 称谓名分 | `names_relations` | 核对人名、职务、昵称与人物关系。 | “副校长”不是“数学主任”。 |
+| 谐趣留白 | `humor_additions` | 核对笑点、反话与含蓄，勿把解释写成原文。 | 人物原本不懂绰号，不替他补词典释义。 |
+
+`checks.json` 完整六类输入示例（是待核对模板，**不会显示已复核**）。`fingerprint` 必须替换为刚人工检查的 `show` 顶层指纹，不能省略或自己构造：
+
+```json
+{
+  "paragraph": "c0001-p0001",
+  "fingerprint": "替换为刚刚人工检查的完整指纹",
+  "checks": [
+    {"category":"subject_speaker","disposition":"pending","resolution":"unchecked","note":"言行归属：待核对谁说话、谁做事，勿张冠李戴。","advice":[],"evidence":[]},
+    {"category":"agency_negation","disposition":"pending","resolution":"unchecked","note":"事理正反：待核对动作方向与肯否。","advice":[],"evidence":[]},
+    {"category":"quantity","disposition":"pending","resolution":"unchecked","note":"数目分寸：待核对金额、人数、约数与倍数。","advice":[],"evidence":[]},
+    {"category":"timeline","disposition":"pending","resolution":"unchecked","note":"前后次第：待核对时间先后和是否已发生。","advice":[],"evidence":[]},
+    {"category":"names_relations","disposition":"pending","resolution":"unchecked","note":"称谓名分：待核对人名、职务、昵称与人物关系。","advice":[],"evidence":[]},
+    {"category":"humor_additions","disposition":"pending","resolution":"unchecked","note":"谐趣留白：待核对笑点、反话与含蓄，勿把解释写成原文。","advice":[],"evidence":[]}
+  ]
+}
+```
+
+- 每次保存 1–6 类，类别不得重复；新记录是本段最新清单，**不自动合并**前次漏填的类别。CLI 可存部分，Web 每次存六项。不存在记录不等于检查过。
+- 意见处理 `disposition` 为 `accepted|rejected|pending|not_applicable`（接受／驳回／待查／不适用）；问题状态 `resolution` 为 `unchecked|resolved|unresolved|not_applicable`（未检查／已解决／未解决／不适用）。接受建议不等于已核实修订解决，可先记 `accepted` + `unresolved`。非 `pending` 必须有非空 `note`，最多 4000 字。
+- 拒绝不一致组合：`accepted` + `not_applicable`；`pending` + `resolved`；`rejected` 或 `not_applicable` + `resolved|unresolved`。确不适用时可记 `not_applicable` + `not_applicable`，说明理由，不能为消掉未解决数虚填。
+- `advice` 每项最多 8 条，形状如 `[{"task":42,"quote":"该任务回奏中的真实短引"}]`；须替换为 `show.reviews` 中本块已完成任务号及其正文真实短引（非空、最多 2000 字），同一任务／短引不重复。它是意见出处，不是自动认可。`evidence` 如 `[1]`，须替换为本段实际词证数字 ID，每项最多 16 条、不重复；不存在或其他段的词证拒绝。无关联时显式写 `[]`，不捏造任务或证据。
+
+### 快照、历史与四种事实
+
+`show` 返回 `fingerprint`、`source`、有效结构下的 `translation`、`structure`、`writer_task`、`reviews`、`zhupi`、`evidence`、`records`、`hints` 和逐段 `paragraphs`。材料快照（保存时的一份材料副本）绑定原文／译稿／已批准上下文／朱批摘要、匹配的准奏来源任务及已完成审校意见；指纹还绑定项目级记录序号。材料变化或他人追加词证／记录后，本次保存会被拒绝；请重新运行 `show`、阅读最新材料，再把新指纹填入文件保存，不要只换指纹自动重试。
+
+词证和复核历史只追加、不改原记录，不提供原地编辑／删除；更正须新增，旧的暂定／确认词证仍保留。每条复核保留当时原译文、朱批、快照及 `previous`；`records[].current` 仅表示该记录材料快照是否等于当前，**不等于它是最新意见或已通过**。不同记录可同时对应当前材料；逐段结论只取最新一条。材料失效时 `reason` 说明需复核，旧内容不隐藏；`change.before/after` 比较前次与本次记录的译文，不是模型提案差异或修改原因的自动证明。
+
+四种事实不能合成一个“质量通过”：
+
+1. `structure.valid`：只查段号／正文结构，不判断语义。
+2. `paragraphs[].opinions_handled`：最新记录对应当前材料、至少一项关联审校且全部处置非待查；不代表所有审校均覆盖或问题已解决。
+3. `operator_reviewed`（人工复核）：最新当前记录六类齐全，且没有 `pending`、`unchecked`、`unresolved`。`unresolved` 也计缺类别；旧记录即使数为零仍须看 `current`。这是人工声明，不是专家终审或语义正确性保证。
+4. 有效御览定稿：仍以 `text status` 为准，复核不授予定稿、不新增定稿门槛，也不改变旧 `text check` 语义。
+
+批准词表提示仅在原文包含 `source`、译文未字面包含任何 `allowed` 时出现，保留 `scope`／`note`；自由文本 `scope` 不可自动判定适用，只请用户核对，不是错译判决，**没有新增禁译词列表**。词证不自动变成词条、朱批或模型材料；如要纳入已批准上下文，须人工选择、编辑／并入现有上下文草稿，再显式 `text context approve`，不原地改已批准快照，新版仍沿用既有失效规则。
+
+Web 武英殿「词证与逐段勘校」逐段显示同样材料、词表提示、「本块词证」及「复核历史（保留原记录）」。六项初始均待查／未检查，模型建议不自动填写；保存错误、自动刷新和段落切换保留本地输入，材料过期后须阅读最新内容，再主动点「已读最新材料，继续核对」。未保存输入只保留在本次页面会话，**浏览器整页重载或关闭会丢失**；已保存的词证和复核历史不受影响。viewer（只读角色）只能查看，不能保存词证或复核。内部接口与页面不冻结，见[稳定性约定](stability.md#unreleased--14-第三批-b词证与逐段勘校)。
+
+本流程不自动抓取链接、不自动导出词证／清单给模型、不入队模型任务、不自动批准上下文。继续按批次人工控制：本块核对后再显式启动下一块；有争议就停下，不新增无人值守批量翻译。本地记录含作品原译文与意见，分享内部文件或 JSON 前须核对隐私与权利。
+
+## Unreleased / 1.4 第三批 C：逐阶段用量账本与请求材料精简
+
+**Linux 本地工程验收通过；版本仍为 1.3.0，未发布。本次与 3B 组合提交，跨平台结果以该提交的 CI 为准。** 没有新增付费调用，不宣称实际小说复验、文学质量或节费收益；不拿其他批次验收代替本批证据。检查与本地对照见[3C 验收记录](acceptance/1.4-third-batch-3c.md)。
+
+### CLI 只读账本
+
+```text
+ziyuan text usage <项目ID> [--json]
+```
+
+Bash，替换自己的项目编号；PowerShell 可直接把编号作为参数传入：
+
+```bash
+project='替换为实际项目ID'
+ziyuan text usage "$project"
+ziyuan text usage "$project" --json
+```
+
+命令先验证项目及原件，再读取现有朝廷事件簿；需要已建立的朝廷，不自动执行 `ziyuan init`，不调用模型、不联网、不改变审批或预算。项目不存在、原件损坏或事件簿不可读时报错，不冒充空账本。沿用退出码 0／1／2，脚本仍须检查退出码和 stderr。本批先提供 CLI，**没有新增 Web 用量表单**。
+
+四阶段为 `translate`（初译）、`review_fidelity`（忠实审校）、`review_style`（文风审校）、`revise`（修订）。统计所有关联任务而非只收有效定稿：包括待办、已指派、完成、失败、撤销、旧稿与各次重试，不因重译成功而抹去先前消耗。用量单位 token 是模型计量文本的单位，不等于字数。
+
+JSON 顶层为 `project`、`stages`、`tasks`、`totals`、`notes`；这是输出，不是要提交的请求 JSON：
+
+| 字段 | 实际口径 |
+| --- | --- |
+| `stages[].kind`／`totals` | 四阶段分别汇总；顶层 `totals` 为项目合计 |
+| `tasks[].task/block/kind/status` | 关联任务、块、阶段及当前状态；状态为 `pending/assigned/completed/failed/cancelled` |
+| `tasks[].attempts`／`budget` | 指派尝试数／本件显式 token 预算；不是 HTTP 次数，也不是朝廷或官员剩余额度。预算为 `null` 表示未设本件限额，不等于免费或取消其他限额 |
+| `tasks[].recorded_execution_usage` | 该任务已有 `ModelUsage` 的执行用量小计；没有报告为 `null`，不是零 |
+| `tasks[].usage_reconciled` | 事件小计与任务累计是否一致；`true` 不证明覆盖全部调用或实际账单 |
+| 各层 `totals.recorded_usage` | 执行及已记录治理开销的已报告小计；没有可计记录为 `null`；有值也不能断言完整覆盖 |
+| `tasks_without_execution_usage` | 未见执行 `ModelUsage` 的任务数；不把这些任务填成零消耗 |
+| `usage_events`／`tool_calls`／`tool_failures` | 承办用量记录（`ModelUsage`）数／工具调用及失败数；不是 HTTP 请求数 |
+| `estimates`／`unpriced_usage` | 按币种分别列出的已定价估算小计／缺模型或费率的已报告用量；空估价不代表零费用 |
+| `tasks[].charges[]` | 按 `purpose` 与 `model` 汇总的 `usage`、`rate` 和 `estimated_cost`；未知模型／费率／费用分别可为 `null` |
+
+表中未写完整路径的合计字段均位于顶层、阶段或任务的 `totals` 内。执行开销按每条 `ModelUsage` 发生时最近的 `TaskAssigned.model` 归属，不用最后一次指派或当前模型冒充历史；治理开销按原始票拟、分办、都察院、复勘事件及廷议每条发言的模型归属。`charges[].purpose` 为 `execution/draft/split/censure/recheck/debate`，人读输出对应承办／票拟／分办／都察院审查／复勘／廷议。治理事件的零值可能是人工决定或缺失报告，不能当作已证实的零 token 调用；显式执行 `ModelUsage` 报告的零值则保留。
+
+`rate` 有值时含 `input_per_million`、`output_per_million`、`currency`、`source`，是**本次查询**用来估价的费率，不是执行时锁价。支持的 DeepSeek 名称使用内置 **2026-10 高峰未命中缓存价（未实时核价）**；其他模型可用当前 `ZIYUAN_LLM_PRICE`（每百万 token「输入,输出[,币种]」），不提供时单列未知费率。币种不相加、不换汇。服务端缓存命中、折扣、实际账单均未知，订阅额度不能据此认定为按 token 付费。
+
+`recorded_usage` 非空只证明有已报告小计；缺失报告、失败前未返回用量等不能补零，即使 `usage_reconciled=true` 也不能声称完整。任务数、指派尝试、用量记录、工具调用都不等于 HTTP 请求数；重试可共享 trace（追踪标识），历史完整 HTTP 数和精确耗时未知，分钟级时辰不能充当请求计时。人工用时与文学质量须另外记录。
+
+### 请求材料精简的窄边界
+
+运行时先执行已有 `abridge`（历史节略），再为当次发送给模型的请求另建一份材料副本，只处理**本次运行成功执行**的 `read_file`（读取文件）：参数字符串和完整返回字节必须完全相同，较早副本才可换成指向后续最新完整副本的短提示（仅短提示确实更短时替换）。保留工具调用／输出的 call ID（调用标识）配对；最新全文始终留在该请求内，不让模型猜测已丢失的材料。已节略的副本不拿来当相同全文折叠。
+
+不同参数、返回内容已变的重读、读取错误和其他工具的输出不精简；不是正文截断、跨文件摘要、按语义去重或记忆检索。替换只存在于发给模型的请求副本，**不写回原始历史（history）**，不改变原工具记录，也不改变既有节略阈值或保护规则。
+
+本地 HTTP 模拟服务的字节测量仅证明该固定场景发送的材料副本发生变化，不能按减少字节推算真实 token、费率、费用或小说收益；它不是付费模型或实际小说质量复验。预算与停止策略不变，不减少词义核对、朱批复核、两路审校或手工分批验收，不新增定稿门槛，也不自动启动下一块。兼容边界见[稳定性约定](stability.md#unreleased--14-第三批-c逐阶段用量账本与请求材料精简)。
+
 ## 遗留临时文件的清理
 
 准奏落盘时，紫垣在目标文件旁边先建一份租约 `.ziyuan-lease-<编号>`，再建临时文件 `.ziyuan-tmp-<进程序号>-<纳秒>-<计数>`，把新内容写进临时文件、刷盘，改名覆盖目标后才删掉租约。正常跑完一轮，两样都不留。

@@ -198,27 +198,39 @@ impl ModelCatalog for Catalog {
 /// 空闲时段与缓存命中都更便宜。不在价目中的模型用 `ZIYUAN_LLM_PRICE`（「输入,输出[,币种]」，
 /// 每百万 token），未设置则返回 `None`。
 pub fn price_for(model: &str) -> Option<Price> {
+    price_quote(model).map(|(price, _)| price)
+}
+
+/// Current estimation rate and its provenance, not a historical billing rate.
+pub fn price_quote(model: &str) -> Option<(Price, &'static str)> {
     let (input, output) = match model {
         "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => (2.0, 8.0),
         "deepseek-v4-pro" => (9.0, 27.0),
         _ => {
             return env::var("ZIYUAN_LLM_PRICE")
                 .ok()
-                .and_then(|s| parse_price(&s));
+                .and_then(|s| parse_price(&s))
+                .map(|price| (price, "ZIYUAN_LLM_PRICE（本次读取，非历史费率）"));
         }
     };
-    Some(Price {
-        input_per_million: input,
-        output_per_million: output,
-        currency: "元".into(),
-    })
+    Some((
+        Price {
+            input_per_million: input,
+            output_per_million: output,
+            currency: "元".into(),
+        },
+        "内置 DeepSeek 2026-10 高峰未命中缓存估价（未实时核价）",
+    ))
 }
 
 fn parse_price(spec: &str) -> Option<Price> {
     let mut parts = spec.split(',').map(str::trim);
-    let input = parts.next()?.parse().ok()?;
-    let output = parts.next()?.parse().ok()?;
+    let input: f64 = parts.next()?.parse().ok()?;
+    let output: f64 = parts.next()?.parse().ok()?;
     let currency = parts.next().filter(|c| !c.is_empty()).unwrap_or("元");
+    if !input.is_finite() || !output.is_finite() || input < 0.0 || output < 0.0 {
+        return None;
+    }
     Some(Price {
         input_per_million: input,
         output_per_million: output,
@@ -1077,6 +1089,13 @@ mod tests {
         assert_eq!(price.describe(usage), "约 6.0000 元");
         assert_eq!(parse_price("0.5,1.5,USD").unwrap().currency, "USD");
         assert!(parse_price("免费").is_none() && parse_price("1").is_none());
+        for invalid in ["NaN,1", "1,inf", "-1,2", "2,-0.1"] {
+            assert!(parse_price(invalid).is_none(), "{invalid}");
+        }
+        let (price, source) = price_quote("deepseek-v4-pro").unwrap();
+        assert_eq!(price.input_per_million, 9.0);
+        assert_eq!(price.output_per_million, 27.0);
+        assert!(source.contains("2026-10"));
     }
 
     #[test]

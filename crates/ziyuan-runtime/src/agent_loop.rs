@@ -364,6 +364,48 @@ pub const STEP_LIMIT_NOTE: &str = "〔步数用尽，据已查阅的内容回奏
 pub const UNCHECKED_SEND_BACK: &str = "发回重办：你尚未调用任何工具查阅，就已回奏。请先调用工具（如 read_file、search_code）查证，再按体例回奏；\
      确实无须查阅的，在「依据」中说明理由。";
 
+/// A request-only projection: history keeps the full outputs so abridging a later
+/// request can never leave a persistent pointer to an abridged material copy.
+/// Only successful reads executed in this run are eligible; arguments and fenced
+/// bytes must both match exactly. Never fold abridged heads of distinct files.
+fn compact_reads(messages: &[Message], reads: &[(usize, String)], nonce: &str) -> Vec<Message> {
+    let mut request = messages.to_vec();
+    for (position, (index, args)) in reads.iter().enumerate() {
+        let Message::ToolOutput { output, .. } = &messages[*index] else {
+            continue;
+        };
+        if guard::unfence(output, nonce).contains("〔节略") {
+            continue;
+        }
+        let later =
+            reads[position + 1..]
+                .iter()
+                .rev()
+                .find_map(|(next, next_args)| match &messages[*next] {
+                    Message::ToolOutput {
+                        call_id,
+                        output: next_output,
+                    } if args == next_args && output == next_output => Some(call_id),
+                    _ => None,
+                });
+        if let Some(call_id) = later {
+            let pointer = guard::fence(
+                &format!(
+                    "〔重复读取：相同 read_file 参数与完整返回字节；全文保留在后续工具调用 {call_id} 的输出中，请以该份全文为准。〕"
+                ),
+                nonce,
+            );
+            if pointer.len() < output.len() {
+                let Message::ToolOutput { output, .. } = &mut request[*index] else {
+                    unreachable!();
+                };
+                *output = pointer;
+            }
+        }
+    }
+    request
+}
+
 /// 从 `messages`（通常是 System + User）开始，循环调用模型与工具，直到模型给出最终答复。
 ///
 /// 工具输出是外来文书：以 `nonce` 为暗号包上边界（系统提示应含 [`guard::warning`]），
@@ -412,9 +454,11 @@ pub fn run_with_context(
         && !messages
             .iter()
             .any(|m| matches!(m, Message::ToolOutput { .. }));
+    let mut successful_reads = Vec::new();
     for _ in 0..max_steps {
         abridge(&mut messages, &specs, context_tokens, nonce);
-        match hooks.call(model, &messages, &specs)? {
+        let request = compact_reads(&messages, &successful_reads, nonce);
+        match hooks.call(model, &request, &specs)? {
             ModelTurn::Final(answer) if unchecked => {
                 unchecked = false;
                 messages.push(Message::Assistant(answer));
@@ -458,6 +502,9 @@ pub fn run_with_context(
                     let result = check_args(&tool.spec(), &call.args_json)
                         .and_then(|()| tool.execute(&call.args_json));
                     hooks.tool_invoked(&call.name, &call.args_json, result.is_ok());
+                    if call.name == "read_file" && result.is_ok() {
+                        successful_reads.push((messages.len(), call.args_json.clone()));
+                    }
                     let output = result.unwrap_or_else(|err| format!("tool error: {err}"));
                     for finding in guard::scan(&output, &[Threat::Hijack]) {
                         let source = format!("tool:{}", call.name);
@@ -476,7 +523,8 @@ pub fn run_with_context(
         "已用尽 {max_steps} 步，不能再调用工具。请就已查阅的内容按体例回奏，没查完的列入「未办之事」。"
     )));
     abridge(&mut messages, &[], context_tokens, nonce);
-    match hooks.call(model, &messages, &[]) {
+    let request = compact_reads(&messages, &successful_reads, nonce);
+    match hooks.call(model, &request, &[]) {
         Ok(ModelTurn::Final(answer)) => Ok(format!(
             "{STEP_LIMIT_NOTE}\n{}",
             guard::strip_fences(&answer, nonce)

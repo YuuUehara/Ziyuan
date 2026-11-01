@@ -19,6 +19,177 @@ use ziyuan_governance::{Court, founding_events};
 use ziyuan_runtime::{DemoBackend, Limits};
 use ziyuan_storage::{EventLog, EventStore};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn verification_http_readonly_strict_permissions_stale_and_history() {
+    fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, String> {
+        let mut result = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(files(&path));
+            } else {
+                result.insert(path.clone(), sha256_hex(&fs::read(path).unwrap()));
+            }
+        }
+        result
+    }
+    let mut readonly_changes = Vec::new();
+    for founded in [false, true] {
+        let (base, root) = start(&format!("verification-{founded}"), founded).await;
+        let p = project(
+            &root,
+            "人工语义复核",
+            "彼女は私を愛さなくてよい。\n\n五倍になった。\n",
+        );
+        let block = &p.chapters[0].blocks[0];
+        let paragraph = &block.paragraphs[0].id;
+        let base_route = format!("/text/{}/blocks/{}", p.id, block.block_id);
+        let route = format!("{base_route}/verification");
+        let evidence_route = format!("{base_route}/evidence");
+        assert_eq!(call(&base, &route, None, None).await.0, 401);
+        let before = files(&root);
+        let (code, empty) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(code, 200, "{empty}");
+        let after = files(&root);
+        readonly_changes.extend(
+            after
+                .iter()
+                .filter(|(path, hash)| before.get(*path) != Some(*hash))
+                .map(|(path, _)| path.clone()),
+        );
+        readonly_changes.extend(
+            before
+                .keys()
+                .filter(|path| !after.contains_key(*path))
+                .cloned(),
+        );
+        assert_eq!(empty["records"], json!([]));
+        assert!(
+            empty["paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["operator_reviewed"] == false)
+        );
+        let dir = root.join(block_dir_rel(&p.id, &block.block_id));
+        fs::create_dir_all(&dir).unwrap();
+        let first_translation = candidate(&p, &block.block_id);
+        fs::write(dir.join("zh.json"), &first_translation).unwrap();
+        let evidence = json!({"paragraph":paragraph, "quote":"彼女", "source":"https://example.invalid/dictionary", "locator":"見出し：彼女", "explanation":"主体を独立して確認", "context":"この段落の主語", "status":"tentative"});
+        assert_eq!(
+            call(&base, &evidence_route, Some(VIEWER), Some(evidence.clone()))
+                .await
+                .0,
+            403
+        );
+        let mut extra = evidence.clone();
+        extra["auto_fetch"] = json!(true);
+        assert_eq!(
+            call(&base, &evidence_route, Some(TOKEN), Some(extra))
+                .await
+                .0,
+            422
+        );
+        let mut invalid = evidence.clone();
+        invalid["status"] = json!("expert_verified");
+        assert_eq!(
+            call(&base, &evidence_route, Some(TOKEN), Some(invalid))
+                .await
+                .0,
+            422
+        );
+        let mut invalid = evidence.clone();
+        invalid["quote"] = json!("not in source");
+        let (code, error) = call(&base, &evidence_route, Some(TOKEN), Some(invalid)).await;
+        assert_eq!(code, 400, "{error}");
+        assert!(!error.to_string().contains(root.to_str().unwrap()));
+        let (code, saved_evidence) =
+            call(&base, &evidence_route, Some(TOKEN), Some(evidence.clone())).await;
+        assert_eq!(code, 200, "{saved_evidence}");
+        assert_eq!(saved_evidence["details"], evidence);
+        let (code, view) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(code, 200, "{view}");
+        let checks: Vec<_> = ["subject_speaker", "agency_negation", "quantity", "timeline", "names_relations", "humor_additions"].into_iter().map(|category| json!({"category":category, "disposition":"pending", "resolution":"unchecked", "note":"", "advice":[], "evidence":[]})).collect();
+        let mut input =
+            json!({"paragraph":paragraph, "fingerprint":view["fingerprint"], "checks":checks});
+        input["checks"][0]["evidence"] = json!([saved_evidence["id"]]);
+        assert_eq!(
+            call(&base, &route, Some(VIEWER), Some(input.clone()))
+                .await
+                .0,
+            403
+        );
+        let mut bad = input.clone();
+        bad["auto_review"] = json!(true);
+        assert_eq!(call(&base, &route, Some(TOKEN), Some(bad)).await.0, 422);
+        let mut bad = input.clone();
+        bad["checks"][0]["extra"] = json!(true);
+        assert_eq!(call(&base, &route, Some(TOKEN), Some(bad)).await.0, 422);
+        let mut bad = input.clone();
+        bad["checks"][0]["resolution"] = json!("accepted");
+        assert_eq!(call(&base, &route, Some(TOKEN), Some(bad)).await.0, 422);
+        let mut bad = input.clone();
+        bad["checks"][0]["advice"] = json!([{"task":999,"quote":"invented suggestion"}]);
+        assert_eq!(call(&base, &route, Some(TOKEN), Some(bad)).await.0, 400);
+        let mut bad = input.clone();
+        bad["checks"][0]["evidence"] = json!([999]);
+        assert_eq!(call(&base, &route, Some(TOKEN), Some(bad)).await.0, 400);
+        let (code, first) = call(&base, &route, Some(TOKEN), Some(input.clone())).await;
+        assert_eq!(code, 200, "{first}");
+        assert_eq!(first["checks"], input["checks"]);
+        let (_, recorded) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(recorded["records"][0]["current"], true);
+        assert_eq!(recorded["paragraphs"][0]["operator_reviewed"], false);
+        assert_eq!(recorded["paragraphs"][0]["opinions_handled"], false);
+        // Concurrent/replayed writes must not overwrite or silently duplicate history.
+        assert_eq!(
+            call(&base, &route, Some(TOKEN), Some(input.clone()))
+                .await
+                .0,
+            400
+        );
+        input["fingerprint"] = recorded["fingerprint"].clone();
+        let mut revised: Value = serde_json::from_str(&first_translation).unwrap();
+        revised["paragraphs"][0]["text"] = json!("她不必爱我。");
+        fs::write(dir.join("zh.json"), serde_json::to_vec(&revised).unwrap()).unwrap();
+        assert_eq!(
+            call(&base, &route, Some(TOKEN), Some(input.clone()))
+                .await
+                .0,
+            400
+        );
+        let (_, stale) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(stale["records"][0]["record"], first);
+        assert_eq!(stale["records"][0]["current"], false);
+        assert_eq!(stale["paragraphs"][0]["operator_reviewed"], false);
+        input["fingerprint"] = stale["fingerprint"].clone();
+        input["checks"][0]["disposition"] = json!("accepted");
+        input["checks"][0]["resolution"] = json!("resolved");
+        input["checks"][0]["note"] = json!("独立核对原文：她是主语；其余项目未查");
+        let (code, second) = call(&base, &route, Some(TOKEN), Some(input)).await;
+        assert_eq!(code, 200, "{second}");
+        assert_eq!(second["previous"], first["id"]);
+        let before = files(&root);
+        let (_, history) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(files(&root), before);
+        assert_eq!(history["records"].as_array().unwrap().len(), 2);
+        assert_eq!(history["records"][0]["record"], first);
+        assert_eq!(history["records"][1]["record"], second);
+        assert_eq!(
+            history["records"][1]["change"]["before"],
+            first["translation"]
+        );
+        assert_eq!(history["records"][1]["change"]["after"], "她不必爱我。");
+        assert_eq!(history["evidence"][0], saved_evidence);
+        assert_eq!(history["paragraphs"][0]["operator_reviewed"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+    assert!(
+        readonly_changes.is_empty(),
+        "GET must not create or rewrite files: {readonly_changes:?}"
+    );
+}
+
 async fn export_get(base: &str, path: &str, token: &str) -> (u16, String, String, Vec<u8>) {
     let url = format!("{base}/api{path}");
     let token = format!("Bearer {token}");

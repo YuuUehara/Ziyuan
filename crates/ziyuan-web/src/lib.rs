@@ -210,6 +210,14 @@ fn router_for(app: AppState) -> Router {
         .route("/text/{project}/memory/search", get(text::memory_search))
         .route("/text/{project}/blocks/{block}", get(text::block))
         .route(
+            "/text/{project}/blocks/{block}/verification",
+            get(text::verification).post(text::verification_record),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/evidence",
+            post(text::evidence_add),
+        )
+        .route(
             "/text/{project}/context/approve",
             post(text::approve_context),
         )

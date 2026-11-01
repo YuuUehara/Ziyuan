@@ -522,6 +522,17 @@
   .text-notes-layout > div { min-width: 0; }
   #text-zhupi-input { min-height: 60px; }
   #text-zhupi-form label { margin-top: 0; }
+  #verification-panel { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+  #verification-panel .row, #text-export .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 10px; align-items: end; }
+  #verification-panel label, #text-export .row > label { display: grid; gap: 4px; min-width: 0; }
+  #verification-panel .row > label, #text-export .row > label { margin: 0; }
+  #verification-panel input, #verification-panel select, #verification-panel textarea { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+  #verification-panel input, #verification-panel select, #text-export select { min-height: 36px; min-width: 0; }
+  #verification-panel fieldset { min-width: 0; border: 1px solid var(--line); margin: 12px 0; padding: 10px; }
+  #verification-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+  #verification-panel dl { margin: 8px 0; }
+  #verification-panel dt { color: var(--muted); margin-top: 8px; }
+  #verification-panel dd { margin: 0; white-space: pre-wrap; }
   .text-memory { min-width: 0; max-width: 100%; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
   .text-memory .row, .text-memory input { min-width: 0; max-width: 100%; }
   #memory-search-form { flex-wrap: wrap; }
@@ -1384,12 +1395,12 @@ function renderExport() {
   const d = exportState(), outline = textProject.outline || [];
   const prefix = `export-${textProjectId}`;
   host.innerHTML = `<h3>章节导出</h3>
-    <p class="hint">下载 TAR：定稿含 TXT / Markdown 与 manifest.json 清单；原件按档案文件去重，不转换格式。选择按项目顺序导出。未定稿或失效章节会使整批定稿导出被拒绝，不改审批或材料。</p>
+    <p class="hint">下载为 TAR 归档包，内含所选文件和 manifest.json 校验清单。原件保留原始文件；定稿可选 TXT 或 Markdown。章节按项目顺序导出；任何一章未定稿或已失效，整批定稿都不会导出。</p>
     <div class="actions"><button type="button" class="small" data-view data-export-all ${d.busy ? "disabled" : ""}>全选章节</button></div>
     <div class="text-note-list checks" role="group" aria-label="导出章节">${outline.map((c, i) => `<label><input type="checkbox" data-view data-keep data-export-chapter="${esc(c.chapter)}" id="${esc(prefix)}-chapter-${i}" ${d.chapters === null || d.chapters.includes(c.chapter) ? "checked" : ""} ${d.busy ? "disabled" : ""}> ${esc(c.title || c.chapter)}</label>`).join("")}</div>
-    <div class="row"><label class="shrink" for="${esc(prefix)}-format">格式</label><select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option></select>
-    <label class="shrink" for="${esc(prefix)}-layout">编排</label><select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></div>
-    <p class="hint">格式与编排仅用于定稿。转换可能损失格式信息；下载前会预览文件及转换警告，请确认后继续。实际下载重新检查定稿与材料，不盲信预览。</p>
+    <div class="row"><label for="${esc(prefix)}-format">定稿格式<select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option></select></label>
+    <label for="${esc(prefix)}-layout">定稿编排<select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></label></div>
+    <p class="hint">格式与编排不影响原件。先查看文件列表和格式转换警告，再确认下载；下载时仍会重新检查定稿和材料。同一原件若包含多章，只打包一次，取回时可能包含未选章节。</p>
     <div class="actions"><button type="button" class="small" data-view data-export-kind="original" ${d.busy || !outline.length ? "disabled" : ""}>取回原件 TAR</button><button type="button" class="small" data-view data-export-kind="finished" ${d.busy || !outline.length ? "disabled" : ""}>导出定稿 TAR</button></div>
     <p class="hint" role="status" aria-live="polite">${esc(d.message)}</p>
     ${d.preview ? `<div class="text-scroll"><h4>下载前预览 · ${d.kind === "original" ? "归档原件" : "有效定稿"}</h4><ul>${d.preview.files.map((f) => `<li>${esc(f.name)}（${f.length} 字节）</li>`).join("")}<li>manifest.json（校验清单）</li></ul>${(d.preview.warnings || []).map((w) => `<p class="hint">${esc(w)}</p>`).join("")}<details class="text-material"><summary>查看校验清单</summary><pre>${esc(JSON.stringify(d.preview.manifest, null, 2))}</pre></details></div><div class="actions"><button type="button" class="small" data-view data-export-confirm ${d.busy ? "disabled" : ""}>确认下载 TAR</button><button type="button" class="small" data-view data-export-cancel ${d.busy ? "disabled" : ""}>取消</button></div>` : ""}`;
@@ -1621,9 +1632,158 @@ async function loadTextProject() {
   history.replaceState(null, "", textHash());
   await loadTextBlock();
 }
+// Verification forms have their own persistent DOM: polling updates facts, never local input.
+const semanticCategories = {
+  subject_speaker: {title:"言行归属", note:"核对谁在说话、谁在做事，勿张冠李戴。", example:"“清替我换钱”，不是“我替清换钱”。"},
+  agency_negation: {title:"事理正反", note:"核对动作方向与肯定、否定，勿将原意颠倒。", example:"“借给他”不是“向他借”；“并非主任”不能漏掉“并非”。"},
+  quantity: {title:"数目分寸", note:"核对金额、人数、约数与倍数，勿增减失度。", example:"“约三圆”不宜写成“恰好三圆”。"},
+  timeline: {title:"前后次第", note:"核对时间先后与事情是否已经发生。", example:"“来年暑假回去”，不是“今年暑假回过”。"},
+  names_relations: {title:"称谓名分", note:"核对人名、职务、昵称与人物关系。", example:"“副校长”不可误作“数学主任”。"},
+  humor_additions: {title:"谐趣留白", note:"核对笑点、反话与含蓄之处，勿将解释写成原文。", example:"人物本来不懂一个绰号，不能替他补上一段词典释义。"},
+};
+const verificationDispositions = {accepted:"接受", rejected:"驳回", pending:"待查", not_applicable:"不适用"};
+const verificationResolutions = {unchecked:"未检查", resolved:"已解决", unresolved:"未解决", not_applicable:"不适用"};
+const evidenceStates = {tentative:"暂定", confirmed:"已确认"};
+const evidenceFields = {quote:"原文短引", source:"出处（网址或书目信息）", locator:"出处位置（词条、页码等）", explanation:"词义核对说明", context:"适用语境"};
+const verificationDrafts = new Map();
+let verificationScope = "", verificationView = null, verificationError = "", verificationRequest = 0;
+let verificationParagraph = "", verificationFormKey = "", verificationBusy = false;
+function currentVerificationScope() { return `${textProjectId}/${textBlockId}`; }
+function verificationBase() { return `/text/${encodeURIComponent(textProjectId)}/blocks/${encodeURIComponent(textBlockId)}`; }
+async function loadVerification() {
+  const scope = currentVerificationScope(), request = ++verificationRequest;
+  if (verificationScope !== scope) {
+    verificationScope = scope; verificationView = null; verificationParagraph = ""; verificationFormKey = "";
+  }
+  verificationError = "";
+  renderVerification();
+  try {
+    const view = await api(verificationBase() + "/verification");
+    if (scope !== currentVerificationScope() || request !== verificationRequest) return;
+    verificationView = view;
+  } catch (e) {
+    if (scope !== currentVerificationScope() || request !== verificationRequest) return;
+    verificationError = e.message;
+  }
+  renderVerification();
+}
+function verificationDraft() {
+  const key = `${verificationScope}/${verificationParagraph}`;
+  if (!verificationDrafts.has(key)) verificationDrafts.set(key, {
+    fingerprint: verificationView.fingerprint,
+    checks: Object.keys(semanticCategories).map((category) => ({category, disposition: "pending", resolution: "unchecked", note: "", task: "", quote: "", evidence: ""})),
+    evidence: {quote: "", source: "", locator: "", explanation: "", context: "", status: "tentative"},
+  });
+  return verificationDrafts.get(key);
+}
+function verificationOptions(values, selected) {
+  return Object.entries(values).map(([value, label]) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
+}
+function renderVerificationForm() {
+  if (!verificationView || !verificationParagraph) return;
+  const d = verificationDraft();
+  $("verification-form").innerHTML = `<div class="write"><h4>逐段勘校</h4>
+    <p class="hint">六事逐项勘校，记录所据与存疑。此为人工核对记录，不代准奏，亦非御览定稿。</p>
+    <p class="hint">每次保存本段全部六项；意见处理与问题状态分开填写。模型建议不会自动算作已检查，保存记录也不代表专家终审。</p>
+    ${d.checks.map((c, i) => `<fieldset><legend>${esc(semanticCategories[c.category].title)}</legend>
+      <p class="hint">${esc(semanticCategories[c.category].note)}</p><p class="hint">例：${esc(semanticCategories[c.category].example)}</p>
+      <div class="row"><label>意见处理<select data-vcheck="${i}" data-vfield="disposition">${verificationOptions(verificationDispositions, c.disposition)}</select></label><label>问题状态<select data-vcheck="${i}" data-vfield="resolution">${verificationOptions(verificationResolutions, c.resolution)}</select></label></div>
+      <label>理由／核对说明<textarea data-vcheck="${i}" data-vfield="note">${esc(c.note)}</textarea></label>
+      <div class="row"><label>审校诏令号（可选）<input type="text" inputmode="numeric" data-vcheck="${i}" data-vfield="task" value="${esc(c.task)}"></label><label>关联词证编号（逗号分隔，可选）<input type="text" data-vcheck="${i}" data-vfield="evidence" value="${esc(c.evidence)}"></label></div>
+      <label>审校意见原句（填写诏令号时必填）<textarea data-vcheck="${i}" data-vfield="quote">${esc(c.quote)}</textarea></label>
+    </fieldset>`).join("")}
+    <div class="actions"><button type="button" class="small" id="verification-save">保存本段六项复核</button><button type="button" class="small" id="verification-refresh">已读最新材料，继续核对</button></div>
+    <h4>添加词证</h4><p class="hint">词证是词义核对的出处和说明。网址只作记录，不自动打开；保存后保留原记录，补充说明请另存一条。</p>
+    ${Object.entries(evidenceFields).map(([key, label]) => `<label>${label}<textarea data-vevidence="${key}">${esc(d.evidence[key])}</textarea></label>`).join("")}
+    <label>词证状态<select data-vevidence="status">${verificationOptions(evidenceStates, d.evidence.status)}</select></label><button type="button" class="small" id="evidence-save">保存词证</button></div>`;
+}
+function renderVerification() {
+  let panel = $("verification-panel");
+  if (!panel) {
+    panel = document.createElement("section"); panel.id = "verification-panel"; panel.className = "text-material";
+    $("text-materials").after(panel);
+    panel.innerHTML = `<h3>词证与逐段勘校</h3><p class="hint">记录词义依据，逐段核对译文。记录只保存在本地，不自动纳入已批准上下文或发送给模型；保存勘校记录不会自动准奏、御览定稿或启动下一块。</p><label>勘校段落<select id="verification-paragraph" data-view></select></label><div id="verification-message" role="status"></div><div id="verification-facts"></div><div id="verification-form"></div>`;
+    const saveInput = (e) => {
+      if (!verificationView || !verificationParagraph) return;
+      const d = verificationDraft(), el = e.target;
+      if (el.dataset.vcheck !== undefined) d.checks[Number(el.dataset.vcheck)][el.dataset.vfield] = el.value;
+      if (el.dataset.vevidence) d.evidence[el.dataset.vevidence] = el.value;
+    };
+    panel.addEventListener("input", saveInput);
+    panel.addEventListener("change", saveInput);
+    panel.addEventListener("change", (e) => {
+      if (e.target.id !== "verification-paragraph") return;
+      verificationParagraph = e.target.value; verificationFormKey = ""; renderVerification();
+    });
+    panel.addEventListener("click", verificationClick);
+  }
+  panel.hidden = !textProjectId || !textBlockId;
+  if (verificationScope !== currentVerificationScope() || !verificationView) {
+    $("verification-facts").textContent = verificationError || "正在读取复核材料…";
+    delete $("verification-facts").dataset.signature;
+    $("verification-form").replaceChildren(); verificationFormKey = "";
+    $("verification-paragraph").replaceChildren(); return;
+  }
+  const v = verificationView;
+  if (!v.source.paragraphs.some((p) => p.id === verificationParagraph)) verificationParagraph = v.source.paragraphs[0]?.id || "";
+  $("verification-paragraph").innerHTML = v.source.paragraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === verificationParagraph ? "selected" : ""}>${esc(p.id)}</option>`).join("");
+  if (!verificationParagraph) return;
+  const d = verificationDraft(), stale = d.fingerprint !== v.fingerprint;
+  $("verification-message").textContent = verificationError || (stale ? "材料或复核记录已更新，暂不能保存。输入已保留：请先阅读最新内容，再点「已读最新材料，继续核对」。" : "填写后请主动保存。自动刷新或切换段落不会清空输入；刷新整个页面或关闭页面会丢失未保存的内容。");
+  const paragraph = verificationParagraph;
+  const info = v.paragraphs.find((p) => p.paragraph === paragraph);
+  const text = (block) => block?.paragraphs.find((p) => p.id === paragraph)?.text || "（无）";
+  const facts = $("verification-facts"), signature = JSON.stringify([verificationScope, paragraph, v, textBlock?.status]);
+  if (facts.dataset.signature !== signature) {
+    facts.innerHTML = `<p>结构检查：${v.structure ? (v.structure.valid ? "通过（不判断译文对错）" : "未通过") : "尚无译稿"} · 关联意见：${info?.opinions_handled ? "已处理" : "未处理"} · 人工复核：${info?.operator_reviewed ? "已复核" : "未复核"} · 御览定稿：${textBlock?.status?.state?.state === "finalized" ? "有效" : "尚无有效定稿"}${info?.latest && !info.current ? " · 旧记录须重新核对" : ""}</p>
+      <p class="text-para">原文：${esc(text(v.source))}</p><p class="text-para">现行译文：${esc(text(v.translation))}</p>
+      <details><summary>本段朱批 · 第 ${esc(v.zhupi.version)} 版</summary><pre>${esc(v.zhupi.items[paragraph]?.text || "本段没有朱批。")}</pre></details>
+      <h4>模型审校意见（仅供参考）</h4>${v.reviews.map((r) => `<details><summary>诏令 #${esc(r.task)} · ${esc({review_fidelity:"忠实审校", review_style:"文风审校"}[r.kind])}</summary><pre>${esc(r.text)}</pre></details>`).join("") || "暂无模型审校意见"}
+      <h4>已批准词表提示</h4><p class="hint">这里只核对字面用词，是否适合本段仍需你判断。</p>${v.hints.filter((h) => h.paragraph === paragraph).map((h) => `<p>${esc(h.source)} → ${h.allowed.map(esc).join(" / ")} · 适用范围：${esc(h.scope || "未注明")} · 说明：${esc(h.note || "无")} · ${esc(h.message)}</p>`).join("") || "暂无提示"}
+      <h4>本块词证</h4>${v.evidence.map((e) => `<details><summary>词证 #${esc(e.id)} · ${esc(e.details.paragraph)} · ${esc(evidenceStates[e.details.status])}</summary><dl>${Object.entries(evidenceFields).map(([key, label]) => `<dt>${esc(label)}</dt><dd>${esc(e.details[key])}</dd>`).join("")}</dl></details>`).join("") || "尚无词证"}
+      <h4>复核历史（保留原记录）</h4>${v.records.map((r) => `<details><summary>复核 #${esc(r.record.id)} · ${esc(r.record.paragraph)} · ${r.current ? "对应当前材料" : "旧材料 · 需重新核对"} · ${r.record.previous ? "前次 #" + esc(r.record.previous) : "首次记录"}</summary>
+        <p>${esc(r.reason || "")}</p><p class="text-para">记录时的原文：${esc(r.record.source)}</p><p class="text-para">记录时的译文：${esc(r.record.translation)}</p><p class="text-para">记录时的朱批：${esc(r.record.zhupi || "无")}</p>
+        ${r.change ? `<p class="text-para">实际修订前：${esc(r.change.before)}</p><p class="text-para">实际修订后：${esc(r.change.after)}</p>` : ""}
+        <ul class="text-glossary">${r.record.checks.map((c) => `<li><b>${esc(semanticCategories[c.category].title)}</b> · 意见处理：${esc(verificationDispositions[c.disposition])} · 问题状态：${esc(verificationResolutions[c.resolution])}<p class="text-para">${esc(c.note || "未填写核对说明")}</p>${c.advice.map((a) => `<p class="text-para">审校诏令 #${esc(a.task)}：${esc(a.quote)}</p>`).join("")}${c.evidence.length ? `<p>关联词证：${c.evidence.map((id) => "#" + esc(id)).join("、")}</p>` : ""}</li>`).join("")}</ul>
+      </details>`).join("") || "尚无复核记录，不能视为已检查"}`;
+    facts.insertAdjacentHTML("afterbegin", `<p>本段最新复核：${info?.latest ? "#" + esc(info.latest) : "尚无记录"} · 尚待核对：${esc(info?.unresolved ?? 6)} 项</p>`);
+    facts.dataset.signature = signature;
+  }
+  const key = `${verificationScope}/${paragraph}`;
+  if (key !== verificationFormKey) { verificationFormKey = key; renderVerificationForm(); }
+  panel.querySelectorAll("button").forEach((b) => b.disabled = verificationBusy || (b.id === "verification-save" && stale));
+}
+async function verificationClick(e) {
+  const action = e.target.id;
+  if (!["verification-save", "verification-refresh", "evidence-save"].includes(action) || verificationBusy || document.body.classList.contains("viewer")) return;
+  const scope = currentVerificationScope(), d = verificationDraft();
+  if (action === "verification-refresh") { d.fingerprint = verificationView.fingerprint; renderVerification(); return; }
+  let body, endpoint;
+  try {
+    if (action === "evidence-save") { body = {paragraph: verificationParagraph, ...d.evidence}; endpoint = "/evidence"; }
+    else {
+      if (d.fingerprint !== verificationView.fingerprint) throw new Error("材料或记录已更新，请先阅读最新内容，再点「已读最新材料，继续核对」。");
+      body = {paragraph: verificationParagraph, fingerprint: d.fingerprint, checks: d.checks.map((c) => {
+        if (!!c.task.trim() !== !!c.quote.trim() || (c.task && (!/^[1-9]\d*$/.test(c.task) || !Number.isSafeInteger(Number(c.task))))) throw new Error("请同时填写审校诏令号和该条意见的原句；诏令号须为正整数。");
+        const ids = c.evidence.trim() ? c.evidence.split(",").map((n) => n.trim()) : [];
+        if (ids.some((n) => !/^[1-9]\d*$/.test(n) || !Number.isSafeInteger(Number(n)))) throw new Error("词证编号须为正整数；多个编号用英文逗号分隔，如 1,2。");
+        return {category:c.category, disposition:c.disposition, resolution:c.resolution, note:c.note, advice:c.task ? [{task:Number(c.task), quote:c.quote}] : [], evidence:ids.map(Number)};
+      })}; endpoint = "/verification";
+    }
+    verificationBusy = true; verificationError = ""; renderVerification();
+    await api(verificationBase() + endpoint, body);
+    if (scope !== currentVerificationScope()) return;
+    toast(action === "evidence-save" ? "词证已保存；未自动纳入已批准上下文，也未发送给模型。" : "复核记录已保存；不会自动解决问题或御览定稿。");
+    // Deliberately retain both forms; never infer human review from successful persistence.
+    await loadVerification();
+  } catch (error) {
+    if (scope === currentVerificationScope()) verificationError = error.message;
+  } finally { verificationBusy = false; if (scope === currentVerificationScope()) renderVerification(); }
+}
 async function loadTextBlock() {
   if (!textProjectId || !textBlockId) return;
   const project = textProjectId, block = textBlockId;
+  loadVerification();
   textError = null;
   try {
     const loaded = await api(`/text/${encodeURIComponent(project)}/blocks/${encodeURIComponent(block)}`);
@@ -1875,6 +2035,7 @@ function renderTextNow() {
     }
   }
   $("text-materials").innerHTML = materials.join("");
+  renderVerification();
   // 与 text status 的下一步一致：执行中、待准奏时不再下诏或定稿；定稿后先退回重修，才能初译或修订。
   const kind = b && b.status && b.status.state && b.status.state.state;
   const blockedBy = {

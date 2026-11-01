@@ -1947,3 +1947,393 @@ fn selected_references_reject_stale_confirmation_and_count_full_utf8_material() 
         "must exercise the exact public byte boundary"
     );
 }
+
+fn verification_checks(category: SemanticCategory, resolution: Resolution) -> Vec<SemanticCheck> {
+    [
+        SemanticCategory::SubjectSpeaker,
+        SemanticCategory::AgencyNegation,
+        SemanticCategory::Quantity,
+        SemanticCategory::Timeline,
+        SemanticCategory::NamesRelations,
+        SemanticCategory::HumorAdditions,
+    ]
+    .into_iter()
+    .map(|c| SemanticCheck {
+        category: c,
+        disposition: if c == category {
+            Disposition::Accepted
+        } else {
+            Disposition::NotApplicable
+        },
+        resolution: if c == category {
+            resolution
+        } else {
+            Resolution::NotApplicable
+        },
+        note: if c == category {
+            "已对照原文核查此项，修订解决情况另记"
+        } else {
+            "本次问题与此项无关，未据此判断整段质量"
+        }
+        .into(),
+        advice: Vec::new(),
+        evidence: Vec::new(),
+    })
+    .collect()
+}
+
+#[test]
+fn verification_preserves_opinions_zhupi_and_revision_differences_without_a_signoff_gate() {
+    let fx = Fx::new("verification-loop");
+    let t = fx.t();
+    let mut s = fx.session();
+    let writer = translated(&fx, &mut s, B1);
+    s.apply_changes(writer, &fx.root, vec![]).unwrap();
+    let reviews = s.issue_review(&fx.root, &fx.project, B1).unwrap();
+    complete(
+        &mut s,
+        reviews[0].id,
+        vec![],
+        "第1段请核对主语，勿把清的动作归给主人公。",
+    );
+    complete(&mut s, reviews[1].id, vec![], "保留叙述者的自嘲。");
+    let paragraph = fx.block(B1).paragraphs[0].id.clone();
+    let evidence = t
+        .add_evidence(
+            &fx.project,
+            B1,
+            &EvidenceInput {
+                paragraph: paragraph.clone(),
+                quote: "第1段".into(),
+                source: "本地词义核对手册".into(),
+                locator: "主语条目 §2".into(),
+                explanation: "核对动作的实际发出者".into(),
+                context: "本段叙述视角，不推及其余章节".into(),
+                status: EvidenceStatus::Tentative,
+            },
+        )
+        .unwrap();
+    let initial = t.verification(Some(s.court()), &fx.project, B1).unwrap();
+    assert!(
+        initial
+            .paragraphs
+            .iter()
+            .all(|p| !p.operator_reviewed && !p.opinions_handled && p.latest.is_none())
+    );
+    assert_eq!(initial.writer_task, Some(writer.0));
+    assert_eq!(initial.reviews[0].writer_task, Some(writer.0));
+    let mut checks = verification_checks(SemanticCategory::SubjectSpeaker, Resolution::Unresolved);
+    checks[0].advice.push(AdviceLink {
+        task: reviews[0].id.0,
+        quote: "第1段请核对主语".into(),
+    });
+    checks[0].evidence.push(evidence.id);
+    let request = VerificationInput {
+        paragraph: paragraph.clone(),
+        fingerprint: initial.fingerprint,
+        checks,
+    };
+    let first = t
+        .record_verification(Some(s.court()), &fx.project, B1, &request)
+        .unwrap();
+    let pending = t.verification(Some(s.court()), &fx.project, B1).unwrap();
+    assert!(pending.paragraphs[0].opinions_handled);
+    assert!(!pending.paragraphs[0].operator_reviewed);
+    assert_eq!(pending.paragraphs[0].unresolved, 1);
+    assert!(pending.records[0].current);
+    // Existing finalization deliberately does NOT depend on semantic checklist completion.
+    s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+    s.reopen_translation(&fx.root, &fx.project, B1, "主语仍须修订")
+        .unwrap();
+    t.set_zhupi(&fx.project, B1, &paragraph, "核对动作的施受，保留否定")
+        .unwrap();
+    let old = t.verification(Some(s.court()), &fx.project, B1).unwrap();
+    assert!(!old.records[0].current);
+    assert_eq!(old.records[0].record, first);
+    assert!(
+        t.record_verification(Some(s.court()), &fx.project, B1, &request)
+            .is_err()
+    );
+    let revision = s.issue_revise(&fx.root, &fx.project, B1).unwrap();
+    let corrected = fx.candidate(B1, |ps| ps[0].text = "清的动作，不是主人公的。".into());
+    complete(
+        &mut s,
+        revision.id,
+        vec![fx.zh_change(B1, corrected)],
+        "修订完成不是操作者验收",
+    );
+    s.apply_changes(revision.id, &fx.root, vec![]).unwrap();
+    let fresh = t.verification(Some(s.court()), &fx.project, B1).unwrap();
+    assert!(fresh.paragraphs.iter().all(|p| !p.operator_reviewed));
+    let mut checks = request.checks.clone();
+    checks[0].resolution = Resolution::Resolved;
+    checks[0].note = "已对照实际修订前后文字核实主语；不是仅据模型声称".into();
+    let second = t
+        .record_verification(
+            Some(s.court()),
+            &fx.project,
+            B1,
+            &VerificationInput {
+                paragraph,
+                fingerprint: fresh.fingerprint,
+                checks,
+            },
+        )
+        .unwrap();
+    assert_eq!(second.previous, Some(first.id));
+    assert_eq!(second.snapshot.writer_task, Some(revision.id.0));
+    assert_eq!(second.zhupi.as_deref(), Some("核对动作的施受，保留否定"));
+    let after_restart = fx
+        .t()
+        .verification(Some(fx.session().court()), &fx.project, B1)
+        .unwrap();
+    assert!(after_restart.paragraphs[0].operator_reviewed);
+    assert!(!after_restart.records[0].current);
+    assert!(after_restart.records[1].current);
+    assert_eq!(
+        after_restart.records[1].change,
+        Some(TranslationChange {
+            before: "译：第1段の文。".into(),
+            after: "清的动作，不是主人公的。".into(),
+        })
+    );
+    // Neither model-written "completed" nor this paragraph's checklist implies batch-wide review.
+    assert!(
+        after_restart.paragraphs[1..]
+            .iter()
+            .all(|p| !p.operator_reviewed)
+    );
+    t.ensure_context_draft(&fx.project).unwrap();
+    t.approve_context(&fx.project).unwrap();
+    assert!(
+        !t.verification(Some(s.court()), &fx.project, B1)
+            .unwrap()
+            .records[1]
+            .current
+    );
+}
+
+#[test]
+fn verification_semantic_samples_keep_pending_and_rejected_evidence_until_explicit_recheck() {
+    let mut fx = Fx::new("semantic-samples");
+    // Minimal original examples: expectations are independent bilingual judgments, not machine rules.
+    let samples = [
+        (
+            "一円札を銀貨に換えた。",
+            "把银币换成一圆纸钞。",
+            "把一圆纸钞换成银币。",
+            SemanticCategory::AgencyNegation,
+        ),
+        (
+            "清はおれを可愛がらなくてもよかった。",
+            "我不必疼清。",
+            "清本不必疼我。",
+            SemanticCategory::SubjectSpeaker,
+        ),
+        (
+            "合計は五倍だ。",
+            "总数增加了五倍。",
+            "总数是原来的五倍。",
+            SemanticCategory::Quantity,
+        ),
+        (
+            "狸が校長だ。",
+            "狐狸是校长。",
+            "狸是校长。",
+            SemanticCategory::NamesRelations,
+        ),
+        (
+            "教頭は数学主任ではない。",
+            "教头就是数学主任。",
+            "教头并不是数学主任。",
+            SemanticCategory::AgencyNegation,
+        ),
+        (
+            "うらなりという意味をおれは知らない。",
+            "我知道蔫瓜是藤梢晚结的南瓜。",
+            "我不知道蔫瓜是什么意思。",
+            SemanticCategory::HumorAdditions,
+        ),
+    ];
+    let source = fx.root.join("semantic.txt");
+    fs::write(
+        &source,
+        samples.iter().map(|s| s.0).collect::<Vec<_>>().join("\n\n"),
+    )
+    .unwrap();
+    let p = fx
+        .t()
+        .texts()
+        .create(NewProject {
+            title: "最小语义反例".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    fx.t().texts().import(&p.id, &[source]).unwrap();
+    fx.project = p.id;
+    let t = fx.t();
+    t.export(&fx.project, B1).unwrap();
+    let mut candidate = fx.block(B1);
+    for (p, sample) in candidate.paragraphs.iter_mut().zip(samples) {
+        p.text = sample.1.into();
+    }
+    fs::write(fx.zh_path(B1), candidate.serialized().unwrap()).unwrap();
+    let initial = t.verification(None, &fx.project, B1).unwrap();
+    assert!(initial.structure.as_ref().unwrap().valid);
+    assert!(initial.paragraphs.iter().all(|p| !p.operator_reviewed));
+    for (p, sample) in candidate.paragraphs.iter().zip(samples) {
+        let view = t.verification(None, &fx.project, B1).unwrap();
+        let mut checks = verification_checks(sample.3, Resolution::Unresolved);
+        // A rejected model suggestion remains recorded; rejection itself is not resolution.
+        if sample.3 == SemanticCategory::HumorAdditions {
+            checks.last_mut().unwrap().disposition = Disposition::Rejected;
+            checks.last_mut().unwrap().resolution = Resolution::Unchecked;
+        }
+        t.record_verification(
+            None,
+            &fx.project,
+            B1,
+            &VerificationInput {
+                paragraph: p.id.clone(),
+                fingerprint: view.fingerprint,
+                checks,
+            },
+        )
+        .unwrap();
+    }
+    for (p, sample) in candidate.paragraphs.iter_mut().zip(samples) {
+        p.text = sample.2.into();
+    }
+    fs::write(fx.zh_path(B1), candidate.serialized().unwrap()).unwrap();
+    let changed = t.verification(None, &fx.project, B1).unwrap();
+    assert!(changed.records.iter().all(|r| !r.current));
+    assert!(changed.paragraphs.iter().all(|p| !p.operator_reviewed));
+    for (p, sample) in candidate.paragraphs.iter().zip(samples) {
+        let view = t.verification(None, &fx.project, B1).unwrap();
+        t.record_verification(
+            None,
+            &fx.project,
+            B1,
+            &VerificationInput {
+                paragraph: p.id.clone(),
+                fingerprint: view.fingerprint,
+                checks: verification_checks(sample.3, Resolution::Resolved),
+            },
+        )
+        .unwrap();
+    }
+    let checked = t.verification(None, &fx.project, B1).unwrap();
+    assert!(checked.paragraphs.iter().all(|p| p.operator_reviewed));
+    for (view, sample) in checked.records[6..].iter().zip(samples) {
+        assert_eq!(view.change.as_ref().unwrap().before, sample.1);
+        assert_eq!(view.change.as_ref().unwrap().after, sample.2);
+        assert!(view.current);
+    }
+    assert_eq!(
+        checked.records[5].record.checks[5].disposition,
+        Disposition::Rejected
+    );
+}
+
+#[test]
+fn verification_rejects_forged_links_and_stale_forms_and_limits_glossary_hints_to_literals() {
+    let fx = Fx::new("verification-contract");
+    let t = fx.t();
+    let p = fx.block(B1).paragraphs[0].id.clone();
+    let mut request = VerificationInput {
+        paragraph: p.clone(),
+        fingerprint: String::new(),
+        checks: verification_checks(SemanticCategory::Quantity, Resolution::Resolved),
+    };
+    request.fingerprint = t.verification(None, &fx.project, B1).unwrap().fingerprint;
+    assert!(
+        t.record_verification(None, &fx.project, B1, &request)
+            .is_err()
+    );
+    fx.write_glossary(r#"[{"source":"第1段","allowed":["第一译法","另一允许译法"]},{"source":"第2段","allowed":["限定译法"],"scope":"只有绰号语境","note":"不机械替换"}]"#);
+    t.approve_context(&fx.project).unwrap();
+    t.export(&fx.project, B1).unwrap();
+    fs::write(
+        fx.zh_path(B1),
+        fx.candidate(B1, |ps| ps[0].text = "另一允许译法".into()),
+    )
+    .unwrap();
+    let view = t.verification(None, &fx.project, B1).unwrap();
+    assert_eq!(
+        view.hints.len(),
+        1,
+        "第二个 allowed 也被接受；有 scope 只提示人工核对"
+    );
+    assert_eq!(view.hints[0].source, "第2段");
+    assert_eq!(view.hints[0].scope.as_deref(), Some("只有绰号语境"));
+    let mut evidence = EvidenceInput {
+        paragraph: p.clone(),
+        quote: "第1段".into(),
+        source: "本地书目".into(),
+        locator: "页2".into(),
+        explanation: "查词不等于适用".into(),
+        context: "仅此段".into(),
+        status: EvidenceStatus::Confirmed,
+    };
+    let saved = t.add_evidence(&fx.project, B1, &evidence).unwrap();
+    evidence.quote = "不在原文".into();
+    assert!(t.add_evidence(&fx.project, B1, &evidence).is_err());
+    evidence.quote = "第1段".into();
+    evidence.source = "界".repeat(2001);
+    assert!(t.add_evidence(&fx.project, B1, &evidence).is_err());
+    // Adding evidence invalidates an already-open form instead of losing a concurrent change.
+    request.fingerprint = view.fingerprint;
+    assert!(
+        t.record_verification(None, &fx.project, B1, &request)
+            .is_err()
+    );
+    request.fingerprint = t.verification(None, &fx.project, B1).unwrap().fingerprint;
+    request.checks[0].advice.push(AdviceLink {
+        task: 987,
+        quote: "伪造回奏".into(),
+    });
+    assert!(
+        t.record_verification(None, &fx.project, B1, &request)
+            .is_err()
+    );
+    request.checks[0].advice.clear();
+    request.checks[0].evidence.push(saved.id);
+    request.paragraph = fx.block(B1).paragraphs[1].id.clone();
+    assert!(
+        t.record_verification(None, &fx.project, B1, &request)
+            .is_err()
+    );
+    request.paragraph = p;
+    let record = t
+        .record_verification(None, &fx.project, B1, &request)
+        .unwrap();
+    assert!(
+        t.record_verification(None, &fx.project, B1, &request)
+            .is_err()
+    );
+    let mut unknown = serde_json::to_value(&request).unwrap();
+    unknown["operator_reviewed"] = true.into();
+    assert!(serde_json::from_value::<VerificationInput>(unknown).is_err());
+    assert_eq!(
+        t.verification(None, &fx.project, B1).unwrap().records[0]
+            .record
+            .id,
+        record.id
+    );
+    // Evidence and review records never enter the existing export path automatically.
+    t.export(&fx.project, B1).unwrap();
+    for name in [
+        "source.json",
+        "context.json",
+        "zhupi.json",
+        "neighbors.json",
+    ] {
+        assert!(
+            !fs::read_to_string(t.block_dir(&fx.project, B1).join(name))
+                .unwrap()
+                .contains("查词不等于适用")
+        );
+    }
+}

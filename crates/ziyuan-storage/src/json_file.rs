@@ -299,9 +299,10 @@ impl Write for Limited {
 }
 
 impl<T: Serialize + DeserializeOwned> JsonFile<T> {
-    /// 持共享锁读取当前状态；文件（或其目录）不存在时为 `Ok(None)`。不建目录，不改动状态文件。
+    /// 持共享锁读取当前状态；文件不存在时直接返回 `Ok(None)`，不创建目录或锁文件。
+    /// 并发首次写入可以在此后发布；不存在的观察点在线性化上先于该次发布。
     pub fn load(&self) -> Result<Option<Stored<T>>, JsonFileError> {
-        match fs::metadata(self.dir()) {
+        match fs::symlink_metadata(&self.path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
             Ok(_) => {}
@@ -468,6 +469,13 @@ mod tests {
         let file = counter_file(&dir);
         assert_eq!(file.load().unwrap(), None);
         assert!(!dir.exists(), "纯读取不应建目录");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(file.load().unwrap(), None);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "缺失状态读取也不创建锁"
+        );
 
         let first = bump(&file).unwrap();
         assert_eq!(

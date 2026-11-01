@@ -11,6 +11,7 @@ mod output;
 mod subscription_commands;
 mod text_commands;
 mod translation_commands;
+mod verification_commands;
 
 use std::env;
 use std::error::Error;
