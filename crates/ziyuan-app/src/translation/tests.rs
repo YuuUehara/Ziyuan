@@ -1248,3 +1248,314 @@ fn resume_plan_only_takes_flagged_states() {
 fn cancelled_block_label_matches_task_status() {
     assert_eq!(BlockState::Cancelled { task: 1 }.label(), "已撤销");
 }
+
+#[test]
+fn finished_export_requires_effective_signoffs_and_preserves_project_order() {
+    let fx = Fx::new("finished-export");
+    let mut s = fx.session();
+    let options = ExportOptions {
+        chapters: vec!["c0003".into(), "c0001".into()],
+        ..Default::default()
+    };
+    let err = s
+        .export_finished(&fx.root, &fx.project, &options)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(B1) && err.contains(B3) && !err.contains(B2),
+        "{err}"
+    );
+    for block in [B1, B3] {
+        let task = translated(&fx, &mut s, block);
+        s.apply_changes(task, &fx.root, vec![]).unwrap();
+        // Approved is not finalized.
+        assert!(s.export_finished(&fx.root, &fx.project, &options).is_err());
+        s.finalize_translation(&fx.root, &fx.project, block)
+            .unwrap();
+    }
+    let events = s.history().unwrap().to_vec();
+    let first = s.export_finished(&fx.root, &fx.project, &options).unwrap();
+    assert_eq!(
+        first
+            .files
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        ["c0001.txt", "c0003.txt"]
+    );
+    assert_eq!(
+        String::from_utf8(first.files[1].bytes.clone()).unwrap(),
+        "c3.txt\n\n译：三章。\n\n"
+    );
+    assert_eq!(first.manifest["chapters"][0]["blocks"][0]["task"], 1);
+    assert_eq!(s.history().unwrap(), events);
+    let merged = s
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                layout: ExportLayout::Book,
+                ..options.clone()
+            },
+        )
+        .unwrap();
+    assert_eq!(merged.files[0].name, "book.txt");
+    assert_eq!(
+        merged.files[0].bytes,
+        [
+            first.files[0].bytes.as_slice(),
+            b"\n",
+            first.files[1].bytes.as_slice()
+        ]
+        .concat()
+    );
+    let hash = first.manifest["files"][0]["sha256"].as_str().unwrap();
+    assert_eq!(hash, sha256_hex(&first.files[0].bytes));
+
+    // A still-finalized event cannot override a later annotation, context or disk edit.
+    fx.t()
+        .set_zhupi(&fx.project, B1, "c0001-p0001", "新要求")
+        .unwrap();
+    let err = s
+        .export_finished(&fx.root, &fx.project, &options)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("朱批"), "{err}");
+    fx.t().clear_zhupi(&fx.project, B1, "c0001-p0001").unwrap();
+    assert!(s.export_finished(&fx.root, &fx.project, &options).is_ok());
+    let good = fs::read(fx.zh_path(B1)).unwrap();
+    fs::write(
+        fx.zh_path(B1),
+        fx.candidate(B1, |ps| ps[0].text = "改稿".into()),
+    )
+    .unwrap();
+    assert!(
+        s.export_finished(&fx.root, &fx.project, &options)
+            .unwrap_err()
+            .to_string()
+            .contains("版本失效")
+    );
+    fs::write(fx.zh_path(B1), good).unwrap();
+    s.reopen_translation(&fx.root, &fx.project, B3, "重审")
+        .unwrap();
+    assert!(s.export_finished(&fx.root, &fx.project, &options).is_err());
+    fx.t().ensure_context_draft(&fx.project).unwrap();
+    fx.t().approve_context(&fx.project).unwrap();
+    assert!(
+        s.export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                chapters: vec!["c0001".into()],
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("版本失效")
+    );
+}
+
+#[test]
+fn finished_markdown_reinserts_approved_text_without_activating_markup() {
+    use crate::text_project::{ImportOptions, ImportSource, ParseOptions};
+    let mut fx = Fx::new("markdown-export");
+    let t = fx.t();
+    let project = t
+        .texts()
+        .create(t.project(&fx.project).unwrap().metadata)
+        .unwrap();
+    fx.project = project.id;
+    let source = "\u{feff}序文。\r\n\r\n## 二章\r\n\r\n｜紫垣《しえん》の文。\r\n\r\n```js\r\nalert('not translated');\r\n```\r\n\r\n---\r\n\r\n### 小節\r\n\r\n- 項目一\r\n- 項目二\r\n\r\n> 引用\r\n\r\n## 一章\r\n\r\n終 `tail` の文。\r\n";
+    let sources = [ImportSource::Text {
+        name: "ordered.md".into(),
+        text: source.into(),
+    }];
+    let opts = ImportOptions {
+        parsing: ParseOptions {
+            ruby: true,
+            heading_level: Some(2),
+        },
+        ..Default::default()
+    };
+    let preview = t
+        .texts()
+        .preview_import(&fx.project, &sources, &opts)
+        .unwrap();
+    let project = t
+        .texts()
+        .import_prepared(&fx.project, &sources, &opts, &preview.fingerprint)
+        .unwrap();
+    let mut s = fx.session();
+    let attack = "![画](https://invalid.example) <script>alert(1)</script> &copy;\n    # 不是代码";
+    for c in &project.chapters {
+        for b in &c.blocks {
+            let e = s
+                .issue_translation(&fx.root, &fx.project, &b.block_id)
+                .unwrap();
+            let mut candidate = b.clone();
+            for p in &mut candidate.paragraphs {
+                p.text = attack.into();
+                p.inlines.clear();
+            }
+            let change = fx.zh_change(
+                &b.block_id,
+                String::from_utf8(candidate.serialized().unwrap()).unwrap(),
+            );
+            complete(&mut s, e.id, vec![change], "完成");
+            s.apply_changes(e.id, &fx.root, vec![]).unwrap();
+            s.finalize_translation(&fx.root, &fx.project, &b.block_id)
+                .unwrap();
+        }
+    }
+    let originals = t
+        .export_originals(&fx.project, &["c0003".into(), "c0002".into()])
+        .unwrap();
+    assert_eq!(originals.files.len(), 1);
+    assert_eq!(originals.files[0].bytes, source.as_bytes());
+    assert_eq!(originals.manifest["chapters"][0]["chapter"], "c0002");
+    let exported = s
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                chapters: vec!["c0002".into(), "c0001".into()],
+                format: ExportFormat::Markdown,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let md = String::from_utf8(exported.files[1].bytes.clone()).unwrap();
+    assert!(md.starts_with("# 二章\n\n"), "{md}");
+    assert!(md.contains("```js\nalert('not translated');\n```"), "{md}");
+    assert!(md.contains("\n---\n"), "{md}");
+    assert!(md.contains("### "), "{md}");
+    assert!(!md.contains("しえん") && !md.contains("<ruby>"), "{md}");
+    let mut code_blocks = 0;
+    for e in pulldown_cmark::Parser::new(&md) {
+        use pulldown_cmark::{Event, Tag};
+        match e {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. })
+            | Event::Html(_)
+            | Event::InlineHtml(_) => panic!("activated translated markup: {e:?}\n{md}"),
+            Event::Start(Tag::CodeBlock(_)) => code_blocks += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(code_blocks, 1, "{md}");
+    let txt = s
+        .export_finished(&fx.root, &fx.project, &ExportOptions::default())
+        .unwrap();
+    assert!(
+        !String::from_utf8(txt.files[1].bytes.clone())
+            .unwrap()
+            .contains("not translated")
+    );
+    assert!(txt.warnings.iter().any(|w| w.contains("TXT")));
+    let err = s
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                format: ExportFormat::Markdown,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("行内代码"), "{err}");
+}
+
+#[test]
+fn finished_export_uses_only_approved_target_annotations() {
+    use crate::text_project::Inline;
+    let fx = Fx::new("target-ruby");
+    let mut s = fx.session();
+    let task = s.issue_translation(&fx.root, &fx.project, B3).unwrap();
+    let candidate = fx.candidate(B3, |ps| {
+        ps[0].text = "甲<乙（保留）".into();
+        ps[0].inlines = vec![
+            Inline::Ruby {
+                base: "甲<乙".into(),
+                reading: "a&b[link](x)".into(),
+                byte_start: 0,
+                byte_end: 0,
+            },
+            Inline::Text {
+                text: "（保留）".into(),
+            },
+        ];
+    });
+    complete(&mut s, task.id, vec![fx.zh_change(B3, candidate)], "注音");
+    s.apply_changes(task.id, &fx.root, vec![]).unwrap();
+    s.finalize_translation(&fx.root, &fx.project, B3).unwrap();
+    let opts = ExportOptions {
+        chapters: vec!["c0003".into()],
+        ..Default::default()
+    };
+    let txt = s.export_finished(&fx.root, &fx.project, &opts).unwrap();
+    assert_eq!(
+        String::from_utf8(txt.files[0].bytes.clone()).unwrap(),
+        "c3.txt\n\n｜甲<乙《a&b[link](x)》（保留）\n\n"
+    );
+    let md = s
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                format: ExportFormat::Markdown,
+                ..opts
+            },
+        )
+        .unwrap();
+    assert!(
+        String::from_utf8(md.files[0].bytes.clone())
+            .unwrap()
+            .contains("<ruby>甲&lt;乙<rt>a&amp;b&#91;link&#93;&#40;x&#41;</rt></ruby>（保留）")
+    );
+}
+
+#[test]
+fn finished_export_refuses_a_change_during_collection() {
+    use std::cell::Cell;
+    use ziyuan_storage::{EventStore, StorageError};
+    struct ChangingStore {
+        events: Vec<CourtEvent>,
+        reads: Cell<usize>,
+        path: PathBuf,
+    }
+    impl EventStore for ChangingStore {
+        fn load(&self) -> std::result::Result<Vec<CourtEvent>, StorageError> {
+            self.reads.set(self.reads.get() + 1);
+            if self.reads.get() == 2 {
+                fs::write(&self.path, b"changed during export").unwrap();
+            }
+            Ok(self.events.clone())
+        }
+        fn append(&mut self, _: usize, _: &[CourtEvent]) -> std::result::Result<(), StorageError> {
+            panic!("export must not write events")
+        }
+    }
+    let fx = Fx::new("export-snapshot-race");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B3);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    s.finalize_translation(&fx.root, &fx.project, B3).unwrap();
+    let history = s.history().unwrap().to_vec();
+    let store = ChangingStore {
+        events: history.clone(),
+        reads: Cell::new(0),
+        path: fx.zh_path(B3),
+    };
+    let mut changing = Session::replayed(store, s.court().clone(), history);
+    let error = changing
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                chapters: vec!["c0003".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("版本失效"), "{error}");
+}

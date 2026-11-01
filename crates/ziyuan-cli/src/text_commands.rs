@@ -4,10 +4,13 @@ use std::env;
 use std::error::Error;
 use std::io::Read;
 use std::path::PathBuf;
+use ziyuan_app::Session;
 use ziyuan_app::text_project::{
     ImportOptions, ImportPreview, ImportSource, NewProject, Project, Provenance, TextProjects,
     ValidationReport,
 };
+use ziyuan_app::translation::{ExportFormat, ExportLayout, ExportOptions, Translations};
+use ziyuan_storage::EventLog;
 use ziyuan_storage::{LockScope, RecordState, Untouched, Workspace};
 
 /// `text recovery status` 发现未收尾的受管写入：状态本身读成功，但退出码仍为 1，
@@ -36,6 +39,14 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        TXT 使用新解析/BOM 处理也须 preview + --confirm；不加选项仍走旧 TXT 导入
                                        重复 --chapter-title 按章序覆盖全部章名；确认时须保持文件顺序与选项不变
   ziyuan text show <项目ID>            核对原文副本后列出章节、段落与提示块
+  ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md]
+                            [--layout chapters|book] [--output <new.tar>]
+                                       导出有效定稿，默认 TXT、按章；缺块或失效则整批拒绝，需要朝廷
+  ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]
+                                       原件按原字节导出，不依赖朝廷，不接受 --format/--layout
+    导出不调用模型或网络；不加 --output 只读预览文件名称、大小、警告与清单（--json 也不输出字节）。
+    加 --output 重新核验后写单个 TAR：内含 TXT/MD 定稿或原件及 manifest 清单；不覆盖现有路径，
+    不创建父目录。未选章时按项目章序导出全部；--chapter 可重复选择不同章节。
   ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]
                                        检查候选译稿的结构（漏段、重复、顺序、陌生段号、空文本）；
                                        提示块默认取自译稿的 block_id。只查结构，不评判译文质量；
@@ -63,6 +74,12 @@ pub(crate) enum TextAction {
     Preview(String, Vec<ImportSource>, ImportOptions),
     ImportPrepared(String, Vec<ImportSource>, ImportOptions, String),
     Show(String),
+    Export {
+        project: String,
+        options: ExportOptions,
+        originals: bool,
+        output: Option<PathBuf>,
+    },
     Check {
         id: String,
         candidate: PathBuf,
@@ -74,6 +91,9 @@ const INIT_USAGE: &str = "用法: ziyuan text init --title <标题> --language <
 const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--chapter-title <章名>]... [--confirm <预览指纹>]；MD 或解析选项须先 text preview 再 --confirm";
 const PREVIEW_USAGE: &str = "用法: ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--chapter-title <章名>]...";
 const SHOW_USAGE: &str = "用法: ziyuan text show <项目ID>";
+const EXPORT_FINISHED_USAGE: &str = "用法: ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md] [--layout chapters|book] [--output <new.tar>]";
+const EXPORT_ORIGINALS_USAGE: &str =
+    "用法: ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]";
 const CHECK_USAGE: &str =
     "用法: ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]";
 const RECOVERY_USAGE: &str = "用法: ziyuan text recovery status [--json] | ziyuan text recovery finish <操作ID> --yes | ziyuan text recovery abandon <操作ID> --yes | ziyuan text recovery temps [--json] [--yes]";
@@ -107,6 +127,8 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
         "init" => parse_init(rest)?,
         "import" => parse_import(rest, false)?,
         "preview" => parse_import(rest, true)?,
+        "export-finished" => parse_export(rest, false)?,
+        "export-originals" => parse_export(rest, true)?,
         "show" => match rest {
             [id] if !id.starts_with("--") => TextAction::Show(id.clone()),
             _ => return Err(SHOW_USAGE.into()),
@@ -123,6 +145,57 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
                 format!("未知的 text 子命令：{other}。运行 ziyuan text help 查看用法").into(),
             );
         }
+    })
+}
+
+fn parse_export(args: &[String], originals: bool) -> Result<TextAction, Box<dyn Error>> {
+    let usage = if originals {
+        EXPORT_ORIGINALS_USAGE
+    } else {
+        EXPORT_FINISHED_USAGE
+    };
+    let (project, args) = args.split_first().ok_or(usage)?;
+    if project.starts_with('-') || project.trim().is_empty() {
+        return Err(usage.into());
+    }
+    let mut options = ExportOptions::default();
+    let mut output = None;
+    let mut given = Vec::new();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        if flag != "--chapter" && given.contains(flag) {
+            return Err(format!("{flag} 只能给一次。{usage}").into());
+        }
+        given.push(flag.clone());
+        let value = rest
+            .next()
+            .filter(|value| !value.starts_with('-') && !value.trim().is_empty())
+            .ok_or(usage)?;
+        match flag.as_str() {
+            "--chapter" => options.chapters.push(value.clone()),
+            "--output" => output = Some(PathBuf::from(value)),
+            "--format" if !originals => {
+                options.format = match value.as_str() {
+                    "txt" => ExportFormat::Txt,
+                    "md" => ExportFormat::Markdown,
+                    _ => return Err(usage.into()),
+                };
+            }
+            "--layout" if !originals => {
+                options.layout = match value.as_str() {
+                    "chapters" => ExportLayout::Chapters,
+                    "book" => ExportLayout::Book,
+                    _ => return Err(usage.into()),
+                };
+            }
+            _ => return Err(usage.into()),
+        }
+    }
+    Ok(TextAction::Export {
+        project: project.clone(),
+        options,
+        originals,
+        output,
     })
 }
 
@@ -298,6 +371,12 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
         TextAction::Memory(action) => return crate::memory_commands::run(action, json),
         TextAction::Translation(action) => return crate::translation_commands::run(action, json),
         TextAction::Recovery(action) => return run_recovery(action, json),
+        TextAction::Export {
+            project,
+            options,
+            originals,
+            output,
+        } => return run_export(&project, &options, originals, output, json),
         TextAction::Init(metadata) => {
             let project = projects.create(metadata)?;
             match json {
@@ -371,6 +450,52 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                 );
             }
         }
+    }
+    Ok(())
+}
+
+fn run_export(
+    project: &str,
+    options: &ExportOptions,
+    originals: bool,
+    output: Option<PathBuf>,
+    json: bool,
+) -> Result<(), Box<dyn Error>> {
+    let root = env::current_dir()?;
+    // Each invocation builds a fresh, validated bundle; never reuse an earlier preview.
+    let bundle = if originals {
+        Translations::new(&root).export_originals(project, &options.chapters)?
+    } else {
+        Session::open(EventLog::new(&root))?.export_finished(&root, project, options)?
+    };
+    if let Some(destination) = &output {
+        bundle.write_archive(&root, destination)?;
+    }
+    if json {
+        let files: Vec<_> = bundle
+            .files
+            .iter()
+            .map(|file| serde_json::json!({"name": file.name, "size": file.bytes.len()}))
+            .collect();
+        print_json(serde_json::json!({
+            "project": project,
+            "output": output,
+            "files": files,
+            "manifest": bundle.manifest,
+            "warnings": bundle.warnings,
+        }))?;
+    } else {
+        match output {
+            Some(destination) => println!("已导出 TAR：{}", destination.display()),
+            None => println!("导出预览（只读；未写归档）：{project}"),
+        }
+        for warning in &bundle.warnings {
+            println!("警告：{warning}");
+        }
+        for file in &bundle.files {
+            println!("  {}：{} 字节", file.name, file.bytes.len());
+        }
+        println!("清单：{}", serde_json::to_string_pretty(&bundle.manifest)?);
     }
     Ok(())
 }

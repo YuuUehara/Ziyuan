@@ -951,3 +951,227 @@ fn memory_cli_is_explicit_and_rebuilds_only_derived_data() {
         "夜が明けた。\n\n風が止んだ。\n"
     );
 }
+
+/// Read the short, regular-file USTAR entries emitted by the export archive writer.
+fn export_tar_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    while offset + 512 <= bytes.len() {
+        let header = &bytes[offset..offset + 512];
+        if header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+        let name_end = header[..100].iter().position(|b| *b == 0).unwrap_or(100);
+        let name = std::str::from_utf8(&header[..name_end]).unwrap();
+        let size = std::str::from_utf8(&header[124..136])
+            .unwrap()
+            .trim_matches(['\0', ' ']);
+        let size = usize::from_str_radix(size, 8).unwrap();
+        assert!(matches!(header[156], 0 | b'0'), "regular files only");
+        offset += 512;
+        entries.push((name.to_owned(), bytes[offset..offset + size].to_vec()));
+        offset += size.div_ceil(512) * 512;
+    }
+    entries
+}
+
+#[test]
+fn export_originals_preview_archive_order_and_no_overwrite() {
+    let dir = TempDir::new("export-originals");
+    let root = dir.path();
+    let project = init_json(root, "原件", "ja");
+    let first = "\u{feff}第一章。\r\n\r\n原文。\r\n";
+    let second = "第二章。\n";
+    dir.write("first.txt", first);
+    dir.write("second.txt", second);
+    let imported = ok_json(
+        root,
+        &[
+            "text",
+            "import",
+            &project,
+            "first.txt",
+            "second.txt",
+            "--json",
+        ],
+    );
+    let before = tree_snapshot(root);
+    let preview = ok_json(root, &["text", "export-originals", &project, "--json"]);
+    assert_eq!(tree_snapshot(root), before, "JSON preview must not write");
+    let text = ok(root, &["text", "export-originals", &project]);
+    assert!(stdout(&text).contains("只读"));
+    assert_eq!(tree_snapshot(root), before, "text preview must not write");
+    let files = preview["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["size"], first.len());
+    assert!(files.iter().all(|file| file.get("bytes").is_none()));
+    assert!(preview["manifest"].is_object());
+    let chapters = imported["chapters"].as_array().unwrap();
+    let selected = ok_json(
+        root,
+        &[
+            "text",
+            "export-originals",
+            &project,
+            "--chapter",
+            chapters[1]["id"].as_str().unwrap(),
+            "--chapter",
+            chapters[0]["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(
+        selected["files"], preview["files"],
+        "selection uses project order"
+    );
+    let written = ok_json(
+        root,
+        &[
+            "text",
+            "export-originals",
+            &project,
+            "--output",
+            "originals.tar",
+            "--json",
+        ],
+    );
+    assert_eq!(written["output"], "originals.tar");
+    let archive = std::fs::read(root.join("originals.tar")).unwrap();
+    let entries = export_tar_entries(&archive);
+    for (index, expected) in [first, second].iter().enumerate() {
+        let name = files[index]["name"].as_str().unwrap();
+        let entry = entries.iter().find(|entry| entry.0 == name).unwrap();
+        assert_eq!(entry.1, expected.as_bytes());
+    }
+    let manifest = entries
+        .iter()
+        .find(|entry| entry.0 == "manifest.json")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&manifest.1).unwrap(),
+        preview["manifest"]
+    );
+    assert_eq!(entries.len(), 3);
+    let before_failure = tree_snapshot(root);
+    for destination in [
+        "originals.tar",
+        "first.txt",
+        "missing/export.tar",
+        ".ziyuan/forbidden.tar",
+    ] {
+        assert_eq!(
+            code(
+                root,
+                &[
+                    "text",
+                    "export-originals",
+                    &project,
+                    "--output",
+                    destination
+                ]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            tree_snapshot(root),
+            before_failure,
+            "failed destination {destination}"
+        );
+    }
+    // A fresh output invocation must recheck source integrity, not trust the preview.
+    let original = imported["chapters"][0]["original_path"].as_str().unwrap();
+    let project_dir = root.join(".ziyuan/text-projects").join(&project);
+    std::fs::write(project_dir.join(original), "tampered").unwrap();
+    assert_eq!(
+        code(
+            root,
+            &[
+                "text",
+                "export-originals",
+                &project,
+                "--output",
+                "stale.tar"
+            ]
+        ),
+        Some(1)
+    );
+    assert!(!root.join("stale.tar").exists());
+    no_court(root);
+}
+
+#[test]
+fn export_usage_is_strict_and_finished_requires_court() {
+    let dir = TempDir::new("export-usage");
+    let root = dir.path();
+    for action in ["export-originals", "export-finished"] {
+        let before = tree_snapshot(root);
+        for suffix in [
+            vec![],
+            vec![""],
+            vec!["p", "--unknown", "x"],
+            vec!["p", "--chapter"],
+            vec!["p", "--chapter", " "],
+            vec!["p", "--output", ""],
+            vec!["p", "--output", "a", "--output", "b"],
+            vec!["p", "extra"],
+            vec!["p", "--format", "html"],
+            vec!["p", "--layout", "wrong"],
+            vec!["p", "--format", "txt", "--format", "md"],
+            vec!["p", "--layout", "chapters", "--layout", "book"],
+        ] {
+            let mut args = vec!["text", action];
+            args.extend(suffix);
+            assert_eq!(code(root, &args), Some(2), "{args:?}");
+        }
+        assert_eq!(tree_snapshot(root), before);
+    }
+    for flag in ["--format", "--layout"] {
+        let value = if flag == "--format" {
+            "txt"
+        } else {
+            "chapters"
+        };
+        assert_eq!(
+            code(root, &["text", "export-originals", "p", flag, value]),
+            Some(2)
+        );
+    }
+    let project = init_json(root, "未定稿", "ja");
+    dir.write("chapter.txt", "原文。\n");
+    let imported = ok_json(root, &["text", "import", &project, "chapter.txt", "--json"]);
+    let chapter = imported["chapters"][0]["id"].as_str().unwrap();
+    let before = tree_snapshot(root);
+    assert_eq!(
+        code(
+            root,
+            &[
+                "text",
+                "export-originals",
+                &project,
+                "--chapter",
+                chapter,
+                "--chapter",
+                chapter
+            ]
+        ),
+        Some(1)
+    );
+    for suffix in [
+        vec![],
+        vec!["--json"],
+        vec![
+            "--format",
+            "md",
+            "--layout",
+            "book",
+            "--output",
+            "finished.tar",
+        ],
+    ] {
+        let mut args = vec!["text", "export-finished", &project];
+        args.extend(suffix);
+        assert_eq!(code(root, &args), Some(1));
+    }
+    assert_eq!(tree_snapshot(root), before);
+    no_court(root);
+}

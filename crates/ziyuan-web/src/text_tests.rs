@@ -19,6 +19,112 @@ use ziyuan_governance::{Court, founding_events};
 use ziyuan_runtime::{DemoBackend, Limits};
 use ziyuan_storage::{EventLog, EventStore};
 
+async fn export_get(base: &str, path: &str, token: &str) -> (u16, String, String, Vec<u8>) {
+    let url = format!("{base}/api{path}");
+    let token = format!("Bearer {token}");
+    tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut response = agent
+            .get(&url)
+            .header("Authorization", &token)
+            .call()
+            .unwrap();
+        let status = response.status().as_u16();
+        let get = |key: &str| {
+            response
+                .headers()
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let mime = get("content-type");
+        let disposition = get("content-disposition");
+        (
+            status,
+            mime,
+            disposition,
+            response.body_mut().read_to_vec().unwrap(),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn export_read_only_originals_strict_queries_and_safe_errors() {
+    let (base, root) = start("export", false).await;
+    let p = project(&root, "不可放进 header\r\n作品名", "第一段。\n");
+    let route = format!("/text/{}/export", p.id);
+    assert_eq!(call(&base, &route, None, None).await.0, 401);
+    let (code, mime, disposition, bytes) =
+        export_get(&base, &format!("{route}?kind=original"), VIEWER).await;
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(mime, "application/x-tar");
+    assert_eq!(
+        disposition,
+        format!("attachment; filename=\"ziyuan-{}.tar\"", p.id)
+    );
+    assert_eq!(bytes.len() % 512, 0);
+    assert!(bytes.windows(13).any(|w| w == b"manifest.json"));
+    let (code, preview) = call(
+        &base,
+        &format!("{route}?kind=original&preview=true"),
+        Some(VIEWER),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{preview}");
+    assert!(!preview["files"].as_array().unwrap().is_empty());
+    for file in preview["files"].as_array().unwrap() {
+        assert!(file.get("bytes").is_none());
+        assert!(file["length"].is_number());
+    }
+    assert!(!preview.to_string().contains(root.to_str().unwrap()));
+    for query in [
+        "kind=nope",
+        "format=html",
+        "layout=flat",
+        "unknown=true",
+        "preview=yes",
+        "chapters=,",
+        "chapters=x,",
+        "chapters=%20",
+        "chapters=x,,y",
+        "kind=original&format=html",
+        "kind=original&chapters=missing",
+        "kind=original&kind=finished",
+    ] {
+        let (code, mime, disposition, body) =
+            export_get(&base, &format!("{route}?{query}"), VIEWER).await;
+        assert_eq!(code, 400, "{query}: {}", String::from_utf8_lossy(&body));
+        assert_ne!(mime, "application/x-tar");
+        assert!(disposition.is_empty());
+        assert!(!String::from_utf8_lossy(&body).contains(root.to_str().unwrap()));
+    }
+    let duplicate = format!("kind=original&chapters={0},{0}", p.chapters[0].id);
+    assert_eq!(
+        export_get(&base, &format!("{route}?{duplicate}"), VIEWER)
+            .await
+            .0,
+        400
+    );
+    let (code, mime, disposition, body) = export_get(&base, &route, VIEWER).await;
+    assert_eq!(code, 409);
+    assert_ne!(mime, "application/x-tar");
+    assert!(disposition.is_empty());
+    assert!(!String::from_utf8_lossy(&body).contains(root.to_str().unwrap()));
+    Session::found(EventLog::new(&root)).unwrap();
+    let (code, mime, disposition, _) = export_get(&base, &route, VIEWER).await;
+    assert_eq!(code, 400);
+    assert_ne!(mime, "application/x-tar");
+    assert!(disposition.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// 在临时目录启动服务；`found` 为假时不建朝（译书与札记仍应可用）。
 async fn start(name: &str, found: bool) -> (String, PathBuf) {
     let root = std::env::temp_dir().join(format!("ziyuan-web-text-{name}-{}", std::process::id()));
@@ -662,6 +768,29 @@ async fn translation_status_pending_finalize_reopen_and_issue() {
         finalized["translation_hash"],
         json!(sha256_hex(candidate.as_bytes()))
     );
+    for options in ["format=txt&layout=chapters", "format=markdown&layout=book"] {
+        let route = format!("/text/{}/export?{options}", project.id);
+        let (code, preview) =
+            call(&base, &format!("{route}&preview=true"), Some(VIEWER), None).await;
+        assert_eq!(code, 200, "{preview}");
+        let snapshot = preview["manifest"]["snapshot_sha256"].as_str().unwrap();
+        let (code, wrong) = call(
+            &base,
+            &format!("{route}&snapshot=wrong"),
+            Some(VIEWER),
+            None,
+        )
+        .await;
+        assert_eq!(code, 400, "{wrong}");
+        assert!(wrong["error"].as_str().unwrap().contains("重新预览"));
+        let (code, mime, disposition, bytes) =
+            export_get(&base, &format!("{route}&snapshot={snapshot}"), VIEWER).await;
+        assert_eq!(code, 200, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(mime, "application/x-tar");
+        assert!(disposition.starts_with("attachment; filename=\"ziyuan-"));
+        assert!(bytes.windows(13).any(|w| w == b"manifest.json"));
+        assert!(!String::from_utf8_lossy(&bytes).contains(root.to_str().unwrap()));
+    }
     let (_, block_json) = call(
         &base,
         &format!("/text/{}/blocks/{block}", project.id),
@@ -696,6 +825,12 @@ async fn translation_status_pending_finalize_reopen_and_issue() {
             .0,
         200
     );
+    // A previously successful preview cannot authorize a later download after reopening.
+    let (code, mime, disposition, _) =
+        export_get(&base, &format!("/text/{}/export", project.id), VIEWER).await;
+    assert_eq!(code, 400);
+    assert_ne!(mime, "application/x-tar");
+    assert!(disposition.is_empty());
     let (_, block_json) = call(
         &base,
         &format!("/text/{}/blocks/{block}", project.id),

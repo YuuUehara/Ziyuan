@@ -202,6 +202,7 @@ fn router_for(app: AppState) -> Router {
         .route("/palace", post(palace))
         .route("/text", get(text::list))
         .route("/text/{project}", get(text::project))
+        .route("/text/{project}/export", get(text::export))
         .route("/text/{project}/import/preview", post(text::import_preview))
         .route("/text/{project}/import", post(text::import_confirm))
         .route("/text/{project}/memory", get(text::memory_status))

@@ -21,6 +21,7 @@ similar.workspace = true
 syntect.workspace = true
 pulldown-cmark.workspace = true
 unicode-segmentation.workspace = true
+tar.workspace = true
 tokio = { workspace = true, features = ["macros", "time"] }
 ureq.workspace = true
 

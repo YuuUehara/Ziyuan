@@ -10,6 +10,8 @@
 //! 译稿哈希是 `zh.json` 文件字节的哈希。
 mod context;
 mod export;
+mod export_package;
+mod finished;
 mod gate;
 mod session;
 mod status;
@@ -23,6 +25,7 @@ pub use context::{
     SUMMARIES_DIR, parse_glossary,
 };
 pub use export::Exported;
+pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
 pub use session::{ResumeOutcome, block_source_hash};
 pub use status::{
     BlockFacts, BlockState, BlockStatus, ContextFacts, NextStep, ResumeOptions, StaleReason,

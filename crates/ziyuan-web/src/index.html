@@ -823,6 +823,7 @@
           <div class="text-main">
             <p class="hint" id="text-status" role="status" aria-live="polite"></p>
             <section id="text-import" aria-label="导入原文"></section>
+            <section class="text-memory" id="text-export" aria-label="章节导出"></section>
             <div class="text-compare">
               <div class="text-col"><h4>原文</h4><div class="text-scroll" id="text-source"></div></div>
               <div class="text-col"><h4>已准奏译文</h4><div class="text-scroll" id="text-zh"></div></div>
@@ -1352,6 +1353,78 @@ let textError = null;
 let textBusy = false;
 let textLoaded = false;
 let importDraft = null;
+const exportDrafts = new Map();
+let exportActiveProject = null, exportEpoch = 0;
+function exportState() {
+  if (!exportDrafts.has(textProjectId)) exportDrafts.set(textProjectId, { chapters: null, format: "txt", layout: "chapters", busy: false, message: "", preview: null });
+  return exportDrafts.get(textProjectId);
+}
+function renderExport() {
+  if (exportActiveProject !== textProjectId) { exportActiveProject = textProjectId; exportEpoch++; }
+  const host = $("text-export");
+  if (!textProjectId || textProject?.project.id !== textProjectId) { host.innerHTML = ""; return; }
+  const d = exportState(), outline = textProject.outline || [];
+  const prefix = `export-${textProjectId}`;
+  host.innerHTML = `<h3>章节导出</h3>
+    <p class="hint">下载 TAR：定稿含 TXT / Markdown 与 manifest.json 清单；原件按档案文件去重，不转换格式。选择按项目顺序导出。未定稿或失效章节会使整批定稿导出被拒绝，不改审批或材料。</p>
+    <div class="actions"><button type="button" class="small" data-view data-export-all ${d.busy ? "disabled" : ""}>全选章节</button></div>
+    <div class="text-note-list checks" role="group" aria-label="导出章节">${outline.map((c, i) => `<label><input type="checkbox" data-view data-keep data-export-chapter="${esc(c.chapter)}" id="${esc(prefix)}-chapter-${i}" ${d.chapters === null || d.chapters.includes(c.chapter) ? "checked" : ""} ${d.busy ? "disabled" : ""}> ${esc(c.title || c.chapter)}</label>`).join("")}</div>
+    <div class="row"><label class="shrink" for="${esc(prefix)}-format">格式</label><select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option></select>
+    <label class="shrink" for="${esc(prefix)}-layout">编排</label><select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></div>
+    <p class="hint">格式与编排仅用于定稿。转换可能损失格式信息；下载前会预览文件及转换警告，请确认后继续。实际下载重新检查定稿与材料，不盲信预览。</p>
+    <div class="actions"><button type="button" class="small" data-view data-export-kind="original" ${d.busy || !outline.length ? "disabled" : ""}>取回原件 TAR</button><button type="button" class="small" data-view data-export-kind="finished" ${d.busy || !outline.length ? "disabled" : ""}>导出定稿 TAR</button></div>
+    <p class="hint" role="status" aria-live="polite">${esc(d.message)}</p>
+    ${d.preview ? `<div class="text-scroll"><h4>下载前预览 · ${d.kind === "original" ? "归档原件" : "有效定稿"}</h4><ul>${d.preview.files.map((f) => `<li>${esc(f.name)}（${f.length} 字节）</li>`).join("")}<li>manifest.json（校验清单）</li></ul>${(d.preview.warnings || []).map((w) => `<p class="hint">${esc(w)}</p>`).join("")}<details class="text-material"><summary>查看校验清单</summary><pre>${esc(JSON.stringify(d.preview.manifest, null, 2))}</pre></details></div><div class="actions"><button type="button" class="small" data-view data-export-confirm ${d.busy ? "disabled" : ""}>确认下载 TAR</button><button type="button" class="small" data-view data-export-cancel ${d.busy ? "disabled" : ""}>取消</button></div>` : ""}`;
+}
+$("text-export").addEventListener("change", (e) => {
+  const d = exportState();
+  if (e.target.hasAttribute("data-export-chapter")) d.chapters = [...$("text-export").querySelectorAll("[data-export-chapter]:checked")].map((el) => el.dataset.exportChapter);
+  if (e.target.dataset.exportOption) d[e.target.dataset.exportOption] = e.target.value;
+  d.preview = null; d.message = "选择已修改，下载前将重新预览。";
+  renderExport();
+});
+$("text-export").addEventListener("click", (e) => {
+  if (e.target.hasAttribute("data-export-all")) { const d = exportState(); d.chapters = null; d.preview = null; renderExport(); }
+  if (e.target.dataset.exportKind) downloadTextExport(e.target.dataset.exportKind);
+  if (e.target.hasAttribute("data-export-confirm")) downloadTextExport(exportState().kind, true);
+  if (e.target.hasAttribute("data-export-cancel")) { const d = exportState(); d.preview = null; d.message = "已取消下载。"; renderExport(); }
+});
+async function downloadTextExport(kind, confirmed = false) {
+  const d = exportState(), project = textProjectId, epoch = exportEpoch;
+  if (d.busy || (confirmed && !d.preview)) return;
+  const chapters = (textProject.outline || []).filter((c) => d.chapters === null || d.chapters.includes(c.chapter)).map((c) => c.chapter);
+  if (!chapters.length) { d.message = "请至少选择一章。"; renderExport(); return; }
+  const current = () => project === textProjectId && epoch === exportEpoch;
+  const query = new URLSearchParams({ kind, format: d.format, layout: d.layout, chapters: chapters.join(",") });
+  if (confirmed) query.set("snapshot", d.preview.manifest.snapshot_sha256);
+  const path = `/text/${encodeURIComponent(project)}/export?${query}`;
+  d.busy = true; d.message = confirmed ? "正在重新检查并打包…" : "正在检查并预览…";
+  if (!confirmed) d.preview = null;
+  renderExport();
+  try {
+    if (!confirmed) {
+      const preview = await api(path + "&preview=true");
+      if (!current()) return;
+      d.preview = preview; d.kind = kind; d.message = "请检查文件与转换警告，再确认下载。";
+      return;
+    }
+    const response = await fetch("api" + path);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || `下载失败（HTTP ${response.status}）`);
+    }
+    if (response.headers.get("Content-Type") !== "application/x-tar") throw new Error("服务器未返回 TAR，未触发下载。");
+    const blob = await response.blob();
+    if (!current()) return;
+    const url = URL.createObjectURL(blob), link = document.createElement("a");
+    link.href = url; link.download = `ziyuan-${project.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 80)}.tar`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    d.preview = null;
+    d.message = "已开始下载 TAR（含文件与清单）。";
+  } catch (e) { if (current()) { d.preview = null; d.message = `导出失败：${e.message}`; } }
+  finally { d.busy = false; if (current()) renderExport(); }
+}
 function importState() {
   if (!importDraft || importDraft.project !== textProjectId) {
     importDraft = { project: textProjectId, files: [], ruby: false, heading: "", titles: [], preview: null, busy: false, message: "", revision: 0 };
@@ -1659,6 +1732,7 @@ function updateNoteLink() {
 }
 function renderTextNow() {
   renderImport();
+  renderExport();
   const projects = textProjects || [];
   const select = $("text-project");
   select.innerHTML = projects.length
