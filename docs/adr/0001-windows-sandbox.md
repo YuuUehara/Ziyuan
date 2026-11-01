@@ -95,7 +95,7 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 
 - 每次新建 profile，把自身受信探针复制进去；不复用可写 profile，不给宿主目录加 ACL。显式 Unicode 环境只选择 `SystemRoot` 与指向本任务 profile 的 `LOCALAPPDATA`，按变量名排序；系统根变量缺失则拒绝，不回退继承宿主环境，也不传入宿主 AppData 路径。不授 capability，设置 LPAC 属性，挂起创建、加入 kill-on-close Job 后核对身份与**本任务** Job 归属，再恢复线程。
 - 身份以 `TokenIsAppContainer` 检查，AAP opt-out 改用真实令牌的 `AccessCheck` 对照，不再依赖 class 46 的用户态支持。固定合成 DACL 向 Everyone 与 `ALL_APPLICATION_PACKAGES` 授予同一访问位；宿主及单独创建的普通 AppContainer 必须允许，LPAC 必须拒绝，挂起阶段与恢复后的子进程分别检查。访问检查 API 失败绝不当作拒绝通过。普通容器只运行本探针作为显式正对照，不是 LPAC 失败后的回退。
-- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。宿主用 `GetHandleInformation` 核对哨兵有效且可继承，子进程同一 API 必须明确返回无效句柄，不等待或关闭故意不存在的句柄。入口先写出并刷新 `CHILD_ENTERED=1`，再检查身份。LPAC 子进程必须实际写出 `APP=1 AAP_ACCESS=0 JOB=1 SECRET=0 ENV=1`，普通容器对应 `AAP_ACCESS=1`；不再输出容易被误认为通用身份查询的 `LPAC=1`。`SECRET` 是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、LocalAppData 值位于本任务 profile、宿主注入的模拟秘密变量未传入。这是环境值检查，不是路径防换链或文件隔离证明。
+- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。宿主用 `GetHandleInformation` 核对哨兵有效且可继承；在线程恢复前，从父进程用 `DuplicateHandle` 查询子进程句柄表：白名单输出句柄必须可复制，哨兵必须明确返回无效句柄，其他错误均失败。复制品只留在父进程，立即关闭，不关闭源句柄。输出 `CHILD_OUTPUT_HANDLE=1 CHILD_SENTINEL_ABSENT=1` 并只读记录严格句柄策略；不让子进程故意引用无效句柄，不关闭保护策略。子进程入口先写出并刷新 `CHILD_ENTERED=1`，再检查身份。LPAC 子进程必须实际写出 `APP=1 AAP_ACCESS=0 JOB=1 ENV=1`，普通容器对应 `AAP_ACCESS=1`；不再声称子进程自行测得 `SECRET=0`，也不输出容易被误认为通用身份查询的 `LPAC=1`。哨兵是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、LocalAppData 值位于本任务 profile、宿主注入的模拟秘密变量未传入。这是环境值检查，不是路径防换链或文件隔离证明。
 - 故障对照在所有挂起身份检查成功后注入恢复前拒绝，走同一终止／等待／清理路径，检查子进程输出为空；不能把入 Job 本身失败误当故障对照通过。等待有时限，无法确认结束时保留 profile 并诊断，不删除或复用不确定资源。
 - 关闭句柄、删除自建文件后删除 profile，同时检查存储路径已消失，不把删除 API 返回成功等同无残留。完整进程树、父进程崩溃、超时取消与并发资源生命周期仍属 W1d；当前只运行自己的单进程探针。
 - 原生 Windows 测试运行普通容器、LPAC 与恢复前拒绝三个公开可执行入口。CI 固定 `windows-2025`，记录 OS、镜像、宿主提升状态与父 Job 状态；非 Windows 跳过原生测试不是隔离证据，手动运行探针会明确失败，不伪装成功。普通用户及桌面系统对照仍待补验。
@@ -109,6 +109,8 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 **第三轮进展与接口修正：** [defbff4 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41348504203)仍有 Windows 失败，但已越过创建与入 Job，错误转为 `GetTokenInformation` 返回 87，尚未恢复线程。`LOCALAPPDATA` 修正已使该基线不再出现启动 203，不等于子进程已运行通过。[微软 Q&A 的版本实测与文档核对](https://learn.microsoft.com/en-us/answers/questions/6011619/gettokeninformation-supported-contract-for-tokenis)指出 class 46 没有完整 Win32 支持契约，SDK 枚举存在不能当作可查询保证。当前改验上述 AAP 授权行为，新增普通容器正对照，仍待本仓库原生 CI；不使用保留属性、原生内核接口或将查询失败改成 `true` 来冒充身份确认。
 
 **第四轮分段结果：** [67e96e1 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41349478196)中恢复前拒绝对照已通过，含挂起 LPAC 的身份、AAP 拒绝、Job 与零输出清理检查。普通容器的挂起检查亦已通过，但恢复后以 `0xc0000008`（无效句柄）退出，尚无入口输出，后续 LPAC 正常运行对照未执行。入口原本先等待故意缺失的哨兵，与异常码吻合但尚无调用栈证明；现改用句柄信息查询，并增加首行启动标记，仍需原生 CI 确认原因和正常运行结果，不将该异常算作句柄隔离成功。
+
+**第五轮入口定位：** [149f6ca 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41350205175)确实收到 `CHILD_ENTERED=1`，随后仍以 `0xc0000008` 退出，恢复前拒绝对照通过；把等待改成 `GetHandleInformation` 并未解决异常。微软[严格句柄策略文档](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-process_mitigation_strict_handle_check_policy)说明无效句柄引用可触发异常；本轮尚无该策略标志或调用栈实测，不把它定为已证明的原因。当前改为上述父进程挂起查询，增加正对照并记录策略，正常普通容器与 LPAC 的结果仍待原生 CI。
 
 ## 参考
 

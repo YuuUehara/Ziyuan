@@ -324,20 +324,39 @@ fn in_job(process: HANDLE, job: HANDLE) -> io::Result<bool> {
     Ok(result != 0)
 }
 
-fn child_probe(secret: usize, ordinary: bool) -> io::Result<()> {
+fn handle_available(process: HANDLE, handle: HANDLE) -> io::Result<bool> {
+    let mut duplicate = null_mut();
+    // SAFETY: the source process stays owned and suspended through both checks.
+    // Duplicate into the parent, without inheritance or closing the source.
+    // A successful duplicate is uniquely owned and closed here. Only an explicit
+    // invalid-handle result proves absence; access or other errors fail closed.
+    unsafe {
+        if DuplicateHandle(
+            process,
+            handle,
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        ) == 0
+        {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_INVALID_HANDLE as i32) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        drop(own(duplicate)?);
+    }
+    Ok(true)
+}
+
+fn child_probe(ordinary: bool) -> io::Result<()> {
     writeln!(io::stdout(), "CHILD_ENTERED=1")?;
     io::stdout().flush()?;
-    // SAFETY: pseudo handle only borrowed, not closed; sentinel is deliberately
-    // supplied as an untrusted numeric handle. Query flags without trying to
-    // wait on, close, or otherwise operate on a deliberately missing object.
-    let (process, secret_available) = unsafe {
-        let process = GetCurrentProcess();
-        let mut flags = 0;
-        SetLastError(0);
-        let queried = GetHandleInformation(secret as HANDLE, &mut flags);
-        let denied = queried == 0 && GetLastError() == ERROR_INVALID_HANDLE;
-        (process, !denied)
-    };
+    // SAFETY: borrowed pseudo handle, never closed.
+    let process = unsafe { GetCurrentProcess() };
     let app = token_flag(process, TokenIsAppContainer)?;
     let aap = aap_access(process)?;
     let job = in_job(process, null_mut())?;
@@ -351,15 +370,14 @@ fn child_probe(secret: usize, ordinary: bool) -> io::Result<()> {
         && std::env::var_os("ZIYUAN_W1A_HOST_ONLY").is_none();
     writeln!(
         io::stdout(),
-        "APP={app} AAP_ACCESS={} JOB={} SECRET={} ENV={}",
+        "APP={app} AAP_ACCESS={} JOB={} ENV={}",
         u8::from(aap),
         u8::from(job),
-        u8::from(secret_available),
         u8::from(environment_ok)
     )?;
-    if app != 1 || aap != ordinary || !job || secret_available || !environment_ok {
+    if app != 1 || aap != ordinary || !job || !environment_ok {
         return Err(io::Error::other(
-            "child identity / handle / environment check failed",
+            "child identity / environment check failed",
         ));
     }
     Ok(())
@@ -367,11 +385,8 @@ fn child_probe(secret: usize, ordinary: bool) -> io::Result<()> {
 
 pub(super) fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() == 3 && args[0] == "--child" {
-        return child_probe(
-            args[1].parse().map_err(io::Error::other)?,
-            args[2].parse().map_err(io::Error::other)?,
-        );
+    if args.len() == 2 && args[0] == "--child" {
+        return child_probe(args[1].parse().map_err(io::Error::other)?);
     }
     let fault = args == ["--fail-before-resume"];
     let ordinary = args == ["--ordinary-appcontainer-control"];
@@ -462,13 +477,8 @@ pub(super) fn run() -> io::Result<()> {
     let application = wide(&program);
     let directory = wide(&profile.path);
     // Windows filenames cannot contain quotes. Only this known executable path
-    // and integer/boolean controls are serialized; arbitrary args aren't offered.
-    let mut command = wide(format!(
-        "\"{}\" --child {} {}",
-        program.display(),
-        sentinel.as_raw_handle() as usize,
-        ordinary
-    ));
+    // and a boolean control are serialized; arbitrary args aren't offered.
+    let mut command = wide(format!("\"{}\" --child {}", program.display(), ordinary));
     // AppContainer startup also needs LOCALAPPDATA. It is task-private, never
     // copied from the host. Entries are in Unicode name order; each wide call
     // supplies an entry NUL, then push terminates the whole environment block.
@@ -533,6 +543,27 @@ pub(super) fn run() -> io::Result<()> {
         {
             return Err(io::Error::other("suspended identity / Job mismatch"));
         }
+        // Check the child's table from the parent: deliberately referencing an
+        // absent handle inside a strict-checking child may raise an exception.
+        // A valid inherited output handle is the same-API positive control.
+        if !handle_available(child.process.as_raw_handle(), output.as_raw_handle())?
+            || handle_available(child.process.as_raw_handle(), sentinel.as_raw_handle())?
+        {
+            return Err(io::Error::other("suspended handle allowlist mismatch"));
+        }
+        println!("CHILD_OUTPUT_HANDLE=1 CHILD_SENTINEL_ABSENT=1");
+        // SAFETY: documented strict-handle policy is one DWORD of flags. The
+        // aligned output lives through this read-only query; no policy is changed.
+        let mut strict_flags = 0u32;
+        unsafe {
+            checked(GetProcessMitigationPolicy(
+                child.process.as_raw_handle(),
+                ProcessStrictHandleCheckPolicy,
+                (&mut strict_flags as *mut u32).cast(),
+                size_of_val(&strict_flags),
+            ))?;
+        }
+        println!("CHILD_STRICT_HANDLE_FLAGS={strict_flags}");
         if fault {
             injected = true;
             return Err(io::Error::new(
@@ -596,7 +627,7 @@ pub(super) fn run() -> io::Result<()> {
     } else {
         result?;
         let expected = format!(
-            "CHILD_ENTERED=1\nAPP=1 AAP_ACCESS={} JOB=1 SECRET=0 ENV=1",
+            "CHILD_ENTERED=1\nAPP=1 AAP_ACCESS={} JOB=1 ENV=1",
             u8::from(ordinary)
         );
         if text.trim() != expected {
