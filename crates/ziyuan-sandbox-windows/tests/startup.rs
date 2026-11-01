@@ -3,17 +3,27 @@
 use std::process::Command;
 
 #[test]
-fn startup_is_lpac_in_our_job_with_only_selected_handles() {
-    let output = Command::new(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"))
-        .env("ZIYUAN_W1A_HOST_ONLY", "synthetic-host-secret")
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    println!("{stdout}{stderr}");
-    assert!(output.status.success(), "{stdout}{stderr}");
-    assert!(stdout.contains("APP=1 LPAC=1 JOB=1 SECRET=0 ENV=1"));
-    assert!(stdout.contains("PROFILE_CLEANED=1"));
+fn startup_distinguishes_aap_policy_and_excludes_unselected_handles() {
+    for (argument, expected) in [
+        (
+            Some("--ordinary-appcontainer-control"),
+            "APP=1 AAP_ACCESS=1 JOB=1 SECRET=0 ENV=1",
+        ),
+        (None, "APP=1 AAP_ACCESS=0 JOB=1 SECRET=0 ENV=1"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"))
+            .args(argument)
+            .env("ZIYUAN_W1A_HOST_ONLY", "synthetic-host-secret")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("{stdout}{stderr}");
+        assert!(output.status.success(), "{stdout}{stderr}");
+        assert!(stdout.contains("HOST_AAP_ACCESS=1"));
+        assert!(stdout.contains(expected), "{stdout}{stderr}");
+        assert!(stdout.contains("PROFILE_CLEANED=1"));
+    }
 }
 
 #[test]

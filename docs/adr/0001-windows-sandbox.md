@@ -94,16 +94,19 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 新增未发布的 `ziyuan-sandbox-windows` 工作区成员，仅含独立探针可执行文件；不是通用命令启动 API，不接受用户测试命令，也没有 runtime／MCP 调用者。生产十一 crate 和发布流程不变。根 `unsafe_code = "forbid"` 不动；该实验 crate 使用 `deny`，只有私有 Win32 模块显式允许 FFI，逐处记录指针、所有权、对齐与释放约束。这是实现者自查，不是独立安全签核。
 
 - 每次新建 profile，把自身受信探针复制进去；不复用可写 profile，不给宿主目录加 ACL。显式 Unicode 环境只选择 `SystemRoot` 与指向本任务 profile 的 `LOCALAPPDATA`，按变量名排序；系统根变量缺失则拒绝，不回退继承宿主环境，也不传入宿主 AppData 路径。不授 capability，设置 LPAC 属性，挂起创建、加入 kill-on-close Job 后核对身份与**本任务** Job 归属，再恢复线程。
-- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。子进程必须实际写出 `APP=1 LPAC=1 JOB=1 SECRET=0 ENV=1`；此处 `SECRET` 是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、LocalAppData 值位于本任务 profile、宿主注入的模拟秘密变量未传入。这是环境值检查，不是路径防换链或文件隔离证明。
+- 身份以 `TokenIsAppContainer` 检查，AAP opt-out 改用真实令牌的 `AccessCheck` 对照，不再依赖 class 46 的用户态支持。固定合成 DACL 向 Everyone 与 `ALL_APPLICATION_PACKAGES` 授予同一访问位；宿主及单独创建的普通 AppContainer 必须允许，LPAC 必须拒绝，挂起阶段与恢复后的子进程分别检查。访问检查 API 失败绝不当作拒绝通过。普通容器只运行本探针作为显式正对照，不是 LPAC 失败后的回退。
+- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。LPAC 子进程必须实际写出 `APP=1 AAP_ACCESS=0 JOB=1 SECRET=0 ENV=1`，普通容器对应 `AAP_ACCESS=1`；不再输出容易被误认为通用身份查询的 `LPAC=1`。`SECRET` 是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、LocalAppData 值位于本任务 profile、宿主注入的模拟秘密变量未传入。这是环境值检查，不是路径防换链或文件隔离证明。
 - 故障对照在所有挂起身份检查成功后注入恢复前拒绝，走同一终止／等待／清理路径，检查子进程输出为空；不能把入 Job 本身失败误当故障对照通过。等待有时限，无法确认结束时保留 profile 并诊断，不删除或复用不确定资源。
 - 关闭句柄、删除自建文件后删除 profile，同时检查存储路径已消失，不把删除 API 返回成功等同无残留。完整进程树、父进程崩溃、超时取消与并发资源生命周期仍属 W1d；当前只运行自己的单进程探针。
-- 原生 Windows 测试运行正常／拒绝两个公开可执行入口。CI 固定 `windows-2025`，记录 OS、镜像、宿主提升状态与父 Job 状态；非 Windows 跳过原生测试不是隔离证据，手动运行探针会明确失败，不伪装成功。普通用户及桌面系统对照仍待补验。
+- 原生 Windows 测试运行普通容器、LPAC 与恢复前拒绝三个公开可执行入口。CI 固定 `windows-2025`，记录 OS、镜像、宿主提升状态与父 Job 状态；非 Windows 跳过原生测试不是隔离证据，手动运行探针会明确失败，不伪装成功。普通用户及桌面系统对照仍待补验。
 
-本地已通过 Windows MSVC 交叉目标 Clippy 与工作区 Clippy；这不包含 Windows 原生执行。原生两条对照和具体提交的六项 CI 未通过前，W1a 不结项、不进入 W1b，不升级任何隔离能力。当前仍未证明宿主文件不可访问、网络被拒或后代进程全部正确收尾。
+本地已通过 Windows MSVC 交叉目标 Clippy 与工作区 Clippy；这不包含 Windows 原生执行。原生全部对照和具体提交的六项 CI 未通过前，W1a 不结项、不进入 W1b，不升级任何隔离能力。合成 DACL 检查是目标版本上的 AAP 授权行为验证，不是微软承诺的通用 LPAC 检测 API，也未证明宿主文件不可访问、网络被拒或后代进程全部正确收尾。
 
 **首轮原生失败记录：** [f0e0c21 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347088703)五项通过，Windows 两条探针各自及证据步骤重试均报 Win32 203；没有拿到子进程身份／Job／句柄通过证据。实际平台是 Server 2025 `26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。原始空环境块是启动兼容性假设，不将错误号直接解释为 LPAC／Job 不可用。随后仅选择 `SystemRoot` 并增加错误调用位置与环境哨兵，原生结果见下。
 
 **第二轮定位：** [3837fa3 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347867878)仍是五项通过、Windows 两条失败；位置诊断确认 `CreateProcessW` 返回 203，说明仅补 `SystemRoot` 不足。外部 AppContainer 的[逐变量对照](https://github.com/janhq/jan/issues/9101)指向缺失 `LOCALAPPDATA`，但不代替本仓库的 LPAC 实测。本次只新增指向本任务 profile 的 `LOCALAPPDATA`，并核对子进程实际环境；失败时保留受信探针输出用于诊断。原生 CI 确认前仍不结项，不放宽身份、Job 或句柄检查，也不据提升权限宿主外推普通用户支持。
+
+**第三轮进展与接口修正：** [defbff4 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41348504203)仍有 Windows 失败，但已越过创建与入 Job，错误转为 `GetTokenInformation` 返回 87，尚未恢复线程。`LOCALAPPDATA` 修正已使该基线不再出现启动 203，不等于子进程已运行通过。[微软 Q&A 的版本实测与文档核对](https://learn.microsoft.com/en-us/answers/questions/6011619/gettokeninformation-supported-contract-for-tokenis)指出 class 46 没有完整 Win32 支持契约，SDK 枚举存在不能当作可查询保证。当前改验上述 AAP 授权行为，新增普通容器正对照，仍待本仓库原生 CI；不使用保留属性、原生内核接口或将查询失败改成 `true` 来冒充身份确认。
 
 ## 参考
 

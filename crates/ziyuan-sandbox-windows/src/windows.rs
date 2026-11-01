@@ -14,7 +14,14 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::*,
-    Security::{Authorization::ConvertSidToStringSidW, Isolation::*, *},
+    Security::{
+        Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            SDDL_REVISION_1,
+        },
+        Isolation::*,
+        *,
+    },
     System::{
         Com::CoTaskMemFree, JobObjects::*, Threading::*,
         WindowsProgramming::PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT,
@@ -246,6 +253,68 @@ fn token_flag(process: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<u32
     Ok(flag)
 }
 
+// A version-scoped behavioral probe, NOT a generic "is LPAC" token API.
+// Everyone permits the user-side check; AC (ALL_APPLICATION_PACKAGES) permits
+// the package-side check for ordinary AppContainers, but not for LPAC opt-out.
+// Native tests require host + ordinary-container grants and LPAC denial.
+fn aap_access(process: HANDLE) -> io::Result<bool> {
+    let mut token = null_mut();
+    let mut duplicate = null_mut();
+    let descriptor = wide("O:SYG:SYD:(A;;0x1;;;WD)(A;;0x1;;;AC)");
+    let mut security = null_mut();
+    // SAFETY: borrow the live process, own both returned token handles; the
+    // impersonation duplicate satisfies AccessCheck's token contract. The SDDL
+    // includes owner/group and grants one non-generic synthetic access bit.
+    unsafe {
+        checked(OpenProcessToken(
+            process,
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ))?;
+        let token = own(token)?;
+        checked(DuplicateToken(
+            token.as_raw_handle(),
+            SecurityImpersonation,
+            &mut duplicate,
+        ))?;
+        let duplicate = own(duplicate)?;
+        checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor.as_ptr(),
+            SDDL_REVISION_1,
+            &mut security,
+            null_mut(),
+        ))?;
+        let mapping = GENERIC_MAPPING {
+            GenericRead: 1,
+            GenericWrite: 1,
+            GenericExecute: 1,
+            GenericAll: 1,
+        };
+        let mut privileges: PRIVILEGE_SET = zeroed();
+        let mut bytes = size_of_val(&privileges) as u32;
+        let mut granted = 0;
+        let mut allowed = 0;
+        // SAFETY: API-owned descriptor lives through AccessCheck; typed aligned
+        // output buffers have exact supplied sizes. An insufficient privilege
+        // buffer is an API failure, never interpreted as access denial.
+        let result = checked(AccessCheck(
+            security,
+            duplicate.as_raw_handle(),
+            1,
+            &mapping,
+            &mut privileges,
+            &mut bytes,
+            &mut granted,
+            &mut allowed,
+        ));
+        // Match the SDDL conversion allocator even when AccessCheck failed,
+        // after preserving the original error (LocalFree may change last error).
+        LocalFree(security);
+        result?;
+        Ok(allowed != 0)
+    }
+}
+
 fn in_job(process: HANDLE, job: HANDLE) -> io::Result<bool> {
     let mut result = 0;
     // SAFETY: process/job are live handles (null job asks about any Job).
@@ -255,7 +324,7 @@ fn in_job(process: HANDLE, job: HANDLE) -> io::Result<bool> {
     Ok(result != 0)
 }
 
-fn child_probe(secret: usize) -> io::Result<()> {
+fn child_probe(secret: usize, ordinary: bool) -> io::Result<()> {
     // SAFETY: pseudo handle only borrowed, not closed; sentinel is deliberately
     // supplied as an untrusted numeric handle. Zero-time wait cannot block.
     let (process, secret_available) = unsafe {
@@ -266,7 +335,7 @@ fn child_probe(secret: usize) -> io::Result<()> {
         (process, !denied)
     };
     let app = token_flag(process, TokenIsAppContainer)?;
-    let lpac = token_flag(process, TokenIsLessPrivilegedAppContainer)?;
+    let aap = aap_access(process)?;
     let job = in_job(process, null_mut())?;
     let directory = std::env::current_dir()?;
     let environment_ok = std::env::var_os("SystemRoot").is_some_and(|value| !value.is_empty())
@@ -278,12 +347,13 @@ fn child_probe(secret: usize) -> io::Result<()> {
         && std::env::var_os("ZIYUAN_W1A_HOST_ONLY").is_none();
     writeln!(
         io::stdout(),
-        "APP={app} LPAC={lpac} JOB={} SECRET={} ENV={}",
+        "APP={app} AAP_ACCESS={} JOB={} SECRET={} ENV={}",
+        u8::from(aap),
         u8::from(job),
         u8::from(secret_available),
         u8::from(environment_ok)
     )?;
-    if app != 1 || lpac != 1 || !job || secret_available || !environment_ok {
+    if app != 1 || aap != ordinary || !job || secret_available || !environment_ok {
         return Err(io::Error::other(
             "child identity / handle / environment check failed",
         ));
@@ -293,11 +363,15 @@ fn child_probe(secret: usize) -> io::Result<()> {
 
 pub(super) fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() == 2 && args[0] == "--child" {
-        return child_probe(args[1].parse().map_err(io::Error::other)?);
+    if args.len() == 3 && args[0] == "--child" {
+        return child_probe(
+            args[1].parse().map_err(io::Error::other)?,
+            args[2].parse().map_err(io::Error::other)?,
+        );
     }
     let fault = args == ["--fail-before-resume"];
-    if !args.is_empty() && !fault {
+    let ordinary = args == ["--ordinary-appcontainer-control"];
+    if !args.is_empty() && !fault && !ordinary {
         return Err(io::Error::other("unknown probe arguments"));
     }
     // SAFETY: borrowed pseudo handle, never closed or inherited.
@@ -307,6 +381,10 @@ pub(super) fn run() -> io::Result<()> {
         token_flag(host, TokenElevation)?,
         u8::from(in_job(host, null_mut())?)
     );
+    if !aap_access(host)? {
+        return Err(io::Error::other("host AAP access control failed"));
+    }
+    println!("HOST_AAP_ACCESS=1");
     let mut profile = Profile::create()?;
     let program = profile.path.join("w1a-probe.exe");
     std::fs::copy(std::env::current_exe()?, &program)?;
@@ -363,19 +441,24 @@ pub(super) fn run() -> io::Result<()> {
     let handles = [input.as_raw_handle(), output.as_raw_handle()];
     let mut attributes = Attributes::new()?;
     attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
-    attributes.set(
-        PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-        &policy,
-    )?;
+    // Ordinary AppContainer is only a separately requested positive control,
+    // never a retry or fallback after a failed LPAC launch.
+    if !ordinary {
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+            &policy,
+        )?;
+    }
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
     let application = wide(&program);
     let directory = wide(&profile.path);
     // Windows filenames cannot contain quotes. Only this known executable path
-    // and an integer are serialized; arbitrary argument quoting is not offered.
+    // and integer/boolean controls are serialized; arbitrary args aren't offered.
     let mut command = wide(format!(
-        "\"{}\" --child {}",
+        "\"{}\" --child {} {}",
         program.display(),
-        sentinel.as_raw_handle() as usize
+        sentinel.as_raw_handle() as usize,
+        ordinary
     ));
     // AppContainer startup also needs LOCALAPPDATA. It is task-private, never
     // copied from the host. Entries are in Unicode name order; each wide call
@@ -437,10 +520,7 @@ pub(super) fn run() -> io::Result<()> {
         }
         if !in_job(child.process.as_raw_handle(), job.as_raw_handle())?
             || token_flag(child.process.as_raw_handle(), TokenIsAppContainer)? != 1
-            || token_flag(
-                child.process.as_raw_handle(),
-                TokenIsLessPrivilegedAppContainer,
-            )? != 1
+            || aap_access(child.process.as_raw_handle())? != ordinary
         {
             return Err(io::Error::other("suspended identity / Job mismatch"));
         }
@@ -506,7 +586,11 @@ pub(super) fn run() -> io::Result<()> {
         println!("FAULT_BEFORE_RESUME=1 CHILD_BYTES=0 PROFILE_CLEANED=1");
     } else {
         result?;
-        if text.trim() != "APP=1 LPAC=1 JOB=1 SECRET=0 ENV=1" {
+        let expected = format!(
+            "APP=1 AAP_ACCESS={} JOB=1 SECRET=0 ENV=1",
+            u8::from(ordinary)
+        );
+        if text.trim() != expected {
             return Err(io::Error::other(format!(
                 "unexpected child evidence: {text:?}"
             )));
