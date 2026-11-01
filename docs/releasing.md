@@ -1,19 +1,19 @@
 # 发布
 
-本页说明如何用标签发布紫垣，以及 crates.io 的发布流程。只描述仓库内已经配置的步骤，不含令牌、密钥或其他凭据。
+本页按 1.4.0 说明如何用标签发布紫垣，以及 crates.io 的发布流程。只描述仓库内已经配置的步骤，不含令牌、密钥或其他凭据；当前发行及注册表进度分别见[1.4.0 验收记录](acceptance/1.4.0.md)。历史首发记录保留在下文，不表示新版本还须重复首发。
 
 ## 触发条件
 
-- 标签须与 `Cargo.toml` 的版本一致，例如版本 `1.3.0` 对应标签 `v1.3.0`；`release.yml` 会先比对，不一致即失败。新 crate 须先完成首次发布和可信发布登记，不要先推标签再补准备。
+- 标签须与 `Cargo.toml` 的版本一致，例如版本 `1.4.0` 对应标签 `v1.4.0`；`release.yml` 会先比对，不一致即失败。新 crate 须先完成首次发布和可信发布登记，不要先推标签再补准备。
 - 带连字符的版本（如 `1.0.0-rc.1`）按预发布处理，不标为 latest。
 - 发布说明取自 `CHANGELOG.md` 中标题为 `## <版本>`（或版本后接空格及说明）的一节；找不到时由 GitHub 自动生成。发版前把该版本一节写进 CHANGELOG。
 
 ```bash
-git tag v1.3.0
-git push origin v1.3.0
+git tag v1.4.0
+git push origin v1.4.0
 ```
 
-推送标签会触发 `.github/workflows/release.yml`。不要手工改已公开 Release 的资产来“修”构建问题；有缺陷应发新版本。
+以上仅说明标签与版本的对应关系；已存在的标签不得重复创建或覆盖。推送标签会触发 `.github/workflows/release.yml`。不要手工改已公开 Release 的资产来“修”构建问题；有缺陷应发新版本。
 
 ## release.yml 做什么
 
@@ -31,7 +31,7 @@ build 或 publish 任一步失败，Release 保持草稿或不被公开，crates
 
 ## crates.io 可信发布
 
-1.3 共十一个 crate，workflow 按以下依赖顺序发布；`ziyuan-memory` 在依赖它的 `ziyuan-app` 之前：
+工作区共十一个 crate，workflow 按以下依赖顺序发布；`ziyuan-memory` 在依赖它的 `ziyuan-app` 之前：
 
 ```text
 ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-runtime
@@ -44,11 +44,11 @@ ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-runtime
 
 首次发布阻塞已解除：2026-10-31，`ziyuan-memory 1.3.0` 已通过临时 API token 手工发布，注册表下载包的校验值、源码与提交出处均已核对；维护者已确认保存可信发布配置并撤销临时令牌。orb 中的 Cargo 登录凭据也已清除。后续版本无需长期 API token。
 
-新包的可信发布登记由维护者在 crates.io 网页完成，本轮手工首发不等于已实测该新包的后续自动发布：1.3 工作流已跳过已经存在的 `ziyuan-memory 1.3.0`。下一个尚未发布的版本才能验证它的自动上传；配置字段仍须与下节一致。
+可信发布登记由维护者在 crates.io 网页完成。1.3 工作流跳过了已经手工发布的 `ziyuan-memory 1.3.0`，当时尚未验证该包的自动上传；**1.4.0 已实际通过可信发布上传，十一个 crate 均已核对可用**，见[1.4.0 验收](acceptance/1.4.0.md)。未来新增包仍须分别完成首发及登记。
 
 `release.yml` 已包含上面的十一项顺序。原有十个 crate 的配置不替代新包登记；未来新增 crate 仍须按下节分别完成首次发布与登记。
 
-本版四平台实际下载包已通过原生检查，十一个 crate 均可用，原有十项的可信发布记录指向同一次 Release 工作流，见[最终验收](acceptance/1.3.0.md#正式发行与实际下载包)。1.2.3 标签、历史提交与资产保留，不重打标签、不覆盖历史包。四平台包验收与 crates.io 是不同结果：Release 已公开也不等于十一个 crate 都已发布，仍须分别核对。
+1.3.0 的四平台实际下载包与十一个 crate 的历史结果见[当版验收](acceptance/1.3.0.md#正式发行与实际下载包)。旧标签、提交与资产保留，不重打标签、不覆盖历史包。四平台包验收与 crates.io 是不同结果：Release 已公开不等于所有 crate 都已发布，须分别核对。
 
 ### 第一步：手工发布尚不存在的 crate 的首个版本
 

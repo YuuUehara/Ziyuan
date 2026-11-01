@@ -1,6 +1,6 @@
 # ZiYuan 设计文档
 
-本文写于 1.0.0-rc.2，描述朝廷、事件簿与权限的内部设计。1.1.0 新增的文本项目与作品关注独立于事件簿，存于 `.ziyuan/text-projects/` 与 `.ziyuan/subscriptions/`，用法见[文本整理与检查](text-projects.md)和[作品更新提醒](subscriptions.md)。
+本文始于 1.0.0-rc.2，保留核心分层设计，并补充到 1.4.0 的边界说明。文本项目与作品关注独立存于 `.ziyuan/text-projects/` 与 `.ziyuan/subscriptions/`；1.4 新增参考绑定事件、逐段勘校与用量账本，现行契约见[稳定性约定](stability.md)，用法见[文本整理与检查](text-projects.md)和[作品更新提醒](subscriptions.md)。内部设计说明不是冻结 API。
 
 ## 1. 核心目标
 
@@ -142,7 +142,7 @@ ChatGPT 订阅：`ZIYUAN_LLM_PROVIDER=chatgpt` 时凭据为 `Auth::Plan(Arc<chat
 
 `ziyuan-runtime::haoshe`（号舍）把 `run_tests` 与名册写了 `haoshe` 的本地外藩关进操作系统沙箱：`confine(program, args, &Rules)` 在 Linux 上包一层 bubblewrap（`/` 只读、`/tmp` 换成 tmpfs、凭据目录换成空 tmpfs、只绑定可写目录），在 macOS 上生成 Seatbelt 规则交给 `sandbox-exec`；没有号舍时返回原因，调用者据此返回 `SandboxUnavailable { platform, operation, reason }` 拒绝执行；只有 `Mode::Off`（`ZIYUAN_SANDBOX=off`）不入号舍照常运行。`Rules.network` 为 `Network::{Off, Open, Only(域名)}`：`Only` 时号舍仍断网，`haoshe::proxy::Proxy`（门吏）在号舍外代为转递 `CONNECT` 与 `http://` 绝对地址的请求，只放行名单上的域名并记下被拦的。Linux 上门吏开在 Unix 套接字上，号舍内由 socat 在 `127.0.0.1:3128` 接入；macOS 上门吏开在本机端口，Seatbelt 只放行这一端口。代理地址经 `HTTP(S)_PROXY` 等变量交给号舍内的程序。返回的 `Confined` 持有门吏，须留到命令结束。
 
-重试、度支、参数校验、外来文书边界、trace ID 与工具输出节略见 §3 的 Agent Loop 一条。尚未实现：并行执行工具、进程级沙箱（工具只受路径限制）。
+重试、度支、参数校验、外来文书边界、trace ID 与工具输出节略见 §3 的 Agent Loop 一条。工具尚不并行执行；`run_tests` 与配置了号舍的本地外藩已使用上述进程级沙箱，普通文件工具仍依赖路径及玉玺检查。Windows 原生号舍尚未提供，需隔离的操作拒绝执行，不能把功能测试通过说成隔离能力已齐备。
 
 ## 5. 吏部与官员升迁
 
