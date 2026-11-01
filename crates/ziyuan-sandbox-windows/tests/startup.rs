@@ -21,6 +21,7 @@ fn startup_distinguishes_aap_policy_and_excludes_unselected_handles() {
         println!("{stdout}{stderr}");
         assert!(output.status.success(), "{stdout}{stderr}");
         assert!(stdout.contains("HOST_AAP_ACCESS=1"));
+        assert!(stdout.contains("CHILD_ENTERED=1"));
         assert!(stdout.contains(expected), "{stdout}{stderr}");
         assert!(stdout.contains("PROFILE_CLEANED=1"));
     }
@@ -37,5 +38,6 @@ fn rejected_startup_never_runs_the_suspended_child() {
     println!("{stdout}{stderr}");
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("FAULT_BEFORE_RESUME=1 CHILD_BYTES=0 PROFILE_CLEANED=1"));
+    assert!(!stdout.contains("CHILD_ENTERED=1"));
     assert!(!stdout.contains("APP=1"));
 }

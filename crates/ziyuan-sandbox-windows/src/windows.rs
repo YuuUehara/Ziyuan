@@ -325,13 +325,17 @@ fn in_job(process: HANDLE, job: HANDLE) -> io::Result<bool> {
 }
 
 fn child_probe(secret: usize, ordinary: bool) -> io::Result<()> {
+    writeln!(io::stdout(), "CHILD_ENTERED=1")?;
+    io::stdout().flush()?;
     // SAFETY: pseudo handle only borrowed, not closed; sentinel is deliberately
-    // supplied as an untrusted numeric handle. Zero-time wait cannot block.
+    // supplied as an untrusted numeric handle. Query flags without trying to
+    // wait on, close, or otherwise operate on a deliberately missing object.
     let (process, secret_available) = unsafe {
         let process = GetCurrentProcess();
+        let mut flags = 0;
         SetLastError(0);
-        let wait = WaitForSingleObject(secret as HANDLE, 0);
-        let denied = wait == WAIT_FAILED && GetLastError() == ERROR_INVALID_HANDLE;
+        let queried = GetHandleInformation(secret as HANDLE, &mut flags);
+        let denied = queried == 0 && GetLastError() == ERROR_INVALID_HANDLE;
         (process, !denied)
     };
     let app = token_flag(process, TokenIsAppContainer)?;
@@ -427,6 +431,11 @@ pub(super) fn run() -> io::Result<()> {
         }
         if WaitForSingleObject(sentinel.as_raw_handle(), 0) != WAIT_OBJECT_0 {
             return Err(io::Error::other("host sentinel control failed"));
+        }
+        let mut flags = 0;
+        checked(GetHandleInformation(sentinel.as_raw_handle(), &mut flags))?;
+        if flags & HANDLE_FLAG_INHERIT == 0 {
+            return Err(io::Error::other("host sentinel is not inheritable"));
         }
     }
     // All referenced attribute values outlive CreateProcessW. No capabilities,
@@ -587,7 +596,7 @@ pub(super) fn run() -> io::Result<()> {
     } else {
         result?;
         let expected = format!(
-            "APP=1 AAP_ACCESS={} JOB=1 SECRET=0 ENV=1",
+            "CHILD_ENTERED=1\nAPP=1 AAP_ACCESS={} JOB=1 SECRET=0 ENV=1",
             u8::from(ordinary)
         );
         if text.trim() != expected {
