@@ -108,6 +108,258 @@ fn no_court(dir: &Path) {
     );
 }
 
+fn assert_import_matches_preview(project: &Value, preview: &Value) {
+    let imported = project["chapters"].as_array().unwrap();
+    let prepared = preview["chapters"].as_array().unwrap();
+    assert_eq!(imported.len(), prepared.len());
+    for (actual, expected) in imported.iter().zip(prepared) {
+        for field in [
+            "id",
+            "source_name",
+            "sha256",
+            "byte_len",
+            "paragraphs",
+            "blocks",
+            "parsing",
+        ] {
+            assert_eq!(actual[field], expected[field], "chapter field {field}");
+        }
+        let actual_path = Path::new(actual["original_path"].as_str().unwrap());
+        let preview_path = Path::new(expected["original_path"].as_str().unwrap());
+        assert!(
+            actual_path.ends_with(preview_path),
+            "{actual_path:?} does not end with {preview_path:?}"
+        );
+    }
+}
+
+/// Include directories as well as bytes: a read-only preview must not create caches or locks.
+fn tree_snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    fn walk(root: &Path, dir: &Path, entries: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if path.is_dir() {
+                entries.push((relative, None));
+                walk(root, &path, entries);
+            } else {
+                entries.push((relative, Some(std::fs::read(path).unwrap())));
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    walk(root, root, &mut entries);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+#[test]
+fn prepared_import_options_are_usage_errors_before_io() {
+    let dir = TempDir::new("preview-usage");
+    let root = dir.path();
+    let cases: &[&[&str]] = &[
+        &["preview"],
+        &["preview", "id"],
+        &["preview", "id", "a.md", "--ruby", "--ruby"],
+        &[
+            "preview",
+            "id",
+            "a.md",
+            "--heading-level",
+            "1",
+            "--heading-level",
+            "2",
+        ],
+        &["preview", "id", "a.md", "--heading-level", "3"],
+        &["preview", "id", "a.md", "--heading-level"],
+        &["preview", "id", "a.md", "--chapter-title"],
+        &["preview", "id", "a.md", "--chapter-title", "  "],
+        &["preview", "id", "a.md", "--chapter-title", "--ruby"],
+        &["preview", "id", "a.md", "--unknown"],
+        &["preview", "id", "a.md", "--confirm", "abc"],
+        &["import", "id", "a.txt", "--ruby"],
+        &["import", "id", "a.txt", "--heading-level", "1"],
+        &["import", "id", "a.txt", "--chapter-title", "章"],
+        &["import", "id", "a.txt", "--confirm"],
+        &["import", "id", "a.txt", "--confirm", ""],
+        &["import", "id", "a.txt", "--confirm", "a", "--confirm", "b"],
+    ];
+    for case in cases {
+        let mut args = vec!["text"];
+        args.extend_from_slice(case);
+        let out = ziyuan(root, &args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(tree_snapshot(root).is_empty());
+}
+
+#[test]
+fn preview_is_read_only_and_confirmed_markdown_preserves_order_and_titles() {
+    let dir = TempDir::new("preview-md");
+    let root = dir.path();
+    let id = init_json(root, "章序", "ja");
+    dir.write("z.MD", "# 第一章\n\n｜漢字《かんじ》。\n");
+    dir.write("a.MarkDown", "# 第二章\n\n次の朝。\n");
+    let options = [
+        "z.MD",
+        "a.MarkDown",
+        "--ruby",
+        "--heading-level",
+        "1",
+        "--chapter-title",
+        "先の章",
+        "--chapter-title",
+        "後の章",
+    ];
+    let mut args = vec!["text", "preview", &id];
+    args.extend_from_slice(&options);
+    let before = tree_snapshot(root);
+    let out = ok(root, &args);
+    let text = stdout(&out);
+    for expected in [
+        "先の章",
+        "後の章",
+        "原文字节范围",
+        "段",
+        "提示块",
+        "预览指纹",
+    ] {
+        assert!(text.contains(expected), "{text}");
+    }
+    args.push("--json");
+    let preview = ok_json(root, &args);
+    assert_eq!(tree_snapshot(root), before);
+    assert_eq!(preview["project"], id);
+    assert_eq!(preview["options"]["parsing"]["ruby"], true);
+    assert_eq!(preview["options"]["parsing"]["heading_level"], 1);
+    assert_eq!(preview["chapters"][0]["source_name"], "z.MD");
+    assert_eq!(preview["chapters"][1]["source_name"], "a.MarkDown");
+    assert_eq!(preview["chapters"][0]["parsing"]["title"], "先の章");
+    assert_eq!(preview["chapters"][1]["parsing"]["title"], "後の章");
+    assert_eq!(preview["chapters"][0]["parsing"]["source_file"], 1);
+    assert_eq!(preview["chapters"][1]["parsing"]["source_file"], 2);
+    let fingerprint = preview["fingerprint"].as_str().unwrap();
+    assert!(!fingerprint.is_empty());
+    let mut import = vec!["text", "import", &id];
+    import.extend_from_slice(&options);
+    import.extend_from_slice(&["--confirm", fingerprint, "--json"]);
+    let project = ok_json(root, &import);
+    assert_import_matches_preview(&project, &preview);
+    no_court(root);
+}
+
+#[test]
+fn stale_preview_fails_without_import_and_fresh_preview_can_confirm() {
+    let dir = TempDir::new("preview-stale");
+    let root = dir.path();
+    let id = init_json(root, "变化", "ja");
+    dir.write("chapter.md", "# 章\n\n元の本文。\n");
+    let preview = ok_json(root, &["text", "preview", &id, "chapter.md", "--json"]);
+    dir.write("chapter.md", "# 章\n\n変わった本文。\n");
+    let out = ziyuan(
+        root,
+        &[
+            "text",
+            "import",
+            &id,
+            "chapter.md",
+            "--confirm",
+            preview["fingerprint"].as_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let project = ok_json(root, &["text", "show", &id, "--json"]);
+    assert!(project["chapters"].as_array().unwrap().is_empty());
+    let fresh = ok_json(root, &["text", "preview", &id, "chapter.md", "--json"]);
+    assert_ne!(preview["fingerprint"], fresh["fingerprint"]);
+    ok(
+        root,
+        &[
+            "text",
+            "import",
+            &id,
+            "chapter.md",
+            "--confirm",
+            fresh["fingerprint"].as_str().unwrap(),
+        ],
+    );
+    no_court(root);
+}
+
+#[test]
+fn plain_txt_keeps_legacy_bom_until_explicit_preview_confirmation() {
+    let dir = TempDir::new("preview-bom");
+    let root = dir.path();
+    let original = "\u{feff}本文。\r\n";
+    let path = dir.write("chapter.txt", original);
+    let legacy_id = init_json(root, "旧解析", "ja");
+    let legacy = ok_json(
+        root,
+        &["text", "import", &legacy_id, "chapter.txt", "--json"],
+    );
+    assert_eq!(
+        legacy["chapters"][0]["paragraphs"][0]["text"],
+        "\u{feff}本文。"
+    );
+    assert!(legacy["chapters"][0]["parsing"].is_null());
+    let id = init_json(root, "新解析", "ja");
+    let preview = ok_json(root, &["text", "preview", &id, "chapter.txt", "--json"]);
+    assert_eq!(preview["chapters"][0]["paragraphs"][0]["text"], "本文。");
+    let project = ok_json(
+        root,
+        &[
+            "text",
+            "import",
+            &id,
+            "chapter.txt",
+            "--confirm",
+            preview["fingerprint"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_import_matches_preview(&project, &preview);
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn preview_io_and_title_count_errors_use_runtime_exit_code() {
+    let dir = TempDir::new("preview-errors");
+    let root = dir.path();
+    let id = init_json(root, "错误", "ja");
+    assert_eq!(code(root, &["text", "preview", &id, "missing.md"]), Some(1));
+    dir.write("chapter.md", "# 一\n\n本文。\n");
+    assert_eq!(
+        code(
+            root,
+            &[
+                "text",
+                "preview",
+                &id,
+                "chapter.md",
+                "--chapter-title",
+                "一",
+                "--chapter-title",
+                "二"
+            ]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        code(root, &["text", "preview", "missing-project", "chapter.md"]),
+        Some(1)
+    );
+}
+
 /// 用存好的提示块造一份同结构的候选译稿。
 fn candidate_from(block: &Value) -> Value {
     let paragraphs: Vec<Value> = block["paragraphs"]

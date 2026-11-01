@@ -26,7 +26,7 @@ pub(crate) struct ReviseMaterials {
 
 fn neighbor(paragraph: Option<&BlockParagraph>) -> serde_json::Value {
     match paragraph {
-        Some(p) => json!([{ "id": p.id, "text": p.text }]),
+        Some(p) => json!([p]),
         None => json!([]),
     }
 }

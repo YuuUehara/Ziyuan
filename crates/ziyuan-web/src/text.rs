@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use ziyuan_app::notes::{NewNote, NoteEdit, NoteFilter, NoteKind, Notes};
-use ziyuan_app::text_project::Project;
+use ziyuan_app::text_project::{ImportOptions, ImportSource, Project};
 use ziyuan_app::translation::{BlockStatus, TranslationError, Translations};
 use ziyuan_app::{AppError, selected_files};
 use ziyuan_core::TranslationKind;
@@ -45,6 +45,75 @@ fn opt_field(body: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+// Deliberately not ImportSource: uploads cannot select server filesystem paths.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UploadFile {
+    name: String,
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportRequest {
+    files: Vec<UploadFile>,
+    #[serde(default)]
+    options: ImportOptions,
+    fingerprint: Option<String>,
+}
+
+impl ImportRequest {
+    fn sources(self) -> (Vec<ImportSource>, ImportOptions, Option<String>) {
+        let sources = self
+            .files
+            .into_iter()
+            .map(|f| ImportSource::Text {
+                name: f.name,
+                text: f.text,
+            })
+            .collect();
+        (sources, self.options, self.fingerprint)
+    }
+}
+
+pub(crate) async fn import_preview(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    Json(body): Json<ImportRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let (sources, options, _) = body.sources();
+    let preview = blocking(move || {
+        let t = Translations::new(&root);
+        t.texts()
+            .preview_import(&id, &sources, &options)
+            .map_err(|e| material(TranslationError::from(e)))
+    })
+    .await?;
+    Ok(Json(json!(preview)))
+}
+
+pub(crate) async fn import_confirm(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    Json(body): Json<ImportRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let (sources, options, fingerprint) = body.sources();
+    let fingerprint = fingerprint
+        .filter(|f| !f.is_empty())
+        .ok_or_else(|| ApiError::bad("请先预览，再确认完全相同的导入内容。"))?;
+    let project = blocking(move || {
+        let t = Translations::new(&root);
+        t.texts()
+            .import_prepared(&id, &sources, &options, &fingerprint)
+            .map_err(|e| material(TranslationError::from(e)))
+    })
+    .await?;
+    app.emit("changed", json!({}));
+    Ok(Json(json!(project)))
 }
 
 /// 项目摘要（列表与详情共用）：章、块为件数，另附现行上下文版本。
@@ -248,6 +317,7 @@ pub(crate) async fn project(
                     json!({
                         "chapter": c.id,
                         "source_name": c.source_name,
+                        "title": c.parsing.as_ref().map(|p| p.title.as_str()).unwrap_or(&c.source_name),
                         "blocks": c.blocks.iter().map(|b| b.block_id.clone()).collect::<Vec<_>>(),
                     })
                 })

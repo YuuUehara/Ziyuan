@@ -341,7 +341,7 @@
   /* ---- 表单与按钮：墨色细框，只有「采纳」钤朱 ---- */
   label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
   label:first-child { margin-top: 0; }
-  input[type=text], input[type=number], input[type=password], input[type=datetime-local], select, textarea {
+  input[type=text], input[type=number], input[type=password], input[type=datetime-local], input[type=file], select, textarea {
     width: 100%; font: inherit; color: var(--ink); background: var(--sheet);
     border: 1px solid var(--line); border-radius: var(--radius); padding: 7px 9px;
   }
@@ -356,11 +356,12 @@
   .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
   code { font-family: var(--mono); font-size: .92em; }
 
-  button {
+  button, input[type=file]::file-selector-button {
     font: inherit; cursor: pointer; border-radius: var(--radius); border: 1px solid var(--line-strong);
     background: var(--sheet); color: var(--ink); padding: 6px 12px; white-space: nowrap;
   }
-  button:hover { background: var(--well); }
+  input[type=file]::file-selector-button { margin-right: 9px; }
+  button:hover, input[type=file]::file-selector-button:hover { background: var(--well); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.small { padding: 2px 9px; font-size: 12.5px; }
   /* 主要动作：墨色实底，每处至多一个。 */
@@ -528,6 +529,18 @@
   #memory-query { flex: 1 1 180px; }
   #memory-hits { max-height: 48vh; overflow: auto; }
   #memory-result.error { color: var(--bad); }
+  #text-import { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  #text-import input, #text-import select { min-width: 0; max-width: 100%; }
+  #text-import :disabled { opacity: .45; cursor: not-allowed; }
+  #text-import h4 { margin: 12px 0 6px; font-family: var(--serif); font-size: 14px; font-weight: 600; letter-spacing: 2px; }
+  #text-import ol { padding-left: 22px; }
+  #text-import li { margin-bottom: 6px; }
+  #text-import .row { flex-wrap: wrap; }
+  #import-chapters { max-height: 60vh; overflow: auto; margin-bottom: 12px; }
+  #import-chapters .text-material + .text-material { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+  /* 长读音可折行，但不把一组读音随意分配给分开的基底字符。 */
+  #text-import ruby, #text-source ruby { display: inline-flex; flex-direction: column-reverse; align-items: center; vertical-align: bottom; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  #text-import rt, #text-source rt { display: block; max-width: 100%; font-size: .72em; text-align: center; overflow-wrap: anywhere; }
   /* 结果与错误里常有长路径或 SHA，须在窄屏内换行。 */
   #text-action-result, #text-status, #note-result, #note-status, #text-project-meta { overflow-wrap: anywhere; }
   #text-action-result.error, #note-result.error, #text-status .error { color: var(--bad); }
@@ -809,6 +822,7 @@
           </div>
           <div class="text-main">
             <p class="hint" id="text-status" role="status" aria-live="polite"></p>
+            <section id="text-import" aria-label="导入原文"></section>
             <div class="text-compare">
               <div class="text-col"><h4>原文</h4><div class="text-scroll" id="text-source"></div></div>
               <div class="text-col"><h4>已准奏译文</h4><div class="text-scroll" id="text-zh"></div></div>
@@ -1337,6 +1351,115 @@ let textPicked = null;     // 选中的段：朱批与札记都以它为准
 let textError = null;
 let textBusy = false;
 let textLoaded = false;
+let importDraft = null;
+function importState() {
+  if (!importDraft || importDraft.project !== textProjectId) {
+    importDraft = { project: textProjectId, files: [], ruby: false, heading: "", titles: [], preview: null, busy: false, message: "", revision: 0 };
+  }
+  return importDraft;
+}
+// All source strings are escaped; only these fixed tags are ever generated.
+function sourceInlineHtml(p) {
+  if (!Array.isArray(p.inlines) || !p.inlines.length) return esc(p.text);
+  return p.inlines.map((i) => {
+    if (i.kind === "ruby") return `<ruby aria-label="${esc(i.base)}（${esc(i.reading)}）">${esc(i.base)}<rp>（</rp><rt>${esc(i.reading)}</rt><rp>）</rp></ruby>`;
+    if (i.kind === "emphasis") return `<em>${esc(i.text)}</em>`;
+    return esc(i.text || "");
+  }).join("");
+}
+function renderImport() {
+  const box = $("text-import");
+  const d = importState();
+  if (!textProjectId || !textProject || textProject.project.id !== textProjectId || textProject.project.chapters) {
+    box.replaceChildren(); delete box.dataset.project; return;
+  }
+  if (!state || state.viewer) {
+    box.textContent = "观政只读：请由持有写权限的用户预览并导入原文。"; return;
+  }
+  // Polling must not replace live inputs, their focus, or selected browser files.
+  if (box.dataset.project === d.project && box.dataset.revision === String(d.revision)) return;
+  const files = box.dataset.project === d.project ? $("import-files") : null;
+  box.dataset.project = d.project; box.dataset.revision = String(d.revision);
+  const disabled = d.busy ? "disabled" : "";
+  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；先用 ziyuan text init 建项目。不追加、不替换。UTF-8；HTTP JSON 请求体上限 2 MiB（含转义和元数据），应用层原文上限 8 MiB。请明确调整文件顺序后预览。</p>
+    <label>选择文件 <input type="file" id="import-files" multiple accept=".txt,.md,.markdown" ${disabled}></label>
+    <ol>${d.files.map((f, i) => `<li><div class="row"><span>${esc(f.name)}</span><span class="shrink"><button type="button" class="small" data-import-move="${i}" data-step="-1" ${i === 0 ? "disabled" : disabled}>上移</button> <button type="button" class="small" data-import-move="${i}" data-step="1" ${i === d.files.length - 1 ? "disabled" : disabled}>下移</button></span></div></li>`).join("")}</ol>
+    <label><input id="import-ruby" type="checkbox" ${d.ruby ? "checked" : ""} ${disabled}>显式识别注音 ruby</label>
+    <label>MD 分章 <select id="import-heading" ${disabled}><option value="">不分章</option><option value="1" ${d.heading === "1" ? "selected" : ""}>一级标题</option><option value="2" ${d.heading === "2" ? "selected" : ""}>二级标题</option></select></label>
+    <button type="button" id="import-preview" ${d.busy || !d.files.length ? "disabled" : ""}>${d.busy ? "处理中…" : "重新预览"}</button>
+    <p role="status" class="hint">${esc(d.message)}</p>
+    <div id="import-chapters" class="text-scroll" role="region" aria-label="章节导入预览，可滚动" tabindex="0" ${d.preview ? "" : "hidden"}>${d.preview ? `<p>预览共 ${d.preview.chapters.length} 章（未写入，可滚动核对全部内容）。</p>` + d.preview.chapters.map((c, i) => {
+      const p = c.parsing || {};
+      const rubyCount = (c.paragraphs || []).reduce((n, para) => n + (para.inlines || []).filter((i) => i.kind === "ruby").length, 0);
+      return `<div class="text-material"><label>章 ${i + 1} 标题 <input type="text" data-import-title="${i}" value="${esc(d.titles[i] ?? p.title ?? c.source_name)}" ${disabled}></label><p>${esc(c.source_name)} · ${esc(p.format)} · 字节 [${esc(p.byte_start)}, ${esc(p.byte_end)}) · ${(c.paragraphs || []).length} 段 · ${(c.blocks || []).length} 块 · ${rubyCount} 处注音 · ${(p.warnings || []).length} 条警告</p>${(p.warnings || []).map((w) => `<p class="hint">警告 [${esc(w.byte_start)}, ${esc(w.byte_end)})：${esc(w.message)}</p>`).join("")}${(c.paragraphs || []).map((p) => `<p class="text-para">${sourceInlineHtml(p)}</p>`).join("")}</div>`;
+    }).join("") : ""}</div>
+    <button type="button" id="import-confirm" ${d.busy || !d.preview || d.dirty ? "disabled" : ""}>确认以上精确预览并导入一次</button>`;
+  if (files) {
+    files.disabled = d.busy;
+    $("import-files").replaceWith(files);
+  }
+}
+function invalidateImport() {
+  const d = importState(); d.dirty = true; d.message = "内容、顺序或标题已修改，必须重新预览。"; d.revision++; renderImport();
+}
+async function submitImport(confirm) {
+  const d = importState();
+  if (!state || state.viewer || d.busy || !d.files.length || (confirm && (!d.preview || d.dirty))) return;
+  const body = { files: d.files, options: { parsing: { ruby: d.ruby, heading_level: d.heading ? Number(d.heading) : null }, chapter_titles: d.titles } };
+  if (confirm) body.fingerprint = d.preview.fingerprint;
+  if (new TextEncoder().encode(JSON.stringify(body)).length > 2 * 1024 * 1024) {
+    d.message = "编码后的 JSON 请求超过 HTTP 2 MiB 上限，请减少文件。"; d.revision++; renderImport(); return;
+  }
+  d.busy = true; d.message = confirm ? "正在导入…" : "正在预览（不会写入）…"; d.revision++; renderImport();
+  try {
+    const result = await api(`/text/${encodeURIComponent(d.project)}/import${confirm ? "" : "/preview"}`, body);
+    if (confirm) {
+      d.preview = null; d.message = "已导入。";
+      if (textProjectId === d.project) await loadText();
+    } else {
+      d.preview = result; d.dirty = false;
+      d.titles = result.options.chapter_titles.slice();
+      d.message = "请核对章序、标题、原文字节范围、段落及警告；修改后须重新预览。";
+    }
+  } catch (e) {
+    d.message = `操作失败：${e.message}${confirm ? "。请先刷新项目核对结果，不要盲目重试。" : ""}`;
+    if (confirm) d.dirty = true;
+  } finally { d.busy = false; d.revision++; if (importDraft === d) renderImport(); }
+}
+$("text-import").addEventListener("click", (e) => {
+  const d = importState(); if (!state || state.viewer || d.busy) return;
+  const move = e.target.closest("[data-import-move]");
+  if (move) {
+    const i = Number(move.dataset.importMove), j = i + Number(move.dataset.step);
+    if (j >= 0 && j < d.files.length) { [d.files[i], d.files[j]] = [d.files[j], d.files[i]]; d.titles = []; d.preview = null; invalidateImport(); }
+  }
+  if (e.target.id === "import-preview") submitImport(false);
+  if (e.target.id === "import-confirm") submitImport(true);
+});
+$("text-import").addEventListener("input", (e) => {
+  const d = importState(); if (d.busy || !state || state.viewer) return;
+  if (e.target.dataset.importTitle !== undefined) {
+    if (!d.titles.length) d.titles = d.preview.chapters.map((c) => c.parsing?.title || c.source_name);
+    d.titles[Number(e.target.dataset.importTitle)] = e.target.value;
+    d.dirty = true; $("import-confirm").disabled = true;
+    d.message = "章节标题已修改，必须重新预览后才能确认。";
+    $("text-import").querySelector('[role="status"]').textContent = d.message;
+  }
+});
+$("text-import").addEventListener("change", async (e) => {
+  const d = importState(); if (d.busy || !state || state.viewer) return;
+  if (e.target.id === "import-ruby") { d.ruby = e.target.checked; d.titles = []; d.preview = null; invalidateImport(); }
+  if (e.target.id === "import-heading") { d.heading = e.target.value; d.titles = []; d.preview = null; invalidateImport(); }
+  if (e.target.id === "import-files") {
+    const files = [...e.target.files]; d.busy = true; d.preview = null; d.titles = []; d.message = "正在解码 UTF-8…"; d.revision++; renderImport();
+    try {
+      if (files.reduce((n, f) => n + f.size, 0) > 2 * 1024 * 1024) throw new Error("原文超过 HTTP 2 MiB 请求上限");
+      d.files = await Promise.all(files.map(async (f) => ({ name: f.name, text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await f.arrayBuffer()) })));
+      d.message = "请用上移／下移明确核对文件顺序，再预览。";
+    } catch (e) { d.files = []; d.message = `文件读取失败：${e.message}`; }
+    finally { d.busy = false; d.dirty = true; d.revision++; if (importDraft === d) renderImport(); }
+  }
+});
 // 「项目/块/段」→ 未保存的朱批：重绘、刷新与关页都不丢（只在本标签页，存 sessionStorage）。
 const textDrafts = (() => {
   try { return JSON.parse(sessionStorage.getItem("ziyuan-text-drafts") || "{}"); } catch { return {}; }
@@ -1382,7 +1505,7 @@ async function loadText() {
 }
 async function loadTextProject() {
   const project = textProjectId;
-  textProject = null;
+  if (textProject?.project.id !== project) { textProject = null; textBlock = null; renderText(); }
   textError = null;
   if (project !== memoryProject) loadMemoryStatus(null);
   if (!textProjectId) { renderText(); return; }
@@ -1408,14 +1531,18 @@ async function loadTextProject() {
 }
 async function loadTextBlock() {
   if (!textProjectId || !textBlockId) return;
+  const project = textProjectId, block = textBlockId;
   textError = null;
   try {
-    textBlock = await api(`/text/${encodeURIComponent(textProjectId)}/blocks/${encodeURIComponent(textBlockId)}`);
+    const loaded = await api(`/text/${encodeURIComponent(project)}/blocks/${encodeURIComponent(block)}`);
+    if (project !== textProjectId || block !== textBlockId) return;
+    textBlock = loaded;
     const paragraphs = ((textBlock.source && textBlock.source.paragraphs) || []).map((p) => p.id);
     // 刷新后回到原来看的那一段。
     if (!textPicked) textPicked = textPickedLoad();
     if (textPicked && !paragraphs.includes(textPicked)) textPicked = null;
   } catch (e) {
+    if (project !== textProjectId || block !== textBlockId) return;
     textBlock = null;
     textError = `无法加载此块：${e.message}`;
   }
@@ -1490,12 +1617,12 @@ function textStaleText(reason) {
     default: return String(reason.reason || "版本失效");
   }
 }
-function textParagraphHtml(p, changed, note) {
+function textParagraphHtml(p, changed, note, source = false) {
   const zhu = textZhupiSaved(p.id);
   const picked = p.id === textPicked ? " picked" : "";
   const mark = changed ? " changed" : "";
   return `<p class="text-para${mark}${picked}" data-text-para="${esc(p.id)}" ${note ? `title="${esc(note)}"` : ""}>` +
-    `<span class="pid">${esc(p.id)}</span>${esc(p.text)}` +
+    `<span class="pid">${esc(p.id)}</span>${source ? sourceInlineHtml(p) : esc(p.text)}` +
     (zhu ? `<span class="zhu">朱批：${esc(zhu)}</span>` : "") +
     `</p>`;
 }
@@ -1531,6 +1658,7 @@ function updateNoteLink() {
     : "未选项目：札记不记出处，只存译法。";
 }
 function renderTextNow() {
+  renderImport();
   const projects = textProjects || [];
   const select = $("text-project");
   select.innerHTML = projects.length
@@ -1547,7 +1675,7 @@ function renderTextNow() {
   const byBlock = new Map(((textProject && textProject.statuses) || []).map((s) => [s.block, s]));
   $("text-outline").innerHTML = textProject && (textProject.outline || []).length
     ? textProject.outline.map((chapter) =>
-        `<div class="text-chapter">${esc(chapter.chapter)}${chapter.source_name ? " · " + esc(chapter.source_name) : ""}</div>` +
+        `<div class="text-chapter">${esc(chapter.chapter)}${chapter.title || chapter.source_name ? " · " + esc(chapter.title || chapter.source_name) : ""}</div>` +
         chapter.blocks.map((b) => {
           const st = byBlock.get(b);
           return `<button type="button" class="text-block-row ${b === textBlockId ? "current" : ""}" data-view data-text-block="${esc(b)}">` +
@@ -1585,7 +1713,7 @@ function renderTextNow() {
   // 三栏：原文 / 已准奏译文 / 待准修订（待准奏诏令的最终译稿）。
   const sourceParagraphs = (b && b.source && b.source.paragraphs) || [];
   $("text-source").innerHTML = sourceParagraphs.length
-    ? sourceParagraphs.map((p) => textParagraphHtml(p, false)).join("")
+    ? sourceParagraphs.map((p) => textParagraphHtml(p, false, null, true)).join("")
     : `<p class="hint">${b ? "此块没有原文。" : "选一个块以看原文。"}</p>`;
   const zh = b && b.translation && b.translation.paragraphs;
   $("text-zh").innerHTML = zh

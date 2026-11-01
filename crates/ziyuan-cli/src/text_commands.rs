@@ -4,7 +4,10 @@ use std::env;
 use std::error::Error;
 use std::io::Read;
 use std::path::PathBuf;
-use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects, ValidationReport};
+use ziyuan_app::text_project::{
+    ImportOptions, ImportPreview, ImportSource, NewProject, Project, Provenance, TextProjects,
+    ValidationReport,
+};
 use ziyuan_storage::{LockScope, RecordState, Untouched, Workspace};
 
 /// `text recovery status` 发现未收尾的受管写入：状态本身读成功，但退出码仍为 1，
@@ -24,6 +27,14 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        建立项目（译入 zh-CN），打印项目 ID；来源与权利为用户自述，不作核验
   ziyuan text import <项目ID> <章节.txt>...
                                        按给出的顺序一次性导入 UTF-8 TXT（每个项目只能导入一次）
+  ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>]
+                     [--chapter-title <章名>]...
+                                       只读预览 TXT/MD，显示章序、原文字节范围、段落、提示块及警告和指纹
+  ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>]
+                    [--chapter-title <章名>]... --confirm <预览指纹>
+                                       MD（.md/.markdown）、ruby 或新解析选项须先 preview 再确认；
+                                       TXT 使用新解析/BOM 处理也须 preview + --confirm；不加选项仍走旧 TXT 导入
+                                       重复 --chapter-title 按章序覆盖全部章名；确认时须保持文件顺序与选项不变
   ziyuan text show <项目ID>            核对原文副本后列出章节、段落与提示块
   ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]
                                        检查候选译稿的结构（漏段、重复、顺序、陌生段号、空文本）；
@@ -49,6 +60,8 @@ pub(crate) enum TextAction {
     Recovery(RecoveryAction),
     Init(NewProject),
     Import(String, Vec<PathBuf>),
+    Preview(String, Vec<ImportSource>, ImportOptions),
+    ImportPrepared(String, Vec<ImportSource>, ImportOptions, String),
     Show(String),
     Check {
         id: String,
@@ -58,7 +71,8 @@ pub(crate) enum TextAction {
 }
 
 const INIT_USAGE: &str = "用法: ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明> [--author <作者>] [--version <版本>] [--date <取得日期>] [--scope <使用范围>]";
-const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <章节.txt>...";
+const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--chapter-title <章名>]... [--confirm <预览指纹>]；MD 或解析选项须先 text preview 再 --confirm";
+const PREVIEW_USAGE: &str = "用法: ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--chapter-title <章名>]...";
 const SHOW_USAGE: &str = "用法: ziyuan text show <项目ID>";
 const CHECK_USAGE: &str =
     "用法: ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]";
@@ -91,12 +105,8 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
     Ok(match action.as_str() {
         "help" => TextAction::Help,
         "init" => parse_init(rest)?,
-        "import" => match rest {
-            [id, files @ ..] if !files.is_empty() && !rest.iter().any(|a| a.starts_with("--")) => {
-                TextAction::Import(id.clone(), files.iter().map(PathBuf::from).collect())
-            }
-            _ => return Err(IMPORT_USAGE.into()),
-        },
+        "import" => parse_import(rest, false)?,
+        "preview" => parse_import(rest, true)?,
         "show" => match rest {
             [id] if !id.starts_with("--") => TextAction::Show(id.clone()),
             _ => return Err(SHOW_USAGE.into()),
@@ -113,6 +123,68 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
                 format!("未知的 text 子命令：{other}。运行 ziyuan text help 查看用法").into(),
             );
         }
+    })
+}
+
+fn parse_import(args: &[String], preview: bool) -> Result<TextAction, Box<dyn Error>> {
+    let usage = if preview { PREVIEW_USAGE } else { IMPORT_USAGE };
+    let (id, args) = args.split_first().ok_or(usage)?;
+    if id.starts_with("--") || id.is_empty() {
+        return Err(usage.into());
+    }
+    let mut options = ImportOptions::default();
+    let mut files = Vec::new();
+    let mut confirm = None;
+    let mut given = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with("--") {
+            files.push(PathBuf::from(arg));
+            continue;
+        }
+        if arg != "--chapter-title" && given.contains(arg) {
+            return Err(format!("{arg} 只能给一次。{usage}").into());
+        }
+        given.push(arg.clone());
+        match arg.as_str() {
+            "--ruby" => options.parsing.ruby = true,
+            "--heading-level" | "--chapter-title" | "--confirm" => {
+                let value = rest
+                    .next()
+                    .filter(|value| !value.starts_with("--") && !value.trim().is_empty())
+                    .ok_or(usage)?;
+                match arg.as_str() {
+                    "--heading-level" => {
+                        options.parsing.heading_level = Some(match value.as_str() {
+                            "1" => 1,
+                            "2" => 2,
+                            _ => return Err(usage.into()),
+                        });
+                    }
+                    "--chapter-title" => options.chapter_titles.push(value.clone()),
+                    "--confirm" if !preview => confirm = Some(value.clone()),
+                    _ => return Err(usage.into()),
+                }
+            }
+            _ => return Err(usage.into()),
+        }
+    }
+    if files.is_empty() {
+        return Err(usage.into());
+    }
+    if !preview && confirm.is_none() {
+        if !given.is_empty() {
+            return Err(IMPORT_USAGE.into());
+        }
+        // No new options means the frozen legacy command, including runtime exit 1 for
+        // unsupported inputs. Markdown still cannot import without explicit confirmation.
+        return Ok(TextAction::Import(id.clone(), files));
+    }
+    let sources = files.into_iter().map(ImportSource::File).collect();
+    Ok(if preview {
+        TextAction::Preview(id.clone(), sources, options)
+    } else {
+        TextAction::ImportPrepared(id.clone(), sources, options, confirm.ok_or(usage)?)
     })
 }
 
@@ -238,6 +310,13 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
             }
         }
         TextAction::Import(id, files) => {
+            if files.iter().any(|file| {
+                file.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+                })
+            }) {
+                return Err("Markdown 导入须先运行 text preview，再以相同文件与选项加 --confirm <预览指纹> 确认".into());
+            }
             let project = projects.import(&id, &files)?;
             match json {
                 true => print_json(serde_json::to_value(&project)?)?,
@@ -245,6 +324,23 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                     println!("已导入 {} 章：", project.chapters.len());
                     print_chapters(&projects, &project)?;
                 }
+            }
+        }
+        TextAction::Preview(id, sources, options) => {
+            let preview = projects.preview_import(&id, &sources, &options)?;
+            if json {
+                print_json(serde_json::to_value(&preview)?)?;
+            } else {
+                print_preview(&preview);
+            }
+        }
+        TextAction::ImportPrepared(id, sources, options, expected) => {
+            let project = projects.import_prepared(&id, &sources, &options, &expected)?;
+            if json {
+                print_json(serde_json::to_value(&project)?)?;
+            } else {
+                println!("已导入 {} 章：", project.chapters.len());
+                print_chapters(&projects, &project)?;
             }
         }
         TextAction::Show(id) => {
@@ -277,6 +373,38 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
         }
     }
     Ok(())
+}
+
+fn print_preview(preview: &ImportPreview) {
+    println!(
+        "导入预览（只读）：{} · {} 章",
+        preview.project,
+        preview.chapters.len()
+    );
+    for (index, chapter) in preview.chapters.iter().enumerate() {
+        println!(
+            "  {}. {} {}：{} 段，{} 个提示块",
+            index + 1,
+            chapter.id,
+            chapter.source_name,
+            chapter.paragraphs.len(),
+            chapter.blocks.len()
+        );
+        if let Some(parsing) = &chapter.parsing {
+            println!(
+                "    标题：{} · 格式：{:?} · 原文字节范围：{}..{}",
+                parsing.title, parsing.format, parsing.byte_start, parsing.byte_end
+            );
+            for warning in &parsing.warnings {
+                println!(
+                    "    警告 {}..{}：{}",
+                    warning.byte_start, warning.byte_end, warning.message
+                );
+            }
+        }
+    }
+    println!("预览指纹：{}", preview.fingerprint);
+    println!("确认导入：用相同文件顺序与选项运行 text import，并加 --confirm <预览指纹>。");
 }
 
 fn print_json(value: serde_json::Value) -> Result<(), Box<dyn Error>> {

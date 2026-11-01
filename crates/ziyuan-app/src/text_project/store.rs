@@ -18,7 +18,7 @@ const MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct TextProjects {
     root: PathBuf,
-    manifest_bytes: u64,
+    pub(super) manifest_bytes: u64,
 }
 impl TextProjects {
     /// `workspace` is the user's project/workspace directory, not `.ziyuan` itself.
@@ -37,7 +37,7 @@ impl TextProjects {
         valid_id(id)?;
         Ok(self.root.join(id))
     }
-    fn manifest(&self, id: &str) -> Result<JsonFile<Project>> {
+    pub(super) fn manifest(&self, id: &str) -> Result<JsonFile<Project>> {
         let dir = self.project_dir(id)?;
         if let Ok(m) = fs::symlink_metadata(&dir)
             && (!m.is_dir() || m.file_type().is_symlink())
@@ -46,7 +46,7 @@ impl TextProjects {
         }
         Ok(JsonFile::new(
             dir.join("project.json"),
-            1,
+            2,
             self.manifest_bytes,
         ))
     }
@@ -126,6 +126,7 @@ impl TextProjects {
                         byte_len: source.bytes.len(),
                         paragraphs,
                         blocks,
+                        parsing: None,
                     });
                     snapshots.push(source);
                 }
@@ -196,15 +197,20 @@ impl TextProjects {
             .value;
         validate_project(&project, id)?;
         let dir = self.project_dir(id)?;
+        let mut parsed = std::collections::BTreeMap::new();
         for (i, chapter) in project.chapters.iter().enumerate() {
             let expected = format!("c{:04}", i + 1);
             let parts: Vec<_> = chapter.original_path.split('/').collect();
+            let original_name = match &chapter.parsing {
+                None => format!("{expected}.txt"),
+                Some(info) => super::import::original_name(info.source_file, &info.format),
+            };
             if chapter.id != expected
                 || parts.len() != 3
                 || !parts[0].starts_with(".import-")
                 || valid_id(parts[0].strip_prefix(".import-").unwrap_or("")).is_err()
                 || parts[1] != "originals"
-                || parts[2] != format!("{expected}.txt")
+                || parts[2] != original_name
             {
                 return Err(invalid(format!("{expected}: 无效原文路径或章节 ID")));
             }
@@ -215,7 +221,70 @@ impl TextProjects {
             if sha256(&raw) != chapter.sha256 || raw.len() != chapter.byte_len {
                 return Err(TextProjectError::Stale(chapter.id.clone()));
             }
-            let paragraphs = split_paragraphs(&expected, &raw)?;
+            let paragraphs = match &chapter.parsing {
+                None => {
+                    if project.chapters.iter().any(|c| c.parsing.is_some()) {
+                        return Err(invalid("不支持将旧 TXT 项目原地转为新版解析"));
+                    }
+                    split_paragraphs(&expected, &raw)?
+                }
+                Some(info) => {
+                    if info.version != 1 {
+                        return Err(invalid("无法读取此原文解析版本，请升级 ziyuan"));
+                    }
+                    if super::import::format_for_name(&chapter.source_name)? != info.format
+                        || info.title.trim().is_empty()
+                    {
+                        return Err(TextProjectError::Stale(chapter.id.clone()));
+                    }
+                    let previous = i
+                        .checked_sub(1)
+                        .and_then(|n| project.chapters[n].parsing.as_ref());
+                    let same_file = previous.is_some_and(|p| p.source_file == info.source_file);
+                    let ordered = if same_file {
+                        let p = previous.expect("same source has a previous chapter");
+                        p.part.checked_add(1) == Some(info.part)
+                            && p.format == info.format
+                            && p.options == info.options
+                            && project.chapters[i - 1].original_path == chapter.original_path
+                            && project.chapters[i - 1].source_name == chapter.source_name
+                    } else {
+                        info.part == 0
+                            && previous.map_or(Some(1), |p| p.source_file.checked_add(1))
+                                == Some(info.source_file)
+                            && (i == 0 || previous.is_some())
+                    };
+                    if !ordered {
+                        return Err(invalid("原文文件与章节顺序不符"));
+                    }
+                    if !parsed.contains_key(&chapter.original_path) {
+                        let documents = super::parse_document(
+                            &raw,
+                            info.format.clone(),
+                            &info.options,
+                            super::import::fallback_title(&chapter.source_name),
+                        )?;
+                        parsed.insert(chapter.original_path.clone(), documents);
+                    }
+                    let documents = &parsed[&chapter.original_path];
+                    let document = documents
+                        .get(info.part)
+                        .ok_or_else(|| invalid("章节原文范围不符"))?;
+                    let last = project
+                        .chapters
+                        .get(i + 1)
+                        .and_then(|c| c.parsing.as_ref())
+                        .is_none_or(|next| next.source_file != info.source_file);
+                    if info.byte_start != document.byte_start
+                        || info.byte_end != document.byte_end
+                        || info.warnings != document.warnings
+                        || (last && info.part + 1 != documents.len())
+                    {
+                        return Err(TextProjectError::Stale(chapter.id.clone()));
+                    }
+                    super::import::paragraphs(&expected, document)
+                }
+            };
             let blocks = chunk_paragraphs(&expected, &paragraphs, project.block_bytes)?;
             if paragraphs != chapter.paragraphs || blocks != chapter.blocks {
                 return Err(TextProjectError::Stale(chapter.id.clone()));
@@ -236,7 +305,7 @@ impl TextProjects {
 
 /// Upper bound for the stored envelope: it nests `project` one level deeper (two more spaces
 /// per line) and adds a few header fields.
-fn estimated_manifest_bytes(project: &Project) -> Result<u64> {
+pub(super) fn estimated_manifest_bytes(project: &Project) -> Result<u64> {
     let body = serde_json::to_vec_pretty(project).map_err(|e| invalid(e.to_string()))?;
     let lines = body.iter().filter(|&&b| b == b'\n').count() + 1;
     Ok((body.len() + lines * 2 + 256) as u64)
@@ -253,7 +322,7 @@ fn validate_metadata(m: &NewProject) -> Result<()> {
     }
     Ok(())
 }
-fn validate_project(p: &Project, id: &str) -> Result<()> {
+pub(super) fn validate_project(p: &Project, id: &str) -> Result<()> {
     if p.id != id {
         return Err(invalid("项目 ID 不匹配"));
     }
@@ -273,7 +342,7 @@ fn valid_id(id: &str) -> Result<()> {
     }
     Ok(())
 }
-fn random_id() -> Result<String> {
+pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0; 16];
     SystemRandom::new()
         .fill(&mut bytes)
@@ -287,7 +356,7 @@ pub(super) fn sha256(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -307,11 +376,11 @@ fn read_plain(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(fs::read(path)?)
 }
-struct Source {
+pub(super) struct Source {
     path: PathBuf,
     file: File,
     metadata: fs::Metadata,
-    bytes: Vec<u8>,
+    pub(super) bytes: Vec<u8>,
 }
 impl Source {
     fn read(path: &Path) -> Result<Self> {
@@ -321,6 +390,9 @@ impl Source {
         {
             return Err(invalid("仅支持 .txt 原文"));
         }
+        Self::read_limited(path, usize::MAX)
+    }
+    pub(super) fn read_limited(path: &Path, limit: usize) -> Result<Self> {
         let before = fs::symlink_metadata(path)?;
         if !before.is_file() || before.file_type().is_symlink() {
             return Err(invalid("仅接受普通文件，拒绝符号链接"));
@@ -331,7 +403,12 @@ impl Source {
             return Err(TextProjectError::SourceChanged(path.display().to_string()));
         }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        (&mut file)
+            .take((limit as u64).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err(invalid("导入原文超过 8 MiB，请拆成多个项目"));
+        }
         let mut source = Self {
             path: path.to_owned(),
             file,
@@ -341,7 +418,7 @@ impl Source {
         source.verify()?;
         Ok(source)
     }
-    fn verify(&mut self) -> Result<()> {
+    pub(super) fn verify(&mut self) -> Result<()> {
         use std::io::{Seek, SeekFrom};
         let changed = || TextProjectError::SourceChanged(self.path.display().to_string());
         let now = fs::symlink_metadata(&self.path).map_err(|_| changed())?;

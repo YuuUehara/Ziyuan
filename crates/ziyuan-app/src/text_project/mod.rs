@@ -4,11 +4,15 @@
 //! bytes are checked before/after import, but portable std filesystem operations cannot
 //! prevent a malicious process from swapping ancestor paths or changing/restoring a file
 //! between observations. This is consistency checking, not an adversarial filesystem sandbox.
+mod document;
+mod import;
 mod model;
 mod split;
 mod store;
 mod validate;
 
+pub use document::*;
+pub use import::{ImportOptions, ImportPreview, ImportSource};
 pub use model::*;
 pub use split::{chunk_paragraphs, split_paragraphs};
 pub use store::TextProjects;

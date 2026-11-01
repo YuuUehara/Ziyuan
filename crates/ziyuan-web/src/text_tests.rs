@@ -1054,3 +1054,88 @@ async fn memory_api_child() {
     assert!(result["hits"].as_array().unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn ordered_upload_preview_and_exact_confirmation() {
+    let (base, root) = start("upload-preview", false).await;
+    let texts = TextProjects::new(&root);
+    let p = texts
+        .create(NewProject {
+            title: "上传".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let route = format!("/text/{}/import", p.id);
+    let preview_route = format!("{route}/preview");
+    let mut body = json!({"files": [
+        {"name": "second.md", "text": "# 第一章\n\n漢字《かんじ》\n\n<script>alert(1)</script>\n\n# 次章\n\n続き"},
+        {"name": "first.txt", "text": "末尾"}
+    ], "options": {"parsing": {"ruby": true, "heading_level": 1}, "chapter_titles": []}});
+    let (code, _) = call(&base, &preview_route, Some(VIEWER), Some(body.clone())).await;
+    assert_eq!(code, 403);
+    let (code, preview) = call(&base, &preview_route, Some(TOKEN), Some(body.clone())).await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(preview["chapters"].as_array().unwrap().len(), 3);
+    assert_eq!(preview["chapters"][0]["source_name"], "second.md");
+    assert!(
+        !preview["chapters"][0]["parsing"]["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let serialized = preview.to_string();
+    assert!(serialized.contains("\"kind\":\"ruby\""));
+    assert!(serialized.contains("<script>alert(1)</script>"));
+    let (code, unchanged) = call(&base, &format!("/text/{}", p.id), Some(TOKEN), None).await;
+    assert_eq!(code, 200);
+    assert_eq!(unchanged["project"]["chapters"], 0);
+    // The unchanged preview token cannot approve changed source or titles.
+    body["fingerprint"] = preview["fingerprint"].clone();
+    let mut stale = body.clone();
+    stale["files"][0]["text"] = json!("changed");
+    let (code, _) = call(&base, &route, Some(TOKEN), Some(stale)).await;
+    assert_eq!(code, 400);
+    let mut titled = body.clone();
+    titled["options"]["chapter_titles"] = json!(["一", "二", "三"]);
+    let (code, _) = call(&base, &route, Some(TOKEN), Some(titled.clone())).await;
+    assert_eq!(code, 400);
+    titled.as_object_mut().unwrap().remove("fingerprint");
+    let (code, revised) = call(&base, &preview_route, Some(TOKEN), Some(titled.clone())).await;
+    assert_eq!(code, 200, "{revised}");
+    titled["fingerprint"] = revised["fingerprint"].clone();
+    let (code, _) = call(&base, &route, Some(VIEWER), Some(titled.clone())).await;
+    assert_eq!(code, 403);
+    let (code, imported) = call(&base, &route, Some(TOKEN), Some(titled.clone())).await;
+    assert_eq!(code, 200, "{imported}");
+    assert_eq!(imported["chapters"][0]["parsing"]["title"], "一");
+    let block = imported["chapters"][0]["blocks"][0]["block_id"]
+        .as_str()
+        .unwrap();
+    let (code, source) = call(
+        &base,
+        &format!("/text/{}/blocks/{block}", p.id),
+        Some(VIEWER),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{source}");
+    assert!(
+        source["source"]
+            .to_string()
+            .contains("<script>alert(1)</script>")
+    );
+    assert!(source["source"].to_string().contains("\"kind\":\"ruby\""));
+    let (code, _) = call(&base, &route, Some(TOKEN), Some(titled)).await;
+    assert_eq!(code, 400);
+    let (code, _) = call(
+        &base,
+        &preview_route,
+        Some(TOKEN),
+        Some(json!({"files": [{"path": "/etc/passwd"}]})),
+    )
+    .await;
+    assert_eq!(code, 422);
+    fs::remove_dir_all(root).unwrap();
+}

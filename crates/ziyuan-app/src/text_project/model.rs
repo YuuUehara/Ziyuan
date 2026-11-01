@@ -1,4 +1,4 @@
-use super::Result;
+use super::{ImportWarning, Inline, ParseOptions, Result, SourceFormat};
 use serde::{Deserialize, Serialize};
 
 /// User statements, not a license verification or a grant of rights.
@@ -34,6 +34,23 @@ pub struct Chapter {
     pub byte_len: usize,
     pub paragraphs: Vec<Paragraph>,
     pub blocks: Vec<PromptBlock>,
+    /// Absent on legacy TXT projects: never reinterpret their original paragraph identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsing: Option<ChapterParsing>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChapterParsing {
+    pub version: u32,
+    pub format: SourceFormat,
+    pub options: ParseOptions,
+    /// One-based source file order; several chapters can share one unchanged original.
+    pub source_file: usize,
+    /// Zero-based chapter within this source file.
+    pub part: usize,
+    pub title: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub warnings: Vec<ImportWarning>,
 }
 /// Half-open UTF-8 byte range in the unchanged original; gaps retain blank-line layout.
 /// Paragraph text normalizes CRLF to LF, but does not trim nonblank lines.
@@ -43,11 +60,16 @@ pub struct Paragraph {
     pub byte_start: usize,
     pub byte_end: usize,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inlines: Vec<Inline>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockParagraph {
     pub id: String,
     pub text: String,
+    /// Read-only source annotations; candidate translations need only id and text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inlines: Vec<Inline>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptBlock {

@@ -356,7 +356,7 @@ fn original_tamper_and_newer_manifest_refuse_show_and_candidate_check() {
     let manifest = dir.join("project.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    value["schema_version"] = 2.into();
+    value["schema_version"] = 3.into();
     fs::write(manifest, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(
         f.service()
@@ -635,4 +635,127 @@ fn memory_pairing_and_check_agree_on_kind_id_and_position() {
         }
         assert_eq!(memory, app, "{label}");
     }
+}
+
+#[test]
+fn legacy_v1_projects_remain_read_only_and_byte_identical_after_upgrade() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let source = f.file("old.txt", "\u{feff}｜漢字《かんじ》\r\n\r\n次。\r\n");
+    let p = f.service().import(&p.id, &[source]).unwrap();
+    let manifest = f.service().project_dir(&p.id).unwrap().join("project.json");
+    // Actual legacy envelope and absent new fields, not a new-format file renamed as v1.
+    let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    old["schema_version"] = 1.into();
+    for chapter in old["data"]["chapters"].as_array_mut().unwrap() {
+        chapter.as_object_mut().unwrap().remove("parsing");
+        for paragraph in chapter["paragraphs"].as_array_mut().unwrap() {
+            paragraph.as_object_mut().unwrap().remove("inlines");
+        }
+        for block in chapter["blocks"].as_array_mut().unwrap() {
+            for paragraph in block["paragraphs"].as_array_mut().unwrap() {
+                paragraph.as_object_mut().unwrap().remove("inlines");
+            }
+        }
+    }
+    fs::write(&manifest, serde_json::to_vec(&old).unwrap()).unwrap();
+    let before = fs::read(&manifest).unwrap();
+    let loaded = f.service().show(&p.id).unwrap();
+    assert_eq!(loaded, p);
+    assert!(
+        loaded.chapters[0].paragraphs[0]
+            .text
+            .starts_with('\u{feff}')
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), before);
+    assert_eq!(
+        loaded.chapters[0].blocks[0].serialized().unwrap(),
+        p.chapters[0].blocks[0].serialized().unwrap()
+    );
+}
+
+#[test]
+fn prepared_chapters_share_raw_originals_and_budget_readings_not_just_base_text() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let raw = "\u{feff}前書き。\r\n\r\n# 第一章\r\n\r\n｜今日《きょう》。\r\n\r\n# 第二章\r\n\r\n終。\r\n";
+    let input = [ImportSource::Text {
+        name: "book.md".into(),
+        text: raw.into(),
+    }];
+    let options = ImportOptions {
+        parsing: ParseOptions {
+            ruby: true,
+            heading_level: Some(1),
+        },
+        ..Default::default()
+    };
+    let preview = f.service().preview_import(&p.id, &input, &options).unwrap();
+    assert_eq!(preview.chapters.len(), 3);
+    assert_eq!(preview.chapters[0].paragraphs[0].text, "前書き。");
+    let imported = f
+        .service()
+        .import_prepared(&p.id, &input, &options, &preview.fingerprint)
+        .unwrap();
+    assert_eq!(f.service().show(&p.id).unwrap(), imported);
+    let original = &imported.chapters[0].original_path;
+    assert!(
+        imported
+            .chapters
+            .iter()
+            .all(|c| c.original_path == *original)
+    );
+    assert_eq!(
+        fs::read(f.service().project_dir(&p.id).unwrap().join(original)).unwrap(),
+        raw.as_bytes()
+    );
+    assert_eq!(imported.chapters[1].paragraphs[0].text, "今日。");
+    let encoded = String::from_utf8(imported.chapters[1].blocks[0].serialized().unwrap()).unwrap();
+    assert!(encoded.contains("きょう"));
+    let material = ziyuan_app::translation::Translations::new(&f.0)
+        .export(&p.id, "c0001-b0001")
+        .unwrap();
+    let neighbors =
+        fs::read_to_string(f.0.join(format!("translations/{}/c0001-b0001/neighbors.json", p.id)))
+            .unwrap();
+    assert!(
+        neighbors.contains("きょう"),
+        "neighbor readings must survive material export"
+    );
+    assert!(
+        material
+            .files
+            .iter()
+            .any(|file| file.ends_with("source.json"))
+    );
+
+    let oversized = f.create("ja");
+    let input = [ImportSource::Text {
+        name: "reading.txt".into(),
+        text: format!("｜字《{}》", "あ".repeat(20_000)),
+    }];
+    let options = ImportOptions {
+        parsing: ParseOptions {
+            ruby: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(
+        f.service()
+            .preview_import(&oversized.id, &input, &options)
+            .unwrap_err()
+            .to_string()
+            .contains("单段")
+    );
+    assert!(f.service().show(&oversized.id).unwrap().chapters.is_empty());
+    assert!(
+        fs::read_dir(f.service().project_dir(&oversized.id).unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".import-"))
+    );
 }

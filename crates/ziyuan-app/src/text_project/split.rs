@@ -36,6 +36,7 @@ fn push(out: &mut Vec<Paragraph>, chapter: &str, text: &str, start: usize, end: 
         byte_start: start,
         byte_end: end,
         text: text[start..end].replace("\r\n", "\n"),
+        inlines: Vec::new(),
     });
 }
 
@@ -54,6 +55,7 @@ pub fn chunk_paragraphs(
         let item = BlockParagraph {
             id: paragraph.id.clone(),
             text: paragraph.text.clone(),
+            inlines: paragraph.inlines.clone(),
         };
         block.paragraphs.push(item.clone());
         if block.serialized()?.len() > limit {
