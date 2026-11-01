@@ -269,6 +269,8 @@ impl Drop for Server {
     }
 }
 fn read_request(stream: &mut TcpStream) -> Value {
+    // Accepted sockets can inherit the listener's nonblocking mode on other platforms.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
