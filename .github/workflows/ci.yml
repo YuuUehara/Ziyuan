@@ -29,6 +29,8 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       # smoke.sh 先跑 cargo test --workspace，再以演示后端走一遍 CLI。
       - run: bash scripts/smoke.sh
+      - name: R0 离线字面量检索基线（合成材料，非产品索引）
+        run: cargo run -p ziyuan-runtime --example code_search_baseline --locked
 
   linux-compat:
     name: Linux GNU · glibc 2.35 基线与启动
@@ -86,6 +88,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: ${{ matrix.command }}
+      - name: R0 离线字面量检索基线（合成材料，非产品索引）
+        run: cargo run -p ziyuan-runtime --example code_search_baseline --locked
       - name: W1a 原生启动证据（实验探针，非生产号舍）
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh

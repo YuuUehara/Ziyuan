@@ -2474,6 +2474,7 @@ dependencies = [
 name = "ziyuan-runtime"
 version = "1.4.1"
 dependencies = [
+ "ring",
  "serde_json",
  "tokio",
  "ureq",

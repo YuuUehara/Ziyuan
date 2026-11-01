@@ -1,0 +1,110 @@
+{
+  "version": "code-search-r0-v1",
+  "files": {
+    "src/auth.rs": "pub fn issue_session() -> &'static str {\n    \"login-token\"\n}\n",
+    "src/cache.rs": "pub fn restore_snapshot() -> &'static str {\n    \"cache-only\"\n}\n",
+    "src/main.rs": "mod auth;\nfn main() {\n    auth::issue_session();\n}\n",
+    "docs/notes.md": "issue_session is a historical name, not an implementation or call.\nrestore_snapshot is not a login operation.\n",
+    "Cargo.toml": "[package]\nname = \"login-fixture\"\n",
+    ".gitignore": "src/ignored.rs\n",
+    "src/ignored.rs": "// SYNTHETIC_IGNORED_RECORD\n",
+    ".env": "SYNTHETIC_DENIED_MARKER\n",
+    ".git/config": "SYNTHETIC_DENIED_MARKER\n",
+    ".jj/state": "SYNTHETIC_DENIED_MARKER\n",
+    ".ziyuan/court.log": "SYNTHETIC_DENIED_MARKER\n",
+    "target/generated.rs": "SYNTHETIC_BUILD_MARKER\n",
+    "node_modules/generated.js": "SYNTHETIC_BUILD_MARKER\n"
+  },
+  "cases": [
+    {
+      "id": "exact_definition", "category": "exact", "scope": ["src"],
+      "query": "pub fn issue_session", "relevant": ["src/auth.rs:1"],
+      "purpose": "Find the implementation, not the call or historical documentation."
+    },
+    {
+      "id": "cross_file_calls", "category": "exact", "scope": ["."],
+      "query": "issue_session(", "relevant": ["src/auth.rs:1", "src/main.rs:3"],
+      "purpose": "Both the definition and caller matter; the note has no call."
+    },
+    {
+      "id": "ambiguous_name", "category": "distractor", "scope": ["."],
+      "query": "issue_session", "relevant": ["src/auth.rs:1", "src/main.rs:3"],
+      "purpose": "Retrieve executable definition/call, not a historical prose mention."
+    },
+    {
+      "id": "natural_english", "category": "semantic", "scope": ["src"],
+      "query": "where is the login credential issued", "relevant": ["src/auth.rs:1"],
+      "purpose": "The authentication function creates the credential; cache restore does not."
+    },
+    {
+      "id": "natural_chinese", "category": "semantic", "scope": ["src"],
+      "query": "哪个函数签发登录凭据", "relevant": ["src/auth.rs:1"],
+      "purpose": "Same human-labelled target with no shared source-language tokens."
+    },
+    {
+      "id": "similar_but_inapplicable", "category": "distractor", "scope": ["src"],
+      "query": "restore_snapshot", "relevant": ["src/cache.rs:1"],
+      "purpose": "Cache restoration is a different operation, not an authentication result."
+    },
+    {
+      "id": "edited_worktree", "category": "freshness", "scope": ["src"],
+      "writes": {"src/auth.rs": "pub fn issue_session() -> &'static str {\n    \"fresh-token\"\n}\n"},
+      "query": "fresh-token", "relevant": ["src/auth.rs:2"],
+      "purpose": "Observe current disk bytes, not the earlier token string."
+    },
+    {
+      "id": "crlf_unicode_line_shift", "category": "freshness", "scope": ["src"],
+      "writes": {"src/auth.rs": "// 第一行\r\n// 第二行\r\npub fn issue_session() {}\r\n"},
+      "query": "pub fn issue_session", "relevant": ["src/auth.rs:3"],
+      "purpose": "CRLF and multibyte comments move the definition to line three."
+    },
+    {
+      "id": "renamed_file", "category": "freshness", "scope": ["src"],
+      "renames": {"src/auth.rs": "src/identity.rs"},
+      "query": "pub fn issue_session", "relevant": ["src/identity.rs:1"],
+      "purpose": "Never report the deleted old pathname."
+    },
+    {
+      "id": "deleted_file", "category": "negative", "scope": ["src"],
+      "deletes": ["src/auth.rs"], "required_empty": true,
+      "query": "pub fn issue_session", "relevant": [],
+      "purpose": "A removed definition must not leave a stale location."
+    },
+    {
+      "id": "untracked_file", "category": "freshness", "scope": ["src"],
+      "writes": {"src/rotate.rs": "pub fn rotate_key() {}\n"},
+      "query": "pub fn rotate_key", "relevant": ["src/rotate.rs:1"],
+      "purpose": "Explicitly allowed new disk files are not identified solely by HEAD."
+    },
+    {
+      "id": "manifest_location", "category": "exact", "scope": ["Cargo.toml"],
+      "query": "name = \"login-fixture\"", "relevant": ["Cargo.toml:2"],
+      "purpose": "Text configuration is in scope without claiming syntax parsing."
+    },
+    {
+      "id": "scope_exclusion", "category": "negative", "scope": ["src/cache.rs"],
+      "query": "issue_session", "relevant": [], "required_empty": true,
+      "purpose": "The existing auth file is outside this request's grant."
+    },
+    {
+      "id": "metadata_denied", "category": "negative", "scope": ["."],
+      "query": "SYNTHETIC_DENIED_MARKER", "relevant": [], "required_empty": true,
+      "purpose": "The marker exists only in .env and protected metadata directories."
+    },
+    {
+      "id": "build_output_skipped", "category": "negative", "scope": ["."],
+      "query": "SYNTHETIC_BUILD_MARKER", "relevant": [], "required_empty": true,
+      "purpose": "Both generated/dependency directories are excluded by today's tool."
+    },
+    {
+      "id": "no_match", "category": "negative", "scope": ["."],
+      "query": "made_up_symbol_997", "relevant": [], "required_empty": true,
+      "purpose": "No source contains this symbol."
+    },
+    {
+      "id": "gitignored_file", "category": "negative", "scope": ["."],
+      "query": "SYNTHETIC_IGNORED_RECORD", "relevant": [],
+      "purpose": "R1 must honor ignores; current literal search is measured, not assumed to do so."
+    }
+  ]
+}
