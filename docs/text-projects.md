@@ -87,9 +87,11 @@ Bash 中把 `$id` 写为 `"$id"`。编号必须来自自己的项目。检查会
 
 旧命令 `ziyuan text import <项目ID> <章节.txt>...` 不带解析选项时仍走旧 TXT 路径，不改变既有段号或解析含义。需要 Markdown、注音、新 BOM 处理或解析选项时，必须先 `text preview`，检查后再以 `--confirm` 确认，不能把预览与导入连成无人审阅的一条命令。开发阶段证据保留在[第一批验收记录](acceptance/1.4-first-batch.md)，最终状态见本页开头的版本验收链接。
 
-![桌面：按二级标题分章、注音和警告预览](images/text-import-preview.png)
+以下用自写短文展示正常注音：读音以较小字号标在汉字上方。含危险标签的安全测试图单独保留在[验收记录](acceptance/1.4-first-batch.md#浏览器实跑)，不作为日常导入示例。
 
-![390 CSS 像素窄屏：注音与滚动预览](images/text-import-narrow.png)
+![桌面：按二级标题分章与正常注音预览](images/text-import-clean-desktop.png)
+
+![390 CSS 像素窄屏：正常注音与滚动预览](images/text-import-clean-narrow.png)
 
 ### CLI：先检查，再确认
 
