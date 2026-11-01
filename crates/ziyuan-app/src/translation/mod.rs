@@ -13,6 +13,7 @@ mod export;
 mod export_package;
 mod finished;
 mod gate;
+mod references;
 mod session;
 mod status;
 mod zhupi;
@@ -26,6 +27,10 @@ pub use context::{
 };
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
+pub use references::{
+    MAX_REFERENCE_BYTES, MAX_REFERENCES, ReferencePreview, ReferenceRequest, ReferenceSelection,
+    ReferenceSubmission, ReferenceTaskView,
+};
 pub use session::{ResumeOutcome, block_source_hash};
 pub use status::{
     BlockFacts, BlockState, BlockStatus, ContextFacts, NextStep, ResumeOptions, StaleReason,

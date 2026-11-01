@@ -137,7 +137,7 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
         "memory" => TextAction::Memory(crate::memory_commands::parse(rest)?),
         "recovery" => parse_recovery(rest)?,
         "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
-        | "status" | "resume" => {
+        | "status" | "resume" | "references" => {
             TextAction::Translation(crate::translation_commands::parse(&args)?)
         }
         other => {

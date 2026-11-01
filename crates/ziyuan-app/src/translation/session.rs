@@ -189,7 +189,7 @@ impl<S: EventStore> Session<S> {
         project: &str,
         block: &str,
     ) -> std::result::Result<Edict, AppError> {
-        self.issue_writer(root, project, block, TranslationKind::Translate)
+        self.issue_writer(root, project, block, TranslationKind::Translate, None)
     }
 
     /// 修订：导出朱批与两路审校最近的回奏，下工部统稿诏令。须已有已准奏的初译或修订。
@@ -199,15 +199,16 @@ impl<S: EventStore> Session<S> {
         project: &str,
         block: &str,
     ) -> std::result::Result<Edict, AppError> {
-        self.issue_writer(root, project, block, TranslationKind::Revise)
+        self.issue_writer(root, project, block, TranslationKind::Revise, None)
     }
 
-    fn issue_writer(
+    pub(super) fn issue_writer(
         &mut self,
         root: &Path,
         project: &str,
         block: &str,
         kind: TranslationKind,
+        references: Option<&super::references::PreparedReferences>,
     ) -> std::result::Result<Edict, AppError> {
         self.reload()?;
         let t = Translations::new(root);
@@ -237,6 +238,29 @@ impl<S: EventStore> Session<S> {
             _ => translate_text(project, block, schema, exported.context_version),
         };
         let committed = self.commit(|court| {
+            if let Some(references) = references {
+                if let Some(task) = court.tasks().find(|task| {
+                    task.references
+                        .as_ref()
+                        .is_some_and(|r| r.submission == references.binding.submission)
+                }) {
+                    if task
+                        .references
+                        .as_ref()
+                        .is_some_and(|r| r == &references.binding)
+                    {
+                        return Ok(Vec::new());
+                    }
+                    return Err(refuse("同一提交身份已用于不同内容，请查询原任务"));
+                }
+                if serde_json::to_vec(court).map_err(|e| refuse(e.to_string()))? != references.court
+                {
+                    return Err(refuse("朝廷资料在下诏期间变化，请重新预览；未创建任务"));
+                }
+                references
+                    .check_files(root)
+                    .map_err(|e| refuse(e.to_string()))?;
+            }
             check_idle(court, project, block)?;
             check_not_finalized(court, project, block)?;
             if kind == TranslationKind::Revise {
@@ -259,15 +283,38 @@ impl<S: EventStore> Session<S> {
                 zhupi_hash: zhupi_hash.clone(),
             };
             let mut next = court.clone();
-            let (_, events) = issue_linked(
+            let (edict, events) = issue_linked(
                 &mut next,
                 Department::Works,
                 text.clone(),
                 translate_seal(project, block, true),
                 link,
             )?;
-            Ok(events.into())
+            let mut events = Vec::from(events);
+            if let Some(references) = references {
+                events.push(
+                    next.propose_translation_references(edict.id, references.binding.clone())?,
+                );
+            }
+            Ok(events)
         })?;
+        if committed.is_empty() {
+            let submission = &references
+                .expect("只有参考重试不记新事件")
+                .binding
+                .submission;
+            return Ok(self
+                .court
+                .tasks()
+                .find(|task| {
+                    task.references
+                        .as_ref()
+                        .is_some_and(|r| &r.submission == submission)
+                })
+                .expect("提交时已找到任务")
+                .edict
+                .clone());
+        }
         match committed.into_iter().next() {
             Some(CourtEvent::EdictIssued(edict)) => Ok(*edict),
             _ => unreachable!("译书下诏先记 EdictIssued"),

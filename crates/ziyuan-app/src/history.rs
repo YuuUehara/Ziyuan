@@ -119,7 +119,8 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         | TemplateApplied { task, .. }
         | ModelUsage { task, .. }
         | TaskReviewed { task, .. }
-        | TranslationLinked { task, .. } => vec![*task],
+        | TranslationLinked { task, .. }
+        | TranslationReferencesBound { task, .. } => vec![*task],
         Founded(_)
         | Clock(_)
         | AgentRegistered(_)
@@ -439,6 +440,12 @@ pub fn describe_event(event: &CourtEvent) -> String {
         CourtEvent::TranslationLinked {
             task, kind, block, ..
         } => format!("译书关联：#{} {} {block}", task.0, kind.label()),
+        CourtEvent::TranslationReferencesBound { task, binding } => {
+            format!(
+                "参考已绑定：#{} 提交 {}（仅入队，尚不代表发送或采纳）",
+                task.0, binding.submission
+            )
+        }
         CourtEvent::TranslationFinalized { block, .. } => format!("御览定稿：{block}"),
         CourtEvent::TranslationReopened { block, reason, .. } => {
             format!("退回重修：{block}（{reason}）")

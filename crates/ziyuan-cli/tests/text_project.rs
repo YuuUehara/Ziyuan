@@ -1175,3 +1175,368 @@ fn export_usage_is_strict_and_finished_requires_court() {
     assert_eq!(tree_snapshot(root), before);
     no_court(root);
 }
+
+#[test]
+fn selected_reference_flags_are_usage_errors_before_file_io() {
+    let dir = TempDir::new("reference-usage");
+    for args in [
+        vec!["references", "preview", "p", "b"],
+        vec![
+            "references",
+            "preview",
+            "p",
+            "b",
+            "--kind",
+            "review",
+            "--selection",
+            "missing.json",
+        ],
+        vec![
+            "references",
+            "preview",
+            "p",
+            "b",
+            "--kind",
+            "translate",
+            "--kind",
+            "revise",
+            "--selection",
+            "missing.json",
+        ],
+        vec![
+            "references",
+            "preview",
+            "p",
+            "b",
+            "--kind",
+            "translate",
+            "--selection",
+            "missing.json",
+            "--unknown",
+            "x",
+        ],
+        vec!["references", "show"],
+        vec!["references", "show", "no-task"],
+        vec!["references", "show", "1", "--kind", "translate"],
+        vec!["translate", "p", "b", "--references", "missing.json"],
+        vec![
+            "revise",
+            "p",
+            "b",
+            "--confirm",
+            "fingerprint",
+            "--submission",
+            "id",
+        ],
+        vec![
+            "translate",
+            "p",
+            "b",
+            "--references",
+            "missing.json",
+            "--confirm",
+            "fp",
+            "--submission",
+            "bad/id",
+        ],
+        vec![
+            "revise",
+            "p",
+            "b",
+            "--references",
+            "missing.json",
+            "--confirm",
+            "fp",
+            "--submission",
+            "非ASCII",
+        ],
+        vec![
+            "translate",
+            "p",
+            "b",
+            "--references",
+            "missing.json",
+            "--confirm",
+            "fp",
+            "--submission",
+            "id",
+            "--submission",
+            "id",
+        ],
+    ] {
+        let mut command = vec!["text"];
+        command.extend(args);
+        assert_eq!(code(dir.path(), &command), Some(2), "{command:?}");
+    }
+    for submission in ["".to_owned(), "a".repeat(129)] {
+        assert_eq!(
+            code(
+                dir.path(),
+                &[
+                    "text",
+                    "translate",
+                    "p",
+                    "b",
+                    "--references",
+                    "missing.json",
+                    "--confirm",
+                    "fp",
+                    "--submission",
+                    &submission
+                ]
+            ),
+            Some(2)
+        );
+    }
+    assert!(stdout(&ok(dir.path(), &["text", "help"])).contains("authorized_projects"));
+    no_court(dir.path());
+}
+
+#[test]
+fn selected_reference_preview_and_persisted_submission_are_offline() {
+    use ziyuan_app::Session;
+    use ziyuan_core::{CourtEvent, FileChange, TaskId, TranslationKind};
+    use ziyuan_storage::{EventLog, EventStore};
+
+    let dir = TempDir::new("reference-roundtrip");
+    let root = dir.path();
+    let project = init_json(root, "Reference target", "en");
+    dir.write("reference.txt", "Alpha reference.\n");
+    dir.write("chapter.txt", "Alpha.\n\nBeta.\n");
+    let imported = ok_json(
+        root,
+        &[
+            "text",
+            "import",
+            &project,
+            "reference.txt",
+            "chapter.txt",
+            "--json",
+        ],
+    );
+    let block = imported["chapters"][1]["blocks"][0]["block_id"]
+        .as_str()
+        .unwrap();
+    ok(root, &["init"]);
+    let reference_block = imported["chapters"][0]["blocks"][0]["block_id"]
+        .as_str()
+        .unwrap();
+    let issued = ok_json(
+        root,
+        &["text", "translate", &project, reference_block, "--json"],
+    );
+    let task = TaskId(issued["task"].as_u64().unwrap());
+    let mut candidate = imported["chapters"][0]["blocks"][0].clone();
+    candidate["paragraphs"][0]["text"] = json!("阿尔法参考译文。");
+    // Fixture only the worker response, using the same legal assignment/proposal/completion
+    // lifecycle as app translation fixtures. CLI apply + finalize establish the real source.
+    let session = Session::open(EventLog::new(root)).unwrap();
+    let worker = session
+        .court()
+        .route(&session.court().task(task).unwrap().edict)
+        .unwrap()
+        .worker;
+    let events = vec![
+        CourtEvent::TaskAssigned {
+            task,
+            worker,
+            model: None,
+        },
+        CourtEvent::ChangesProposed {
+            task,
+            changes: vec![FileChange {
+                path: format!("translations/{project}/{reference_block}/zh.json"),
+                before: None,
+                after: serde_json::to_string_pretty(&candidate).unwrap(),
+            }],
+        },
+        CourtEvent::TaskCompleted {
+            task,
+            worker,
+            summary: "Fixture translation complete".into(),
+        },
+    ];
+    let mut log = EventLog::new(root);
+    let history = log.load().unwrap();
+    let mut court = ziyuan_governance::Court::replay(&history).unwrap();
+    for event in &events {
+        court.apply(event).unwrap();
+    }
+    log.append(history.len(), &events).unwrap();
+    drop(session);
+    let task_id = task.0.to_string();
+    ok(root, &["apply", &task_id]);
+    ok(root, &["text", "finalize", &project, reference_block]);
+
+    let local_memory = |args: &[&str]| {
+        let mut command = Command::new(BIN);
+        command.current_dir(root).args(args);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("ZIYUAN_") {
+                command.env_remove(key);
+            }
+        }
+        let out = command
+            .env("ZIYUAN_MEMORY_PROVIDER", "local")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    local_memory(&["text", "memory", "build", &project, "--json"]);
+    let hits = local_memory(&[
+        "text",
+        "memory",
+        "search",
+        &project,
+        "--query",
+        "Alpha reference.",
+        "--json",
+    ]);
+    let hit = &hits["hits"][0];
+    assert_eq!(hit["selection"]["identity"], hit["identity"]);
+    assert_eq!(hit["selection"]["origin"], hit["origin"]);
+    assert!(hit["selection"]["digests"].is_object());
+    for field in [
+        "source",
+        "target",
+        "score",
+        "keyword_score",
+        "cosine_score",
+        "keyword_rank",
+        "vector_rank",
+    ] {
+        assert!(hit.get(field).is_some(), "legacy hit field {field}");
+    }
+    dir.write(
+        "selection.json",
+        &serde_json::to_string(&json!({"selections":[hit["selection"]]})).unwrap(),
+    );
+    let before = tree_snapshot(root);
+    let preview_args = [
+        "text",
+        "references",
+        "preview",
+        &project,
+        block,
+        "--kind",
+        "translate",
+        "--selection",
+        "selection.json",
+        "--json",
+    ];
+    let preview = ok_json(root, &preview_args);
+    assert_eq!(preview["project"], project);
+    assert_eq!(preview["block"], block);
+    assert_eq!(
+        preview["kind"],
+        serde_json::to_value(TranslationKind::Translate).unwrap()
+    );
+    assert_eq!(
+        preview["bytes"].as_u64().unwrap(),
+        preview["prompt"].as_str().unwrap().len() as u64
+    );
+    assert_eq!(
+        tree_snapshot(root),
+        before,
+        "preview must not export or enqueue"
+    );
+    let human = ok(root, &preview_args[..preview_args.len() - 1]);
+    assert!(stdout(&human).contains(preview["prompt"].as_str().unwrap()));
+    assert!(stdout(&human).contains("外部模型"));
+    assert!(stdout(&human).contains("仅入队"));
+    assert_eq!(tree_snapshot(root), before);
+
+    for body in [
+        "arbitrary reference prose",
+        r#"{"selections":[]}"#,
+        r#"{"selections":[],"prompt":"injected"}"#,
+        r#"{"selections":[],"selections":[]}"#,
+    ] {
+        dir.write("bad.json", body);
+        assert_eq!(
+            code(
+                root,
+                &[
+                    "text",
+                    "references",
+                    "preview",
+                    &project,
+                    block,
+                    "--kind",
+                    "translate",
+                    "--selection",
+                    "bad.json"
+                ]
+            ),
+            Some(1)
+        );
+    }
+    assert_eq!(
+        code(
+            root,
+            &[
+                "text",
+                "references",
+                "preview",
+                &project,
+                block,
+                "--kind",
+                "translate",
+                "--selection",
+                "missing.json"
+            ]
+        ),
+        Some(1)
+    );
+    let fingerprint = preview["fingerprint"].as_str().unwrap();
+    let issue_args = [
+        "text",
+        "translate",
+        &project,
+        block,
+        "--references",
+        "selection.json",
+        "--confirm",
+        fingerprint,
+        "--submission",
+        "CLI-retry_1",
+        "--json",
+    ];
+    let issued = ok_json(root, &issue_args);
+    let task = issued["task"].as_u64().unwrap().to_string();
+    let after_issue = tree_snapshot(root);
+    // Separate CLI processes reopen Session from disk; retries must not enqueue twice.
+    assert_eq!(ok_json(root, &issue_args), issued);
+    assert_eq!(tree_snapshot(root), after_issue);
+    let shown = ok_json(root, &["text", "references", "show", &task, "--json"]);
+    assert_eq!(shown["snapshot"], preview);
+    assert_eq!(shown["current"], true);
+    ok(
+        root,
+        &[
+            "text",
+            "zhupi",
+            &project,
+            block,
+            imported["chapters"][1]["blocks"][0]["paragraphs"][0]["id"]
+                .as_str()
+                .unwrap(),
+            "Changed note",
+        ],
+    );
+    let stale = ok_json(root, &["text", "references", "show", &task, "--json"]);
+    assert_eq!(
+        stale["snapshot"], preview,
+        "show must retain the exact issued snapshot"
+    );
+    assert_eq!(stale["current"], false);
+    assert!(stale["reason"].is_string());
+    let human = stdout(&ok(root, &["text", "references", "show", &task]));
+    assert!(human.contains("stale"));
+    assert!(human.contains(preview["prompt"].as_str().unwrap()));
+}

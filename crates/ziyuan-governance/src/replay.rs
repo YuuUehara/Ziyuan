@@ -263,6 +263,7 @@ impl Court {
                         urgent: false,
                         template: None,
                         translation: None,
+                        references: None,
                     },
                 );
             }
@@ -414,6 +415,7 @@ impl Court {
                             budget: None,
                             suspicions: Vec::new(),
                             translation: None,
+                            references: None,
                         },
                     );
                 }
@@ -702,6 +704,10 @@ impl Court {
                 };
                 self.check_translation_link(*task, &link)?;
                 self.tasks.get_mut(task).expect("已确认存在").translation = Some(link);
+            }
+            CourtEvent::TranslationReferencesBound { task, binding } => {
+                self.check_translation_references(*task, binding)?;
+                self.tasks.get_mut(task).expect("已确认存在").references = Some(binding.clone());
             }
             CourtEvent::TranslationFinalized {
                 project,

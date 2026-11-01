@@ -528,6 +528,13 @@
   #memory-search-form label { flex: 0 0 auto; }
   #memory-query { flex: 1 1 180px; }
   #memory-hits { max-height: 48vh; overflow: auto; }
+  #reference-panel pre, #memory-hits pre, .reference-snapshot pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; }
+  #reference-panel .row { flex-wrap: wrap; }
+  #reference-panel .row > label, #reference-panel .row > .hint { flex: 0 0 auto; white-space: nowrap; }
+  #reference-kind { flex: 0 0 7em; }
+  #reference-preview { flex: 1 1 220px; }
+  #memory-hits label { display: flex; align-items: center; gap: 8px; }
+  #memory-hits input[type="checkbox"] { flex: 0 0 auto; width: auto; }
   #memory-result.error { color: var(--bad); }
   #text-import { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   #text-import input, #text-import select { min-width: 0; max-width: 100%; }
@@ -845,6 +852,7 @@
               </form>
               <p class="hint" id="memory-result" role="status" aria-live="polite"></p>
               <div id="memory-hits" role="region" aria-label="记忆检索结果" tabindex="0"></div>
+              <div id="reference-panel"></div>
             </section>
           </div>
         </div>
@@ -1016,7 +1024,11 @@ async function api(path, body) {
     throw new Error("缺少访问令牌");
   }
   const data = await response.json().catch(() => ({ error: response.statusText }));
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  if (!response.ok) {
+    const error = new Error(data.error || response.statusText);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -1309,8 +1321,14 @@ function renderEdicts(tasks) {
   $("edict-sheet").hidden = selected !== "new";
   $("edict-close").hidden = !tasks.length;
   const t = tasks.find((x) => String(x.id) === String(selected));
+  const previousReferences = $("task-reference-snapshot");
   $("task-detail").innerHTML = t ? taskHtml(t) : selected === "new" ? ""
     : `<div class="empty">尚无诏令。</div>`;
+  if (t) {
+    if (previousReferences?.dataset.task === String(t.id)) $("task-detail").append(previousReferences);
+    else $("task-detail").insertAdjacentHTML("beforeend", `<div class="reference-snapshot" id="task-reference-snapshot" data-task="${esc(t.id)}"></div>`);
+    loadTaskReferences(t.id);
+  }
   $("hall-badge-fengtian").hidden = !counts.attention;
   $("hall-badge-fengtian").textContent = counts.attention;
 }
@@ -1578,6 +1596,7 @@ async function loadText() {
 }
 async function loadTextProject() {
   const project = textProjectId;
+  if (referenceScope !== `${textProjectId}/${textBlockId}`) syncReferenceFacts(undefined);
   if (textProject?.project.id !== project) { textProject = null; textBlock = null; renderText(); }
   textError = null;
   if (project !== memoryProject) loadMemoryStatus(null);
@@ -1609,6 +1628,7 @@ async function loadTextBlock() {
   try {
     const loaded = await api(`/text/${encodeURIComponent(project)}/blocks/${encodeURIComponent(block)}`);
     if (project !== textProjectId || block !== textBlockId) return;
+    syncReferenceFacts(JSON.stringify(loaded));
     textBlock = loaded;
     const paragraphs = ((textBlock.source && textBlock.source.paragraphs) || []).map((p) => p.id);
     // 刷新后回到原来看的那一段。
@@ -1638,6 +1658,7 @@ function textPickedSave() {
 function selectTextBlock(block) {
   if (!block || block === textBlockId) return;
   textBlockId = block;
+  invalidateReferences(true);
   textPicked = null;
   history.replaceState(null, "", textHash());
   loadTextBlock();
@@ -1899,6 +1920,22 @@ async function textAction(path, body, done) {
 async function onTextAction(action) {
   const b = textBlock;
   if (!b || !state || state.viewer) return;
+  if (["translate", "revise"].includes(action) && referencePending()) {
+    $("reference-panel").scrollIntoView({block: "nearest"});
+    textMessage("已有保存的参考确认；请先查询／重试同一次确认，不要重复下诏。", true);
+    return;
+  }
+  if (["translate", "revise"].includes(action) && referenceSelections.length) {
+    if (action !== referenceKind) {
+      referenceKind = action;
+      invalidateReferences(true);
+      textMessage("用途已变化，已清除旧选择；请重新选择参考并预览。", true);
+    } else {
+      $("reference-panel").scrollIntoView({block: "nearest"});
+      $("reference-preview").click();
+    }
+    return;
+  }
   const base = `/text/${encodeURIComponent(b.project)}/blocks/${encodeURIComponent(b.block)}`;
   const ids = (r) => (r.tasks || []).map((t) => "#" + t).join("、");
   switch (action) {
@@ -2046,6 +2083,135 @@ let memoryRequest = 0;
 let memoryAvailable = false;
 let memoryProject;
 let memoryFacts;
+let referenceHits = [];
+let referenceSelections = [];
+let referenceKind = "translate";
+let referencePreview = null;
+let referenceRevision = 0;
+let referenceBusy = false;
+let referenceFacts;
+let referenceScope;
+let referenceMessage = "";
+function referenceKey() { return `ziyuan-reference:${textProjectId}/${textBlockId}/${referenceKind}`; }
+function referencePending() {
+  try { return JSON.parse(localStorage.getItem(referenceKey()) || "null"); } catch { return null; }
+}
+function invalidateReferences(clear = false) {
+  referenceRevision++;
+  referencePreview = null;
+  referenceBusy = false;
+  referenceMessage = "";
+  if (clear) {
+    referenceSelections = [];
+    referenceHits = [];
+    $("memory-hits").replaceChildren();
+  }
+  renderReferences();
+}
+function syncReferenceFacts(facts) {
+  const scope = `${textProjectId}/${textBlockId}`;
+  if (scope !== referenceScope || facts !== referenceFacts) {
+    referenceScope = scope;
+    referenceFacts = facts;
+    invalidateReferences(true);
+  }
+}
+function referenceSnapshot(preview) {
+  return `<p class="hint">参考 ${esc(preview.references.length)} / 8 条 · ${esc(preview.bytes)} / 8192 字节</p><details><summary>出处、版本与校验信息</summary><pre>${esc(JSON.stringify(preview.references, null, 2))}</pre></details><h4>完整参考外发文本</h4><p class="hint">以下为本次额外提供的完整参考材料；执行时会连同常规原文、上下文与朱批一起发送给模型。</p><pre>${esc(preview.prompt)}</pre>`;
+}
+function renderReferences() {
+  const pending = referencePending();
+  $("reference-panel").innerHTML = `<p class="hint">默认不选参考。最多 8 条、完整参考材料合计 8192 字节。确认后只入队；执行时所选参考原文、译文的完整参考外发文本会连同常规原文、上下文与朱批发送给配置的模型（可能是外部服务）。参考不是指令。</p>
+    <div class="row"><label for="reference-kind">参考用途</label><select id="reference-kind" data-view ${referenceBusy ? "disabled" : ""}><option value="translate" ${referenceKind === "translate" ? "selected" : ""}>初译</option><option value="revise" ${referenceKind === "revise" ? "selected" : ""}>修订</option></select><span class="hint">已选 ${referenceSelections.length} / 8</span><button type="button" class="small" data-view id="reference-preview" ${referenceBusy || !textBlockId || !referenceSelections.length || pending ? "disabled" : ""}>预览所选参考与完整参考材料</button></div>
+    ${referencePreview ? referenceSnapshot(referencePreview) + (state.viewer ? `<p class="hint">只读模式：可预览，不可下诏。</p>` : `<button type="button" class="small" id="reference-confirm" ${referenceBusy || pending ? "disabled" : ""}>明确使用所选参考${referenceKind === "translate" ? "初译" : "修订"}（只入队）</button>`) : ""}
+    ${pending ? `<p class="hint">有已保存的确认请求。若响应丢失，不要重新确认；重试将使用原提交 ID 与完全相同的内容，返回原诏令。提交 ID：${esc(pending.submission.submission)}</p><button type="button" class="small" id="reference-retry" ${referenceBusy ? "disabled" : ""}>查询／重试同一次确认</button>` : ""}<p class="hint" role="status">${esc(referenceMessage)}</p>`;
+}
+$("reference-panel").addEventListener("change", (event) => {
+  if (event.target.id === "reference-kind") {
+    referenceKind = event.target.value;
+    invalidateReferences(true);
+  }
+});
+$("memory-hits").addEventListener("change", (event) => {
+  const input = event.target.closest("[data-reference-hit]");
+  if (!input) return;
+  const selection = referenceHits[Number(input.dataset.referenceHit)].selection;
+  if (input.checked && referenceSelections.length >= 8) { input.checked = false; return; }
+  referenceSelections = input.checked ? [...referenceSelections, selection] : referenceSelections.filter((s) => s !== selection);
+  invalidateReferences();
+});
+$("reference-panel").addEventListener("click", async (event) => {
+  const id = event.target.id;
+  if (!["reference-preview", "reference-confirm", "reference-retry"].includes(id) || referenceBusy) return;
+  if (id !== "reference-preview" && (!state || state.viewer)) return;
+  const revision = referenceRevision, project = textProjectId, block = textBlockId;
+  const base = `/text/${encodeURIComponent(project)}/blocks/${encodeURIComponent(block)}/references`;
+  const key = referenceKey();
+  let body;
+  if (id === "reference-preview") body = {kind: referenceKind, request: {selections: referenceSelections, authorized_projects: []}};
+  else if (id === "reference-retry") body = referencePending();
+  else {
+    if (!referencePreview) return;
+    body = {kind: referenceKind, submission: {request: referencePreview.request, fingerprint: referencePreview.fingerprint, submission: crypto.randomUUID()}};
+    try { localStorage.setItem(key, JSON.stringify(body)); }
+    catch { referenceMessage = "无法持久保存提交 ID；尚未提交。请允许本地存储后重试。"; renderReferences(); return; }
+  }
+  if (!body) return;
+  referenceBusy = true; referenceMessage = "正在处理…"; renderReferences();
+  try {
+    const result = await api(`${base}/${id === "reference-preview" ? "preview" : "issue"}`, body);
+    if (id !== "reference-preview") localStorage.removeItem(key);
+    if (revision !== referenceRevision || project !== textProjectId || block !== textBlockId) return;
+    if (id === "reference-preview") {
+      referencePreview = result;
+      referenceMessage = "预览已就绪；请核对参考材料与外发范围。";
+    }
+    else {
+      referencePreview = null;
+      referenceMessage = `已入队：${result.tasks.map((t) => "#" + t).join("、")}。可在奉天殿查看参考快照。`;
+      loadTextProject();
+    }
+  } catch (e) {
+    if (revision !== referenceRevision || project !== textProjectId || block !== textBlockId) return;
+    if (id !== "reference-preview" && e.status === 400) {
+      localStorage.removeItem(key);
+      referencePreview = null;
+      referenceMessage = `服务端拒绝确认：${e.message}。请重新预览。`;
+    } else referenceMessage = id === "reference-preview" ? e.message : `确认结果未完成：${e.message}。已保留原提交，请使用「查询／重试同一次确认」，不要重新下诏。`;
+  } finally {
+    if (revision === referenceRevision && project === textProjectId && block === textBlockId) { referenceBusy = false; renderReferences(); }
+  }
+});
+let taskReferenceRequest = 0;
+async function loadTaskReferences(task) {
+  const request = ++taskReferenceRequest;
+  try {
+    const view = await api(`/text/references/${encodeURIComponent(task)}`);
+    if (request !== taskReferenceRequest || String(selected) !== String(task)) return;
+    const node = $("task-reference-snapshot");
+    node?.querySelector("[data-reference-status]")?.remove();
+    const encoded = JSON.stringify(view);
+    if (node && node.dataset.view !== encoded) {
+      node.dataset.view = encoded;
+      node.innerHTML = `<h3>所选参考 · 下诏时快照</h3><p class="hint">${view.current ? "当前仍有效" : "已过期／材料已变化"}${view.reason ? "：" + esc(view.reason) : ""}</p>${referenceSnapshot(view.snapshot)}`;
+    }
+  } catch (e) {
+    if (request !== taskReferenceRequest || String(selected) !== String(task)) return;
+    const node = $("task-reference-snapshot");
+    if (!node || (e.status === 404 && !node.dataset.view)) return;
+    let status = node.querySelector("[data-reference-status]");
+    if (!status) {
+      status = document.createElement("p");
+      status.className = "hint";
+      status.dataset.referenceStatus = "";
+      status.setAttribute("role", "status");
+      node.prepend(status);
+    }
+    status.textContent = node.dataset.view
+      ? "参考快照状态暂时无法刷新；保留上次快照，有效性尚未重新确认。稍后自动重试。"
+      : "参考快照暂时无法读取，请检查连接或服务状态；稍后自动重试。";
+  }
+}
 function memoryControls(busy) {
   $("memory-build").disabled = busy || !textProjectId || !memoryAvailable;
   $("memory-search").disabled = busy || !textProjectId || !memoryAvailable;
@@ -2055,6 +2221,7 @@ async function loadMemoryStatus(facts) {
   if (textProjectId === memoryProject && facts === memoryFacts) return;
   memoryProject = textProjectId;
   memoryFacts = facts;
+  invalidateReferences(true);
   const request = ++memoryRequest;
   const project = textProjectId;
   memoryAvailable = false;
@@ -2085,6 +2252,7 @@ async function runMemory(build) {
   if (!build && !query) return;
   const project = textProjectId;
   const request = ++memoryRequest;
+  invalidateReferences(true);
   memoryControls(true);
   $("memory-result").classList.remove("error");
   $("memory-result").textContent = build ? "正在重建当前项目记忆…" : "正在检索当前项目…";
@@ -2098,7 +2266,9 @@ async function runMemory(build) {
       $("memory-result").textContent = result.records ? "重建完成，可以输入文字检索。" : "重建完成，尚无可收录的定稿段落。";
     } else {
       $("memory-result").textContent = result.hits.length ? `找到 ${result.hits.length} 条参考（最多 8 条）。` : "当前项目没有匹配的有效定稿参考。";
-      $("memory-hits").innerHTML = result.hits.map((hit) => `<article class="text-note"><p class="hint">出处：项目 ${esc(hit.project)} · 块 ${esc(hit.block)} · 段 ${esc(hit.paragraph)}</p><p class="text-para">原文：${esc(hit.source)}</p><p class="text-para">译文：${esc(hit.translation)}</p></article>`).join("");
+      referenceHits = result.hits;
+      $("memory-hits").innerHTML = result.hits.map((hit, i) => `<article class="text-note"><label><input type="checkbox" data-view data-reference-hit="${i}">选择此段参考</label><p class="hint">出处：项目 ${esc(hit.project)} · 块 ${esc(hit.block)} · 段 ${esc(hit.paragraph)} · 上下文 v${esc(hit.selection.origin.context_version)} · 朱批 v${esc(hit.selection.origin.zhupi_version)}</p><details><summary>定稿版本与摘要</summary><pre>${esc(JSON.stringify(hit.selection, null, 2))}</pre></details><p class="text-para">原文：${esc(hit.source)}</p><p class="text-para">译文：${esc(hit.translation)}</p></article>`).join("");
+      renderReferences();
     }
   } catch (e) {
     if (request !== memoryRequest || project !== textProjectId) return;
@@ -2113,6 +2283,7 @@ $("memory-search-form").addEventListener("submit", (event) => { event.preventDef
 $("text-project").addEventListener("change", (event) => {
   textProjectId = event.target.value || null;
   textBlockId = null;
+  invalidateReferences(true);
   textPicked = null;
   history.replaceState(null, "", textHash());
   loadTextProject();

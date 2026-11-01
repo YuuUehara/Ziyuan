@@ -102,11 +102,22 @@ pub(crate) async fn require_token(
 ) -> Response {
     match role(&app, request.headers()) {
         None => ApiError(StatusCode::UNAUTHORIZED, "缺少或错误的访问令牌".into()).into_response(),
-        Some(Role::Viewer) if request.method() != Method::GET => ApiError(
-            StatusCode::FORBIDDEN,
-            "观政令牌只能查看，不能下诏、批红、准奏或任免".into(),
-        )
-        .into_response(),
+        Some(Role::Viewer)
+            if request.method() != Method::GET
+                && !(request.method() == Method::POST
+                    && request
+                        .extensions()
+                        .get::<axum::extract::MatchedPath>()
+                        .is_some_and(|p| {
+                            p.as_str() == "/api/text/{project}/blocks/{block}/references/preview"
+                        })) =>
+        {
+            ApiError(
+                StatusCode::FORBIDDEN,
+                "观政令牌只能查看，不能下诏、批红、准奏或任免".into(),
+            )
+            .into_response()
+        }
         Some(role) => {
             request.extensions_mut().insert(role);
             next.run(request).await

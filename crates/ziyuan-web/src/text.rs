@@ -14,7 +14,8 @@ use std::path::Path;
 use ziyuan_app::notes::{NewNote, NoteEdit, NoteFilter, NoteKind, Notes};
 use ziyuan_app::text_project::{ImportOptions, ImportSource, Project};
 use ziyuan_app::translation::{
-    BlockStatus, ExportFormat, ExportLayout, ExportOptions, TranslationError, Translations,
+    BlockStatus, ExportFormat, ExportLayout, ExportOptions, ReferenceRequest, ReferenceSubmission,
+    TranslationError, Translations,
 };
 use ziyuan_app::{AppError, selected_files};
 use ziyuan_core::TranslationKind;
@@ -411,6 +412,7 @@ pub(crate) async fn memory_search(
             "project": hit.record.identity.project, "block": hit.record.identity.block,
             "paragraph": hit.record.identity.paragraph, "source": hit.record.source.text,
             "translation": hit.record.target.text,
+            "selection": {"identity": hit.record.identity, "digests": hit.record.digests, "origin": hit.record.origin},
         })).collect::<Vec<_>>() }),
             )
         })
@@ -686,6 +688,107 @@ pub(crate) async fn reopen(
         .await?;
     app.emit("changed", json!({}));
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReferencePreviewBody {
+    kind: TranslationKind,
+    request: ReferenceRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReferenceIssueBody {
+    kind: TranslationKind,
+    submission: ReferenceSubmission,
+}
+
+fn current_references(
+    project: &str,
+    kind: TranslationKind,
+    request: &ReferenceRequest,
+) -> Result<(), ApiError> {
+    if !matches!(kind, TranslationKind::Translate | TranslationKind::Revise) {
+        return Err(ApiError::bad("参考只可用于初译或修订。"));
+    }
+    if !request.authorized_projects.is_empty()
+        || request
+            .selections
+            .iter()
+            .any(|s| s.identity.project != project)
+    {
+        return Err(ApiError::bad(
+            "Web 参考只可选择当前项目，不接受跨项目授权。",
+        ));
+    }
+    Ok(())
+}
+
+fn reference_error(error: AppError) -> ApiError {
+    match error {
+        AppError::External(_) => {
+            ApiError::bad("参考选择或确认已失效，请检查材料并重新预览；提交 ID 不可改绑其他内容。")
+        }
+        other => ApiError::from(other),
+    }
+}
+
+pub(crate) async fn references_preview(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<ReferencePreviewBody>,
+) -> Result<Json<Value>, ApiError> {
+    current_references(&project, body.kind, &body.request)?;
+    let root = app.0.config.root.clone();
+    let preview = app
+        .session_result(move |s| {
+            s.preview_references(&root, &project, &block, body.kind, &body.request)
+        })
+        .await?
+        .map_err(reference_error)?;
+    Ok(Json(json!(preview)))
+}
+
+pub(crate) async fn references_issue(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<ReferenceIssueBody>,
+) -> Result<Json<Value>, ApiError> {
+    current_references(&project, body.kind, &body.submission.request)?;
+    let root = app.0.config.root.clone();
+    let task = app
+        .session_result(move |s| {
+            s.issue_with_references(&root, &project, &block, body.kind, &body.submission)
+        })
+        .await?
+        .map_err(reference_error)?;
+    app.emit("changed", json!({}));
+    Ok(Json(json!({"tasks": [task.id.0]})))
+}
+
+pub(crate) async fn references_task(
+    State(app): State<AppState>,
+    UrlPath(task): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let view = app
+        .session_result(move |s| {
+            let task = ziyuan_core::TaskId(task);
+            if s.court().task(task).is_none_or(|t| t.references.is_none()) {
+                return Ok(None);
+            }
+            s.reference_task(&root, task).map(Some)
+        })
+        .await?
+        .map_err(reference_error)?
+        .ok_or_else(|| {
+            ApiError(
+                axum::http::StatusCode::NOT_FOUND,
+                "该任务没有参考快照。".into(),
+            )
+        })?;
+    Ok(Json(json!(view)))
 }
 
 /// 下诏：`{ kind: "translate" | "review" | "revise" }`，只入队不执行。审校一次下两件（忠实、文风）。

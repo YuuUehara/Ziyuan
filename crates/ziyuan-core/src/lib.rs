@@ -11,8 +11,8 @@ mod usage;
 pub use agent::{Agent, NO_ART, Persona, default_styles};
 pub use changes::{FileChange, Hunk};
 pub use event::{
-    CourtEvent, DagNode, Edict, Nomination, Speech, Subtask, Template, TranslationKind,
-    TranslationLink,
+    CourtEvent, DagNode, Edict, Nomination, ReferenceBinding, Speech, Subtask, Template,
+    TranslationKind, TranslationLink,
 };
 pub use office::{BudgetScope, Department, GovernanceMode, Office};
 pub use records::{Record, find_records, search_records};

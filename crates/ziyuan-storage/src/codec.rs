@@ -1,8 +1,8 @@
 //! 事件簿 v1 文本编码：每行一个事件，字段以 Tab 分隔，自由文本以 hex 编码。
 use ziyuan_core::{
     Agent, AgentId, BudgetScope, Capability, CensorVerdict, CourtEvent, DagNode, Department, Edict,
-    Evidence, FileChange, GovernanceMode, Nomination, Office, Seal, Speech, Subtask, TaskId,
-    Template, Threat, TokenUsage, TranslationKind, Verdict,
+    Evidence, FileChange, GovernanceMode, Nomination, Office, ReferenceBinding, Seal, Speech,
+    Subtask, TaskId, Template, Threat, TokenUsage, TranslationKind, Verdict,
 };
 
 fn to_hex(value: &str) -> String {
@@ -399,6 +399,13 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             to_hex(source_hash),
             to_hex(output_path),
             to_hex(zhupi_hash)
+        ),
+        TranslationReferencesBound { task, binding } => format!(
+            "v1\tTRANSREFS\t{}\t{}\t{}\t{}",
+            task.0,
+            to_hex(&binding.submission),
+            to_hex(&binding.request_hash),
+            to_hex(&binding.snapshot)
         ),
         TranslationFinalized {
             project,
@@ -1035,6 +1042,14 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             output_path: from_hex(field(8)?)?,
             zhupi_hash: from_hex(field(9)?)?,
         },
+        "TRANSREFS" => TranslationReferencesBound {
+            task: TaskId(id(2)?),
+            binding: ReferenceBinding {
+                submission: from_hex(field(3)?)?,
+                request_hash: from_hex(field(4)?)?,
+                snapshot: from_hex(field(5)?)?,
+            },
+        },
         "TRANSFINAL" => TranslationFinalized {
             project: from_hex(field(2)?)?,
             block: from_hex(field(3)?)?,
@@ -1099,6 +1114,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictIssued(_) => 7,
         ToolInvoked { .. } | SuspicionRaised { .. } => 6,
         TranslationLinked { .. } => 10,
+        TranslationReferencesBound { .. } => 6,
         TranslationFinalized { .. } => 7,
         TranslationReopened { .. } => 5,
     };
@@ -1159,6 +1175,7 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         ModelUsage { .. } => "USAGE",
         TaskReviewed { .. } => "REVIEWED",
         TranslationLinked { .. } => "TRANSLINK",
+        TranslationReferencesBound { .. } => "TRANSREFS",
         TranslationFinalized { .. } => "TRANSFINAL",
         TranslationReopened { .. } => "TRANSREOPEN",
     }
@@ -1241,12 +1258,46 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         }
         AgentRenamed { .. } => 7,
         TranslationLinked { .. } | TranslationFinalized { .. } | TranslationReopened { .. } => 17,
+        TranslationReferencesBound { .. } => 22,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reference_binding_round_trip_and_strict_fields() {
+        let event = CourtEvent::TranslationReferencesBound {
+            task: TaskId(42),
+            binding: ReferenceBinding {
+                submission: "sub-1".into(),
+                request_hash: "a".repeat(64),
+                snapshot: "{\"note\":\"中文\"}\t\n\0".into(),
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.starts_with("v1\tTRANSREFS\t42\t7375622d31\t"));
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(decode_event(&line).unwrap(), event);
+        assert_eq!(readable_since(&line).unwrap(), 22);
+        assert_eq!(kind_of(&event), "TRANSREFS");
+        assert!(decode_event(&format!("{line}\textra")).is_err());
+        assert!(decode_event(line.rsplit_once('\t').unwrap().0).is_err());
+        assert!(decode_event("v1\tTRANSREFS\t42\tzz\t61\t7b7d").is_err());
+    }
+
+    #[test]
+    fn old_translation_encodings_are_byte_identical() {
+        for row in include_str!("compat.tsv")
+            .lines()
+            .filter(|row| row.starts_with("1.2.0\t"))
+        {
+            let (_, line) = row.split_once('\t').unwrap();
+            assert_eq!(encode_event(&decode_event(line).unwrap()), line);
+            assert_eq!(readable_since(line).unwrap(), 17);
+        }
+    }
+
     #[test]
     fn readable_since_matches_what_released_decoders_could_read() {
         let mut seen = std::collections::BTreeSet::new();
@@ -1269,15 +1320,13 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 48, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 49, "每种事件类型至少一条样本");
         assert_eq!(crate::release_name(17), "1.2.0");
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");
         assert_eq!(crate::release_name(12), "1.0.0-rc.2");
-        assert_eq!(
-            crate::RELEASES.last().copied(),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
+        assert!(crate::RELEASES.contains(&env!("CARGO_PKG_VERSION")));
+        assert_eq!(crate::release_name(22), "1.4.0");
     }
     #[test]
     fn event_round_trip_chinese_and_tabs() {

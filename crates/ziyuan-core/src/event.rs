@@ -170,6 +170,14 @@ pub struct TranslationLink {
     pub zhupi_hash: String,
 }
 
+/// Selected translation references. The snapshot is opaque application JSON, not instructions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceBinding {
+    pub submission: String,
+    pub request_hash: String,
+    pub snapshot: String,
+}
+
 /// Event Sourcing: 朝廷状态由此事件列表重放而来。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CourtEvent {
@@ -427,6 +435,11 @@ pub enum CourtEvent {
         context_version: u32,
         output_path: String,
         zhupi_hash: String,
+    },
+    /// Durable selected references for a pending translation writer (1.4.0).
+    TranslationReferencesBound {
+        task: TaskId,
+        binding: ReferenceBinding,
     },
     /// 御览定稿：皇帝签署一块的译稿（`translation_hash` 为定稿 zh.json 的 SHA-256），
     /// 并记下当时的上下文版本与朱批版本。

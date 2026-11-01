@@ -220,6 +220,15 @@ fn router_for(app: AppState) -> Router {
         )
         .route("/text/{project}/blocks/{block}/reopen", post(text::reopen))
         .route("/text/{project}/blocks/{block}/issue", post(text::issue))
+        .route(
+            "/text/{project}/blocks/{block}/references/preview",
+            post(text::references_preview),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/references/issue",
+            post(text::references_issue),
+        )
+        .route("/text/references/{task}", get(text::references_task))
         .route("/notes", get(text::notes_list).post(text::note_add))
         .route("/notes/{id}/edit", post(text::note_edit))
         .route("/notes/{id}/remove", post(text::note_remove))

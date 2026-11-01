@@ -1,8 +1,8 @@
 //! 翰林院译书：诏令与译书块的关联，及御览定稿与退回重修。
 
-use crate::{Court, GovernanceError, Task};
+use crate::{Court, GovernanceError, Task, TaskStatus};
 use serde::{Deserialize, Serialize};
-use ziyuan_core::{Capability, CourtEvent, Department, TaskId, TranslationLink};
+use ziyuan_core::{Capability, CourtEvent, Department, ReferenceBinding, TaskId, TranslationLink};
 
 /// 退回理由的长度上限（字符）。
 const MAX_REASON: usize = 500;
@@ -88,6 +88,60 @@ fn check_output_path(link: &TranslationLink) -> Result<(), GovernanceError> {
 }
 
 impl Court {
+    /// Bind selected references once, before the linked writer starts execution.
+    pub fn propose_translation_references(
+        &self,
+        task: TaskId,
+        binding: ReferenceBinding,
+    ) -> Result<CourtEvent, GovernanceError> {
+        self.check_translation_references(task, &binding)?;
+        Ok(CourtEvent::TranslationReferencesBound { task, binding })
+    }
+
+    pub(crate) fn check_translation_references(
+        &self,
+        task: TaskId,
+        binding: &ReferenceBinding,
+    ) -> Result<(), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&task)
+            .ok_or(GovernanceError::UnknownEdict(task))?;
+        if entry.status != TaskStatus::Pending {
+            return Err(invalid("references require a pending task"));
+        }
+        if !entry
+            .translation
+            .as_ref()
+            .is_some_and(|link| link.kind.writes())
+        {
+            return Err(invalid("references require a linked translation writer"));
+        }
+        if entry.references.is_some() {
+            return Err(invalid("translation references already bound"));
+        }
+        if !(1..=128).contains(&binding.submission.len())
+            || !binding
+                .submission
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err(invalid("invalid reference submission ID"));
+        }
+        check_hash("reference request hash", &binding.request_hash)?;
+        if binding.snapshot.is_empty() || binding.snapshot.len() > 32768 {
+            return Err(invalid("reference snapshot must contain 1..32768 bytes"));
+        }
+        if self.tasks.values().any(|task| {
+            task.references
+                .as_ref()
+                .is_some_and(|other| other.submission == binding.submission)
+        }) {
+            return Err(invalid("reference submission already bound"));
+        }
+        Ok(())
+    }
+
     /// 译书关联：把待办（或执行中）的诏令 `task` 关联到一块。初译、修订须为工部诏令，
     /// 玉玺含 write_file，译稿写在 `translations/<项目>/<块>/` 之下；审校须只读，不写译稿。
     pub fn propose_translation_link(

@@ -23,6 +23,16 @@
 - Web 共用资格与打包规则：章节选择、格式与编排、文件及警告预览，确认后重新检查下载；viewer 只读令牌可用。内部接口为 `GET /api/text/{id}/export`，`kind=original|finished`、`format=txt|markdown`、`layout=chapters|book`、逗号分隔 `chapters`、`preview=true`；下载为 `application/x-tar`。具体用法见[文本工具](docs/text-projects.md#unreleased--14-第二批源码原件与成稿导出)。
 - 不新增朝廷事件或参考接入，不宣称新增文学质量收益。第一批既有证据不充当第二批跨平台、界面或正式下载包验收。
 
+### 1.4 第三批 A：显式选用参考（本地实现与测试进行中，未发布）
+
+**版本保持 1.3.0；不宣称本批 CI、跨平台正式发行验收或付费模型文学质量已获证明。** 本节是未发布源码行为，不把前两批的历史验收或现有截图作为本批证据。
+
+- 搜索 JSON 保留旧字段，新增 `hits[].selection`（身份、摘要、定稿来源），可组成 `ReferenceRequest` 文件；不接受任意参考正文。新增 `text references preview <项目> <块> --kind translate|revise --selection <文件> [--json]`，核对所选原译文、出处／版本、完整参考外发文本、字节数与指纹；`ReferencePreview.prompt` 是随常规任务发送的精确**额外参考材料**，不是完整模型对话。默认不选，专用接口要求 1–8 条、完整参考提示不超过 8192 UTF-8 字节，超限拒绝不截断，空选择用旧无参考流程。
+- 初译／修订同时给 `--references <文件> --confirm <指纹> --submission <ID>` 才明确绑定参考；ID 为 1–128 位 ASCII 字母数字、`-`、`_`。预览不发送、下诏只入队；同目标／用途／请求／指纹与 ID 的持久重试返回原任务，同 ID 改内容拒绝。新增 `text references show <任务ID> [--json]` 查看原快照及当前／失效原因，来源失效或缓存不可用也不隐藏历史内容。
+- CLI 跨项目须在文件 `authorized_projects` 中逐项列出当前与来源项目，省略或空数组默认仅当前项目；搜索的 `--project` 不代替下诏授权。该授权不是工具 ACL，不扩大文件路径、写入或网络权限。Web 只支持当前项目、拒绝跨项目授权，viewer 可预览／查看快照不可确认下诏；页面保存原提交身份供响应丢失时重试。用法与隐私边界见[译文记忆](docs/memory.md#unreleased--14-第三批-a显式选用参考)。
+- 确认与提交重查来源资格及目标材料；执行在取得 scheduler worker permit **之后**、进入后端之前再核验，失效或无法核验时拒绝调用后端。`resume`、审校不自动取参考；发送后来源变化不新增依赖式准奏／御览门控或级联撤销，不把发送前检查当作文学质量保证。
+- v1 事件簿增量新增 `TranslationReferencesBound`／`TRANSREFS`，最低读取版本 **1.4.0**，旧事件编码字节不变。`Task.references` 是 `serde(default)` 可选内部字段；会典 tag 增加 `-references-v1` 后缀，防止旧 1.3 通过缓存绕过未知事件的失败关闭。任务快照含所选作品原译文并保留在 `.ziyuan/court.log`，不是可删除的记忆缓存，分享事件簿及备份前须核对私密内容。详见[稳定性约定](docs/stability.md#unreleased--14-第三批-a显式选用参考)。
+
 ## 1.3.0
 
 新增本地译文记忆：主动查找以前御览定稿的原译文对，供人判断是否适用。已发布的 1.2.3 及以下历史保留不变。已执行的检查、发布结果与边界见 [1.3.0 验收记录](docs/acceptance/1.3.0.md)。

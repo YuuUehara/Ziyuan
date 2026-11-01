@@ -33,7 +33,63 @@ PowerShell 用 `$env:ZIYUAN_MEMORY_PROVIDER = 'local'` 设置同一个变量。�
 
 `search --json` 另有 `reference_prompt`，是供你主动选用的「参考译法」文本。它保留出处，把原译文作为 JSON 引用放在带随机标记的外来文书边界内，并说明朱批与术语优先、没有额外工具或写入权限。没有命中时该字段为空。工具不会替你把它送给模型；若要交给其他翻译流程，须在实际使用前重新查询并核对，导出的文本不是一直有效的批准凭证，也不能保证模型一定不受误导。
 
-## 在网页里用
+## Unreleased / 1.4 第三批 A：显式选用参考
+
+**本地实现与测试进行中，未发布；版本仍为 1.3.0。** 本节是未发布源码的用法，不表示本批 CI、跨平台发行验收或付费模型文学质量评测已通过。上面的 1.3 查询本身仍不自动发送参考；3A 另加一次明确选择、预览和确认，只用于本次初译或修订。
+
+### CLI：从命中选择，不编写参考正文
+
+先取得当前有效定稿的命中，再把想用的 `hits[].selection` 原样放进 `ReferenceRequest.selections`。每项只含 `identity`、`digests`、`origin`；正文由应用重新核对来源后读取，不接受自填的参考正文或 `reference_prompt` 代替选择文件。下面是 Bash 与 jq 示例（假定已有项目、目标块及有效定稿）：
+
+```bash
+export ZIYUAN_MEMORY_PROVIDER=local
+project='实际项目ID'
+block='实际目标块ID'
+ziyuan text memory build "$project"
+ziyuan text memory search "$project" --query '要查找的原文' --json > hits.json
+# 先人工阅读 hits.json 的原译文与出处，再选择；这里示范第一条。
+jq '{selections: [.hits[0].selection], authorized_projects: []}' hits.json > selection.json
+ziyuan text references preview "$project" "$block" --kind translate --selection selection.json
+ziyuan text references preview "$project" "$block" --kind translate --selection selection.json --json > preview.json
+```
+
+确认有命中再选，不能把无结果的 `null` 放进数组。文件外壳为 `{"selections":[所选命中的selection对象],"authorized_projects":[]}`（说明性结构，不是可直接复制的 JSON）。默认不选参考；专用预览／下诏接口要求 **1–8 条不同段落**，完整参考提示（包括引用边界、出处、JSON 转义等）合计 **不超过 8192 UTF-8 字节**，超限整次拒绝，不截断。空数组被拒绝；不选时使用原来的 `text translate`／`text revise`，无需这些新参数。
+
+预览会展示所选原译文、出处／版本、完整参考外发文本、字节数和指纹。JSON 返回完整 `ReferencePreview`。**`ReferencePreview.prompt` 是精确的额外参考材料，不是完整模型对话**：执行时它追加到常规任务文本，模型仍会接收通常的原文、上下文、朱批等材料；8192 字节限额也不是整场对话的预算。配置的模型可能是外部服务，执行会向其发送所选原译文；先核对内容与外发权利，再确认：
+
+```bash
+fingerprint=$(jq -r '.fingerprint' preview.json)
+ziyuan text translate "$project" "$block" --references selection.json \
+  --confirm "$fingerprint" --submission my-translation-001 --json
+# 修订须满足原有修订条件：先以 --kind revise 重新预览，再用 text revise 确认。
+# 将 42 换为上一步返回的实际 task ID。
+ziyuan text references show 42 --json
+ziyuan text references show 42
+```
+
+`--references`、`--confirm`、`--submission` 必须同时给出；提交 ID 是 1–128 位 ASCII 字母、数字、`-`、`_`。预览只读且不发送，下诏**只入队**，仍用 `ziyuan run` 执行；译稿继续须 `apply` 和人工御览，参考不是指令，也不代替审批。未知、重复、缺失的新参数是用法错误（退出 2）；文件无法读取、JSON 无效、空选择、参考或确认失效等是运行失败（退出 1）。既有全局 `--json` 处理不在本批改动范围内。
+
+响应丢失时，以**相同目标、用途、选择文件、指纹和提交 ID**重试原命令；即使重开进程或原任务后来已执行／来源变化，完全相同的提交仍返回原任务，不再下第二诏。同一 ID 不可改绑不同内容；真正的新选择／新确认用新的 ID。材料变化导致新提交的指纹失效时，应重新查询、选择与预览，不强行沿用。`references show` 保留原快照并另报 `current`／`reason`，失效也可查，不依赖记忆缓存或嵌入提供方可用。
+
+CLI 跨项目不自动继承搜索的 `--project`：选择文件还须在 `authorized_projects` 显式列出**当前项目和每个来源项目**。省略该字段或空数组仅允许当前项目；源／目标语种须一致。授权只允许应用读取这些参考，**不是工具 ACL**，不扩大模型的文件路径、写入或网络权限。
+
+### Web：当前项目内选择与确认
+
+在武英殿当前项目的记忆命中勾选参考，选择「初译／修订」，点「预览所选参考与完整参考材料」，核对内容后再明确确认（仅入队）。用途、选择、目标或材料变化后须重新预览。Web 只接受当前项目的选择，拒绝非空 `authorized_projects`，不能用 CLI 的跨项目授权绕过。viewer 可查询／选择、预览及查看任务快照，不能确认下诏；它也不能重建记忆缓存。
+
+页面确认前把请求与生成的提交 ID 保存到浏览器本地存储；结果不明时用「查询／重试同一次确认」，不要重新确认生成第二个身份。奉天殿任务详情显示下诏时参考快照与当前／失效原因，失效不隐藏历史原译文。
+
+内部 HTTP 接口（不冻结）：`POST /api/text/{project}/blocks/{block}/references/preview` 请求为 `{kind, request}`，`POST .../references/issue` 为 `{kind, submission: {request, fingerprint, submission}}`，`GET /api/text/references/{task}` 查看快照。`kind` 为 `translate`／`revise`；viewer 仅获准上述只读预览 POST 和查看 GET，不获准 issue。
+
+### 失效、保留内容与边界
+
+应用在预览、确认及提交事件前核对来源定稿资格与目标材料；执行还会在**取得调度器 worker permit 之后、进入执行后端之前**重新读取任务绑定和资料。缺工作区、快照损坏、参考／目标变化或核验失败会拒绝进入后端，不带着旧参考调用模型。排队时检查过不代表等到执行仍有效；这也不是抵御外部编辑器在最后核验之后继续改文件的原子隔离承诺。
+
+`resume`、只读审校不自动检索或继承参考。材料已经发送后来源再变化，本批**没有新增依赖式准奏／御览门控或级联撤销**；不能把发送前检查说成全生命周期质量签核。仍须按当前任务和译稿自行审阅。
+
+所选参考的原文、译文、出处和版本作为任务快照写入 `.ziyuan/court.log`，不是只存可重建的索引。删除 `.ziyuan/memory/` 不会清除历史快照；私有作品会使事件簿、备份、浏览器保存的请求及终端／JSON 导出成为敏感资料，分享前核对权利和内容。引用边界不是防提示注入保证；本地相似度、工程测试均不证明付费翻译效果。事件最低读取版本和旧缓存边界见[稳定性约定](stability.md#unreleased--14-第三批-a显式选用参考)。
+
+## 在网页里用（1.3 查询）
 
 启动 Web 服务前设置 `ZIYUAN_MEMORY_PROVIDER=local`，再运行 `ziyuan serve`。在武英殿的译书卡片选定项目，点击「重建当前项目记忆」，输入原文后点「查当前项目」。网页最多显示 8 条，只查当前项目；跨项目仍须用命令行明确指定。
 

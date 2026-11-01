@@ -1277,6 +1277,150 @@ fn renaming_changes_only_the_given_parts_and_shows_in_routes() {
 const PROJECT: &str = "0123456789abcdef0123456789abcdef";
 const BLOCK: &str = "c0001-b0001";
 
+#[test]
+fn translation_references_validate_proposals_and_replay() {
+    use ziyuan_core::ReferenceBinding;
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let out = format!("translations/{PROJECT}/{BLOCK}/zh.json");
+    let binding = ReferenceBinding {
+        submission: "submission_1-A".into(),
+        request_hash: "a".repeat(64),
+        snapshot: "opaque\t快照\nnot parsed as JSON".into(),
+    };
+    let mut writers = Vec::new();
+    for kind in [TranslationKind::Translate, TranslationKind::Revise] {
+        let task = issue(&mut court, Department::Works, translation_seal(true));
+        assert_eq!(court.task(task).unwrap().references, None);
+        assert!(
+            court
+                .propose_translation_references(task, binding.clone())
+                .is_err()
+        );
+        let event = court
+            .propose_translation_link(task, translation_link(kind, &out))
+            .unwrap();
+        court.apply(&event).unwrap();
+        writers.push(task);
+    }
+    let task = writers[0];
+    let reject = |court: &mut Court, task, bad: ReferenceBinding| {
+        assert!(
+            court
+                .propose_translation_references(task, bad.clone())
+                .is_err()
+        );
+        assert!(
+            court
+                .apply(&CourtEvent::TranslationReferencesBound { task, binding: bad })
+                .is_err()
+        );
+        assert_eq!(court.task(task).unwrap().references, None);
+    };
+    for submission in [
+        "".into(),
+        "a".repeat(129),
+        "中文".into(),
+        "a/b".into(),
+        "a b".into(),
+    ] {
+        reject(
+            &mut court,
+            task,
+            ReferenceBinding {
+                submission,
+                ..binding.clone()
+            },
+        );
+    }
+    for request_hash in ["A".repeat(64), "a".repeat(63), "g".repeat(64)] {
+        reject(
+            &mut court,
+            task,
+            ReferenceBinding {
+                request_hash,
+                ..binding.clone()
+            },
+        );
+    }
+    for snapshot in [String::new(), "a".repeat(32769), "中".repeat(10923)] {
+        reject(
+            &mut court,
+            task,
+            ReferenceBinding {
+                snapshot,
+                ..binding.clone()
+            },
+        );
+    }
+    let review = issue(&mut court, Department::Works, translation_seal(false));
+    let event = court
+        .propose_translation_link(review, translation_link(TranslationKind::ReviewStyle, ""))
+        .unwrap();
+    court.apply(&event).unwrap();
+    reject(&mut court, review, binding.clone());
+    assert!(
+        court
+            .apply(&CourtEvent::TranslationReferencesBound {
+                task: TaskId(u64::MAX),
+                binding: binding.clone()
+            })
+            .is_err()
+    );
+
+    let event = court
+        .propose_translation_references(task, binding.clone())
+        .unwrap();
+    let mut replayed = court.clone();
+    replayed.apply(&event).unwrap();
+    assert_eq!(
+        replayed.task(task).unwrap().references.as_ref(),
+        Some(&binding)
+    );
+    assert!(replayed.apply(&event).is_err());
+    assert!(
+        replayed
+            .propose_translation_references(
+                task,
+                ReferenceBinding {
+                    submission: "new".into(),
+                    ..binding.clone()
+                }
+            )
+            .is_err()
+    );
+    // Submission IDs are unique across tasks, even after the first task closes.
+    replayed.tasks.get_mut(&task).unwrap().status = TaskStatus::Cancelled;
+    reject(&mut replayed, writers[1], binding.clone());
+    let boundary = ReferenceBinding {
+        submission: "a".repeat(128),
+        snapshot: "a".repeat(32768),
+        ..binding.clone()
+    };
+    let event = replayed
+        .propose_translation_references(writers[1], boundary.clone())
+        .unwrap();
+    replayed.apply(&event).unwrap();
+    assert_eq!(
+        replayed.task(writers[1]).unwrap().references.as_ref(),
+        Some(&boundary)
+    );
+    for status in [
+        TaskStatus::Assigned(AgentId(1)),
+        TaskStatus::Cancelled,
+        TaskStatus::Failed {
+            worker: None,
+            reason: "failed".into(),
+        },
+        TaskStatus::Completed {
+            worker: AgentId(1),
+            summary: "done".into(),
+        },
+    ] {
+        court.tasks.get_mut(&task).unwrap().status = status;
+        reject(&mut court, task, binding.clone());
+    }
+}
+
 fn translation_link(kind: TranslationKind, output_path: &str) -> TranslationLink {
     TranslationLink {
         project: PROJECT.into(),

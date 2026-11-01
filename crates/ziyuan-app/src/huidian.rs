@@ -27,9 +27,10 @@ pub(crate) fn read_huidian(data: Vec<u8>) -> serde_json::Result<Huidian> {
     serde_json::from_slice(&data)
 }
 
-/// 会典由哪一版所修：版本不同即重修，不跨版本沿用状态的格式。
+/// 会典由哪一版及状态格式所修。源码仍使用旧包版本号时也必须隔开新增字段，
+/// 防止旧二进制跳过新事件、从会典中静默丢失参考绑定。
 pub(crate) fn huidian_tag() -> String {
-    format!("v{}", env!("CARGO_PKG_VERSION"))
+    format!("v{}-references-v1", env!("CARGO_PKG_VERSION"))
 }
 
 impl<S: EventStore> Session<S> {

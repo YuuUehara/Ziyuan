@@ -1,14 +1,29 @@
 //! 翰林院译书命令；下诏只入队，执行与准奏沿用 run/apply。
 use crate::note_commands::print_json;
 use std::error::Error;
+use std::io::Read;
+use std::path::PathBuf;
 use ziyuan_app::Session;
-use ziyuan_app::translation::{BlockState, BlockStatus, ResumeOptions, Translations};
+use ziyuan_app::translation::{
+    BlockState, BlockStatus, ReferencePreview, ReferenceRequest, ReferenceSubmission,
+    ResumeOptions, Translations,
+};
+use ziyuan_core::{TaskId, TranslationKind};
 use ziyuan_storage::EventLog;
 
 pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text translate <项目ID> <块ID> [--dept works]    导出材料并下工部初译诏令
   ziyuan text review <项目ID> <块ID>                    下两件礼部只读审校诏令（忠实度、文风）
   ziyuan text revise <项目ID> <块ID>                    按朱批优先下工部统稿诏令
+  ziyuan text references preview <项目ID> <块ID> --kind translate|revise --selection <选择.json>
+                                                    只读预览完整提示、字节数与确认指纹
+  ziyuan text references show <诏令ID>                  查看下诏时的精确快照及当前/失效状态
+  ziyuan text translate|revise <项目ID> <块ID> --references <选择.json>
+                       --confirm <预览指纹> --submission <提交ID>
+                                                    三项须同时给出；提交ID为 1..128 位 ASCII 字母数字、-、_
+    选择文件是 ReferenceRequest JSON（selections 身份/摘要/来源，不接受任意参考正文）；
+    authorized_projects 默认空仅当前项目，跨项目须在文件中逐个显式授权。
+    警告：完整提示含原文与所选参考，执行时将发送给外部模型；预览不发送，下诏仅入队。
   ziyuan text zhupi <项目ID> <块ID> <段号> <意见>         写逐段朱批
   ziyuan text zhupi <项目ID> <块ID> <段号> --clear|--show 清除或查看该段朱批
   ziyuan text zhupi <项目ID> <块ID> [--show]             查看全块朱批
@@ -24,6 +39,16 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
 
 pub(crate) enum TranslationAction {
     Translate(String, String),
+    ReferencesPreview(String, String, TranslationKind, PathBuf),
+    ReferencesShow(TaskId),
+    WithReferences {
+        project: String,
+        block: String,
+        kind: TranslationKind,
+        selection: PathBuf,
+        fingerprint: String,
+        submission: String,
+    },
     Review(String, String),
     Revise(String, String),
     Finalize(String, String),
@@ -41,10 +66,55 @@ pub(crate) enum TranslationAction {
 
 pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let usage = "用法: ziyuan text translate|review|revise|zhupi|finalize|reopen|context|status|resume；运行 ziyuan text help 查看参数";
+    let usage = "用法: ziyuan text translate|review|revise|references|zhupi|finalize|reopen|context|status|resume；运行 ziyuan text help 查看参数";
     // 位置参数不接受选项，避免误把缺失的参数当成项目或块。
     let positional = |s: &str| !s.starts_with("--") && !s.trim().is_empty();
     Ok(match a.as_slice() {
+        ["references", "show", task] => {
+            TranslationAction::ReferencesShow(TaskId(task.parse().map_err(|_| usage)?))
+        }
+        ["references", "preview", p, b, rest @ ..] if positional(p) && positional(b) => {
+            let flags = reference_flags(rest, &["--kind", "--selection"], usage)?;
+            TranslationAction::ReferencesPreview(
+                (*p).into(),
+                (*b).into(),
+                reference_kind(flags["--kind"], usage)?,
+                flags["--selection"].into(),
+            )
+        }
+        [kind @ ("translate" | "revise"), p, b, rest @ ..]
+            if positional(p)
+                && positional(b)
+                && rest
+                    .iter()
+                    .any(|v| matches!(*v, "--references" | "--confirm" | "--submission")) =>
+        {
+            let allowed: &[&str] = if *kind == "translate" {
+                &["--references", "--confirm", "--submission", "--dept"]
+            } else {
+                &["--references", "--confirm", "--submission"]
+            };
+            let flags = reference_flags(rest, allowed, usage)?;
+            if flags.get("--dept").is_some_and(|v| *v != "works") {
+                return Err(usage.into());
+            }
+            let submission = flags.get("--submission").ok_or(usage)?;
+            if submission.len() > 128
+                || !submission
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+            {
+                return Err(usage.into());
+            }
+            TranslationAction::WithReferences {
+                project: (*p).into(),
+                block: (*b).into(),
+                kind: reference_kind(kind, usage)?,
+                selection: (*flags.get("--references").ok_or(usage)?).into(),
+                fingerprint: (*flags.get("--confirm").ok_or(usage)?).into(),
+                submission: (*submission).into(),
+            }
+        }
         ["translate", p, b] | ["translate", p, b, "--dept", "works"]
             if positional(p) && positional(b) =>
         {
@@ -89,6 +159,66 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         }
         _ => return Err(usage.into()),
     })
+}
+
+fn reference_kind(value: &str, usage: &str) -> Result<TranslationKind, Box<dyn Error>> {
+    match value {
+        "translate" => Ok(TranslationKind::Translate),
+        "revise" => Ok(TranslationKind::Revise),
+        _ => Err(usage.into()),
+    }
+}
+
+fn reference_flags<'a>(
+    args: &[&'a str],
+    allowed: &[&str],
+    usage: &str,
+) -> Result<std::collections::BTreeMap<&'a str, &'a str>, Box<dyn Error>> {
+    let mut flags = std::collections::BTreeMap::new();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let value = rest.next().ok_or(usage)?;
+        if !allowed.contains(flag)
+            || value.starts_with('-')
+            || value.trim().is_empty()
+            || flags.insert(*flag, *value).is_some()
+        {
+            return Err(usage.into());
+        }
+    }
+    for flag in allowed.iter().filter(|f| **f != "--dept") {
+        if !flags.contains_key(flag) {
+            return Err(usage.into());
+        }
+    }
+    Ok(flags)
+}
+
+fn read_reference_request(path: &std::path::Path) -> Result<ReferenceRequest, Box<dyn Error>> {
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("参考选择文件超过 16 MiB".into());
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("参考选择文件 {} 无效：{e}", path.display()).into())
+}
+
+fn print_reference_preview(preview: &ReferencePreview) -> Result<(), Box<dyn Error>> {
+    // Include all target/version/reference metadata, not only the rendered prompt.
+    println!("{}", serde_json::to_string_pretty(preview)?);
+    println!("完整提示：\n{}", preview.prompt);
+    println!(
+        "提示字节数：{}\n预览指纹：{}",
+        preview.bytes, preview.fingerprint
+    );
+    println!(
+        "警告：完整提示含原文与所选参考，执行时将发送给外部模型；预览不发送，下诏仅入队，不调用模型。"
+    );
+    Ok(())
 }
 
 pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn Error>> {
@@ -163,6 +293,58 @@ fn run_session(
     json: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (project, block, kind, edicts) = match action {
+        TranslationAction::ReferencesPreview(project, block, kind, selection) => {
+            let request = read_reference_request(&selection)?;
+            let preview = session.preview_references(root, &project, &block, kind, &request)?;
+            if json {
+                print_json(serde_json::to_value(&preview)?)?;
+            } else {
+                print_reference_preview(&preview)?;
+            }
+            return Ok(());
+        }
+        TranslationAction::ReferencesShow(task) => {
+            let view = session.reference_task(root, task)?;
+            if json {
+                print_json(serde_json::to_value(&view)?)?;
+            } else {
+                println!(
+                    "诏令 #{}：{}",
+                    view.task,
+                    if view.current {
+                        "当前有效 (current)"
+                    } else {
+                        "已失效 (stale)"
+                    }
+                );
+                if let Some(reason) = &view.reason {
+                    println!("原因：{reason}");
+                }
+                print_reference_preview(&view.snapshot)?;
+            }
+            return Ok(());
+        }
+        TranslationAction::WithReferences {
+            project,
+            block,
+            kind,
+            selection,
+            fingerprint,
+            submission,
+        } => {
+            let submission = ReferenceSubmission {
+                request: read_reference_request(&selection)?,
+                fingerprint,
+                submission,
+            };
+            let edict = session.issue_with_references(root, &project, &block, kind, &submission)?;
+            let kind = if kind == TranslationKind::Translate {
+                "translate"
+            } else {
+                "revise"
+            };
+            (project, block, kind, vec![edict])
+        }
         TranslationAction::Status(project) => {
             let statuses = session.translation_status(root, &project)?;
             if json {

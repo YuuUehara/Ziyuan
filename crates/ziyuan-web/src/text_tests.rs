@@ -1274,3 +1274,181 @@ async fn ordered_upload_preview_and_exact_confirmation() {
     assert_eq!(code, 422);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_references_http_permissions_confirmation_replay_and_snapshot() {
+    let (base, root) = start("selected-references", true).await;
+    let texts = TextProjects::new(&root);
+    let p = texts
+        .create(NewProject {
+            title: "参考测试".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let first = root.join("reference.txt");
+    let second = root.join("target.txt");
+    fs::write(&first, "参考原文。\n").unwrap();
+    fs::write(&second, "待译原文。\n").unwrap();
+    let p = texts.import(&p.id, &[first, second]).unwrap();
+    let source = &p.chapters[0].blocks[0].block_id;
+    let target = &p.chapters[1].blocks[0].block_id;
+    let mut court = Court::replay(&founding_events(7)).unwrap();
+    let text = candidate(&p, source);
+    let (events, task) = translate_events(&mut court, &p, source, &text);
+    append(&root, &events);
+    fs::create_dir_all(root.join(block_dir_rel(&p.id, source))).unwrap();
+    fs::write(root.join(output_rel(&p.id, source)), text).unwrap();
+    append(
+        &root,
+        &[CourtEvent::ChangesApplied {
+            task,
+            skipped: vec![],
+        }],
+    );
+    let mut session = Session::open(EventLog::new(&root)).unwrap();
+    session.finalize_translation(&root, &p.id, source).unwrap();
+    assert_eq!(
+        call(
+            &base,
+            &format!("/text/references/{}", task.0),
+            Some(VIEWER),
+            None
+        )
+        .await
+        .0,
+        404
+    );
+    let provider = ziyuan_memory::local::LocalProvider::new();
+    session
+        .memory_build(&root, &BTreeSet::from([p.id.clone()]), &provider)
+        .unwrap();
+    let hits = session
+        .memory_search(&root, &BTreeSet::new(), &p.id, "参考", 8, &provider)
+        .unwrap();
+    let record = &hits[0].record;
+    let selection =
+        json!({"identity": record.identity, "digests": record.digests, "origin": record.origin});
+    let request = json!({"selections": [selection], "authorized_projects": []});
+    let route = format!("/text/{}/blocks/{target}/references", p.id);
+    let preview_route = format!("{route}/preview");
+    let issue_route = format!("{route}/issue");
+    let body = json!({"kind": "translate", "request": request});
+    assert_eq!(
+        call(&base, &preview_route, None, Some(body.clone()))
+            .await
+            .0,
+        401
+    );
+    let (code, mut preview) = call(&base, &preview_route, Some(VIEWER), Some(body.clone())).await;
+    assert_eq!(code, 200, "{preview}");
+    assert!(preview["prompt"].as_str().unwrap().contains("参考原文。"));
+    assert_eq!(preview["references"].as_array().unwrap().len(), 1);
+    assert!(preview["bytes"].as_u64().unwrap() <= 8192);
+    let mut extra = body.clone();
+    extra["text"] = json!("不能信任的客户端文本");
+    assert_eq!(
+        call(&base, &preview_route, Some(TOKEN), Some(extra))
+            .await
+            .0,
+        422
+    );
+    let mut extra = body.clone();
+    extra["request"]["selections"][0]["source"] = json!("伪造");
+    assert_eq!(
+        call(&base, &preview_route, Some(TOKEN), Some(extra))
+            .await
+            .0,
+        422
+    );
+    for kind in ["review", "review_style"] {
+        let mut wrong = body.clone();
+        wrong["kind"] = json!(kind);
+        assert_ne!(
+            call(&base, &preview_route, Some(VIEWER), Some(wrong))
+                .await
+                .0,
+            200
+        );
+    }
+    let mut cross = body.clone();
+    cross["request"]["authorized_projects"] = json!([p.id]);
+    assert_eq!(
+        call(&base, &preview_route, Some(VIEWER), Some(cross))
+            .await
+            .0,
+        400
+    );
+    let mut cross = body.clone();
+    cross["request"]["selections"][0]["identity"]["project"] = json!("other");
+    assert_eq!(
+        call(&base, &preview_route, Some(VIEWER), Some(cross))
+            .await
+            .0,
+        400
+    );
+    let old_confirmation = json!({"kind": "translate", "submission": {
+        "request": request, "fingerprint": preview["fingerprint"], "submission": "web-stale-materials"
+    }});
+    let (code, changed) = call(
+        &base,
+        &format!("/text/{}/blocks/{target}/zhupi", p.id),
+        Some(TOKEN),
+        Some(json!({"paragraph": p.chapters[1].blocks[0].paragraphs[0].id, "text": "预览后更新朱批"})),
+    ).await;
+    assert_eq!(code, 200, "{changed}");
+    assert_eq!(
+        call(&base, &issue_route, Some(TOKEN), Some(old_confirmation))
+            .await
+            .0,
+        400
+    );
+    let (code, fresh) = call(&base, &preview_route, Some(VIEWER), Some(body)).await;
+    assert_eq!(code, 200, "{fresh}");
+    assert_ne!(fresh["fingerprint"], preview["fingerprint"]);
+    preview = fresh;
+    let submission = json!({"kind": "translate", "submission": {
+        "request": request, "fingerprint": preview["fingerprint"], "submission": "web-confirmation-1"
+    }});
+    assert_eq!(
+        call(&base, &issue_route, Some(VIEWER), Some(submission.clone()))
+            .await
+            .0,
+        403
+    );
+    let mut stale = submission.clone();
+    stale["submission"]["fingerprint"] = json!("stale");
+    assert_eq!(
+        call(&base, &issue_route, Some(TOKEN), Some(stale)).await.0,
+        400
+    );
+    let (code, issued) = call(&base, &issue_route, Some(TOKEN), Some(submission.clone())).await;
+    assert_eq!(code, 200, "{issued}");
+    let (code, replay) = call(&base, &issue_route, Some(TOKEN), Some(submission.clone())).await;
+    assert_eq!(code, 200, "{replay}");
+    assert_eq!(replay, issued);
+    let task = issued["tasks"][0].as_u64().unwrap();
+    let snapshot_route = format!("/text/references/{task}");
+    assert_eq!(call(&base, &snapshot_route, None, None).await.0, 401);
+    let (code, view) = call(&base, &snapshot_route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{view}");
+    assert_eq!(view["snapshot"], preview);
+    assert_eq!(view["current"], json!(true));
+    let mut session = Session::open(EventLog::new(&root)).unwrap();
+    session
+        .reopen_translation(&root, &p.id, source, "版本变动")
+        .unwrap();
+    let (code, view) = call(&base, &snapshot_route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{view}");
+    assert_eq!(view["snapshot"], preview);
+    assert_eq!(view["current"], json!(false));
+    assert!(view["reason"].is_string());
+    assert_eq!(
+        call(&base, &issue_route, Some(TOKEN), Some(submission))
+            .await
+            .1,
+        issued
+    );
+    fs::remove_dir_all(root).unwrap();
+}

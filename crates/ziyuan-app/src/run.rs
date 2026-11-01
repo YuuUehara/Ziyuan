@@ -98,6 +98,7 @@ impl<S: EventStore> Session<S> {
         // 翰林院实录：本次开工前已结的诏令，供承办者以 search_records 查阅前例。
         let records = Arc::new(court.records());
         let mut jobs = Vec::new();
+        let mut reference_jobs = std::collections::BTreeMap::new();
         let mut running = Vec::new();
         let default_model = scheduler.backend().model_name().map(str::to_owned);
         for &task in tasks {
@@ -221,6 +222,15 @@ impl<S: EventStore> Session<S> {
                         .court
                         .task_limit(entry, Some(worker))
                         .map(|limit| limit.saturating_sub(entry.usage.total()));
+                    if let Some(binding) = &entry.references {
+                        if let Ok(snapshot) = serde_json::from_str::<
+                            crate::translation::ReferencePreview,
+                        >(&binding.snapshot)
+                        {
+                            text = format!("{text}\n\n{}", snapshot.prompt);
+                        }
+                        reference_jobs.insert(task, binding.clone());
+                    }
                     jobs.push(Job {
                         budget,
                         treasury: treasury.clone(),
@@ -250,7 +260,28 @@ impl<S: EventStore> Session<S> {
             }
         }
 
-        let mut progress = scheduler.start(jobs, cancel);
+        let reference_root = scheduler.backend().workspace_root().map(PathBuf::from);
+        let mut progress = scheduler.start_checked(jobs, cancel, move |job| {
+            let Some(expected) = reference_jobs.get(&job.edict.id) else {
+                return Ok(());
+            };
+            let root = reference_root
+                .as_ref()
+                .ok_or("执行后端没有工作区，不能核验所选参考")?;
+            let session = Session::open(ziyuan_storage::EventLog::new(root))?;
+            let task = session.court().task(job.edict.id).ok_or("参考任务不存在")?;
+            if task.references.as_ref() != Some(expected) {
+                return Err("参考任务绑定已变，拒绝调用模型".into());
+            }
+            let view = session.reference_task(root, job.edict.id)?;
+            if !view.current {
+                return Err(view
+                    .reason
+                    .unwrap_or_else(|| "参考已失效，请重新选择下诏".into())
+                    .into());
+            }
+            Ok(())
+        });
         while !running.is_empty() {
             let Some(update) = progress.recv().await else {
                 break;

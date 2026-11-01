@@ -9,6 +9,8 @@ pub(crate) const MEMORY_HELP: &str = r#"翻译记忆（均支持 --json）：
   ziyuan text memory search <项目ID> --query <原文> [--project <其他项目ID>]... [--limit 5]
                                                     查找参考译法，最多 50 条
     默认只查当前项目；其他项目必须逐个给出 --project，不支持 --all。
+    搜索 JSON 的 hits[].selection 可放入选择文件的 selections 数组；不要复制参考正文。
+    使用跨项目参考还须在选择文件 authorized_projects 中显式授权；搜索授权不代替下诏授权。
     先设置 ZIYUAN_MEMORY_PROVIDER=local 才能建库和搜索；默认关闭，不联网。
     本地方法只按文字相似程度找参考，不理解文意，不保证适用。"#;
 
@@ -150,6 +152,11 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
             let hits: Vec<_> = hits.iter().map(|h| json!({
                 "identity":h.record.identity,"origin":h.record.origin,
                 "source":h.record.source,"target":h.record.target,
+                "selection":{
+                    "identity":h.record.identity,
+                    "digests":h.record.digests,
+                    "origin":h.record.origin,
+                },
                 "score":h.score,"keyword_score":h.keyword_score,"cosine_score":h.cosine_score,
                 "keyword_rank":h.keyword_rank,"vector_rank":h.vector_rank,
             })).collect();

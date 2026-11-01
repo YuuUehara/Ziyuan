@@ -1559,3 +1559,391 @@ fn finished_export_refuses_a_change_during_collection() {
         .unwrap_err();
     assert!(error.to_string().contains("版本失效"), "{error}");
 }
+
+fn reference_fixture(fx: &Fx, s: &mut Session<EventLog>) -> ReferenceRequest {
+    for block in [B1, B2] {
+        let task = translated(fx, s, block);
+        s.apply_changes(task, &fx.root, vec![]).unwrap();
+        s.finalize_translation(&fx.root, &fx.project, block)
+            .unwrap();
+    }
+    ReferenceRequest {
+        selections: s
+            .memory_pairs(&fx.root, &fx.project)
+            .unwrap()
+            .pairs
+            .into_iter()
+            .map(|p| ReferenceSelection {
+                identity: p.identity,
+                digests: p.digests,
+                origin: p.origin,
+            })
+            .collect(),
+        authorized_projects: BTreeSet::new(),
+    }
+}
+
+#[test]
+fn selected_references_preview_is_stable_strict_and_bounded() {
+    let fx = Fx::new("reference-preview");
+    let mut s = fx.session();
+    let all = reference_fixture(&fx, &mut s);
+    assert_eq!(all.selections.len(), 8);
+    let mut request = all.clone();
+    request.selections = vec![all.selections[1].clone()];
+    let events = s.event_count();
+    let draft = fs::read(fx.zh_path(B1)).unwrap();
+    let preview = s
+        .preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &request,
+        )
+        .unwrap();
+    assert_eq!(
+        preview,
+        s.preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &request
+        )
+        .unwrap()
+    );
+    assert_eq!(preview.references.len(), 1);
+    assert!(preview.prompt.contains("第2段の文。"));
+    assert!(!preview.prompt.contains("第1段の文。"));
+    assert!(!preview.prompt.contains("第3段の文。"));
+    assert_eq!(preview.bytes, preview.prompt.len());
+    assert_eq!(s.event_count(), events);
+    assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), draft);
+    assert!(!fx.zh_path(B3).exists());
+    assert!(
+        s.preview_references(&fx.root, &fx.project, B3, TranslationKind::Translate, &all)
+            .is_ok()
+    );
+    let mut nine = all.clone();
+    nine.selections.push(all.selections[0].clone());
+    assert!(
+        s.preview_references(&fx.root, &fx.project, B3, TranslationKind::Translate, &nine)
+            .is_err()
+    );
+    let mut duplicate = request.clone();
+    duplicate.selections.push(request.selections[0].clone());
+    assert!(
+        s.preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &duplicate
+        )
+        .is_err()
+    );
+    let mut forged = request.clone();
+    forged.selections[0].digests.block_target_sha256 = "a".repeat(64);
+    assert!(
+        s.preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &forged
+        )
+        .is_err()
+    );
+    let mut unauthorized = request.clone();
+    unauthorized.authorized_projects.insert("a".repeat(32));
+    assert!(
+        s.preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &unauthorized
+        )
+        .is_err()
+    );
+    assert!(
+        s.preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::ReviewStyle,
+            &request
+        )
+        .is_err()
+    );
+    let mut supplied_prose = serde_json::to_value(&request).unwrap();
+    supplied_prose["selections"][0]["translation"] = "客户端伪造的定稿".into();
+    assert!(serde_json::from_value::<ReferenceRequest>(supplied_prose).is_err());
+
+    // Authorization is a concrete project set, not inherited from an index.
+    for language in ["ja", "en"] {
+        let target = fx
+            .t()
+            .texts()
+            .create(NewProject {
+                title: "跨项目目标".into(),
+                source_language: language.into(),
+                target_language: "zh-CN".into(),
+                provenance: Provenance::default(),
+            })
+            .unwrap();
+        fx.t()
+            .texts()
+            .import(&target.id, &[fx.root.join("c3.txt")])
+            .unwrap();
+        assert!(
+            s.preview_references(
+                &fx.root,
+                &target.id,
+                B1,
+                TranslationKind::Translate,
+                &request
+            )
+            .is_err()
+        );
+        let mut authorized = request.clone();
+        authorized.authorized_projects = BTreeSet::from([fx.project.clone(), target.id.clone()]);
+        let result = s.preview_references(
+            &fx.root,
+            &target.id,
+            B1,
+            TranslationKind::Translate,
+            &authorized,
+        );
+        assert_eq!(result.is_ok(), language == "ja");
+    }
+}
+
+#[test]
+fn selected_references_concurrent_retries_keep_one_task_and_exact_snapshot() {
+    let fx = Fx::new("reference-retry");
+    let mut s = fx.session();
+    let mut request = reference_fixture(&fx, &mut s);
+    request.selections = vec![request.selections[1].clone()];
+    let preview = s
+        .preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &request,
+        )
+        .unwrap();
+    let submission = ReferenceSubmission {
+        request,
+        fingerprint: preview.fingerprint.clone(),
+        submission: "retry-1".into(),
+    };
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let ids: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = barrier.clone();
+                let submission = &submission;
+                let fx = &fx;
+                scope.spawn(move || {
+                    let mut session = fx.session();
+                    barrier.wait();
+                    session
+                        .issue_with_references(
+                            &fx.root,
+                            &fx.project,
+                            B3,
+                            TranslationKind::Translate,
+                            submission,
+                        )
+                        .unwrap()
+                        .id
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(ids[0], ids[1]);
+    s.reload().unwrap();
+    assert_eq!(
+        s.court().tasks().filter(|t| t.references.is_some()).count(),
+        1
+    );
+    let view = s.reference_task(&fx.root, ids[0]).unwrap();
+    assert!(view.current);
+    assert_eq!(view.snapshot, preview);
+    let mut conflict = submission.clone();
+    conflict.fingerprint = "0".repeat(64);
+    let before = s.event_count();
+    assert!(
+        s.issue_with_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &conflict
+        )
+        .is_err()
+    );
+    assert_eq!(s.event_count(), before);
+    s.reopen_translation(&fx.root, &fx.project, B1, "纠正译法")
+        .unwrap();
+    let view = s.reference_task(&fx.root, ids[0]).unwrap();
+    assert!(!view.current);
+    assert_eq!(view.snapshot, preview);
+    let before = s.event_count();
+    let retried = fx
+        .session()
+        .issue_with_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &submission,
+        )
+        .unwrap();
+    assert_eq!(retried.id, ids[0]);
+    s.reload().unwrap();
+    assert_eq!(s.event_count(), before);
+    let mut fresh_identity = submission.clone();
+    fresh_identity.submission = "retry-new".into();
+    assert!(
+        s.issue_with_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &fresh_identity
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn selected_references_reject_stale_confirmation_and_count_full_utf8_material() {
+    let fx = Fx::new("reference-bytes");
+    let mut s = fx.session();
+    let mut request = reference_fixture(&fx, &mut s);
+    request.selections = vec![request.selections[1].clone()];
+    let preview = s
+        .preview_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &request,
+        )
+        .unwrap();
+    let submission = ReferenceSubmission {
+        request: request.clone(),
+        fingerprint: preview.fingerprint,
+        submission: "stale".into(),
+    };
+    fx.t()
+        .set_zhupi(&fx.project, B3, "c0003-p0001", "保留人物口气")
+        .unwrap();
+    let events = s.event_count();
+    assert!(
+        s.issue_with_references(
+            &fx.root,
+            &fx.project,
+            B3,
+            TranslationKind::Translate,
+            &submission
+        )
+        .is_err()
+    );
+    assert_eq!(s.event_count(), events);
+
+    // Tune a real finalized paragraph, not a synthetic prompt builder. Each
+    // revision goes through public apply/finalize and yields new selection data.
+    let mut size = 100;
+    let mut reached_boundary = false;
+    for _ in 0..4 {
+        s.reopen_translation(&fx.root, &fx.project, B1, "字节边界夹具")
+            .unwrap();
+        let task = s.issue_revise(&fx.root, &fx.project, B1).unwrap().id;
+        complete(
+            &mut s,
+            task,
+            vec![fx.zh_change(
+                B1,
+                fx.candidate(B1, |ps| ps[1].text = "界".to_owned() + &"x".repeat(size)),
+            )],
+            "修订夹具",
+        );
+        s.apply_changes(task, &fx.root, vec![]).unwrap();
+        s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+        let pair = s
+            .memory_pairs(&fx.root, &fx.project)
+            .unwrap()
+            .pairs
+            .into_iter()
+            .find(|p| p.identity.paragraph == "c0001-p0002")
+            .unwrap();
+        request.selections = vec![ReferenceSelection {
+            identity: pair.identity,
+            digests: pair.digests,
+            origin: pair.origin,
+        }];
+        let preview = s
+            .preview_references(
+                &fx.root,
+                &fx.project,
+                B3,
+                TranslationKind::Translate,
+                &request,
+            )
+            .unwrap();
+        if preview.bytes == MAX_REFERENCE_BYTES {
+            reached_boundary = true;
+            // One extra UTF-8 byte (ASCII here) must fail, not be truncated.
+            s.reopen_translation(&fx.root, &fx.project, B1, "超界夹具")
+                .unwrap();
+            let task = s.issue_revise(&fx.root, &fx.project, B1).unwrap().id;
+            complete(
+                &mut s,
+                task,
+                vec![fx.zh_change(
+                    B1,
+                    fx.candidate(B1, |ps| {
+                        ps[1].text = "界".to_owned() + &"x".repeat(size + 1)
+                    }),
+                )],
+                "超界",
+            );
+            s.apply_changes(task, &fx.root, vec![]).unwrap();
+            s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+            let pair = s
+                .memory_pairs(&fx.root, &fx.project)
+                .unwrap()
+                .pairs
+                .into_iter()
+                .find(|p| p.identity.paragraph == "c0001-p0002")
+                .unwrap();
+            request.selections = vec![ReferenceSelection {
+                identity: pair.identity,
+                digests: pair.digests,
+                origin: pair.origin,
+            }];
+            let error = s
+                .preview_references(
+                    &fx.root,
+                    &fx.project,
+                    B3,
+                    TranslationKind::Translate,
+                    &request,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("8192"), "{error}");
+            break;
+        }
+        size += MAX_REFERENCE_BYTES - preview.bytes;
+    }
+    assert!(
+        reached_boundary,
+        "must exercise the exact public byte boundary"
+    );
+}

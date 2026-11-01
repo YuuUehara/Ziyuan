@@ -18,6 +18,12 @@ pub trait WorkerBackend: Send + Sync {
     /// 执行 `job`：以 `job.edict.seal`（已受官职上限约束）为权限，`job.model` 为模型（`None` 用默认）。
     fn execute(&self, job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError>;
 
+    /// Actual tool workspace. Bound references fail closed if the execution
+    /// backend cannot identify its workspace for the pre-send eligibility check.
+    fn workspace_root(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// 承办官员所用的模型名，供界面显示；不调用模型的后端返回 `None`。
     fn model_name(&self) -> Option<&str> {
         None
@@ -169,6 +175,10 @@ impl ExecutionHooks for UsageTotal {
 }
 
 impl WorkerBackend for AgentBackend {
+    fn workspace_root(&self) -> Option<&std::path::Path> {
+        Some(&self.root)
+    }
+
     fn complete(
         &self,
         model: Option<&str>,

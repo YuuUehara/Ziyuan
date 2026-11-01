@@ -127,7 +127,19 @@ impl Scheduler {
     /// 任务按 `jobs` 顺序开始执行。`cancel` 触发后，执行中的任务记为 `Cancelled`，
     /// 尚未开始的记为 `NotStarted`。
     pub fn start(&self, jobs: Vec<Job>, cancel: &CancelToken) -> mpsc::UnboundedReceiver<Progress> {
+        self.start_checked(jobs, cancel, |_| Ok(()))
+    }
+
+    /// Revalidate application-owned facts after obtaining a worker permit and
+    /// immediately before entering the backend. Rejection makes no backend call.
+    pub fn start_checked(
+        &self,
+        jobs: Vec<Job>,
+        cancel: &CancelToken,
+        check: impl Fn(&Job) -> Result<(), crate::BoxError> + Send + Sync + 'static,
+    ) -> mpsc::UnboundedReceiver<Progress> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let check = Arc::new(check);
         let permits = Arc::new(Semaphore::new(self.limits.max_concurrent.max(1)));
         let backend = self.backend.clone();
         let timeout = self.limits.timeout;
@@ -152,6 +164,7 @@ impl Scheduler {
                     cancel.clone(),
                     timeout,
                     tx.clone(),
+                    check.clone(),
                 );
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -177,6 +190,7 @@ async fn run_job(
     cancel: CancelToken,
     timeout: Duration,
     progress: mpsc::UnboundedSender<Progress>,
+    check: Arc<impl Fn(&Job) -> Result<(), crate::BoxError> + Send + Sync + 'static>,
 ) -> Outcome {
     let treasury = job.treasury.clone();
     let timeout = if job.urgent { timeout * 2 } else { timeout };
@@ -215,6 +229,10 @@ async fn run_job(
     let handle = tokio::task::spawn_blocking(move || {
         // 许可随执行线程释放：超时后线程仍在收尾时，不会让并发数超过上限。
         let _permit = permit;
+        check(&job)?;
+        if hooks.is_cancelled() {
+            return Err("执行已取消".into());
+        }
         backend.execute(&job, &hooks)
     });
     tokio::select! {

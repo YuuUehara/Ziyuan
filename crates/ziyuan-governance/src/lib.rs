@@ -28,7 +28,7 @@ use std::fmt;
 use std::sync::Arc;
 use ziyuan_core::{
     Agent, AgentId, CHANGELOG, Capability, DagNode, Department, Edict, GovernanceMode, Nomination,
-    Office, Seal, Speech, TaskId, Template, TokenUsage, TranslationLink, Verdict,
+    Office, ReferenceBinding, Seal, Speech, TaskId, Template, TokenUsage, TranslationLink, Verdict,
 };
 /// 违反朝廷规则的操作；回放与提议共用同一套规则。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -343,6 +343,9 @@ pub struct Task {
     /// 关联的译书块（`TranslationLinked`）。
     #[serde(default)]
     pub translation: Option<TranslationLink>,
+    /// Selected references; opaque application snapshot, never interpreted by governance.
+    #[serde(default)]
+    pub references: Option<ReferenceBinding>,
 }
 
 impl Task {
