@@ -43,3 +43,28 @@ fn rejected_startup_never_runs_the_suspended_child() {
     assert!(!stdout.contains("CHILD_ENTERED=1"));
     assert!(!stdout.contains("APP=1"));
 }
+
+#[test]
+fn private_files_work_while_host_and_peer_files_are_access_denied() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"))
+        .arg("--file-probe")
+        .env("ZIYUAN_W1A_HOST_ONLY", "synthetic-host-secret")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("{stdout}{stderr}");
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("APP=1 AAP_ACCESS=0 JOB=1 ENV=1"));
+    assert!(stdout.contains("HOST_FILES_READ_WRITE=1"));
+    assert!(stdout.contains("FILE_PRIVATE_READ=1 FILE_PRIVATE_WRITE=1 FILE_TEMP_WRITE=1"));
+    for label in ["source", "journal", "credential", "vcs", "peer"] {
+        assert!(
+            stdout.contains(&format!("FILE_DENIED={label} READ_WIN32=5 WRITE_WIN32=5")),
+            "{stdout}{stderr}"
+        );
+    }
+    assert!(stdout.contains("HOST_FILES_UNCHANGED=1 PRIVATE_OUTPUT_VERIFIED=1"));
+    assert!(stdout.contains("FIXTURES_CLEANED=1 PEER_PROFILE_CLEANED=1"));
+    assert!(stdout.contains("PROFILE_CLEANED=1"));
+}

@@ -1,6 +1,8 @@
 //! W1a self-reexecution probe, not an arbitrary-command launcher.
 //! No runtime/MCP dependency may use this as a production sandbox.
 #[cfg(windows)]
+mod files;
+#[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
 

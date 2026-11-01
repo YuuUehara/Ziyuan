@@ -388,9 +388,14 @@ pub(super) fn run() -> io::Result<()> {
     if args.len() == 2 && args[0] == "--child" {
         return child_probe(args[1].parse().map_err(io::Error::other)?);
     }
+    if args.len() == 5 && args[..3] == ["--child", "false", "--file-probe"] {
+        child_probe(false)?;
+        return crate::files::child(args[3].as_ref(), args[4].as_ref());
+    }
     let fault = args == ["--fail-before-resume"];
     let ordinary = args == ["--ordinary-appcontainer-control"];
-    if !args.is_empty() && !fault && !ordinary {
+    let file_probe = args == ["--file-probe"];
+    if !args.is_empty() && !fault && !ordinary && !file_probe {
         return Err(io::Error::other("unknown probe arguments"));
     }
     // SAFETY: borrowed pseudo handle, never closed or inherited.
@@ -405,6 +410,19 @@ pub(super) fn run() -> io::Result<()> {
     }
     println!("HOST_AAP_ACCESS=1");
     let mut profile = Profile::create()?;
+    let mut peer_profile = if file_probe {
+        Some(Profile::create()?)
+    } else {
+        None
+    };
+    let mut fixtures = match &peer_profile {
+        Some(peer) => {
+            let fixtures = crate::files::Fixtures::create(&profile.path, &peer.path)?;
+            println!("HOST_FILES_READ_WRITE=1");
+            Some(fixtures)
+        }
+        None => None,
+    };
     let program = profile.path.join("w1a-probe.exe");
     std::fs::copy(std::env::current_exe()?, &program)?;
     let output_path = profile.path.join("child-output.txt");
@@ -476,9 +494,17 @@ pub(super) fn run() -> io::Result<()> {
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
     let application = wide(&program);
     let directory = wide(&profile.path);
-    // Windows filenames cannot contain quotes. Only this known executable path
-    // and a boolean control are serialized; arbitrary args aren't offered.
-    let mut command = wide(format!("\"{}\" --child {}", program.display(), ordinary));
+    // These exclusively owned paths contain no quotes or trailing backslashes.
+    // No user command or user-supplied arguments are forwarded.
+    let mut command = format!("\"{}\" --child {}", program.display(), ordinary);
+    if let Some(files) = &fixtures {
+        command.push_str(&format!(
+            " --file-probe \"{}\" \"{}\"",
+            files.host_path().display(),
+            files.peer_path().display()
+        ));
+    }
+    let mut command = wide(command);
     // AppContainer startup also needs LOCALAPPDATA. It is task-private, never
     // copied from the host. Entries are in Unicode name order; each wide call
     // supplies an entry NUL, then push terminates the whole environment block.
@@ -592,6 +618,13 @@ pub(super) fn run() -> io::Result<()> {
     if let Err(error) = child.stop() {
         eprintln!("W1a retained profile: {}", profile.path.display());
         profile.registered = false;
+        if let Some(peer) = &mut peer_profile {
+            eprintln!("W1b retained peer profile: {}", peer.path.display());
+            peer.registered = false;
+        }
+        if let Some(files) = &mut fixtures {
+            files.retain();
+        }
         return Err(error);
     }
     drop(child);
@@ -605,6 +638,16 @@ pub(super) fn run() -> io::Result<()> {
         // Only our trusted probe's fixed evidence/error output, never an
         // arbitrary user command or a dump of the host environment.
         eprintln!("W1a child evidence: {text}");
+    }
+    let files_result = match &fixtures {
+        Some(files) if result.is_ok() => files.verify(),
+        _ => Ok(()),
+    };
+    if let Some(files) = &mut fixtures {
+        files.cleanup()?;
+    }
+    if let Some(peer) = &mut peer_profile {
+        peer.cleanup()?;
     }
     std::fs::remove_file(&program)?;
     std::fs::remove_file(&output_path)?;
@@ -626,16 +669,26 @@ pub(super) fn run() -> io::Result<()> {
         println!("FAULT_BEFORE_RESUME=1 CHILD_BYTES=0 PROFILE_CLEANED=1");
     } else {
         result?;
-        let expected = format!(
+        files_result?;
+        let mut expected = format!(
             "CHILD_ENTERED=1\nAPP=1 AAP_ACCESS={} JOB=1 ENV=1",
             u8::from(ordinary)
         );
+        if file_probe {
+            expected.push('\n');
+            expected.push_str(crate::files::CHILD_EVIDENCE);
+        }
         if text.trim() != expected {
             return Err(io::Error::other(format!(
                 "unexpected child evidence: {text:?}"
             )));
         }
         println!("HOST_SENTINEL=1 {text}PROFILE_CLEANED=1");
+        if file_probe {
+            println!(
+                "HOST_FILES_UNCHANGED=1 PRIVATE_OUTPUT_VERIFIED=1 FIXTURES_CLEANED=1 PEER_PROFILE_CLEANED=1"
+            );
+        }
     }
     Ok(())
 }
