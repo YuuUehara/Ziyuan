@@ -249,6 +249,10 @@ fn finish_allows_a_published_record_whose_files_were_already_written() {
     publish(&ws, &mut guard, RecordState::Published);
     drop(guard);
 
+    // 第一版 finish 只收尾：即使本批事件不在簿中，也不重放业务或截断残行。
+    let log_path = temp.path().join(".ziyuan/court.log");
+    let log_before = b"v1\tCLOCK\t120\nunfinished-tail";
+    std::fs::write(&log_path, log_before).expect("写入带残行的事件簿");
     let (code, _, stderr) = run(
         temp.path(),
         &["text", "recovery", "finish", OPERATION, "--yes"],
@@ -257,6 +261,13 @@ fn finish_allows_a_published_record_whose_files_were_already_written() {
 
     let reopened = Workspace::open(temp.path()).expect("重新打开");
     reopened.ensure_writable().expect("收尾后应可写入");
+    assert_eq!(reopened.generation().expect("读代次"), 2);
+    assert!(reopened.pending_record().expect("读记录").is_none());
+    assert_eq!(std::fs::read(&log_path).expect("读事件簿"), log_before);
+    assert_eq!(
+        std::fs::read(temp.path().join("docs/notes.md")).expect("读目标"),
+        TARGET
+    );
 }
 
 #[test]
@@ -416,10 +427,79 @@ fn status_json_carries_the_operation_id() {
     publish(&ws, &mut guard, RecordState::Published);
     drop(guard);
 
+    let record_path = temp.path().join(".ziyuan/recovery.json");
+    let before = std::fs::read(&record_path).expect("读恢复记录");
     let (code, stdout, _) = run(temp.path(), &["text", "recovery", "status", "--json"]);
     assert_eq!(code, 1);
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("输出应为 JSON");
     assert_eq!(value["state"], "published");
     assert_eq!(value["operation_id"], OPERATION);
     assert_eq!(value["task"], 7);
+    assert_eq!(std::fs::read(&record_path).expect("重读恢复记录"), before);
+    assert_eq!(ws.generation().expect("读代次"), 1);
+}
+
+#[test]
+fn unsupported_recovery_sources_are_refused_without_touching_evidence() {
+    for (version, kind) in [
+        (2, None),
+        (2, Some("human")),
+        (3, Some("model")),
+        (1, Some("human")),
+    ] {
+        let temp = Temp::new("unsupported-source");
+        materialize_target(temp.path());
+        let ws = Workspace::open(temp.path()).expect("打开工作目录");
+        let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
+        publish(&ws, &mut guard, RecordState::Published);
+        drop(guard);
+
+        let record_path = temp.path().join(".ziyuan/recovery.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record_path).expect("读恢复记录"))
+                .expect("记录 JSON");
+        value["format_version"] = serde_json::json!(version);
+        if let Some(kind) = kind {
+            value["record"]["application"]["kind"] = serde_json::json!(kind);
+        }
+        std::fs::write(&record_path, serde_json::to_vec(&value).expect("信封 JSON"))
+            .expect("放入不支持的恢复记录");
+        std::fs::write(
+            temp.path().join(".ziyuan/court.log"),
+            b"v1\tCLOCK\t120\nunfinished-tail",
+        )
+        .expect("写入带残行的事件簿");
+
+        let protected = [
+            ".ziyuan/recovery.json",
+            ".ziyuan/write.generation",
+            ".ziyuan/write-protocol",
+            ".ziyuan/court.log",
+            "docs/notes.md",
+        ];
+        let before = protected.map(|path| std::fs::read(temp.path().join(path)).expect("读证据"));
+        for args in [
+            vec!["text", "recovery", "status", "--json"],
+            vec!["text", "recovery", "finish", OPERATION, "--yes"],
+            vec!["text", "recovery", "abandon", OPERATION, "--yes"],
+        ] {
+            let (code, stdout, stderr) = run(temp.path(), &args);
+            assert_ne!(code, 0, "不支持的记录不能报成功：{stdout}");
+            let expected = if version > 1 {
+                "更新版本"
+            } else {
+                "恢复记录损坏"
+            };
+            assert!(stderr.contains(expected), "{args:?}: {stderr}");
+            for (path, bytes) in protected.iter().zip(&before) {
+                assert_eq!(
+                    std::fs::read(temp.path().join(path)).expect("重读证据"),
+                    *bytes,
+                    "{args:?} 不得改写 {path}"
+                );
+            }
+            assert_eq!(ws.generation().expect("读代次"), 1);
+            assert!(ws.ensure_writable().is_err(), "拒绝后仍须阻断写入");
+        }
+    }
 }

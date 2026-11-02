@@ -144,8 +144,8 @@ pub fn decode_record(bytes: &[u8]) -> Result<RecoveryRecord, RecoveryError> {
     if header.format_version != RECOVERY_FORMAT {
         return Err(corrupt("不支持的格式版本"));
     }
-    // 读到这里已确认版本；余下字段严格解析：外壳不认识的多余字段即是损坏，
-    // 记录本身的未知字段由固定序列化后的校验和拦下。
+    // 读到这里已确认版本；外壳、记录及嵌套来源均严格解析，未知字段直接拒绝，
+    // 不能先丢掉来源标签再用旧布局通过校验和。
     let envelope: Envelope =
         serde_json::from_slice(bytes).map_err(|_| corrupt("字段缺失或含有未知字段"))?;
     if !envelope.sha256.starts_with("sha256:") || envelope.sha256.len() != 7 + 64 {
@@ -439,6 +439,9 @@ mod tests {
         "5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d";
     const HISTORY_SHA: &str = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
     const CHANGES_VERSION: &str = "v1";
+    // 由独立的 Python json.dumps（固定字段序、紧凑分隔）与 hashlib.sha256 核对，
+    // 不是调用待测编码器生成；文件行尾不属于恢复信封的编码字节。
+    const FIRST_FORMAT_GOLDEN: &str = include_str!("recovery-first-format.json");
 
     fn fixture() -> RecoveryRecord {
         let applied = CourtEvent::ChangesApplied {
@@ -488,6 +491,18 @@ mod tests {
         let text = String::from_utf8(bytes.clone()).expect("UTF-8");
         assert!(text.contains("\"format_version\":1"), "{text}");
         assert_eq!(decode_record(&bytes).expect("解码"), record);
+    }
+
+    #[test]
+    fn first_format_matches_independent_golden() {
+        let mut expected = fixture();
+        expected.application.skipped = vec![2, 9];
+        expected.events.encoded_events[1] = "v1\tAPPLIED\t7\t2,9".into();
+        let golden = FIRST_FORMAT_GOLDEN
+            .trim_end_matches(['\r', '\n'])
+            .as_bytes();
+        assert_eq!(decode_record(golden).expect("读取第一版金样"), expected);
+        assert_eq!(encode_record(&expected).expect("编码第一版"), golden);
     }
 
     #[test]
@@ -624,6 +639,69 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn first_format_does_not_discard_source_tags() {
+        for kind in ["model", "human"] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(FIRST_FORMAT_GOLDEN).expect("金样 JSON");
+            value["record"]["application"]["kind"] = serde_json::json!(kind);
+            // 保留旧校验和：若错误地丢掉未知 kind，旧记录的校验和仍会匹配，
+            // 因而这里必须由严格的来源字段解析拒绝，而非碰巧因摘要不同失败。
+            let bytes = serde_json::to_vec(&value).expect("JSON");
+            assert!(matches!(
+                decode_record(&bytes),
+                Err(RecoveryError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn source_validation_is_required_even_with_a_matching_checksum() {
+        for invalid_task in [true, false] {
+            let mut record = fixture();
+            if invalid_task {
+                record.application.task = 0;
+                record.events.encoded_events[1] = "v1\tAPPLIED\t0".into();
+            } else {
+                // 恢复协议版本不是模型提案的内容摘要，不能互换。
+                record.application.changes_version = format!("sha256:{HISTORY_SHA}");
+            }
+            // 绕过编码器的预检，构造摘要确实自洽、只有来源语义不合法的输入。
+            let payload = serde_json::to_vec(&record).expect("记录 JSON");
+            let value = serde_json::json!({
+                "format_version": 1,
+                "sha256": format!("sha256:{}", crate::content_sha256(&payload)),
+                "record": record,
+            });
+            let bytes = serde_json::to_vec(&value).expect("信封 JSON");
+            assert!(matches!(
+                decode_record(&bytes),
+                Err(RecoveryError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_version_headers_are_not_guessed() {
+        for header in [
+            "",
+            r#""format_version":null,"#,
+            r#""format_version":"1","#,
+            r#""format_version":1.0,"#,
+            r#""format_version":-1,"#,
+            r#""format_version":true,"#,
+            r#""format_version":1,"format_version":2,"#,
+            r#""format_version":2,"format_version":1,"#,
+        ] {
+            // 其余内容全部有效，避免因缺正文而让错误的版本推断也通过测试。
+            let bytes = FIRST_FORMAT_GOLDEN.replacen(r#""format_version":1,"#, header, 1);
+            assert!(matches!(
+                decode_record(bytes.as_bytes()),
+                Err(RecoveryError::Corrupt(_))
+            ));
+        }
+    }
+
     fn version_only_record(version: u64) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({ "format_version": version })).expect("JSON")
     }
@@ -650,6 +728,17 @@ mod tests {
             assert!(matches!(
                 decode_record(&version_only_record(version)),
                 Err(RecoveryError::Corrupt(_))
+            ));
+        }
+        // 即使后半段是完整可读的旧模型布局，也不能忽略新格式号后回退读取。
+        for version in [2, 3] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(FIRST_FORMAT_GOLDEN).expect("金样 JSON");
+            value["format_version"] = serde_json::json!(version);
+            let bytes = serde_json::to_vec(&value).expect("JSON");
+            assert!(matches!(
+                decode_record(&bytes),
+                Err(RecoveryError::Newer { found, supported: 1 }) if found == version
             ));
         }
     }
