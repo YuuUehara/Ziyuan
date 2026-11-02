@@ -154,48 +154,61 @@ fn a_published_record_blocks_writes_and_status_says_so() {
 
 #[test]
 fn finish_requires_the_matching_operation_and_then_unblocks() {
-    let temp = Temp::new("finish");
-    materialize_target(temp.path());
-    let ws = Workspace::open(temp.path()).expect("打开工作目录");
-    let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
-    publish(&ws, &mut guard, RecordState::Completed);
-    drop(guard);
+    for upgraded in [false, true] {
+        let temp = Temp::new("finish");
+        materialize_target(temp.path());
+        let ws = Workspace::open(temp.path()).expect("打开工作目录");
+        let mut guard = ws.lock(LockScope::Workspace).expect("取锁");
+        if upgraded {
+            guard.upgrade_write_protocol().expect("显式升级写入闸门");
+        }
+        publish(&ws, &mut guard, RecordState::Completed);
+        drop(guard);
 
-    // 操作 ID 不符时拒绝，且不改动磁盘。
-    let (code, _, stderr) = run(
-        temp.path(),
-        &[
-            "text",
-            "recovery",
-            "finish",
-            "ffffffffffffffffffffffffffffffff",
-            "--yes",
-        ],
-    );
-    assert_eq!(code, 1, "ID 不符应失败：{stderr}");
-    assert!(
-        stderr.contains("不符") || stderr.contains("不符"),
-        "{stderr}"
-    );
+        // 操作 ID 不符时拒绝，且不改动磁盘。
+        let (code, _, stderr) = run(
+            temp.path(),
+            &[
+                "text",
+                "recovery",
+                "finish",
+                "ffffffffffffffffffffffffffffffff",
+                "--yes",
+            ],
+        );
+        assert_eq!(code, 1, "ID 不符应失败：{stderr}");
+        assert!(
+            stderr.contains("不符") || stderr.contains("不符"),
+            "{stderr}"
+        );
 
-    // 不给 --yes 视为用法错误。
-    let (code, _, _) = run(temp.path(), &["text", "recovery", "finish", OPERATION]);
-    assert_eq!(code, 2, "缺少 --yes 应为用法错误");
+        // 不给 --yes 视为用法错误。
+        let (code, _, _) = run(temp.path(), &["text", "recovery", "finish", OPERATION]);
+        assert_eq!(code, 2, "缺少 --yes 应为用法错误");
 
-    let (code, stdout, stderr) = run(
-        temp.path(),
-        &["text", "recovery", "finish", OPERATION, "--yes"],
-    );
-    assert_eq!(code, 0, "收尾应成功：{stderr}");
-    assert!(stdout.contains("已收尾"), "{stdout}");
+        let (code, stdout, stderr) = run(
+            temp.path(),
+            &["text", "recovery", "finish", OPERATION, "--yes"],
+        );
+        assert_eq!(code, 0, "收尾应成功：{stderr}");
+        assert!(stdout.contains("已收尾"), "{stdout}");
 
-    let reopened = Workspace::open(temp.path()).expect("重新打开");
-    reopened.ensure_writable().expect("收尾后应可写入");
-    assert_eq!(reopened.generation().expect("读世代号"), 2);
-    assert!(
-        reopened.pending_record().expect("读记录").is_none(),
-        "收尾后恢复记录应已清理"
-    );
+        let reopened = Workspace::open(temp.path()).expect("重新打开");
+        reopened.ensure_writable().expect("收尾后应可写入");
+        assert_eq!(reopened.generation().expect("读世代号"), 2);
+        assert!(
+            reopened.pending_record().expect("读记录").is_none(),
+            "收尾后恢复记录应已清理"
+        );
+        assert_eq!(
+            reopened.write_protocol().unwrap(),
+            Some(if upgraded { 2 } else { 1 })
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join("docs/notes.md")).unwrap(),
+            TARGET
+        );
+    }
 }
 
 #[test]

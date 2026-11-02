@@ -17,7 +17,9 @@ use crate::recovery::{
 };
 
 pub const DEFAULT_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-pub const WRITE_PROTOCOL: u64 = 1;
+/// Highest understood managed-write protocol. Ordinary locks still create v1;
+/// v2 is an explicit compatibility barrier, not human approval support.
+pub const WRITE_PROTOCOL: u64 = 2;
 /// The single pending-or-terminal recovery record, relative to `.ziyuan`.
 const RECORD_FILE: &str = "recovery.json";
 
@@ -151,6 +153,28 @@ impl Workspace {
         }
     }
 
+    /// Read only. An absent marker is a legacy v1 workspace, without creating it.
+    /// Recognized versions use canonical bytes; unknown future versions fail closed.
+    pub fn write_protocol(&self) -> Result<Option<u64>, WorkspaceError> {
+        let dir = self.root.join(".ziyuan");
+        if !check_path(&dir, true)? {
+            return Ok(None);
+        }
+        match read_control(&dir.join("write-protocol"))? {
+            None => Ok(None),
+            Some(bytes) if bytes == b"1\n" => Ok(Some(1)),
+            Some(bytes) if bytes == b"2\n" => Ok(Some(2)),
+            Some(bytes) => {
+                let found = decimal(&bytes)?;
+                Err(if found > WRITE_PROTOCOL {
+                    WorkspaceError::Newer { found }
+                } else {
+                    WorkspaceError::Corrupt("unsupported write protocol".into())
+                })
+            }
+        }
+    }
+
     /// Acquire managed write exclusion. The scope is reserved for future expansion.
     pub fn lock(&self, _scope: LockScope) -> Result<WriteGuard, WorkspaceError> {
         let started = Instant::now();
@@ -195,17 +219,8 @@ impl Workspace {
             _file: file,
             _reserved: reserved,
         };
-        match read_control(&dir.join("write-protocol"))? {
-            None => atomic_replace(&dir.join("write-protocol"), b"1\n")?,
-            Some(bytes) if bytes == b"1\n" => {}
-            Some(bytes) => {
-                let found = decimal(&bytes)?;
-                return Err(if found > WRITE_PROTOCOL {
-                    WorkspaceError::Newer { found }
-                } else {
-                    WorkspaceError::Corrupt("unsupported write protocol".into())
-                });
-            }
+        if self.write_protocol()?.is_none() {
+            atomic_replace(&dir.join("write-protocol"), b"1\n")?;
         }
         Ok(guard)
     }
@@ -246,6 +261,7 @@ impl Workspace {
     /// Refuse ordinary managed writes while an interrupted or unfinished operation
     /// exists. A `Prepared` record is private staging and does not block.
     pub fn ensure_writable(&self) -> Result<(), WorkspaceError> {
+        self.write_protocol()?;
         let generation = self.generation()?;
         let record = self.pending_record()?;
         if let Some(record) = &record {
@@ -304,6 +320,26 @@ pub struct WriteGuard {
 impl WriteGuard {
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+
+    /// Explicitly raise the compatibility barrier under exclusion, only on an
+    /// even generation with no recovery record. Never called by ordinary writes.
+    /// This does not upgrade recovery/event/project formats or authorize approval.
+    /// Callers must separately gate writers that do not use this workspace API.
+    pub fn upgrade_write_protocol(&mut self) -> Result<(), WorkspaceError> {
+        self.workspace.ensure_writable()?;
+        if let Some(record) = self.workspace.pending_record()? {
+            return Err(WorkspaceError::RecordExists {
+                operation_id: record.operation_id,
+            });
+        }
+        if self.workspace.write_protocol()? != Some(WRITE_PROTOCOL) {
+            atomic_replace(
+                &self.workspace.root.join(".ziyuan/write-protocol"),
+                format!("{WRITE_PROTOCOL}\n").as_bytes(),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn generation(&self) -> Result<u64, WorkspaceError> {
@@ -710,13 +746,15 @@ mod tests {
         let ws = Workspace::open(&root.0).unwrap();
         assert_eq!(ws.root(), root.0.canonicalize().unwrap());
         assert_eq!(ws.generation().unwrap(), 0);
+        assert_eq!(ws.write_protocol().unwrap(), None);
+        ws.ensure_writable().unwrap();
         assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
         assert!(Workspace::open(root.0.join("missing")).is_err());
         let file = root.0.join("file");
         fs::write(&file, "").unwrap();
         assert!(Workspace::open(file).is_err());
         assert_eq!(DEFAULT_WRITE_LOCK_TIMEOUT, Duration::from_secs(5));
-        assert_eq!(WRITE_PROTOCOL, 1);
+        assert_eq!(WRITE_PROTOCOL, 2);
     }
 
     struct Child(std::process::Child);
@@ -1154,8 +1192,12 @@ mod tests {
         let modified = fs::metadata(&marker).unwrap().modified().unwrap();
         drop(ws.lock(LockScope::Workspace).unwrap());
         assert_eq!(fs::metadata(&marker).unwrap().modified().unwrap(), modified);
-        for bytes in [b"2\n".as_slice(), b"02\n", b"18446744073709551615\n"] {
+        for bytes in [b"3\n".as_slice(), b"03\n", b"18446744073709551615\n"] {
             fs::write(&marker, bytes).unwrap();
+            assert!(matches!(
+                ws.ensure_writable(),
+                Err(WorkspaceError::Newer { .. })
+            ));
             assert!(matches!(
                 ws.lock(LockScope::Workspace),
                 Err(WorkspaceError::Newer { .. })
@@ -1165,13 +1207,20 @@ mod tests {
             b"".as_slice(),
             b"0\n",
             b"01\n",
+            b"02\n",
             b"1",
             b"1\r\n",
+            b"2",
+            b"2\r\n",
             b"+2\n",
             b"garbage\n",
             &[b'9'; 33],
         ] {
             fs::write(&marker, bytes).unwrap();
+            assert!(matches!(
+                ws.ensure_writable(),
+                Err(WorkspaceError::Corrupt(_))
+            ));
             assert!(
                 matches!(
                     ws.lock(LockScope::Workspace),
@@ -1189,6 +1238,95 @@ mod tests {
         fs::remove_dir(&marker).unwrap();
         drop(ws.lock(LockScope::Workspace).unwrap());
         assert_eq!(fs::read_dir(root.0.join(".ziyuan")).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn explicit_protocol_upgrade_persists_without_upgrading_ordinary_workspaces() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        let marker = root.0.join(".ziyuan/write-protocol");
+        assert_eq!(fs::read(&marker).unwrap(), b"1\n");
+        assert_eq!(ws.write_protocol().unwrap(), Some(1));
+        fs::write(root.0.join("sentinel"), b"unchanged").unwrap();
+        guard.upgrade_write_protocol().unwrap();
+        assert_eq!(fs::read(&marker).unwrap(), b"2\n");
+        assert_eq!(ws.write_protocol().unwrap(), Some(2));
+        assert_eq!(ws.generation().unwrap(), 0);
+        assert!(ws.pending_record().unwrap().is_none());
+        assert_eq!(fs::read(root.0.join("sentinel")).unwrap(), b"unchanged");
+        let modified = fs::metadata(&marker).unwrap().modified().unwrap();
+        guard.upgrade_write_protocol().unwrap();
+        drop(guard);
+        let reopened = Workspace::open(&root.0).unwrap();
+        let mut guard = reopened.lock(LockScope::Workspace).unwrap();
+        reopened.ensure_writable().unwrap();
+        guard.upgrade_write_protocol().unwrap();
+        assert_eq!(fs::metadata(&marker).unwrap().modified().unwrap(), modified);
+        assert_eq!(guard.begin().unwrap(), 1);
+        assert_eq!(guard.finish().unwrap(), 2);
+        assert_eq!(
+            fs::read(&marker).unwrap(),
+            b"2\n",
+            "never downgrade on lock/begin/finish"
+        );
+        assert_no_temps(&root);
+    }
+
+    #[test]
+    fn protocol_upgrade_refuses_unfinished_generations_and_every_recovery_state() {
+        for state in [
+            None,
+            Some(RecordState::Prepared),
+            Some(RecordState::Published),
+            Some(RecordState::Completed),
+            Some(RecordState::Abandoned),
+        ] {
+            let root = Temp::new();
+            let ws = workspace(&root);
+            let mut guard = ws.lock(LockScope::Workspace).unwrap();
+            if let Some(state) = state {
+                let initial = match state {
+                    RecordState::Completed => RecordState::Published,
+                    RecordState::Abandoned => RecordState::Prepared,
+                    other => other,
+                };
+                let record = record(&ws, initial);
+                guard.publish(&record).unwrap();
+                match state {
+                    RecordState::Completed => {
+                        guard.complete(&record.operation_id).unwrap();
+                    }
+                    RecordState::Abandoned => {
+                        guard.abandon(&record.operation_id).unwrap();
+                    }
+                    _ => {}
+                }
+            } else {
+                guard.begin().unwrap();
+            }
+            let before = ws.pending_record().unwrap();
+            let generation = ws.generation().unwrap();
+            assert!(guard.upgrade_write_protocol().is_err(), "{state:?}");
+            assert_eq!(
+                fs::read(root.0.join(".ziyuan/write-protocol")).unwrap(),
+                b"1\n"
+            );
+            assert_eq!(ws.pending_record().unwrap(), before);
+            assert_eq!(ws.generation().unwrap(), generation);
+            assert_no_temps(&root);
+        }
+        // A marker changed after acquiring the guard must still be validated.
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let mut guard = ws.lock(LockScope::Workspace).unwrap();
+        let marker = root.0.join(".ziyuan/write-protocol");
+        for bytes in [b"3\n".as_slice(), b"02\n"] {
+            fs::write(&marker, bytes).unwrap();
+            assert!(guard.upgrade_write_protocol().is_err());
+            assert_eq!(fs::read(&marker).unwrap(), bytes);
+        }
+        assert_eq!(ws.generation().unwrap(), 0);
     }
 
     /// A record as a real caller stores it: the root in OS form, which is what the
