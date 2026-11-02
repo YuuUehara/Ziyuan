@@ -283,49 +283,75 @@ async fn prepared_on_a_file_log(root: &Root) -> (Session<ziyuan_storage::EventLo
     (session, task)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn a_file_event_log_records_the_clock_and_the_batch_agrees_with_the_record() {
     // 真实事件簿：本批会多记一条时辰，「预期条数」须把它算进去，而不是硬写 +2。
     // 记错了，`text recovery finish` 就无法据记录核对事件簿。
+    let clock = crate::time::TestClock::at(119);
     let root = Root::new("file-log-clock");
     let (mut session, task) = prepared_on_a_file_log(&root).await;
-    let clock_before = session
-        .history()
-        .unwrap()
-        .iter()
-        .filter(|e| matches!(e, CourtEvent::Clock(_)))
-        .count();
+    let before = session.history().unwrap().to_vec();
+    assert_eq!(
+        before
+            .iter()
+            .filter_map(|e| match e {
+                CourtEvent::Clock(at) => Some(*at),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [119]
+    );
 
-    // 看一眼记录发布前的预期：正是本事务要写出的那一批。
+    // 固定跨越整分钟，不再假定准备和准奏碰巧在同一分钟内。
+    clock.set(120);
     session
         .apply_reviewed(task, root.path(), Vec::new(), None)
         .unwrap();
 
     let history = session.history().unwrap();
-    let clock_after = history
-        .iter()
-        .filter(|e| matches!(e, CourtEvent::Clock(_)))
-        .count();
-    // 开国时已记过一条时辰，本批在同分钟内，故不应再记——本批只有申请那一件事。
-    assert_eq!(clock_before, 1, "开国时记过一条时辰");
-    assert_eq!(clock_after, clock_before, "同一分钟内的批次不应再记时辰");
-    // 盘上事件簿与内存一致，说明记录里 pinned 的批次就是真实写出的批次。
+    assert_eq!(&history[..before.len()], before);
+    assert_eq!(
+        &history[before.len()..],
+        [
+            CourtEvent::Clock(120),
+            CourtEvent::ChangesApplied {
+                task,
+                skipped: Vec::new()
+            }
+        ],
+        "跨分钟须且只能追加一条时辰与本批准奏"
+    );
+    // 比较完整事件，而不只比较条数；入簿完成后才能清除恢复记录。
     let on_disk =
         ziyuan_storage::EventStore::load(&ziyuan_storage::EventLog::new(root.path())).unwrap();
-    assert_eq!(on_disk.len(), history.len(), "盘上事件簿条数应与内存一致");
+    assert_eq!(&on_disk, history, "盘上事件簿应与内存逐条一致");
+    assert_eq!(root.read(), CHANGED);
     assert_eq!(root.generation(), 2);
     assert!(!root.path().join(".ziyuan/recovery.json").exists());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn a_file_event_log_does_not_stamp_the_clock_twice_for_one_batch() {
-    // 连做两次准奏：同一分钟内第二次不应再记时辰，两批长度随之不同。
+    // 第一次跨分钟、第二次同分钟：两批长度必须分别是二和一。
     // 记录若按「最多 +2」硬算，其中一批就会与实际对不上。
+    let clock = crate::time::TestClock::at(119);
     let root = Root::new("file-log-twice");
     let (mut session, task) = prepared_on_a_file_log(&root).await;
+    let before_first = session.history().unwrap().len();
+    clock.set(120);
     session
         .apply_reviewed(task, root.path(), Vec::new(), None)
         .unwrap();
+    assert_eq!(
+        &session.history().unwrap()[before_first..],
+        [
+            CourtEvent::Clock(120),
+            CourtEvent::ChangesApplied {
+                task,
+                skipped: Vec::new()
+            }
+        ]
+    );
     // 第一次准奏已收尾：世代号回到偶数，盘上不留记录。
     assert_eq!(root.generation(), 2);
     assert!(!root.path().join(".ziyuan/recovery.json").exists());
@@ -339,7 +365,6 @@ async fn a_file_event_log_does_not_stamp_the_clock_twice_for_one_batch() {
         .issue(Department::Works, "再改 a.txt".into(), seal)
         .unwrap()
         .id;
-    let before_second = session.history().unwrap().len();
     session
         .run(
             &[second],
@@ -352,24 +377,24 @@ async fn a_file_event_log_does_not_stamp_the_clock_twice_for_one_batch() {
         )
         .await
         .unwrap();
+    let before_second = session.history().unwrap().len();
     session
         .apply_reviewed(second, root.path(), Vec::new(), None)
         .unwrap();
 
     assert_eq!(root.read(), CHANGED_TWICE);
     let history = session.history().unwrap();
-    let second_growth = history.len() - before_second;
-    // 执行任务本身也会记事件（入奏、呈报、办结），故不看总长度，只看准奏那批的尾巴：
-    // 受管写入写出的批次至多是「一条时辰 + 一条 ChangesApplied」。
-    assert!(
-        matches!(history.last(), Some(CourtEvent::ChangesApplied { .. })),
-        "最后一条应是本批的 ChangesApplied"
+    assert_eq!(
+        &history[before_second..],
+        [CourtEvent::ChangesApplied {
+            task: second,
+            skipped: Vec::new()
+        }],
+        "同一分钟内第二批只能追加本批准奏，不得重复记时辰"
     );
-    // 盘上事件簿的条数与内存一致：记录钉死的时辰批次就是实际写出的那一批。
     let on_disk =
         ziyuan_storage::EventStore::load(&ziyuan_storage::EventLog::new(root.path())).unwrap();
-    assert_eq!(on_disk.len(), history.len(), "盘上事件簿条数应与内存一致");
-    assert!(second_growth >= 1, "{second_growth}");
+    assert_eq!(&on_disk, history, "盘上事件簿应与内存逐条一致");
     assert_eq!(root.generation(), 4);
     assert!(!root.path().join(".ziyuan/recovery.json").exists());
 }

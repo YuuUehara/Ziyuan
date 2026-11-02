@@ -16,9 +16,46 @@ pub(crate) fn last_clock(events: &[CourtEvent], earlier: Option<u64>) -> Option<
 
 /// 当前 Unix 时间（秒）。
 pub(crate) fn now() -> u64 {
+    #[cfg(test)]
+    if let Some(at) = TEST_NOW.get() {
+        return at;
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Scoped to one current-thread test; parallel tests retain their own clocks.
+#[cfg(test)]
+pub(crate) struct TestClock {
+    previous: Option<u64>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TestClock {
+    pub(crate) fn at(at: u64) -> Self {
+        Self {
+            previous: TEST_NOW.replace(Some(at)),
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn set(&self, at: u64) {
+        TEST_NOW.set(Some(at));
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        TEST_NOW.set(self.previous);
+    }
 }
 
 /// 显示时间所用的时区（秒）：`ZIYUAN_TZ` 如 `+08:00`、`-05:30`，未设或不合法为 UTC。
