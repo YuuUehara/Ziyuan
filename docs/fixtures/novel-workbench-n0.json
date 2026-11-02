@@ -5,6 +5,17 @@
   "project": "n0-lantern",
   "source_language": "ja",
   "target_language": "zh",
+  "target_markup_examples": [
+    {"id": "literary-ruby-and-dots", "paragraph": "p08", "text": "她提着月舟。", "marks": [
+      {"start": 9, "end": 15, "kind": {"type": "ruby", "reading": "灯笼"}},
+      {"start": 9, "end": 15, "kind": {"type": "emphasis_dots"}},
+      {"start": 0, "end": 3, "kind": {"type": "strong"}},
+      {"start": 3, "end": 9, "kind": {"type": "emphasis"}}
+    ], "expected_base": "月舟", "r1_save_allowed": true, "r1_submission_allowed": false},
+    {"id": "unfinished-ruby", "paragraph": "p08", "text": "月舟", "marks": [
+      {"start": 0, "end": 6, "kind": {"type": "ruby", "reading": ""}}
+    ], "expected_base": "月舟", "r1_save_allowed": true, "r1_submission_allowed": false}
+  ],
   "chapters": [
     {"id": "c01", "source_name": "z-first.txt", "paragraphs": [
       {"id": "p01", "block": "b01", "source": "港では、名を明かさない女が灯台を見ていた。", "target": "港口，一个不肯透露姓名的女人望着灯塔。"},

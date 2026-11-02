@@ -14,6 +14,7 @@ mod export;
 mod export_package;
 mod finished;
 mod gate;
+mod markup;
 mod references;
 mod session;
 mod status;
@@ -34,6 +35,7 @@ pub use draft::{
 };
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
+pub use markup::{TargetMark, TargetMarkKind};
 pub use references::{
     MAX_REFERENCE_BYTES, MAX_REFERENCES, ReferencePreview, ReferenceRequest, ReferenceSelection,
     ReferenceSubmission, ReferenceTaskView,

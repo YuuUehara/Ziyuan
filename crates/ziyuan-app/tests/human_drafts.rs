@@ -11,7 +11,8 @@ use std::{
 use ziyuan_app::{
     text_project::{NewProject, Project, Provenance, TextProjects},
     translation::{
-        DraftParagraph, DraftSave, DraftSubmit, HumanSubmission, TranslationError, Translations,
+        DraftParagraph, DraftSave, DraftSubmit, HumanSubmission, TargetMark, TargetMarkKind,
+        TranslationError, Translations,
     },
 };
 use ziyuan_storage::{JsonFileError, LockScope, Workspace};
@@ -58,13 +59,51 @@ impl Fixture {
                 DraftParagraph {
                     id: "c0001-p0001".into(),
                     text: "港口，一个不肯透露姓名的女人望着灯塔。".into(),
+                    marks: Vec::new(),
                 },
                 DraftParagraph {
                     id: "c0001-p0002".into(),
                     text: String::new(),
+                    marks: Vec::new(),
                 },
             ],
         }
+    }
+    fn marked_request(&self) -> DraftSave {
+        let mut request = self.request();
+        request.paragraphs[0].text = "甲月舟乙".into();
+        // Deliberately not range-sorted. Ruby's base is the two middle characters.
+        request.paragraphs[0].marks = vec![
+            TargetMark {
+                start: 3,
+                end: 9,
+                kind: TargetMarkKind::Ruby {
+                    reading: "ねがい".into(),
+                },
+            },
+            TargetMark {
+                start: 3,
+                end: 9,
+                kind: TargetMarkKind::EmphasisDots {},
+            },
+            TargetMark {
+                start: 9,
+                end: 12,
+                kind: TargetMarkKind::Emphasis {},
+            },
+            TargetMark {
+                start: 0,
+                end: 3,
+                kind: TargetMarkKind::Strong {},
+            },
+        ];
+        request.paragraphs[1].text = "船长莲".into();
+        request.paragraphs.push(DraftParagraph {
+            id: "c0001-p0003".into(),
+            text: "药师莲".into(),
+            marks: Vec::new(),
+        });
+        request
     }
     fn path(&self) -> PathBuf {
         self.root
@@ -234,9 +273,9 @@ fn concurrent_windows_have_one_winner_and_a_typed_conflict() {
 }
 
 #[test]
-fn process_restart_preserves_text_and_original_retry_receipt() {
+fn process_restart_preserves_marked_text_and_original_retry_receipt() {
     let f = Fixture::new();
-    let request = f.request();
+    let request = f.marked_request();
     let receipt = f
         .service()
         .save_human_draft(&f.project.id, BLOCK, &request)
@@ -332,6 +371,7 @@ fn rejects_bad_ids_and_bases_but_keeps_recoverable_text() {
             .map(|id| DraftParagraph {
                 id: id.into(),
                 text: "x".into(),
+                marks: Vec::new(),
             })
             .collect();
         assert!(
@@ -452,6 +492,7 @@ fn submissions_survive_new_drafts_and_restart_without_becoming_approved() {
     request.paragraphs.push(DraftParagraph {
         id: "c0001-p0003".into(),
         text: "药师莲和船长并非同一人。".into(),
+        marks: Vec::new(),
     });
     let receipt = f
         .service()
@@ -466,7 +507,7 @@ fn submissions_survive_new_drafts_and_restart_without_becoming_approved() {
         .submit_human_draft(&f.project.id, BLOCK, &submit)
         .unwrap();
     assert_eq!(submission.draft.paragraphs, request.paragraphs);
-    let candidate = submission.candidate().serialized().unwrap();
+    let candidate = submission.candidate().unwrap().serialized().unwrap();
     assert!(
         TextProjects::new(&f.root)
             .check(&f.project.id, BLOCK, &candidate)
@@ -565,10 +606,12 @@ fn incomplete_stale_and_conflicting_submissions_do_not_publish() {
             DraftParagraph {
                 id: "c0001-p0002".into(),
                 text: " \n\t".into(),
+                marks: Vec::new(),
             },
             DraftParagraph {
                 id: "c0001-p0003".into(),
                 text: "药师是另一人".into(),
+                marks: Vec::new(),
             },
         ],
     ] {
@@ -643,37 +686,48 @@ fn incomplete_stale_and_conflicting_submissions_do_not_publish() {
 }
 
 #[test]
-fn v1_read_is_non_mutating_and_v2_blocks_old_readers_and_corrupt_snapshots() {
+fn legacy_read_is_non_mutating_and_new_format_blocks_old_readers_and_corrupt_snapshots() {
     let f = Fixture::new();
     let mut request = f.request();
     request.paragraphs[1].text = "船长莲拒绝出航".into();
     request.paragraphs.push(DraftParagraph {
         id: "c0001-p0003".into(),
         text: "药师莲是另一个人".into(),
+        marks: Vec::new(),
     });
     let receipt = f
         .service()
         .save_human_draft(&f.project.id, BLOCK, &request)
         .unwrap();
-    // Exact v1 shape: reading or retrying must not upgrade it.
-    let mut v1: serde_json::Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
-    v1["schema_version"] = 1.into();
-    v1["data"].as_object_mut().unwrap().remove("submissions");
-    let original = serde_json::to_vec(&v1).unwrap();
-    fs::write(f.path(), &original).unwrap();
-    assert!(
-        f.service()
-            .human_submissions(&f.project.id, BLOCK)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        f.service()
-            .save_human_draft(&f.project.id, BLOCK, &request)
-            .unwrap(),
-        receipt
-    );
-    assert_eq!(fs::read(f.path()).unwrap(), original);
+    // Exact legacy shapes: empty marks must not alter old receipt hashes.
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    for schema in [1, 2] {
+        legacy["schema_version"] = schema.into();
+        if schema == 1 {
+            legacy["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("submissions");
+        } else {
+            legacy["data"]["submissions"] = serde_json::json!({});
+        }
+        let original = serde_json::to_vec(&legacy).unwrap();
+        fs::write(f.path(), &original).unwrap();
+        assert!(
+            f.service()
+                .human_submissions(&f.project.id, BLOCK)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            f.service()
+                .save_human_draft(&f.project.id, BLOCK, &request)
+                .unwrap(),
+            receipt
+        );
+        assert_eq!(fs::read(f.path()).unwrap(), original);
+    }
     let submit = DraftSubmit {
         request_id: "first-v2".into(),
         expected_revision: receipt.revision,
@@ -683,18 +737,20 @@ fn v1_read_is_non_mutating_and_v2_blocks_old_readers_and_corrupt_snapshots() {
         .submit_human_draft(&f.project.id, BLOCK, &submit)
         .unwrap();
     let good = fs::read(f.path()).unwrap();
-    let old_reader =
-        ziyuan_storage::JsonFile::<serde_json::Value>::new(f.path(), 1, 8 * 1024 * 1024);
-    assert!(matches!(
-        old_reader.load(),
-        Err(JsonFileError::Newer {
-            found: 2,
-            supported: 1
-        })
-    ));
-    let result = old_reader
-        .update::<(), JsonFileError>(|_| panic!("old writer must never reach publication"));
-    assert!(matches!(result, Err(JsonFileError::Newer { .. })));
+    for supported in [1, 2] {
+        let old_reader = ziyuan_storage::JsonFile::<serde_json::Value>::new(
+            f.path(),
+            supported,
+            8 * 1024 * 1024,
+        );
+        assert!(matches!(
+            old_reader.load(),
+            Err(JsonFileError::Newer { found: 3, .. })
+        ));
+        let result = old_reader
+            .update::<(), JsonFileError>(|_| panic!("old writer must never reach publication"));
+        assert!(matches!(result, Err(JsonFileError::Newer { .. })));
+    }
     assert_eq!(fs::read(f.path()).unwrap(), good);
     let mut corrupt: serde_json::Value = serde_json::from_slice(&good).unwrap();
     corrupt["data"]["submissions"]["first-v2"]["draft"]["paragraphs"][0]["text"] =
@@ -754,6 +810,284 @@ fn v1_read_is_non_mutating_and_v2_blocks_old_readers_and_corrupt_snapshots() {
             .unwrap(),
         submission
     );
+}
+
+#[test]
+fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() {
+    let f = Fixture::new();
+    let mut marked = f.marked_request();
+    let mut plain = marked.clone();
+    plain.request_id = "plain-before-markup".into();
+    plain.paragraphs[0].marks.clear();
+    let first = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &plain)
+        .unwrap();
+    let submit = DraftSubmit {
+        request_id: "plain-review".into(),
+        expected_revision: first.revision.clone(),
+    };
+    let snapshot = f
+        .service()
+        .submit_human_draft(&f.project.id, BLOCK, &submit)
+        .unwrap();
+    marked.expected_revision = Some(first.revision);
+    let receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &marked)
+        .unwrap();
+    assert_ne!(receipt.content_hash, first.content_hash);
+    let draft = f
+        .service()
+        .human_draft(&f.project.id, BLOCK)
+        .unwrap()
+        .draft
+        .unwrap();
+    assert_eq!(draft.paragraphs, marked.paragraphs);
+    assert_eq!(&draft.paragraphs[0].text[3..9], "月舟");
+    let before = fs::read(f.path()).unwrap();
+    assert!(
+        f.service()
+            .submit_human_draft(
+                &f.project.id,
+                BLOCK,
+                &DraftSubmit {
+                    request_id: "rich-review".into(),
+                    expected_revision: receipt.revision.clone(),
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        HumanSubmission {
+            request_id: "constructed".into(),
+            draft,
+            candidate_hash: String::new()
+        }
+        .candidate()
+        .is_err()
+    );
+    assert_eq!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit)
+            .unwrap(),
+        snapshot
+    );
+    assert_eq!(
+        f.service().human_submissions(&f.project.id, BLOCK).unwrap(),
+        vec![snapshot]
+    );
+    let mut changed = marked.clone();
+    changed.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
+        reading: "別の意味".into(),
+    };
+    assert!(matches!(
+        f.service().save_human_draft(&f.project.id, BLOCK, &changed),
+        Err(TranslationError::DraftRequestConflict)
+    ));
+    assert_eq!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &marked)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+    // Unfinished ruby input is still recoverable draft text, never a submission.
+    changed.request_id = "unfinished-reading".into();
+    changed.expected_revision = Some(receipt.revision);
+    changed.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
+        reading: String::new(),
+    };
+    f.service()
+        .save_human_draft(&f.project.id, BLOCK, &changed)
+        .unwrap();
+    assert_eq!(
+        f.service()
+            .human_draft(&f.project.id, BLOCK)
+            .unwrap()
+            .draft
+            .unwrap()
+            .paragraphs,
+        changed.paragraphs
+    );
+    assert!(
+        f.service()
+            .read_translation(&f.project.id, BLOCK)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(Workspace::open(&f.root).unwrap().generation().unwrap(), 0);
+}
+
+#[test]
+fn mark_only_concurrent_edits_conflict_instead_of_overwriting_each_other() {
+    let f = Fixture::new();
+    let mut request = f.marked_request();
+    let first = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    request.expected_revision = Some(first.revision);
+    let barrier = Arc::new(Barrier::new(2));
+    let requests: Vec<_> = (0..2)
+        .map(|n| {
+            let mut next = request.clone();
+            next.request_id = format!("marks-window-{n}");
+            if n == 0 {
+                next.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
+                    reading: "つきぶね".into(),
+                };
+            } else {
+                next.paragraphs[0].marks.remove(1);
+            }
+            next
+        })
+        .collect();
+    let threads: Vec<_> = requests
+        .iter()
+        .cloned()
+        .map(|next| {
+            let root = f.root.clone();
+            let project = f.project.id.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                Translations::new(root).save_human_draft(&project, BLOCK, &next)
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, Err(TranslationError::DraftConflict { .. })))
+            .count(),
+        1
+    );
+    let winner = results.iter().position(|r| r.is_ok()).unwrap();
+    assert_ne!(
+        results[winner].as_ref().unwrap().content_hash,
+        first.content_hash
+    );
+    assert_eq!(
+        f.service()
+            .human_draft(&f.project.id, BLOCK)
+            .unwrap()
+            .draft
+            .unwrap()
+            .paragraphs,
+        requests[winner].paragraphs
+    );
+    let before = fs::read(f.path()).unwrap();
+    assert!(matches!(
+        f.service().save_human_draft(&f.project.id, BLOCK, &request),
+        Err(TranslationError::DraftRequestConflict)
+    ));
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+}
+
+#[test]
+fn target_markup_rejects_bad_boundaries_overlaps_and_unknown_shapes_without_writing() {
+    use serde_json::json;
+    let f = Fixture::new();
+    for (case, (text, marks, valid)) in [
+        ("甲乙丙", json!([{"start":0,"end":3,"kind":{"type":"strong"}}, {"start":3,"end":9,"kind":{"type":"emphasis"}}]), true),
+        ("e\u{301}", json!([{"start":0,"end":3,"kind":{"type":"emphasis_dots"}}]), true),
+        ("👩‍👧", json!([{"start":0,"end":11,"kind":{"type":"ruby","reading":"おやこ"}}]), true),
+        ("甲乙丙", json!([{"start":1,"end":3,"kind":{"type":"strong"}}]), false),
+        ("甲乙丙", json!([{"start":3,"end":3,"kind":{"type":"strong"}}]), false),
+        ("甲乙丙", json!([{"start":6,"end":3,"kind":{"type":"strong"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":99,"kind":{"type":"strong"}}]), false),
+        ("e\u{301}", json!([{"start":0,"end":1,"kind":{"type":"strong"}}]), false),
+        ("👩‍👧", json!([{"start":0,"end":4,"kind":{"type":"strong"}}]), false),
+        ("甲\n乙", json!([{"start":0,"end":7,"kind":{"type":"strong"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":3,"kind":{"type":"ruby","reading":"か\nな"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":6,"kind":{"type":"strong"}}, {"start":3,"end":9,"kind":{"type":"emphasis"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":9,"kind":{"type":"ruby","reading":"甲乙丙"}}, {"start":3,"end":6,"kind":{"type":"emphasis_dots"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":3,"kind":{"type":"ruby","reading":"a"}}, {"start":0,"end":3,"kind":{"type":"strong"}}, {"start":0,"end":3,"kind":{"type":"ruby","reading":"b"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":3,"kind":{"type":"underline"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":3,"kind":{"type":"strong","reading":"unexpected"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":3,"byte_start":25,"kind":{"type":"strong"}}]), false),
+        ("甲乙丙", json!([{"start":0,"end":3,"kind":{"type":"ruby","reading":"a","children":[]}}]), false),
+    ].into_iter().enumerate() {
+        let before = fs::read(f.path()).ok();
+        let mut input = serde_json::to_value(f.request()).unwrap();
+        input["request_id"] = format!("case-{case}").into();
+        input["paragraphs"][0]["text"] = text.into();
+        input["paragraphs"][0]["marks"] = marks;
+        let result = serde_json::from_value::<DraftSave>(input).map_err(|e| e.to_string())
+            .and_then(|r| f.service().save_human_draft(&f.project.id, BLOCK, &r).map_err(|e| e.to_string()));
+        assert_eq!(result.is_ok(), valid, "case={case}, text={text:?}: {result:?}");
+        if !valid { assert_eq!(fs::read(f.path()).ok(), before); }
+    }
+}
+
+#[test]
+fn markup_limits_include_readings_and_all_paragraph_marks_and_pending_writes() {
+    let f = Fixture::new();
+    let mut request = f.marked_request();
+    // 12 + 9 + 9 bytes of base text; reading alone is below the bound on both sides.
+    request.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
+        reading: "x".repeat(256 * 1024 - 30),
+    };
+    let first = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let before = fs::read(f.path()).unwrap();
+    request.expected_revision = Some(first.revision);
+    request.request_id = "reading-over-limit".into();
+    if let TargetMarkKind::Ruby { reading } = &mut request.paragraphs[0].marks[0].kind {
+        reading.push('字');
+    }
+    assert!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .is_err()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+    request.request_id = "nodes-at-limit".into();
+    request.paragraphs[0].text = "x".repeat(2048);
+    request.paragraphs[1].text = "y".repeat(2049);
+    for paragraph in &mut request.paragraphs[..2] {
+        paragraph.marks = (0..2048)
+            .map(|start| TargetMark {
+                start,
+                end: start + 1,
+                kind: TargetMarkKind::EmphasisDots {},
+            })
+            .collect();
+    }
+    let at_limit = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let before = fs::read(f.path()).unwrap();
+    request.expected_revision = Some(at_limit.revision);
+    request.request_id = "nodes-over-limit".into();
+    request.paragraphs[1].marks.push(TargetMark {
+        start: 2048,
+        end: 2049,
+        kind: TargetMarkKind::Strong {},
+    });
+    assert!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .is_err()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+    request.paragraphs[1].marks.pop();
+    let workspace = Workspace::open(&f.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.begin().unwrap();
+    drop(guard);
+    assert!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .is_err()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
 }
 
 #[cfg(unix)]

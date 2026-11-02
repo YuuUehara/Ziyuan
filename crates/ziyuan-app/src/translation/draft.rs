@@ -1,7 +1,8 @@
 //! Local human drafts and immutable review submissions, never approved writes.
 //! Text, submissions and durable retry receipts share one atomic JSON publication.
 use super::{
-    Result, TranslationError, Translations, ensure_plain_dirs, find_block, invalid, sha256_hex,
+    Result, TargetMark, TranslationError, Translations, ensure_plain_dirs, find_block, invalid,
+    markup, sha256_hex,
 };
 use crate::text_project::{BlockParagraph, PromptBlock};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -10,7 +11,6 @@ use std::{collections::BTreeMap, fs, io};
 use ziyuan_storage::{JsonFile, LockScope, Workspace};
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_TEXT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,9 @@ pub struct DraftBasis {
 pub struct DraftParagraph {
     pub id: String,
     pub text: String,
+    /// Target-text ranges only. Empty marks preserve legacy hashes/receipts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<TargetMark>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,9 +89,15 @@ pub struct HumanSubmission {
 }
 
 impl HumanSubmission {
-    /// Same canonical bytes checked on submission; no source annotations copied.
-    pub fn candidate(&self) -> PromptBlock {
-        PromptBlock {
+    /// The legacy candidate format cannot represent target marks. Never flatten
+    /// rich drafts into this format, even if a caller constructs a snapshot itself.
+    pub fn candidate(&self) -> Result<PromptBlock> {
+        if self.draft.paragraphs.iter().any(|p| !p.marks.is_empty()) {
+            return Err(invalid(
+                "含文学标记的人工稿暂只支持保存／恢复，不能转为纯文本提交",
+            ));
+        }
+        Ok(PromptBlock {
             schema_version: 1,
             block_id: self.draft.block.clone(),
             paragraphs: self
@@ -101,7 +110,7 @@ impl HumanSubmission {
                     inlines: Vec::new(),
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -145,7 +154,7 @@ impl DraftBook {
                 || submission.draft.project != project
                 || submission.draft.block != block
                 || !self.recorded(&submission.draft)?
-                || submission.candidate_hash != sha256_hex(&submission.candidate().serialized()?)
+                || submission.candidate_hash != sha256_hex(&submission.candidate()?.serialized()?)
             {
                 return Err(ziyuan_storage::JsonFileError::Corrupt(
                     "人工提交位置、草稿回执或候选摘要不符".into(),
@@ -177,7 +186,7 @@ impl Translations {
             &self.root,
             &[".ziyuan", "text-projects", project, "human-drafts"],
         )?;
-        let file = JsonFile::new(dir.join(format!("{block}.json")), 2, MAX_FILE_BYTES);
+        let file = JsonFile::new(dir.join(format!("{block}.json")), 3, MAX_FILE_BYTES);
         for path in [file.path(), file.lock_path()] {
             match fs::symlink_metadata(path) {
                 Ok(m) if m.is_file() && !m.file_type().is_symlink() => {}
@@ -234,15 +243,7 @@ impl Translations {
         request: &DraftSave,
     ) -> Result<DraftReceipt> {
         check_request_id(&request.request_id)?;
-        if request
-            .paragraphs
-            .iter()
-            .map(|p| p.text.len())
-            .sum::<usize>()
-            > MAX_TEXT_BYTES
-        {
-            return Err(invalid("人工草稿正文超过 256 KiB"));
-        }
+        markup::validate(&request.paragraphs)?;
         let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
         let _guard = workspace
             .lock(LockScope::Workspace)
@@ -373,7 +374,7 @@ impl Translations {
             draft: book.draft.clone(),
             candidate_hash: String::new(),
         };
-        let bytes = submission.candidate().serialized()?;
+        let bytes = submission.candidate()?.serialized()?;
         let report = self.texts().check(project, block, &bytes)?;
         if !report.valid {
             return Err(invalid(format!(
