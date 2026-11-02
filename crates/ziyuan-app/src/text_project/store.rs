@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use ziyuan_storage::JsonFile;
+use ziyuan_storage::{JsonFile, WriteGuard};
 
 const MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -37,7 +37,7 @@ impl TextProjects {
         valid_id(id)?;
         Ok(self.root.join(id))
     }
-    pub(super) fn manifest(&self, id: &str) -> Result<JsonFile<Project>> {
+    pub(super) fn manifest(&self, id: &str, version: u32) -> Result<JsonFile<Project>> {
         let dir = self.project_dir(id)?;
         if let Ok(m) = fs::symlink_metadata(&dir)
             && (!m.is_dir() || m.file_type().is_symlink())
@@ -46,7 +46,7 @@ impl TextProjects {
         }
         Ok(JsonFile::new(
             dir.join("project.json"),
-            2,
+            version,
             self.manifest_bytes,
         ))
     }
@@ -67,7 +67,7 @@ impl TextProjects {
                 block_bytes: DEFAULT_BLOCK_BYTES,
                 chapters: Vec::new(),
             };
-            self.manifest(&project.id)?
+            self.manifest(&project.id, 2)?
                 .update::<_, TextProjectError>(|old| {
                     if old.is_some() {
                         return Err(invalid("拒绝覆盖已有项目"));
@@ -97,7 +97,7 @@ impl TextProjects {
             return Err(invalid("项目不存在"));
         }
         let (stored, ()) = self
-            .manifest(id)?
+            .manifest(id, 2)?
             .update::<_, TextProjectError>(|current| {
                 let mut project = current.ok_or_else(|| invalid("项目不存在"))?.value;
                 validate_project(&project, id)?;
@@ -188,10 +188,49 @@ impl TextProjects {
         ids.sort();
         Ok(ids.iter().filter_map(|id| self.show(id).ok()).collect())
     }
+    /// Explicitly retire schema-2 project readers/writers after the workspace barrier.
+    /// The caller must stop legacy processes first: their in-flight operations and
+    /// low-level reads that bypass the manifest cannot be revoked by a version header.
+    /// Imported sources remain immutable; no ordinary operation activates this API.
+    /// This is not approval admission or a recovery/event format upgrade.
+    pub fn upgrade_project_protocol(&self, id: &str, guard: &WriteGuard) -> Result<Project> {
+        let workspace = guard.workspace();
+        if fs::canonicalize(&self.root)?
+            != fs::canonicalize(workspace.root().join(".ziyuan/text-projects"))?
+        {
+            return Err(invalid("项目与所持写锁不属同一工作区，不能换版"));
+        }
+        workspace.ensure_writable()?;
+        if workspace.write_protocol()? != Some(2) || workspace.pending_record()?.is_some() {
+            return Err(invalid(
+                "项目清单换版前，须先升级工作区写入协议至第二版，并收尾全部恢复记录",
+            ));
+        }
+        let project = self.show(id)?;
+        if project.chapters.is_empty() {
+            return Err(invalid("请先导入原文，再为项目清单换版"));
+        }
+        let manifest = self.manifest(id, 3)?;
+        if manifest
+            .load()?
+            .is_some_and(|stored| stored.schema_version == 3)
+        {
+            return Ok(project);
+        }
+        manifest.update::<_, TextProjectError>(|current| {
+            let stored = current.ok_or_else(|| invalid("项目不存在"))?;
+            if stored.value != project {
+                return Err(invalid("项目清单自核对后已有变动，请重新核对再换版"));
+            }
+            Ok((stored.value, ()))
+        })?;
+        Ok(project)
+    }
+
     /// Validates stored schema, source hashes, source correspondence and prompt copies.
     pub fn show(&self, id: &str) -> Result<Project> {
         let project = self
-            .manifest(id)?
+            .manifest(id, 3)?
             .load()?
             .ok_or_else(|| invalid("项目不存在"))?
             .value;

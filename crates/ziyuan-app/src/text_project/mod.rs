@@ -25,6 +25,7 @@ pub type Result<T> = std::result::Result<T, TextProjectError>;
 pub enum TextProjectError {
     Io(std::io::Error),
     Storage(ziyuan_storage::JsonFileError),
+    Workspace(ziyuan_storage::WorkspaceError),
     Invalid(String),
     SourceChanged(String),
     Stale(String),
@@ -34,6 +35,7 @@ impl std::fmt::Display for TextProjectError {
         match self {
             Self::Io(e) => e.fmt(f),
             Self::Storage(e) => e.fmt(f),
+            Self::Workspace(e) => e.fmt(f),
             Self::Invalid(s) => write!(f, "文本项目: {s}"),
             Self::SourceChanged(s) => write!(f, "导入期间原文已改变: {s}"),
             Self::Stale(s) => write!(f, "原文副本或项目数据已改变: {s}"),
@@ -49,6 +51,11 @@ impl From<std::io::Error> for TextProjectError {
 impl From<ziyuan_storage::JsonFileError> for TextProjectError {
     fn from(e: ziyuan_storage::JsonFileError) -> Self {
         Self::Storage(e)
+    }
+}
+impl From<ziyuan_storage::WorkspaceError> for TextProjectError {
+    fn from(e: ziyuan_storage::WorkspaceError) -> Self {
+        Self::Workspace(e)
     }
 }
 impl From<serde_json::Error> for TextProjectError {

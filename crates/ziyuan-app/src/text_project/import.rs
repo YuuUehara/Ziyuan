@@ -89,7 +89,7 @@ impl TextProjects {
         let mut snapshots = snapshots(sources)?;
         let dir = self.project_dir(id)?;
         let (stored, ()) = self
-            .manifest(id)?
+            .manifest(id, 2)?
             .update::<_, TextProjectError>(|current| {
                 let mut project = current.ok_or_else(|| invalid("项目不存在"))?.value;
                 validate_project(&project, id)?;

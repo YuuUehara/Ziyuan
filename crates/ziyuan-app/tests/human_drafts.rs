@@ -120,6 +120,75 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn project_barrier_preserves_marked_drafts_basis_and_frozen_submission_retries() {
+    let f = Fixture::new();
+    let request = f.marked_request();
+    let receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let submit = DraftSubmit {
+        request_id: "review-before-project-upgrade".into(),
+        expected_revision: receipt.revision.clone(),
+    };
+    let submission = f
+        .service()
+        .submit_human_draft(&f.project.id, BLOCK, &submit)
+        .unwrap();
+    let bytes = fs::read(f.path()).unwrap();
+    let view = f.service().human_draft(&f.project.id, BLOCK).unwrap();
+    let workspace = Workspace::open(&f.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    f.service()
+        .texts()
+        .upgrade_project_protocol(&f.project.id, &guard)
+        .unwrap();
+    drop(guard);
+    assert_eq!(f.service().human_draft(&f.project.id, BLOCK).unwrap(), view);
+    assert_eq!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit)
+            .unwrap(),
+        submission
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), bytes);
+    let mut next = request;
+    next.request_id = "after-project-upgrade".into();
+    next.expected_revision = Some(receipt.revision);
+    next.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
+        reading: "新读音".into(),
+    };
+    f.service()
+        .save_human_draft(&f.project.id, BLOCK, &next)
+        .unwrap();
+    assert_eq!(
+        f.service()
+            .human_draft(&f.project.id, BLOCK)
+            .unwrap()
+            .draft
+            .unwrap()
+            .paragraphs,
+        next.paragraphs
+    );
+    assert_eq!(workspace.generation().unwrap(), 0);
+    assert!(workspace.pending_record().unwrap().is_none());
+    assert!(
+        f.service()
+            .read_translation(&f.project.id, BLOCK)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!f.root.join(".ziyuan/court.log").exists());
+}
+
+#[test]
 fn drafts_are_incomplete_private_and_retries_do_not_roll_back_newer_text() {
     let f = Fixture::new();
     let source_before = fs::read(

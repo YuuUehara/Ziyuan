@@ -97,6 +97,168 @@ fn preserves_raw_order_layout_unicode_and_duplicate_paragraphs() {
 }
 
 #[test]
+fn explicit_project_upgrade_blocks_legacy_readers_and_writers_without_changing_sources() {
+    use ziyuan_storage::{JsonFile, JsonFileError, LockScope, Workspace};
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let p = f
+        .service()
+        .import(&p.id, &[f.file("book.txt", "月舟。")])
+        .unwrap();
+    let path = f.service().project_dir(&p.id).unwrap().join("project.json");
+    let legacy = JsonFile::<Project>::new(&path, 2, 32 * 1024 * 1024);
+    let before = legacy.load().unwrap().unwrap();
+    assert_eq!(before.schema_version, 2);
+    let workspace = Workspace::open(&f.0).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(f.service().show(&p.id).unwrap(), p);
+    assert_eq!(f.service().list().unwrap(), vec![p.clone()]);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        bytes,
+        "workspace barrier and reads must not upgrade projects"
+    );
+    assert_eq!(
+        f.service().upgrade_project_protocol(&p.id, &guard).unwrap(),
+        p
+    );
+    let upgraded = fs::read(&path).unwrap();
+    let stored = JsonFile::<Project>::new(&path, 3, 32 * 1024 * 1024)
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.schema_version, 3);
+    assert_eq!(stored.revision, before.revision + 1);
+    assert_eq!(stored.value, before.value);
+    assert!(matches!(
+        legacy.load(),
+        Err(JsonFileError::Newer {
+            found: 3,
+            supported: 2
+        })
+    ));
+    assert!(matches!(
+        legacy.update::<(), JsonFileError>(|_| panic!("old writer must not run")),
+        Err(JsonFileError::Newer {
+            found: 3,
+            supported: 2
+        })
+    ));
+    drop(guard);
+    let guard = workspace.lock(LockScope::Workspace).unwrap();
+    assert_eq!(
+        f.service().upgrade_project_protocol(&p.id, &guard).unwrap(),
+        p
+    );
+    assert_eq!(f.service().show(&p.id).unwrap(), p);
+    assert_eq!(f.service().list().unwrap(), vec![p.clone()]);
+    assert!(
+        f.service()
+            .import(&p.id, &[f.file("again.txt", "changed")])
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        upgraded,
+        "reopen, retry and import cannot downgrade/rewrite"
+    );
+    assert_eq!(workspace.generation().unwrap(), 0);
+    assert!(workspace.pending_record().unwrap().is_none());
+    assert!(!f.0.join(".ziyuan/court.log").exists());
+}
+
+#[test]
+fn project_upgrade_refuses_unready_wrong_and_damaged_workspaces_without_rewriting() {
+    use ziyuan_storage::{LockScope, Workspace};
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let path = f.service().project_dir(&p.id).unwrap().join("project.json");
+    let workspace = Workspace::open(&f.0).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    let empty = fs::read(&path).unwrap();
+    assert!(f.service().upgrade_project_protocol(&p.id, &guard).is_err());
+    guard.upgrade_write_protocol().unwrap();
+    assert!(f.service().upgrade_project_protocol(&p.id, &guard).is_err());
+    assert_eq!(fs::read(&path).unwrap(), empty);
+    let p = f
+        .service()
+        .import(&p.id, &[f.file("book.txt", "月舟。")])
+        .unwrap();
+    let before = fs::read(&path).unwrap();
+    let marker = f.0.join(".ziyuan/write-protocol");
+    for bytes in [b"1\n".as_slice(), b"3\n", b"02\n"] {
+        fs::write(&marker, bytes).unwrap();
+        assert!(f.service().upgrade_project_protocol(&p.id, &guard).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&marker).unwrap(), bytes);
+    }
+    fs::write(&marker, b"2\n").unwrap();
+    guard.begin().unwrap();
+    assert!(f.service().upgrade_project_protocol(&p.id, &guard).is_err());
+    guard.finish().unwrap();
+    let other = Fixture::new();
+    let other_ws = Workspace::open(&other.0).unwrap();
+    let mut other_guard = other_ws.lock(LockScope::Workspace).unwrap();
+    other_guard.upgrade_write_protocol().unwrap();
+    assert!(
+        f.service()
+            .upgrade_project_protocol(&p.id, &other_guard)
+            .is_err()
+    );
+    assert!(
+        f.service()
+            .with_manifest_limit(1)
+            .upgrade_project_protocol(&p.id, &guard)
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    // Prepared and terminal leftovers may permit ordinary writes, but never upgrades.
+    for state in ["prepared", "published", "completed", "abandoned"] {
+        let root = workspace.root().to_string_lossy();
+        let record: ziyuan_storage::RecoveryRecord = serde_json::from_value(serde_json::json!({
+            "operation_id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "workspace": root.strip_prefix(r"\\?\").unwrap_or(&root),
+            "generation_before": 0, "generation_after": 2, "state": state,
+            "application": {"task": 7, "changes_version": "v1", "skipped": [0]},
+            "events": {"expected_events": 0, "expected_bytes": 0,
+                "history_sha256": "0".repeat(64), "encoded_events": ["v1\tAPPLIED\t7\t0"]},
+            "targets": []
+        }))
+        .unwrap();
+        let bytes = ziyuan_storage::recovery::encode_record(&record).unwrap();
+        let record_path = f.0.join(".ziyuan/recovery.json");
+        fs::write(&record_path, &bytes).unwrap();
+        assert!(
+            f.service().upgrade_project_protocol(&p.id, &guard).is_err(),
+            "{state}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&record_path).unwrap(), bytes);
+        fs::remove_file(record_path).unwrap();
+    }
+    let original = f
+        .service()
+        .project_dir(&p.id)
+        .unwrap()
+        .join(&p.chapters[0].original_path);
+    fs::write(&original, "破损").unwrap();
+    assert!(f.service().upgrade_project_protocol(&p.id, &guard).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    fs::write(&original, "月舟。").unwrap();
+    for bytes in [b"broken".to_vec(), {
+        let mut future: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        future["schema_version"] = 4.into();
+        serde_json::to_vec(&future).unwrap()
+    }] {
+        fs::write(&path, &bytes).unwrap();
+        assert!(f.service().upgrade_project_protocol(&p.id, &guard).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn rejects_invalid_registration_ids_and_sources_without_partial_visibility() {
     let f = Fixture::new();
     let mut spec = NewProject {
@@ -356,7 +518,7 @@ fn original_tamper_and_newer_manifest_refuse_show_and_candidate_check() {
     let manifest = dir.join("project.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    value["schema_version"] = 3.into();
+    value["schema_version"] = 4.into();
     fs::write(manifest, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(
         f.service()
