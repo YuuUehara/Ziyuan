@@ -635,11 +635,49 @@ fn dependency_rights(root: &Path, denied: bool) -> io::Result<()> {
     Ok(())
 }
 
-const DEPENDENCY_EVIDENCE: &str = "DEPENDENCY_TOKEN_IL=4096 OBJECT_IL=4096 CONTROL_RIGHTS=1\n\
+fn check_dependency_image(root: &Path) -> io::Result<()> {
+    // Hold all read handles throughout comparison: identity cannot be recycled
+    // between queries. No DOS-volume path lookup or extra grants. The control
+    // has identical bytes on the same volume but is a separately created file.
+    let running = File::open(std::env::current_exe()?)?;
+    let admitted = File::open(root.join("probe.exe"))?;
+    let control = File::open(root.join("control/probe.exe"))?;
+    let mut identities = [FILE_ID_INFO::default(); 3];
+    for (file, identity) in [&running, &admitted, &control]
+        .into_iter()
+        .zip(&mut identities)
+    {
+        // SAFETY: owned live file handles; exact initialized, aligned output
+        // structure. Query failure never counts as an identity match.
+        unsafe {
+            checked(GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (identity as *mut FILE_ID_INFO).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            ))?;
+        }
+    }
+    if identities[0].VolumeSerialNumber != identities[1].VolumeSerialNumber
+        || identities[0].FileId.Identifier != identities[1].FileId.Identifier
+        || identities[0].VolumeSerialNumber != identities[2].VolumeSerialNumber
+        || identities[0].FileId.Identifier == identities[2].FileId.Identifier
+    {
+        return Err(io::Error::other(
+            "dependency image identity / mismatch control failed",
+        ));
+    }
+    Ok(())
+}
+
+const DEPENDENCY_EVIDENCE: &str = "DEPENDENCY_IMAGE_ID=1 IMAGE_MISMATCH_REJECTED=1\n\
+DEPENDENCY_TOKEN_IL=4096 OBJECT_IL=4096 CONTROL_RIGHTS=1\n\
 DEPENDENCY_READ_EXECUTE=1 RIGHTS_DENIED=1 DELETE_RENAME_CREATE_DENIED=1";
 
 fn dependency_child(host: &Path) -> io::Result<()> {
     let root = crate::files::dependency_path(host);
+    check_dependency_image(&root)
+        .map_err(|error| io::Error::other(format!("dependency image identity: {error}")))?;
     crate::files::read_dependency(&root)?;
     let storage = token_information(TokenIntegrityLevel)?;
     // SAFETY: exact token class with aligned live structure and inline SID.

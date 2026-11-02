@@ -202,9 +202,9 @@ fn checked_file<T>(result: io::Result<T>) -> io::Result<T> {
 
 pub(super) fn read_dependency(root: &Path) -> io::Result<()> {
     let image = root.join("probe.exe");
-    if checked_file(fs::canonicalize(checked_file(std::env::current_exe())?))?
-        != checked_file(fs::canonicalize(&image))?
-        || !checked_file(fs::read(image))?.starts_with(b"MZ")
+    // The Win32 boundary checks the running image's file identity using two
+    // live read handles. DOS-volume canonical names are not required here.
+    if !checked_file(fs::read(image))?.starts_with(b"MZ")
         || checked_file(fs::read(root.join("data.txt")))? != SENTINEL
         || checked_file(fs::metadata(root.join("data.txt")))?
             .permissions()

@@ -70,6 +70,7 @@ fn private_files_work_while_host_and_peer_files_are_access_denied() {
         assert!(stdout.contains("PROFILE_CLEANED=1"));
         if argument == "--readonly-dependency" {
             assert!(stdout.contains("HOST_DEPENDENCY_RIGHTS=1"));
+            assert!(stdout.contains("DEPENDENCY_IMAGE_ID=1 IMAGE_MISMATCH_REJECTED=1"));
             assert!(stdout.contains("DEPENDENCY_TOKEN_IL=4096 OBJECT_IL=4096 CONTROL_RIGHTS=1"));
             assert!(stdout.contains(
                 "DEPENDENCY_READ_EXECUTE=1 RIGHTS_DENIED=1 DELETE_RENAME_CREATE_DENIED=1"
