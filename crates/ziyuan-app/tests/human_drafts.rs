@@ -10,7 +10,9 @@ use std::{
 };
 use ziyuan_app::{
     text_project::{NewProject, Project, Provenance, TextProjects},
-    translation::{DraftParagraph, DraftSave, TranslationError, Translations},
+    translation::{
+        DraftParagraph, DraftSave, DraftSubmit, HumanSubmission, TranslationError, Translations,
+    },
 };
 use ziyuan_storage::{JsonFileError, LockScope, Workspace};
 
@@ -292,6 +294,27 @@ fn draft_process_worker() {
         service.save_human_draft(&project, BLOCK, &request).unwrap(),
         expected
     );
+    if root.join("submission.json").exists() {
+        let submission: HumanSubmission =
+            serde_json::from_slice(&fs::read(root.join("submission.json")).unwrap()).unwrap();
+        assert_eq!(
+            service.human_submissions(&project, BLOCK).unwrap(),
+            vec![submission.clone()]
+        );
+        assert_eq!(
+            service
+                .submit_human_draft(
+                    &project,
+                    BLOCK,
+                    &DraftSubmit {
+                        request_id: submission.request_id.clone(),
+                        expected_revision: submission.draft.revision.clone(),
+                    }
+                )
+                .unwrap(),
+            submission
+        );
+    }
 }
 
 #[test]
@@ -417,6 +440,320 @@ fn corrupt_future_and_failed_publications_never_reset_the_previous_draft() {
             .is_err()
     );
     assert_eq!(fs::read(f.path()).unwrap(), good);
+}
+
+#[test]
+fn submissions_survive_new_drafts_and_restart_without_becoming_approved() {
+    let f = Fixture::new();
+    let _session = ziyuan_app::Session::found(ziyuan_storage::EventLog::new(&f.root)).unwrap();
+    let events_before = fs::read(f.root.join(".ziyuan/court.log")).unwrap();
+    let mut request = f.request();
+    request.paragraphs[1].text = "船长莲说：今晚不出海。".into();
+    request.paragraphs.push(DraftParagraph {
+        id: "c0001-p0003".into(),
+        text: "药师莲和船长并非同一人。".into(),
+    });
+    let receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let submit = DraftSubmit {
+        request_id: "review-3".into(),
+        expected_revision: receipt.revision,
+    };
+    let submission = f
+        .service()
+        .submit_human_draft(&f.project.id, BLOCK, &submit)
+        .unwrap();
+    assert_eq!(submission.draft.paragraphs, request.paragraphs);
+    let candidate = submission.candidate().serialized().unwrap();
+    assert!(
+        TextProjects::new(&f.root)
+            .check(&f.project.id, BLOCK, &candidate)
+            .unwrap()
+            .valid
+    );
+    let hash: String = ring::digest::digest(&ring::digest::SHA256, &candidate)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(submission.candidate_hash, hash);
+    let mut next = f.request();
+    next.request_id = "after-submit".into();
+    next.paragraphs[0].text = "仍在修改中的下一稿".into();
+    let next_receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &next)
+        .unwrap();
+    // Historical retry is a receipt lookup, even after material changes.
+    f.service()
+        .set_zhupi(&f.project.id, BLOCK, "c0001-p0001", "待复核称谓")
+        .unwrap();
+    let before = fs::read(f.path()).unwrap();
+    assert_eq!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit)
+            .unwrap(),
+        submission
+    );
+    assert!(matches!(
+        f.service().submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                expected_revision: next_receipt.revision.clone(),
+                ..submit.clone()
+            }
+        ),
+        Err(TranslationError::DraftRequestConflict)
+    ));
+    for (name, bytes) in [
+        ("request.json", serde_json::to_vec(&next).unwrap()),
+        ("receipt.json", serde_json::to_vec(&next_receipt).unwrap()),
+        ("submission.json", serde_json::to_vec(&submission).unwrap()),
+    ] {
+        fs::write(f.root.join(name), bytes).unwrap();
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "draft_process_worker", "--nocapture"])
+        .env("ZIYUAN_DRAFT_TEST_ROOT", &f.root)
+        .env("ZIYUAN_DRAFT_TEST_PROJECT", &f.project.id)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+    assert_eq!(Workspace::open(&f.root).unwrap().generation().unwrap(), 0);
+    assert!(
+        f.service()
+            .read_translation(&f.project.id, BLOCK)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fs::read(f.root.join(".ziyuan/court.log")).unwrap(),
+        events_before
+    );
+}
+
+#[test]
+fn incomplete_stale_and_conflicting_submissions_do_not_publish() {
+    let f = Fixture::new();
+    let mut request = f.request();
+    assert!(
+        f.service()
+            .submit_human_draft(
+                &f.project.id,
+                BLOCK,
+                &DraftSubmit {
+                    request_id: "no-draft".into(),
+                    expected_revision: "missing".into(),
+                }
+            )
+            .is_err()
+    );
+    // Missing paragraph and complete-but-whitespace must both fail the existing gate.
+    for paragraphs in [
+        vec![request.paragraphs[0].clone()],
+        vec![
+            request.paragraphs[0].clone(),
+            DraftParagraph {
+                id: "c0001-p0002".into(),
+                text: " \n\t".into(),
+            },
+            DraftParagraph {
+                id: "c0001-p0003".into(),
+                text: "药师是另一人".into(),
+            },
+        ],
+    ] {
+        request.paragraphs = paragraphs;
+        request.request_id.push('x');
+        let receipt = f
+            .service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .unwrap();
+        let before = fs::read(f.path()).unwrap();
+        assert!(
+            f.service()
+                .submit_human_draft(
+                    &f.project.id,
+                    BLOCK,
+                    &DraftSubmit {
+                        request_id: "incomplete".into(),
+                        expected_revision: receipt.revision.clone(),
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            f.service()
+                .human_submissions(&f.project.id, BLOCK)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fs::read(f.path()).unwrap(), before);
+        request.expected_revision = Some(receipt.revision);
+    }
+    request.request_id = "complete".into();
+    request.paragraphs[1].text = "船长说不出海".into();
+    let receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let before = fs::read(f.path()).unwrap();
+    assert!(matches!(
+        f.service().submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                request_id: "old-window".into(),
+                expected_revision: request.expected_revision.unwrap(),
+            }
+        ),
+        Err(TranslationError::DraftConflict { .. })
+    ));
+    f.service()
+        .set_zhupi(&f.project.id, BLOCK, "c0001-p0001", "材料变化")
+        .unwrap();
+    let submit = DraftSubmit {
+        request_id: "stale".into(),
+        expected_revision: receipt.revision,
+    };
+    assert!(matches!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit),
+        Err(TranslationError::DraftBasisChanged)
+    ));
+    let workspace = Workspace::open(&f.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.begin().unwrap();
+    drop(guard);
+    assert!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit)
+            .is_err()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+}
+
+#[test]
+fn v1_read_is_non_mutating_and_v2_blocks_old_readers_and_corrupt_snapshots() {
+    let f = Fixture::new();
+    let mut request = f.request();
+    request.paragraphs[1].text = "船长莲拒绝出航".into();
+    request.paragraphs.push(DraftParagraph {
+        id: "c0001-p0003".into(),
+        text: "药师莲是另一个人".into(),
+    });
+    let receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    // Exact v1 shape: reading or retrying must not upgrade it.
+    let mut v1: serde_json::Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    v1["schema_version"] = 1.into();
+    v1["data"].as_object_mut().unwrap().remove("submissions");
+    let original = serde_json::to_vec(&v1).unwrap();
+    fs::write(f.path(), &original).unwrap();
+    assert!(
+        f.service()
+            .human_submissions(&f.project.id, BLOCK)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), original);
+    let submit = DraftSubmit {
+        request_id: "first-v2".into(),
+        expected_revision: receipt.revision,
+    };
+    let submission = f
+        .service()
+        .submit_human_draft(&f.project.id, BLOCK, &submit)
+        .unwrap();
+    let good = fs::read(f.path()).unwrap();
+    let old_reader =
+        ziyuan_storage::JsonFile::<serde_json::Value>::new(f.path(), 1, 8 * 1024 * 1024);
+    assert!(matches!(
+        old_reader.load(),
+        Err(JsonFileError::Newer {
+            found: 2,
+            supported: 1
+        })
+    ));
+    let result = old_reader
+        .update::<(), JsonFileError>(|_| panic!("old writer must never reach publication"));
+    assert!(matches!(result, Err(JsonFileError::Newer { .. })));
+    assert_eq!(fs::read(f.path()).unwrap(), good);
+    let mut corrupt: serde_json::Value = serde_json::from_slice(&good).unwrap();
+    corrupt["data"]["submissions"]["first-v2"]["draft"]["paragraphs"][0]["text"] =
+        "undocumented change".into();
+    let corrupt = serde_json::to_vec(&corrupt).unwrap();
+    fs::write(f.path(), &corrupt).unwrap();
+    assert!(matches!(
+        f.service().human_submissions(&f.project.id, BLOCK),
+        Err(TranslationError::Storage(JsonFileError::Corrupt(_)))
+    ));
+    assert!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit)
+            .is_err()
+    );
+    assert!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .is_err()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), corrupt);
+    fs::write(f.path(), &good).unwrap();
+    // Failed oversized publication retains both snapshot and original retry receipt.
+    request = f.request();
+    request.request_id = "large-complete".into();
+    request.paragraphs = submission.draft.paragraphs.clone();
+    request.paragraphs[0].text = "x"
+        .repeat(256 * 1024 - request.paragraphs[1].text.len() - request.paragraphs[2].text.len());
+    let large = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let mut failures = 0;
+    for n in 0..40 {
+        let before = fs::read(f.path()).unwrap();
+        match f.service().submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                request_id: format!("large-{n}"),
+                expected_revision: large.revision.clone(),
+            },
+        ) {
+            Ok(_) => {}
+            Err(TranslationError::Storage(JsonFileError::TooLarge { .. })) => {
+                assert_eq!(fs::read(f.path()).unwrap(), before);
+                failures += 1;
+                break;
+            }
+            other => panic!("unexpected submit result: {other:?}"),
+        }
+    }
+    assert_eq!(failures, 1);
+    assert_eq!(
+        f.service()
+            .submit_human_draft(&f.project.id, BLOCK, &submit)
+            .unwrap(),
+        submission
+    );
 }
 
 #[cfg(unix)]

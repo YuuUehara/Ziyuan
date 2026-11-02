@@ -28,7 +28,10 @@ pub use context::{
     ContextManifest, ContextSnapshot, GLOSSARY_FILE, GlossaryEntry, ManifestFile, STYLE_FILE,
     SUMMARIES_DIR, parse_glossary,
 };
-pub use draft::{DraftBasis, DraftParagraph, DraftReceipt, DraftSave, DraftView, HumanDraft};
+pub use draft::{
+    DraftBasis, DraftParagraph, DraftReceipt, DraftSave, DraftSubmit, DraftView, HumanDraft,
+    HumanSubmission,
+};
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
 pub use references::{
