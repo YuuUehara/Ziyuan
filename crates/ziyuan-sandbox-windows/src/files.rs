@@ -1,4 +1,4 @@
-//! W1b's first file matrix: synthetic fixtures only, no ACL changes.
+//! W1b synthetic fixtures; permission changes stay in the private Win32 boundary.
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -58,10 +58,16 @@ impl Drop for Directory {
     }
 }
 
+struct Dependency {
+    directory: Directory,
+    image: Vec<u8>,
+}
+
 pub(super) struct Fixtures {
     host: Directory,
     private: Directory,
     peer: Directory,
+    dependency: Option<Dependency>,
 }
 
 impl Fixtures {
@@ -77,6 +83,7 @@ impl Fixtures {
             )))?,
             private: Directory::create(profile.join("w1b-files"))?,
             peer: Directory::create(peer_profile.join("w1b-files"))?,
+            dependency: None,
         };
         for (_, relative) in HOST_FILES {
             let path = fixtures.host.path.join(relative);
@@ -113,6 +120,21 @@ impl Fixtures {
         &self.peer.path
     }
 
+    pub(super) fn prepare_dependency(&mut self) -> io::Result<PathBuf> {
+        let dependency = Dependency {
+            directory: Directory::create(dependency_path(&self.host.path))?,
+            image: fs::read(std::env::current_exe()?)?,
+        };
+        let root = dependency.directory.path.clone();
+        fs::write(root.join("probe.exe"), &dependency.image)?;
+        fs::write(root.join("data.txt"), SENTINEL)?;
+        fs::create_dir(root.join("control"))?;
+        fs::write(root.join("control/probe.exe"), &dependency.image)?;
+        fs::write(root.join("control/data.txt"), SENTINEL)?;
+        self.dependency = Some(dependency);
+        Ok(root)
+    }
+
     pub(super) fn verify(&self) -> io::Result<()> {
         for path in self.protected_files() {
             if fs::read(path)? != SENTINEL {
@@ -125,16 +147,32 @@ impl Fixtures {
         {
             return Err(io::Error::other("private child file output mismatch"));
         }
+        if let Some(dependency) = &self.dependency {
+            let root = &dependency.directory.path;
+            if fs::read(root.join("probe.exe"))? != dependency.image
+                || fs::read(root.join("data.txt"))? != SENTINEL
+                || fs::read(root.join("control/probe.exe"))? != dependency.image
+                || fs::read(root.join("control/data.txt"))? != SENTINEL
+                || fs::read_dir(root)?.count() != 3
+                || fs::read_dir(root.join("control"))?.count() != 2
+            {
+                return Err(io::Error::other("dependency contents changed"));
+            }
+        }
         Ok(())
     }
 
     pub(super) fn cleanup(&mut self) -> io::Result<()> {
         // Run all cleanup attempts even if one fails; do not report success if
-        // any of the three owned fixture trees remains.
+        // any owned fixture tree remains.
         let host = self.host.cleanup();
         let private = self.private.cleanup();
         let peer = self.peer.cleanup();
-        host.and(private).and(peer)
+        let dependency = match &mut self.dependency {
+            Some(dependency) => dependency.directory.cleanup(),
+            None => Ok(()),
+        };
+        host.and(private).and(peer).and(dependency)
     }
 
     pub(super) fn retain(&mut self) {
@@ -142,7 +180,53 @@ impl Fixtures {
             eprintln!("W1b retained fixture: {}", directory.path.display());
             directory.cleanup = false;
         }
+        if let Some(dependency) = &mut self.dependency {
+            eprintln!(
+                "W1b retained dependency: {}",
+                dependency.directory.path.display()
+            );
+            dependency.directory.cleanup = false;
+        }
     }
+}
+
+pub(super) fn dependency_path(host: &Path) -> PathBuf {
+    host.with_extension("dependency")
+}
+
+pub(super) fn read_dependency(root: &Path) -> io::Result<()> {
+    let image = root.join("probe.exe");
+    if fs::canonicalize(std::env::current_exe()?)? != fs::canonicalize(&image)?
+        || !fs::read(image)?.starts_with(b"MZ")
+        || fs::read(root.join("data.txt"))? != SENTINEL
+        || fs::metadata(root.join("data.txt"))?
+            .permissions()
+            .readonly()
+    {
+        return Err(io::Error::other(
+            "dependency read / execution / attribute control failed",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn writable_dependency_control(root: &Path) -> io::Result<()> {
+    let data = root.join("data.txt");
+    fs::write(&data, b"writable-control-v1")?;
+    if fs::read(&data)? != b"writable-control-v1" {
+        return Err(io::Error::other("dependency writable control mismatch"));
+    }
+    fs::rename(&data, root.join("moved.txt"))?;
+    fs::rename(root.join("moved.txt"), &data)?;
+    fs::write(&data, SENTINEL)?;
+    drop(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join("new.txt"))?,
+    );
+    fs::remove_file(root.join("new.txt"))?;
+    Ok(())
 }
 
 fn denied(label: &str, path: &Path) -> io::Result<()> {

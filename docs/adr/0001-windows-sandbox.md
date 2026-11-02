@@ -123,7 +123,7 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 
 实际平台为 Server 2025 Datacenter `10.0.26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。严格句柄标志证实本基线启用了无效句柄异常且永久生效；移除子进程内的无效句柄引用后，正常探针已通过，不声称获得了旧崩溃的调用栈。W1a 按此原生 CI 基线结项，允许继续 W1b；普通用户与桌面 Windows 补验、文件／网络隔离及后代生命周期仍未完成。实验 crate 仍不发布、不接生产，Windows 受保护执行继续失败关闭，未升级支持等级。
 
-### W1b 首批实现：合成文件访问矩阵，原生 CI 待验
+### W1b 首批实现：合成文件访问矩阵，限定原生 CI 已通过
 
 独立可执行入口 `--file-probe` 仍只重执行受信自身，沿用 W1a 的 LPAC、Job、环境与句柄检查，不授 capability、不改 ACL。安全 Rust 文件模块独立于允许 unsafe 的私有 FFI 模块。
 
@@ -131,10 +131,25 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 - LPAC 子进程先读回并修改自己的已准入合成副本，另建私有输出和临时文件，逐一读回内容；再对五类受保护哨兵分别请求读取和写打开。两者均须明确返回 Win32 `ERROR_ACCESS_DENIED`（5），NotFound、共享冲突、异常、超时或无输出均失败。拒绝探针不截断、不写入受保护文件，即使意外授予访问也只报告失败。
 - 子进程结束后，父进程独立核对实际私有写入结果、五份受保护哨兵未变，再删除三棵自建目录及两个 profile，确认路径消失。无法确认子进程结束时保留全部 profile／夹具，不让析构删除不确定资源。新增公开可执行测试与原有启动对照一同进入 Windows 原生 CI；交叉编译通过不算原生隔离通过。
 
-本批尚无原生文件结果；第二个 profile 没有运行任务，不能称为完整双任务并发隔离验证。只读依赖、大小写／长路径、重解析点／硬链接、启动后换链、普通用户及桌面系统仍待后续批次；网络和后代生命周期仍分别属于 W1c／W1d。即使本矩阵通过，也不结项整个 W1b、不接生产、不升级能力等级。
+实现提交 [c9af11b](https://github.com/YuuUehara/Ziyuan/commit/c9af11b97ef02c248851cd5faa1d4e1fbdf5e1a1) 的[六项 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41354168120)全部通过。[Windows 原生证据](https://github.com/YuuUehara/Ziyuan/actions/runs/41354168120/job/124990548526)为 `3 passed; 0 failed`：实际私有读写成功，五类读取与写打开均返回 5，父进程核对内容、夹具及两个 profile 清理通过。宿主仍为提升权限且已有父 Job 的 CI 基线。
+
+第二个 profile 没有运行任务，不能称为完整双任务并发隔离验证。大小写／长路径、重解析点／硬链接、启动后换链、普通用户及桌面系统仍待后续批次；网络和后代生命周期仍分别属于 W1c／W1d。本矩阵不结项整个 W1b、不接生产、不升级能力等级。只读依赖的下一批进度单列如下。
+
+### W1b 只读依赖小批：实现已加入，原生 CI 待验
+
+新增 `--readonly-dependency`，沿用并重跑首批私有／宿主／peer 对照。另独占新建依赖目录，复制自身受信可执行文件和非映像数据哨兵；不使用真实项目依赖、不启动任意命令、不增加 capability。LPAC 直接从该目录启动同一受信探针，不额外派生执行器，以实际入口及规范路径核对读取／执行允许。
+
+- 只修改这个自建依赖目录的 DACL，禁止父级权限继承；SYSTEM 与宿主用户保留完整权限，本任务 AppContainer SID 只获可继承的读取／执行。`OWNER RIGHTS` ACE 限制隐含所有者 `WRITE_DAC`，防止同用户身份改回写权限；不设置 DOS 只读属性，不改其他宿主目录或原有拒绝夹具的 ACL。
+- 同时建立独立可写对照子目录及未映射的映像副本，仅该对照向本任务 SID 授完整访问。两组目录／文件均显式设低完整性标签；父子分别查询对象标签，子进程还核对自身令牌完整性，均须为 `4096`。同一 LPAC 必须先取得可写对照的全部逐项权限，并实际完成写入、读回、改名、新建和删除；随后才接受只读组拒绝，不能把 medium／low 完整性差异当作 DACL 生效。
+- 父进程在策略生效后、子进程启动前，用相同文件 API 验证目录及两文件的写入、追加、扩展属性、属性、删除、改 DACL、改所有者权限均可取得；目录另验 `DELETE_CHILD`。句柄全部立即关闭。子进程对这些权限逐项请求，必须明确返回 5，不能只用一次 `GENERIC_WRITE` 的部分拒绝冒充全部写权限被拒。
+- 实际删除／改名使用未映射的数据文件，另试新建文件；均须明确拒绝，避免把运行中 EXE 的映像锁当成只读策略证据。父进程在退出后逐字节核对依赖映像、数据和目录条目，再清理并检查路径消失；无法确认子进程终止时，依赖目录与其他夹具一并保留。
+
+本批尚待原生 CI，不凭交叉编译宣称 DACL 生效。保护依赖目录父级的换链／替换、重解析点、硬链接、真实工具链依赖和普通用户兼容性不在本批验收内，仍不构成完整 W1b 或生产安全签核。
 
 ## 参考
 
 - [Microsoft：Launch an AppContainer／LPAC](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)：双主体权限、profile、SECURITY_CAPABILITIES 与 LPAC 创建属性。
 - [Microsoft：UpdateProcThreadAttribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)：句柄白名单的继承要求与各属性支持边界。
 - [Microsoft：Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)：后代关联、breakaway、嵌套 Job、kill-on-close 与通知限制。
+- [Microsoft：OWNER RIGHTS](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-identifiers)：带该 SID 的 ACE 会取代所有者隐含的 `READ_CONTROL`／`WRITE_DAC` 权限。
+- [Microsoft：Mandatory Integrity Control](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control)：完整性检查先于 DACL；只读权限实验必须排除不同完整性级别带来的拒绝。

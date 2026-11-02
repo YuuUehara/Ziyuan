@@ -8,7 +8,7 @@ use std::{
         ffi::{OsStrExt, OsStringExt},
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr::{null, null_mut},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,13 +17,17 @@ use windows_sys::Win32::{
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            SDDL_REVISION_1,
+            GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
         },
         Isolation::*,
         *,
     },
+    Storage::FileSystem::*,
     System::{
-        Com::CoTaskMemFree, JobObjects::*, Threading::*,
+        Com::CoTaskMemFree,
+        JobObjects::*,
+        SystemServices::{SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP},
+        Threading::*,
         WindowsProgramming::PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT,
     },
 };
@@ -383,18 +387,327 @@ fn child_probe(ordinary: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn sid_text(sid: PSID) -> io::Result<String> {
+    let mut text = null_mut();
+    // SAFETY: callers supply API-validated SIDs whose owners outlive this call.
+    // The returned terminated allocation is read before matching LocalFree.
+    unsafe {
+        checked(ConvertSidToStringSidW(sid, &mut text))?;
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+        let value = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+        LocalFree(text.cast());
+        Ok(value)
+    }
+}
+
+fn token_information(class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<Aligned>> {
+    let mut token = null_mut();
+    let mut bytes = 0;
+    // SAFETY: query only our token. Size discovery is checked; aligned storage
+    // covers the requested structure and its inline SID until the caller is done.
+    unsafe {
+        checked(OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY,
+            &mut token,
+        ))?;
+        let token = own(token)?;
+        if GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut bytes) != 0
+            || io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+        {
+            return Err(io::Error::other("token information sizing failed"));
+        }
+        let mut storage = vec![Aligned { _bytes: [0; 16] }; (bytes as usize).div_ceil(16)];
+        checked(GetTokenInformation(
+            token.as_raw_handle(),
+            class,
+            storage.as_mut_ptr().cast(),
+            bytes,
+            &mut bytes,
+        ))?;
+        Ok(storage)
+    }
+}
+
+fn admit_dependency(root: &Path, app_sid: PSID, writable: bool) -> io::Result<()> {
+    let storage = token_information(TokenUser)?;
+    // SAFETY: exact API class, aligned live storage including the pointed-to SID.
+    let user = unsafe { sid_text((*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid)? };
+    let app = sid_text(app_sid)?;
+    // Only this exclusively created dependency directory is changed. Protect
+    // against parent inheritance, keep host cleanup rights, and suppress implicit
+    // owner WRITE_DAC: the LPAC still carries the host user's owner identity.
+    let access = if writable { "FA" } else { "GRGX" };
+    let sddl = wide(format!(
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})(A;OICI;RC;;;OW)(A;OICI;{access};;;{app})"
+    ));
+    let mut descriptor = null_mut();
+    // SAFETY: converted descriptor and embedded DACL remain live until the
+    // setting call ends. Its inheritable ACEs also protect the two owned files.
+    unsafe {
+        checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            null_mut(),
+        ))?;
+        let result = (|| {
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut dacl = null_mut();
+            checked(GetSecurityDescriptorDacl(
+                descriptor,
+                &mut present,
+                &mut dacl,
+                &mut defaulted,
+            ))?;
+            if present == 0 || dacl.is_null() {
+                return Err(io::Error::other("dependency DACL missing"));
+            }
+            let error = SetNamedSecurityInfoW(
+                wide(root).as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                dacl,
+                null(),
+            );
+            if error != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            Ok(())
+        })();
+        LocalFree(descriptor);
+        result
+    }
+}
+
+fn low_integrity(path: &Path) -> io::Result<()> {
+    let mut descriptor = null_mut();
+    // SAFETY: label only our owned synthetic objects. No audit/host SACL is
+    // replaced. All pointers live through the call and use matching LocalFree.
+    unsafe {
+        checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide("S:(ML;;NW;;;LW)").as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            null_mut(),
+        ))?;
+        let result = (|| {
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut sacl = null_mut();
+            checked(GetSecurityDescriptorSacl(
+                descriptor,
+                &mut present,
+                &mut sacl,
+                &mut defaulted,
+            ))?;
+            if present == 0 || sacl.is_null() {
+                return Err(io::Error::other("dependency integrity label missing"));
+            }
+            let error = SetNamedSecurityInfoW(
+                wide(path).as_ptr(),
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null(),
+                sacl,
+            );
+            if error != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            Ok(())
+        })();
+        LocalFree(descriptor);
+        result
+    }
+}
+
+fn check_low_integrity(root: &Path) -> io::Result<()> {
+    for path in [
+        root.to_owned(),
+        root.join("data.txt"),
+        root.join("probe.exe"),
+    ] {
+        let mut descriptor = null_mut();
+        let mut sacl = null_mut();
+        // SAFETY: Windows returns an owned valid descriptor. Embedded ACL / ACE
+        // and SID are inspected only while that allocation is live.
+        unsafe {
+            let error = GetNamedSecurityInfoW(
+                wide(&path).as_ptr(),
+                SE_FILE_OBJECT,
+                LABEL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut sacl,
+                &mut descriptor,
+            );
+            if error != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(error as i32));
+            }
+            let result = (|| {
+                if sacl.is_null() || (*sacl).AceCount != 1 {
+                    return Err(io::Error::other("expected one explicit integrity label"));
+                }
+                let mut ace = null_mut();
+                checked(GetAce(sacl, 0, &mut ace))?;
+                let header = &*ace.cast::<ACE_HEADER>();
+                if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
+                    || (header.AceSize as usize) < size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
+                {
+                    return Err(io::Error::other("unexpected integrity ACE type / size"));
+                }
+                let label = &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>();
+                if label.Mask != SYSTEM_MANDATORY_LABEL_NO_WRITE_UP {
+                    return Err(io::Error::other("unexpected integrity ACE"));
+                }
+                let sid = (&label.SidStart as *const u32).cast_mut().cast();
+                if sid_text(sid)? != "S-1-16-4096" {
+                    return Err(io::Error::other("dependency integrity is not low"));
+                }
+                Ok(())
+            })();
+            LocalFree(descriptor);
+            result?;
+        }
+    }
+    Ok(())
+}
+
+fn dependency_rights(root: &Path, denied: bool) -> io::Result<()> {
+    let requests = [
+        ("write", FILE_WRITE_DATA),
+        ("append", FILE_APPEND_DATA),
+        ("extended_attributes", FILE_WRITE_EA),
+        ("attributes", FILE_WRITE_ATTRIBUTES),
+        ("delete", DELETE),
+        ("dacl", WRITE_DAC),
+        ("owner", WRITE_OWNER),
+    ];
+    for (path, directory) in [
+        (root.to_owned(), true),
+        (root.join("data.txt"), false),
+        (root.join("probe.exe"), false),
+    ] {
+        for (name, right) in requests
+            .into_iter()
+            .chain(directory.then_some(("delete_child", FILE_DELETE_CHILD)))
+        {
+            // SAFETY: live terminated path; no creation, truncation, mutation or
+            // inherited handle. Request rights individually so one denied bit
+            // cannot hide a grant of another. All share modes avoid fake denials.
+            let handle = unsafe {
+                CreateFileW(
+                    wide(&path).as_ptr(),
+                    right,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                let error = io::Error::last_os_error();
+                if !denied || error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+                    return Err(io::Error::other(format!("dependency {name}: {error}")));
+                }
+            } else {
+                // SAFETY: CreateFileW returned a new uniquely owned handle.
+                drop(unsafe { own(handle)? });
+                if denied {
+                    return Err(io::Error::other(format!(
+                        "dependency {name} unexpectedly granted"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+const DEPENDENCY_EVIDENCE: &str = "DEPENDENCY_TOKEN_IL=4096 OBJECT_IL=4096 CONTROL_RIGHTS=1\n\
+DEPENDENCY_READ_EXECUTE=1 RIGHTS_DENIED=1 DELETE_RENAME_CREATE_DENIED=1";
+
+fn dependency_child(host: &Path) -> io::Result<()> {
+    let root = crate::files::dependency_path(host);
+    crate::files::read_dependency(&root)?;
+    let storage = token_information(TokenIntegrityLevel)?;
+    // SAFETY: exact token class with aligned live structure and inline SID.
+    let integrity = unsafe {
+        sid_text(
+            (*storage.as_ptr().cast::<TOKEN_MANDATORY_LABEL>())
+                .Label
+                .Sid,
+        )?
+    };
+    if integrity != "S-1-16-4096" {
+        return Err(io::Error::other(format!(
+            "expected low-integrity LPAC, got {integrity}"
+        )));
+    }
+    let control = root.join("control");
+    check_low_integrity(&root)?;
+    check_low_integrity(&control)?;
+    dependency_rights(&control, false)?;
+    crate::files::writable_dependency_control(&control)?;
+    dependency_rights(&root, true)?;
+    // The non-image data file avoids mistaking a mapped executable's delete
+    // restriction for our policy. Successful mutation is always a failed probe.
+    for (name, result) in [
+        ("delete", std::fs::remove_file(root.join("data.txt"))),
+        (
+            "rename",
+            std::fs::rename(root.join("data.txt"), root.join("replaced.txt")),
+        ),
+        (
+            "create",
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join("new.txt"))
+                .map(drop),
+        ),
+    ] {
+        let code = result.err().and_then(|error| error.raw_os_error());
+        if code != Some(ERROR_ACCESS_DENIED as i32) {
+            return Err(io::Error::other(format!(
+                "dependency {name}: expected access denied, got {code:?}"
+            )));
+        }
+    }
+    println!("{DEPENDENCY_EVIDENCE}");
+    Ok(())
+}
+
 pub(super) fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() == 2 && args[0] == "--child" {
         return child_probe(args[1].parse().map_err(io::Error::other)?);
     }
-    if args.len() == 5 && args[..3] == ["--child", "false", "--file-probe"] {
+    if args.len() == 5
+        && args[..2] == ["--child", "false"]
+        && matches!(args[2].as_str(), "--file-probe" | "--readonly-dependency")
+    {
         child_probe(false)?;
-        return crate::files::child(args[3].as_ref(), args[4].as_ref());
+        crate::files::child(args[3].as_ref(), args[4].as_ref())?;
+        if args[2] == "--readonly-dependency" {
+            dependency_child(args[3].as_ref())?;
+        }
+        return Ok(());
     }
     let fault = args == ["--fail-before-resume"];
     let ordinary = args == ["--ordinary-appcontainer-control"];
-    let file_probe = args == ["--file-probe"];
+    let readonly = args == ["--readonly-dependency"];
+    let file_probe = args == ["--file-probe"] || readonly;
     if !args.is_empty() && !fault && !ordinary && !file_probe {
         return Err(io::Error::other("unknown probe arguments"));
     }
@@ -423,8 +736,32 @@ pub(super) fn run() -> io::Result<()> {
         }
         None => None,
     };
-    let program = profile.path.join("w1a-probe.exe");
-    std::fs::copy(std::env::current_exe()?, &program)?;
+    let program = if readonly {
+        let root = fixtures
+            .as_mut()
+            .expect("file probe has fixtures")
+            .prepare_dependency()?;
+        admit_dependency(&root, profile.sid, false)?;
+        let control = root.join("control");
+        admit_dependency(&control, profile.sid, true)?;
+        for directory in [&root, &control] {
+            for path in [
+                directory.to_owned(),
+                directory.join("data.txt"),
+                directory.join("probe.exe"),
+            ] {
+                low_integrity(&path)?;
+            }
+            check_low_integrity(directory)?;
+            dependency_rights(directory, false)?;
+        }
+        println!("HOST_DEPENDENCY_RIGHTS=1");
+        root.join("probe.exe")
+    } else {
+        let program = profile.path.join("w1a-probe.exe");
+        std::fs::copy(std::env::current_exe()?, &program)?;
+        program
+    };
     let output_path = profile.path.join("child-output.txt");
     let output = OpenOptions::new()
         .create_new(true)
@@ -498,8 +835,13 @@ pub(super) fn run() -> io::Result<()> {
     // No user command or user-supplied arguments are forwarded.
     let mut command = format!("\"{}\" --child {}", program.display(), ordinary);
     if let Some(files) = &fixtures {
+        let mode = if readonly {
+            "--readonly-dependency"
+        } else {
+            "--file-probe"
+        };
         command.push_str(&format!(
-            " --file-probe \"{}\" \"{}\"",
+            " {mode} \"{}\" \"{}\"",
             files.host_path().display(),
             files.peer_path().display()
         ));
@@ -643,13 +985,13 @@ pub(super) fn run() -> io::Result<()> {
         Some(files) if result.is_ok() => files.verify(),
         _ => Ok(()),
     };
+    std::fs::remove_file(&program)?;
     if let Some(files) = &mut fixtures {
         files.cleanup()?;
     }
     if let Some(peer) = &mut peer_profile {
         peer.cleanup()?;
     }
-    std::fs::remove_file(&program)?;
     std::fs::remove_file(&output_path)?;
     profile.cleanup()?;
     if fault {
@@ -678,6 +1020,10 @@ pub(super) fn run() -> io::Result<()> {
             expected.push('\n');
             expected.push_str(crate::files::CHILD_EVIDENCE);
         }
+        if readonly {
+            expected.push('\n');
+            expected.push_str(DEPENDENCY_EVIDENCE);
+        }
         if text.trim() != expected {
             return Err(io::Error::other(format!(
                 "unexpected child evidence: {text:?}"
@@ -688,6 +1034,9 @@ pub(super) fn run() -> io::Result<()> {
             println!(
                 "HOST_FILES_UNCHANGED=1 PRIVATE_OUTPUT_VERIFIED=1 FIXTURES_CLEANED=1 PEER_PROFILE_CLEANED=1"
             );
+        }
+        if readonly {
+            println!("DEPENDENCY_UNCHANGED=1 DEPENDENCY_CLEANED=1");
         }
     }
     Ok(())
