@@ -311,12 +311,55 @@ impl Translations {
     /// Local-only admission under the caller's matching workspace lock.
     /// Returns one pending event, or None for an identical durable receipt.
     /// Does not append, write translation bytes, begin a generation or approve.
-    /// Caller must keep the lock through any future publication/revalidation.
+    /// Use `publish_human_binding` to publish; never append this result directly.
     pub fn admit_human_binding(
         &self,
         guard: &WriteGuard,
         binding: &ziyuan_core::HumanSubmissionBinding,
     ) -> Result<Option<ziyuan_core::CourtEvent>> {
+        self.check_human_binding(guard, binding)
+            .map(|(_, event)| event)
+    }
+
+    /// Publish only a pending binding, never an approval or translation file.
+    /// Keep the matching workspace lock throughout; a log conflict restarts ALL
+    /// admission checks rather than carrying a stale proposed event forward.
+    /// Returns false for an identical durable receipt (including lost responses).
+    pub fn publish_human_binding(
+        &self,
+        guard: &WriteGuard,
+        binding: &ziyuan_core::HumanSubmissionBinding,
+    ) -> Result<bool> {
+        loop {
+            let (history, event) = self.check_human_binding(guard, binding)?;
+            let Some(event) = event else {
+                return Ok(false);
+            };
+            let mut events = Vec::new();
+            let at = crate::time::now();
+            if crate::time::last_clock(&history, None).is_none_or(|t| t / 60 != at / 60) {
+                events.push(ziyuan_core::CourtEvent::Clock(at));
+            }
+            events.push(event);
+            match EventLog::new(guard.workspace().root()).append_if_unchanged(&history, &events) {
+                Ok(()) => return Ok(true),
+                Err(
+                    ziyuan_storage::StorageError::Conflict { .. }
+                    | ziyuan_storage::StorageError::PrefixChanged,
+                ) => continue,
+                Err(e) => return Err(invalid(e.to_string())),
+            }
+        }
+    }
+
+    fn check_human_binding(
+        &self,
+        guard: &WriteGuard,
+        binding: &ziyuan_core::HumanSubmissionBinding,
+    ) -> Result<(
+        Vec<ziyuan_core::CourtEvent>,
+        Option<ziyuan_core::CourtEvent>,
+    )> {
         let workspace = guard.workspace();
         if fs::canonicalize(&self.root)? != fs::canonicalize(workspace.root())? {
             return Err(invalid("人工送审与所持写锁不属同一工作区"));
@@ -356,7 +399,7 @@ impl Translations {
             ziyuan_governance::Court::replay(&history).map_err(|e| invalid(e.to_string()))?;
         if let Some(saved) = court.human_submission_binding(&r.project, &r.block, &r.request_id) {
             return if saved == binding {
-                Ok(None)
+                Ok((history, None))
             } else {
                 Err(TranslationError::DraftRequestConflict)
             };
@@ -391,10 +434,10 @@ impl Translations {
         if source.source != r.previous || source.translation_hash != r.basis.translation_hash {
             return Err(invalid("人工送审的前一准奏来源或盘上译稿不符，请重新核对"));
         }
-        court
+        let event = court
             .propose_human_submission_binding(binding.clone())
-            .map(Some)
-            .map_err(|e| invalid(e.to_string()))
+            .map_err(|e| invalid(e.to_string()))?;
+        Ok((history, Some(event)))
     }
 
     fn draft_file(&self, project: &str, block: &str) -> Result<JsonFile<DraftBook>> {

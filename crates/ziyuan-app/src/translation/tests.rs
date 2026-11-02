@@ -322,19 +322,43 @@ fn human_binding_admission_resolves_approval_order_and_preserves_receipt_identit
     drop(foreign_guard);
     let log_bytes = fs::read(fx.root.join(".ziyuan/court.log")).unwrap();
     let generation = workspace.generation().unwrap();
-    let event = t.admit_human_binding(&guard, &binding).unwrap().unwrap();
+    assert!(t.admit_human_binding(&guard, &binding).unwrap().is_some());
     assert_eq!(
         log_bytes,
         fs::read(fx.root.join(".ziyuan/court.log")).unwrap()
     );
     assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), disk);
     assert_eq!(workspace.generation().unwrap(), generation);
-    // Simulate the future publication caller while retaining the same lock.
+    // An unrelated writer can append without the workspace lock. Publication
+    // must read a fresh prefix rather than reuse the earlier admission/session.
     let mut log = EventLog::new(&fx.root);
-    log.append(s.event_count(), &[event]).unwrap();
+    log.append(s.event_count(), &[ziyuan_core::CourtEvent::Clock(1)])
+        .unwrap();
+    let stale = submission
+        .prepare_binding("stale".into(), HumanActor::Local, resolved.source.clone())
+        .unwrap();
+    assert!(t.admit_human_binding(&guard, &stale).unwrap().is_some());
+    assert!(t.publish_human_binding(&guard, &binding).unwrap());
+    let published = EventLog::new(&fx.root).load().unwrap();
+    assert_eq!(
+        published
+            .iter()
+            .filter(|event| matches!(event, ziyuan_core::CourtEvent::HumanSubmissionBound { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), disk);
+    assert_eq!(workspace.generation().unwrap(), generation);
     drop(guard);
     t.set_zhupi(&fx.project, B1, "c0001-p0001", "后改材料")
         .unwrap();
+    let guard = workspace.lock(LockScope::Workspace).unwrap();
+    assert!(matches!(
+        t.publish_human_binding(&guard, &stale),
+        Err(TranslationError::DraftBasisChanged)
+    ));
+    assert_eq!(EventLog::new(&fx.root).load().unwrap(), published);
+    drop(guard);
     fs::remove_file(fx.root.join(format!(
         ".ziyuan/text-projects/{}/human-drafts/{B1}.json",
         fx.project
@@ -345,28 +369,31 @@ fn human_binding_admission_resolves_approval_order_and_preserves_receipt_identit
         t.admit_human_binding(&guard, &binding).unwrap().is_none(),
         "durable receipt survives changed basis and lost drafts"
     );
+    assert!(!t.publish_human_binding(&guard, &binding).unwrap());
+    assert_eq!(EventLog::new(&fx.root).load().unwrap(), published);
     let mut web = binding.clone();
     web.request.actor = HumanActor::Web;
     web.request_hash = ziyuan_governance::human_binding_request_hash(&web.request);
     assert!(
-        t.admit_human_binding(&guard, &web).is_err(),
+        t.publish_human_binding(&guard, &web).is_err(),
         "authorization precedes receipt lookup"
     );
     let mut conflict = binding.clone();
     conflict.request.submission_id.push('x');
     conflict.request_hash = ziyuan_governance::human_binding_request_hash(&conflict.request);
     assert!(matches!(
-        t.admit_human_binding(&guard, &conflict),
+        t.publish_human_binding(&guard, &conflict),
         Err(TranslationError::DraftRequestConflict)
     ));
     guard.begin().unwrap();
     assert!(
-        t.admit_human_binding(&guard, &binding).is_err(),
+        t.publish_human_binding(&guard, &binding).is_err(),
         "even receipt lookup refuses interrupted generations"
     );
     guard.finish().unwrap();
     assert_eq!(workspace.generation().unwrap(), generation + 2);
     assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), disk);
+    assert_eq!(EventLog::new(&fx.root).load().unwrap(), published);
 }
 
 #[test]

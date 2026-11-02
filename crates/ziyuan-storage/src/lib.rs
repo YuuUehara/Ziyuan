@@ -33,6 +33,8 @@ pub enum StorageError {
         expected: usize,
         actual: usize,
     },
+    /// The decoded event prefix changed, even if its length stayed the same.
+    PrefixChanged,
 }
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -48,6 +50,7 @@ impl fmt::Display for StorageError {
                 f,
                 "事件簿已被其他进程更新（预期 {expected} 条事件，实际 {actual} 条）"
             ),
+            Self::PrefixChanged => write!(f, "事件簿前文已变化，须重新核对后再追记"),
         }
     }
 }
@@ -55,7 +58,10 @@ impl std::error::Error for StorageError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::Corrupt { .. } | Self::Newer { .. } | Self::Conflict { .. } => None,
+            Self::Corrupt { .. }
+            | Self::Newer { .. }
+            | Self::Conflict { .. }
+            | Self::PrefixChanged => None,
         }
     }
 }
@@ -578,6 +584,28 @@ impl EventStore for EventLog {
     }
 
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError> {
+        self.append_checked(expected, None, events)
+    }
+}
+
+impl EventLog {
+    /// Append only if the complete decoded history still matches `expected`.
+    /// Comparison and append share the exclusive file lock. Canonically equivalent
+    /// wire representations count as the same events; this is not a raw-byte hash.
+    pub fn append_if_unchanged(
+        &mut self,
+        expected: &[CourtEvent],
+        events: &[CourtEvent],
+    ) -> Result<(), StorageError> {
+        self.append_checked(expected.len(), Some(expected), events)
+    }
+
+    fn append_checked(
+        &mut self,
+        expected: usize,
+        prefix: Option<&[CourtEvent]>,
+        events: &[CourtEvent],
+    ) -> Result<(), StorageError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -590,11 +618,25 @@ impl EventStore for EventLog {
             .write(true)
             .open(&self.path)?;
         file.lock()?;
-        let tail = self.read_tail(&mut file, |_, _| Ok(()))?;
+        if prefix.is_some() {
+            // Never trust an incremental cursor when verifying the full prefix.
+            self.set_cursor(Cursor::default());
+        }
+        let mut changed = false;
+        let tail = self.read_tail(&mut file, |index, line| {
+            if let Some(prefix) = prefix {
+                let event = decode_line(index, line)?;
+                changed |= prefix.get(index) != Some(&event);
+            }
+            Ok(())
+        })?;
         let (committed, actual, start) = (tail.end.bytes, tail.end.events, tail.start);
         self.set_cursor(tail.end);
         if actual != expected {
             return Err(StorageError::Conflict { expected, actual });
+        }
+        if changed {
+            return Err(StorageError::PrefixChanged);
         }
         if tail.torn {
             file.set_len(committed)?;
@@ -863,6 +905,41 @@ mod tests {
         ));
         b.append(1, &[reform(GovernanceMode::Cabinet)]).unwrap();
         assert_eq!(a.load().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prefix_append_rejects_growth_and_same_length_replacement_without_writing() {
+        let root = temp_root("prefix-conflict");
+        let mut log = EventLog::new(&root);
+        log.append(0, &[CourtEvent::Founded(GovernanceMode::Chancellor)])
+            .unwrap();
+        let expected = log.load().unwrap(); // Also populate the incremental cursor.
+        let event = reform(GovernanceMode::Cabinet);
+        let path = root.join(".ziyuan/court.log");
+        let replacement = format!(
+            "{}\nunfinished",
+            encode_event_line(&CourtEvent::Founded(GovernanceMode::Cabinet))
+        );
+        fs::write(&path, &replacement).unwrap();
+        assert!(matches!(
+            log.append_if_unchanged(&expected, std::slice::from_ref(&event)),
+            Err(StorageError::PrefixChanged)
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
+        let current = EventLog::new(&root).load().unwrap();
+        log.append_if_unchanged(&current, std::slice::from_ref(&event))
+            .unwrap();
+        assert_eq!(log.load().unwrap(), [current[0].clone(), event.clone()]);
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            log.append_if_unchanged(&current, std::slice::from_ref(&event)),
+            Err(StorageError::Conflict {
+                expected: 1,
+                actual: 2
+            })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -15,7 +15,7 @@ use ziyuan_app::{
         TargetMark, TargetMarkKind, TranslationError, Translations,
     },
 };
-use ziyuan_storage::{EventLog, EventStore, JsonFileError, LockScope, Workspace};
+use ziyuan_storage::{EventLog, JsonFileError, LockScope, Workspace};
 
 const BLOCK: &str = "c0001-b0001";
 struct Fixture {
@@ -169,17 +169,15 @@ fn bound_literary_candidate_survives_lost_drafts_without_becoming_approved() {
     TextProjects::new(&f.root)
         .upgrade_project_protocol(&f.project.id, &guard)
         .unwrap();
-    let event = f
-        .service()
-        .admit_human_binding(&guard, &binding)
-        .unwrap()
-        .unwrap();
-    // Test the internal event path only; no production publication entry opens.
-    let count = session.event_count();
     drop(session);
-    EventLog::new(&f.root).append(count, &[event]).unwrap();
+    assert!(f.service().publish_human_binding(&guard, &binding).unwrap());
     drop(guard);
     fs::remove_file(f.path()).unwrap();
+    let guard = workspace.lock(LockScope::Workspace).unwrap();
+    let before = fs::read(f.root.join(".ziyuan/court.log")).unwrap();
+    assert!(!f.service().publish_human_binding(&guard, &binding).unwrap());
+    assert_eq!(fs::read(f.root.join(".ziyuan/court.log")).unwrap(), before);
+    drop(guard);
     let reopened = ziyuan_app::Session::open(EventLog::new(&f.root)).unwrap();
     let frozen = reopened
         .court()
