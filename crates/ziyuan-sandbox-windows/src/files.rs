@@ -194,12 +194,19 @@ pub(super) fn dependency_path(host: &Path) -> PathBuf {
     host.with_extension("dependency")
 }
 
+#[track_caller]
+fn checked_file<T>(result: io::Result<T>) -> io::Result<T> {
+    let location = std::panic::Location::caller();
+    result.map_err(|error| io::Error::new(error.kind(), format!("{location}: {error}")))
+}
+
 pub(super) fn read_dependency(root: &Path) -> io::Result<()> {
     let image = root.join("probe.exe");
-    if fs::canonicalize(std::env::current_exe()?)? != fs::canonicalize(&image)?
-        || !fs::read(image)?.starts_with(b"MZ")
-        || fs::read(root.join("data.txt"))? != SENTINEL
-        || fs::metadata(root.join("data.txt"))?
+    if checked_file(fs::canonicalize(checked_file(std::env::current_exe())?))?
+        != checked_file(fs::canonicalize(&image))?
+        || !checked_file(fs::read(image))?.starts_with(b"MZ")
+        || checked_file(fs::read(root.join("data.txt")))? != SENTINEL
+        || checked_file(fs::metadata(root.join("data.txt")))?
             .permissions()
             .readonly()
     {
@@ -212,20 +219,20 @@ pub(super) fn read_dependency(root: &Path) -> io::Result<()> {
 
 pub(super) fn writable_dependency_control(root: &Path) -> io::Result<()> {
     let data = root.join("data.txt");
-    fs::write(&data, b"writable-control-v1")?;
-    if fs::read(&data)? != b"writable-control-v1" {
+    checked_file(fs::write(&data, b"writable-control-v1"))?;
+    if checked_file(fs::read(&data))? != b"writable-control-v1" {
         return Err(io::Error::other("dependency writable control mismatch"));
     }
-    fs::rename(&data, root.join("moved.txt"))?;
-    fs::rename(root.join("moved.txt"), &data)?;
-    fs::write(&data, SENTINEL)?;
-    drop(
+    checked_file(fs::rename(&data, root.join("moved.txt")))?;
+    checked_file(fs::rename(root.join("moved.txt"), &data))?;
+    checked_file(fs::write(&data, SENTINEL))?;
+    drop(checked_file(
         OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(root.join("new.txt"))?,
-    );
-    fs::remove_file(root.join("new.txt"))?;
+            .open(root.join("new.txt")),
+    )?);
+    checked_file(fs::remove_file(root.join("new.txt")))?;
     Ok(())
 }
 

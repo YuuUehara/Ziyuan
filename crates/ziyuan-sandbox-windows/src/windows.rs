@@ -440,7 +440,8 @@ fn admit_dependency(root: &Path, app_sid: PSID, writable: bool) -> io::Result<()
     // Only this exclusively created dependency directory is changed. Protect
     // against parent inheritance, keep host cleanup rights, and suppress implicit
     // owner WRITE_DAC: the LPAC still carries the host user's owner identity.
-    let access = if writable { "FA" } else { "GRGX" };
+    // Install object-specific masks, not generic bits, in existing file ACLs.
+    let access = if writable { "FA" } else { "FRFX" };
     let sddl = wide(format!(
         "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})(A;OICI;RC;;;OW)(A;OICI;{access};;;{app})"
     ));
@@ -655,8 +656,10 @@ fn dependency_child(host: &Path) -> io::Result<()> {
         )));
     }
     let control = root.join("control");
-    check_low_integrity(&root)?;
-    check_low_integrity(&control)?;
+    check_low_integrity(&root)
+        .map_err(|error| io::Error::other(format!("read-only dependency label query: {error}")))?;
+    check_low_integrity(&control)
+        .map_err(|error| io::Error::other(format!("writable dependency label query: {error}")))?;
     dependency_rights(&control, false)?;
     crate::files::writable_dependency_control(&control)?;
     dependency_rights(&root, true)?;
