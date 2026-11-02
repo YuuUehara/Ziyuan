@@ -154,7 +154,12 @@ impl Court {
                     if task.0 == 0 {
                         return Err(invalid("模型来源须为真实诏令，不得借用零号"));
                     }
-                    check_hash("模型改动版本", changes_version)?;
+                    check_hash(
+                        "模型改动版本",
+                        changes_version
+                            .strip_prefix("sha256:")
+                            .ok_or_else(|| invalid("模型改动版本须沿用 sha256: 前缀"))?,
+                    )?;
                     Some(event)
                 }
                 TranslationSource::Human {

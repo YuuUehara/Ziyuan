@@ -17,6 +17,7 @@ mod gate;
 mod markup;
 mod references;
 mod session;
+mod source;
 mod status;
 mod usage;
 mod verification;
@@ -41,6 +42,7 @@ pub use references::{
     ReferenceSubmission, ReferenceTaskView,
 };
 pub use session::{ResumeOutcome, block_source_hash};
+pub use source::{ResolvedTranslationSource, resolve_translation_source};
 pub use status::{
     BlockFacts, BlockState, BlockStatus, ContextFacts, NextStep, ResumeOptions, StaleReason,
     block_states, resume_plan,

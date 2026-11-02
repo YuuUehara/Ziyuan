@@ -1350,7 +1350,7 @@ fn human_bindings_check_integrity_scope_and_replay_without_approval() {
             _ => {
                 changed.request.previous = TranslationSource::Model {
                     task: TaskId(9),
-                    changes_version: "e".repeat(64),
+                    changes_version: format!("sha256:{}", "e".repeat(64)),
                     event: ziyuan_core::EventReference {
                         index: 3,
                         hash: "f".repeat(64),

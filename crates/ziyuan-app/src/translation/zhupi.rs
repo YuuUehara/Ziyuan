@@ -2,7 +2,7 @@
 use super::{Result, Translations, find_block, invalid, pretty_json};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use ziyuan_storage::JsonFile;
+use ziyuan_storage::{JsonFile, LockScope, Workspace};
 
 const ZHUPI_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ZHUPI: usize = 2000;
@@ -55,6 +55,13 @@ impl Translations {
         paragraph: &str,
         text: &str,
     ) -> Result<u32> {
+        let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
+        let _guard = workspace
+            .lock(LockScope::Workspace)
+            .map_err(|e| invalid(e.to_string()))?;
+        workspace
+            .ensure_writable()
+            .map_err(|e| invalid(e.to_string()))?;
         self.check_paragraph(project, block, paragraph)?;
         let text = text.trim();
         if text.is_empty() {
@@ -95,6 +102,13 @@ impl Translations {
 
     /// 清除一段朱批（本无朱批则不改版本），返回现行版本。
     pub fn clear_zhupi(&self, project: &str, block: &str, paragraph: &str) -> Result<u32> {
+        let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
+        let _guard = workspace
+            .lock(LockScope::Workspace)
+            .map_err(|e| invalid(e.to_string()))?;
+        workspace
+            .ensure_writable()
+            .map_err(|e| invalid(e.to_string()))?;
         self.check_paragraph(project, block, paragraph)?;
         let (_, version) = self.zhupi_file(project)?.update(|current| {
             let mut book = current.map(|s| s.value).unwrap_or_default();

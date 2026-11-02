@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use ziyuan_storage::{LockScope, Workspace};
 
 pub const GLOSSARY_FILE: &str = "glossary.json";
 pub const STYLE_FILE: &str = "style.md";
@@ -238,6 +239,13 @@ impl Translations {
     /// 批准上下文草稿：校验后存为新快照 `v<N>`（N 递增，从不覆盖），返回版本。
     /// 草稿与现行快照完全相同时不建新版，返回现行版本。
     pub fn approve_context(&self, project: &str) -> Result<u32> {
+        let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
+        let _guard = workspace
+            .lock(LockScope::Workspace)
+            .map_err(|e| invalid(e.to_string()))?;
+        workspace
+            .ensure_writable()
+            .map_err(|e| invalid(e.to_string()))?;
         let p = self.project(project)?;
         let chapters: Vec<String> = p.chapters.iter().map(|c| c.id.clone()).collect();
         let draft = self.read_draft(project, &chapters)?;

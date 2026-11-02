@@ -172,6 +172,204 @@ fn apply_error<T: std::fmt::Debug>(result: std::result::Result<T, AppError>) -> 
 }
 
 #[test]
+fn human_binding_admission_resolves_approval_order_and_preserves_receipt_identity() {
+    use ziyuan_core::{HumanActor, TranslationSource};
+    use ziyuan_storage::{EventStore, LockScope, Workspace};
+    let fx = Fx::new("human-admission");
+    let t = fx.t();
+    let mut s = fx.session();
+    assert_eq!(
+        resolve_translation_source(s.history().unwrap(), &fx.project, B1)
+            .unwrap()
+            .source,
+        TranslationSource::None {}
+    );
+    let first = translated(&fx, &mut s, B1);
+    s.apply_changes(first, &fx.root, vec![]).unwrap();
+    let disk = fs::read(fx.zh_path(B1)).unwrap();
+    // Two legal model revisions whose application order differs from task order.
+    // Only proposals change, so all three approvals have identical translation bytes.
+    let link = s.court().task(first).unwrap().translation.clone().unwrap();
+    let seal = s.court().task(first).unwrap().edict.seal.clone();
+    let mut revisions = Vec::new();
+    for n in 0..2 {
+        let task = s
+            .issue(Department::Works, format!("补建议{n}"), seal.clone())
+            .unwrap()
+            .id;
+        let mut revision = link.clone();
+        revision.kind = TranslationKind::Revise;
+        s.commit(|court| {
+            Ok(vec![
+                court.propose_translation_link(task, revision.clone())?,
+            ])
+        })
+        .unwrap();
+        complete(
+            &mut s,
+            task,
+            vec![FileChange {
+                path: format!("{}note-{n}.md", proposals_rel(&fx.project, B1)),
+                before: None,
+                after: format!("称谓建议{n}"),
+            }],
+            "补建议",
+        );
+        revisions.push(task);
+    }
+    s.apply_changes(revisions[1], &fx.root, vec![]).unwrap();
+    let before_source = resolve_translation_source(s.history().unwrap(), &fx.project, B1).unwrap();
+    let draft = DraftSave {
+        request_id: "save".into(),
+        expected_revision: None,
+        basis: t.human_draft(&fx.project, B1).unwrap().basis,
+        paragraphs: fx
+            .block(B1)
+            .paragraphs
+            .into_iter()
+            .map(|p| DraftParagraph {
+                id: p.id,
+                text: format!("人工：{}", p.text),
+                marks: vec![],
+            })
+            .collect(),
+    };
+    let saved = t.save_human_draft(&fx.project, B1, &draft).unwrap();
+    let submission = t
+        .submit_human_draft(
+            &fx.project,
+            B1,
+            &DraftSubmit {
+                request_id: "submit".into(),
+                expected_revision: saved.revision,
+            },
+        )
+        .unwrap();
+    let old = submission
+        .prepare_binding("bind-old".into(), HumanActor::Local, before_source.source)
+        .unwrap();
+    s.apply_changes(revisions[0], &fx.root, vec![]).unwrap();
+    assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), disk);
+    let history = s.history().unwrap();
+    let resolved = resolve_translation_source(history, &fx.project, B1).unwrap();
+    let index = history
+        .iter()
+        .rposition(|e| matches!(e, CourtEvent::ChangesApplied {task, ..} if *task == revisions[0]))
+        .unwrap();
+    assert_eq!(
+        resolved.source,
+        TranslationSource::Model {
+            task: revisions[0],
+            changes_version: crate::changes_version(
+                &s.court()
+                    .task(revisions[0])
+                    .unwrap()
+                    .changes
+                    .as_ref()
+                    .unwrap()
+                    .files
+            ),
+            event: ziyuan_storage::event_reference(index as u64, &history[index]),
+        }
+    );
+    assert_eq!(resolved.translation_hash, Some(sha256_hex(&disk)));
+    let binding = submission
+        .prepare_binding("bind".into(), HumanActor::Local, resolved.source.clone())
+        .unwrap();
+    let workspace = Workspace::open(&fx.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    assert!(
+        t.admit_human_binding(&guard, &binding).is_err(),
+        "workspace barrier is required"
+    );
+    guard.upgrade_write_protocol().unwrap();
+    assert!(
+        t.admit_human_binding(&guard, &binding).is_err(),
+        "project barrier is required too"
+    );
+    TextProjects::new(&fx.root)
+        .upgrade_project_protocol(&fx.project, &guard)
+        .unwrap();
+    assert!(
+        t.admit_human_binding(&guard, &old).is_err(),
+        "same bytes cannot conceal another approval"
+    );
+    for mutation in 0..4 {
+        let mut previous = resolved.source.clone();
+        if let TranslationSource::Model {
+            task,
+            changes_version,
+            event,
+        } = &mut previous
+        {
+            match mutation {
+                0 => event.index += 1,
+                1 => event.hash = "0".repeat(64),
+                2 => *task = first,
+                _ => *changes_version = format!("sha256:{}", "0".repeat(64)),
+            }
+        }
+        let bad = submission
+            .prepare_binding(format!("bad-{mutation}"), HumanActor::Local, previous)
+            .unwrap();
+        assert!(t.admit_human_binding(&guard, &bad).is_err());
+    }
+    let foreign_root = fx.root.join("other-workspace");
+    fs::create_dir(&foreign_root).unwrap();
+    let foreign = Workspace::open(&foreign_root).unwrap();
+    let foreign_guard = foreign.lock(LockScope::Workspace).unwrap();
+    assert!(t.admit_human_binding(&foreign_guard, &binding).is_err());
+    drop(foreign_guard);
+    let log_bytes = fs::read(fx.root.join(".ziyuan/court.log")).unwrap();
+    let generation = workspace.generation().unwrap();
+    let event = t.admit_human_binding(&guard, &binding).unwrap().unwrap();
+    assert_eq!(
+        log_bytes,
+        fs::read(fx.root.join(".ziyuan/court.log")).unwrap()
+    );
+    assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), disk);
+    assert_eq!(workspace.generation().unwrap(), generation);
+    // Simulate the future publication caller while retaining the same lock.
+    let mut log = EventLog::new(&fx.root);
+    log.append(s.event_count(), &[event]).unwrap();
+    drop(guard);
+    t.set_zhupi(&fx.project, B1, "c0001-p0001", "后改材料")
+        .unwrap();
+    fs::remove_file(fx.root.join(format!(
+        ".ziyuan/text-projects/{}/human-drafts/{B1}.json",
+        fx.project
+    )))
+    .unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    assert!(
+        t.admit_human_binding(&guard, &binding).unwrap().is_none(),
+        "durable receipt survives changed basis and lost drafts"
+    );
+    let mut web = binding.clone();
+    web.request.actor = HumanActor::Web;
+    web.request_hash = ziyuan_governance::human_binding_request_hash(&web.request);
+    assert!(
+        t.admit_human_binding(&guard, &web).is_err(),
+        "authorization precedes receipt lookup"
+    );
+    let mut conflict = binding.clone();
+    conflict.request.submission_id.push('x');
+    conflict.request_hash = ziyuan_governance::human_binding_request_hash(&conflict.request);
+    assert!(matches!(
+        t.admit_human_binding(&guard, &conflict),
+        Err(TranslationError::DraftRequestConflict)
+    ));
+    guard.begin().unwrap();
+    assert!(
+        t.admit_human_binding(&guard, &binding).is_err(),
+        "even receipt lookup refuses interrupted generations"
+    );
+    guard.finish().unwrap();
+    assert_eq!(workspace.generation().unwrap(), generation + 2);
+    assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), disk);
+}
+
+#[test]
 fn export_writes_materials_and_never_touches_zh_or_proposals() {
     let fx = Fx::new("export");
     let t = fx.t();

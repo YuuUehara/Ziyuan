@@ -163,14 +163,22 @@ fn bound_literary_candidate_survives_lost_drafts_without_becoming_approved() {
     );
 
     let session = ziyuan_app::Session::found(EventLog::new(&f.root)).unwrap();
-    let event = session
-        .court()
-        .propose_human_submission_binding(binding.clone())
+    let workspace = Workspace::open(&f.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    TextProjects::new(&f.root)
+        .upgrade_project_protocol(&f.project.id, &guard)
+        .unwrap();
+    let event = f
+        .service()
+        .admit_human_binding(&guard, &binding)
+        .unwrap()
         .unwrap();
     // Test the internal event path only; no production publication entry opens.
     let count = session.event_count();
     drop(session);
     EventLog::new(&f.root).append(count, &[event]).unwrap();
+    drop(guard);
     fs::remove_file(f.path()).unwrap();
     let reopened = ziyuan_app::Session::open(EventLog::new(&f.root)).unwrap();
     let frozen = reopened
@@ -243,6 +251,80 @@ fn bound_literary_candidate_survives_lost_drafts_without_becoming_approved() {
     );
     assert_ne!(reading_changed.request_hash, binding.request_hash);
     assert!(ReviewCandidate::from_binding(&reading_changed).is_ok());
+}
+
+#[test]
+fn material_writers_wait_for_admission_lock_and_refuse_interrupted_writes() {
+    use std::{sync::mpsc, time::Duration};
+    let f = Fixture::new();
+    let t = f.service();
+    t.set_zhupi(&f.project.id, BLOCK, "c0001-p0001", "原批")
+        .unwrap();
+    t.ensure_context_draft(&f.project.id).unwrap();
+    let workspace = Workspace::open(&f.root).unwrap();
+    let guard = workspace.lock(LockScope::Workspace).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let workers: Vec<_> = (0..3)
+        .map(|op| {
+            let root = f.root.clone();
+            let project = f.project.id.clone();
+            let started = started_tx.clone();
+            let done = done_tx.clone();
+            std::thread::spawn(move || {
+                let t = Translations::new(root);
+                started.send(()).unwrap();
+                let result = match op {
+                    0 => t.set_zhupi(&project, BLOCK, "c0001-p0002", "新批"),
+                    1 => t.clear_zhupi(&project, BLOCK, "c0001-p0001"),
+                    _ => t.approve_context(&project),
+                };
+                done.send(result).unwrap();
+            })
+        })
+        .collect();
+    for _ in 0..3 {
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    let blocked = done_rx.recv_timeout(Duration::from_millis(150));
+    drop(guard);
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert!(
+        matches!(blocked, Err(mpsc::RecvTimeoutError::Timeout)),
+        "material cannot change while admission holds the lock"
+    );
+    for _ in 0..3 {
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_ok()
+        );
+    }
+    assert_eq!(t.zhupi_version(&f.project.id).unwrap(), 3);
+    assert_eq!(t.context_version(&f.project.id).unwrap(), 1);
+    let before = t.zhupi(&f.project.id, BLOCK).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.begin().unwrap();
+    drop(guard);
+    assert!(
+        t.set_zhupi(&f.project.id, BLOCK, "c0001-p0002", "不该写入")
+            .is_err()
+    );
+    assert!(t.clear_zhupi(&f.project.id, BLOCK, "c0001-p0002").is_err());
+    assert!(
+        t.approve_context(&f.project.id).is_err(),
+        "even an identical snapshot must honor recovery blocking"
+    );
+    assert_eq!(t.zhupi(&f.project.id, BLOCK).unwrap(), before);
+    assert_eq!(t.context_version(&f.project.id).unwrap(), 1);
+    workspace
+        .lock(LockScope::Workspace)
+        .unwrap()
+        .finish()
+        .unwrap();
 }
 
 #[test]

@@ -37,6 +37,13 @@ impl TextProjects {
         valid_id(id)?;
         Ok(self.root.join(id))
     }
+    /// Stored compatibility barrier only; does not validate project contents or upgrade.
+    pub fn project_protocol(&self, id: &str) -> Result<u32> {
+        self.manifest(id, 3)?
+            .load()?
+            .map(|s| s.schema_version)
+            .ok_or_else(|| invalid("项目不存在"))
+    }
     pub(super) fn manifest(&self, id: &str, version: u32) -> Result<JsonFile<Project>> {
         let dir = self.project_dir(id)?;
         if let Ok(m) = fs::symlink_metadata(&dir)

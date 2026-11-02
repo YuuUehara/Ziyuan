@@ -8,7 +8,7 @@ use crate::text_project::{BlockParagraph, PromptBlock};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io};
-use ziyuan_storage::{JsonFile, LockScope, Workspace};
+use ziyuan_storage::{EventLog, EventStore, JsonFile, LockScope, Workspace, WriteGuard};
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -308,6 +308,95 @@ fn check_request_id(id: &str) -> Result<()> {
 }
 
 impl Translations {
+    /// Local-only admission under the caller's matching workspace lock.
+    /// Returns one pending event, or None for an identical durable receipt.
+    /// Does not append, write translation bytes, begin a generation or approve.
+    /// Caller must keep the lock through any future publication/revalidation.
+    pub fn admit_human_binding(
+        &self,
+        guard: &WriteGuard,
+        binding: &ziyuan_core::HumanSubmissionBinding,
+    ) -> Result<Option<ziyuan_core::CourtEvent>> {
+        let workspace = guard.workspace();
+        if fs::canonicalize(&self.root)? != fs::canonicalize(workspace.root())? {
+            return Err(invalid("人工送审与所持写锁不属同一工作区"));
+        }
+        workspace
+            .ensure_writable()
+            .map_err(|e| invalid(e.to_string()))?;
+        if workspace
+            .write_protocol()
+            .map_err(|e| invalid(e.to_string()))?
+            != Some(2)
+            || workspace
+                .pending_record()
+                .map_err(|e| invalid(e.to_string()))?
+                .is_some()
+        {
+            return Err(invalid(
+                "人工送审准入须先完成工作区换版，并收尾全部恢复记录",
+            ));
+        }
+        let r = &binding.request;
+        // There is no authenticated remote publication entry. A payload cannot
+        // turn this trusted local API into a Web user's authorization.
+        if r.actor != ziyuan_core::HumanActor::Local {
+            return Err(invalid("本地人工送审准入不接受网页操作来源"));
+        }
+        if self.texts().project_protocol(&r.project)? != 3 {
+            return Err(invalid("人工送审准入须先为项目清单换版"));
+        }
+        let project = self.project(&r.project)?;
+        find_block(&project, &r.block)?;
+        let candidate = ReviewCandidate::from_binding(binding)?;
+        let history = EventLog::new(workspace.root())
+            .load()
+            .map_err(|e| invalid(e.to_string()))?;
+        let court =
+            ziyuan_governance::Court::replay(&history).map_err(|e| invalid(e.to_string()))?;
+        if let Some(saved) = court.human_submission_binding(&r.project, &r.block, &r.request_id) {
+            return if saved == binding {
+                Ok(None)
+            } else {
+                Err(TranslationError::DraftRequestConflict)
+            };
+        }
+        let book = self
+            .draft_file(&r.project, &r.block)?
+            .load()?
+            .ok_or_else(|| invalid("尚无可核对的人工送审快照"))?
+            .value;
+        book.check(&r.project, &r.block)?;
+        let submission = book
+            .submissions
+            .get(&r.submission_id)
+            .ok_or_else(|| invalid("人工送审快照不存在"))?;
+        if submission.prepare_binding(r.request_id.clone(), r.actor, r.previous.clone())?
+            != *binding
+        {
+            return Err(invalid("人工送审绑定与原提交不符"));
+        }
+        let report = self.texts().check(
+            &r.project,
+            &r.block,
+            &candidate.text_structure().serialized()?,
+        )?;
+        if !report.valid {
+            return Err(invalid("人工送审候选未通过段落归属与完整性检查"));
+        }
+        if self.draft_basis(&r.project, &r.block)? != r.basis {
+            return Err(TranslationError::DraftBasisChanged);
+        }
+        let source = super::resolve_translation_source(&history, &r.project, &r.block)?;
+        if source.source != r.previous || source.translation_hash != r.basis.translation_hash {
+            return Err(invalid("人工送审的前一准奏来源或盘上译稿不符，请重新核对"));
+        }
+        court
+            .propose_human_submission_binding(binding.clone())
+            .map(Some)
+            .map_err(|e| invalid(e.to_string()))
+    }
+
     fn draft_file(&self, project: &str, block: &str) -> Result<JsonFile<DraftBook>> {
         // Membership is checked before using either identifier as a path component.
         find_block(&self.project(project)?, block)?;
