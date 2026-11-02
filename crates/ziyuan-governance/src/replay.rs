@@ -108,6 +108,7 @@ impl Court {
             courtesy_names: BTreeMap::new(),
             art_names: BTreeMap::new(),
             translation_signoffs: BTreeMap::new(),
+            human_bindings: BTreeMap::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -708,6 +709,16 @@ impl Court {
             CourtEvent::TranslationReferencesBound { task, binding } => {
                 self.check_translation_references(*task, binding)?;
                 self.tasks.get_mut(task).expect("已确认存在").references = Some(binding.clone());
+            }
+            CourtEvent::HumanSubmissionBound { binding } => {
+                self.propose_human_submission_binding((**binding).clone())?;
+                let r = &binding.request;
+                self.human_bindings
+                    .entry(r.project.clone())
+                    .or_default()
+                    .entry(r.block.clone())
+                    .or_default()
+                    .insert(r.request_id.clone(), (**binding).clone());
             }
             CourtEvent::TranslationFinalized {
                 project,

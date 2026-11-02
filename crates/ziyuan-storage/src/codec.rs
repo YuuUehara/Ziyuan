@@ -407,6 +407,10 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
             to_hex(&binding.request_hash),
             to_hex(&binding.snapshot)
         ),
+        HumanSubmissionBound { binding } => format!(
+            "v1\tHUMANBOUND\t{}",
+            to_hex(&serde_json::to_string(binding).expect("binding is JSON-serializable"))
+        ),
         TranslationFinalized {
             project,
             block,
@@ -1050,6 +1054,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
                 snapshot: from_hex(field(5)?)?,
             },
         },
+        "HUMANBOUND" => HumanSubmissionBound {
+            binding: serde_json::from_str(&from_hex(field(2)?)?).map_err(|e| e.to_string())?,
+        },
         "TRANSFINAL" => TranslationFinalized {
             project: from_hex(field(2)?)?,
             block: from_hex(field(3)?)?,
@@ -1115,6 +1122,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ToolInvoked { .. } | SuspicionRaised { .. } => 6,
         TranslationLinked { .. } => 10,
         TranslationReferencesBound { .. } => 6,
+        HumanSubmissionBound { .. } => 3,
         TranslationFinalized { .. } => 7,
         TranslationReopened { .. } => 5,
     };
@@ -1176,6 +1184,7 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         TaskReviewed { .. } => "REVIEWED",
         TranslationLinked { .. } => "TRANSLINK",
         TranslationReferencesBound { .. } => "TRANSREFS",
+        HumanSubmissionBound { .. } => "HUMANBOUND",
         TranslationFinalized { .. } => "TRANSFINAL",
         TranslationReopened { .. } => "TRANSREOPEN",
     }
@@ -1259,12 +1268,74 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         AgentRenamed { .. } => 7,
         TranslationLinked { .. } | TranslationFinalized { .. } | TranslationReopened { .. } => 17,
         TranslationReferencesBound { .. } => 22,
+        HumanSubmissionBound { .. } => 24,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn human_binding_has_strict_sources_and_preserves_canonical_bytes() {
+        let row = include_str!("compat.tsv")
+            .lines()
+            .find(|r| r.starts_with("1.5.0-dev.1\t"))
+            .unwrap();
+        let (_, line) = row.split_once('\t').unwrap();
+        let event = decode_event(line).unwrap();
+        assert_eq!(encode_event(&event), line);
+        assert_eq!(readable_since(line).unwrap(), 24);
+        assert_eq!(crate::release_name(24), "1.5.0-dev.1");
+        assert_eq!(kind_of(&event), "HUMANBOUND");
+        assert!(decode_event(&format!("{line}\textra")).is_err());
+        assert!(decode_event("v1\tHUMANBOUND").is_err());
+        let CourtEvent::HumanSubmissionBound { binding } = event else {
+            panic!()
+        };
+        let original = serde_json::to_value(binding).unwrap();
+        let decode_json = |v: &serde_json::Value| {
+            decode_event(&format!("v1\tHUMANBOUND\t{}", to_hex(&v.to_string())))
+        };
+        for previous in [
+            serde_json::json!({"kind":"model", "task":42, "changes_version":"a".repeat(64), "event":{"index":0,"hash":"b".repeat(64)}}),
+            serde_json::json!({"kind":"human", "operation_id":"c".repeat(32), "event":{"index":7,"hash":"d".repeat(64)}}),
+        ] {
+            let mut value = original.clone();
+            value["request"]["previous"] = previous;
+            let decoded = decode_json(&value).unwrap();
+            assert_eq!(decode_event(&encode_event(&decoded)).unwrap(), decoded);
+            value["request"]["previous"]["foreign"] = true.into();
+            assert!(decode_json(&value).is_err());
+        }
+        for previous in [
+            serde_json::json!(null),
+            serde_json::json!({"kind":"unknown"}),
+            serde_json::json!({"kind":"none", "task":42}),
+            serde_json::json!({"kind":"human", "task":42}),
+            serde_json::json!({"kind":"model", "task":42}),
+        ] {
+            let mut value = original.clone();
+            value["request"]["previous"] = previous;
+            assert!(decode_json(&value).is_err());
+        }
+        let mut missing = original.clone();
+        missing["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("previous");
+        assert!(decode_json(&missing).is_err());
+        let mut unknown = original;
+        unknown["request"]["approve"] = true.into();
+        assert!(decode_json(&unknown).is_err());
+
+        let reference = crate::event_reference(7, &CourtEvent::Clock(120));
+        assert_eq!(reference.index, 7);
+        assert_eq!(
+            reference.hash,
+            "a6154a5d346821aefb5db2be524e885847b0c34308a69561ad305d0b344c1c5a"
+        );
+    }
+
     #[test]
     fn reference_binding_round_trip_and_strict_fields() {
         let event = CourtEvent::TranslationReferencesBound {
@@ -1320,7 +1391,7 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 49, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 50, "每种事件类型至少一条样本");
         assert_eq!(crate::release_name(17), "1.2.0");
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");

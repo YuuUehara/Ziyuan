@@ -12,16 +12,7 @@ use ziyuan_storage::{JsonFile, LockScope, Workspace};
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DraftBasis {
-    pub project_hash: String,
-    pub source_hash: String,
-    pub context_version: u32,
-    pub zhupi_hash: String,
-    /// Current disk bytes only, not a claim that the translation is approved.
-    pub translation_hash: Option<String>,
-}
+pub use ziyuan_core::DraftBasis;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +80,39 @@ pub struct HumanSubmission {
 }
 
 impl HumanSubmission {
+    /// Prepare frozen pending material only; no lock, admission, append or write.
+    /// Authentication, current basis and predecessor resolution remain the future
+    /// publication caller's responsibility, not evidence supplied by this object.
+    pub fn prepare_binding(
+        &self,
+        request_id: String,
+        actor: ziyuan_core::HumanActor,
+        previous: ziyuan_core::TranslationSource,
+    ) -> Result<ziyuan_core::HumanSubmissionBinding> {
+        check_request_id(&request_id)?;
+        check_request_id(&self.request_id)?;
+        let bytes = self.candidate()?.serialized()?;
+        if sha256_hex(&bytes) != self.candidate_hash {
+            return Err(invalid("人工送审候选摘要不符"));
+        }
+        let request = ziyuan_core::HumanBindingRequest {
+            project: self.draft.project.clone(),
+            block: self.draft.block.clone(),
+            request_id,
+            actor,
+            submission_id: self.request_id.clone(),
+            revision: self.draft.revision.clone(),
+            basis: self.draft.basis.clone(),
+            candidate: String::from_utf8(bytes).expect("candidate JSON is UTF-8"),
+            candidate_hash: self.candidate_hash.clone(),
+            previous,
+        };
+        Ok(ziyuan_core::HumanSubmissionBinding {
+            request_hash: ziyuan_governance::human_binding_request_hash(&request),
+            request,
+        })
+    }
+
     /// Legacy plain candidates keep their exact bytes; marked candidates use v2.
     /// Neither representation confers approval or formal export eligibility.
     pub fn candidate(&self) -> Result<ReviewCandidate> {
@@ -141,6 +165,21 @@ pub struct ReviewFormatCheck {
 }
 
 impl ReviewCandidate {
+    /// Parse the one authoritative candidate, even without the local draft book.
+    /// This checks frozen representation only, never authorization or freshness.
+    pub fn from_binding(binding: &ziyuan_core::HumanSubmissionBinding) -> Result<Self> {
+        let r = &binding.request;
+        let candidate: Self = serde_json::from_str(&r.candidate)?;
+        if candidate.block_id != r.block
+            || candidate.serialized()? != r.candidate.as_bytes()
+            || sha256_hex(r.candidate.as_bytes()) != r.candidate_hash
+            || ziyuan_governance::human_binding_request_hash(r) != binding.request_hash
+        {
+            return Err(invalid("人工送审绑定与冻结候选不符"));
+        }
+        Ok(candidate)
+    }
+
     fn validate(&self) -> Result<()> {
         if !matches!(self.schema_version, 1 | 2)
             || (self.schema_version == 1 && self.paragraphs.iter().any(|p| !p.marks.is_empty()))

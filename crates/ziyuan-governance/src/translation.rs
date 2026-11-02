@@ -2,7 +2,26 @@
 
 use crate::{Court, GovernanceError, Task, TaskStatus};
 use serde::{Deserialize, Serialize};
-use ziyuan_core::{Capability, CourtEvent, Department, ReferenceBinding, TaskId, TranslationLink};
+use ziyuan_core::{
+    Capability, CourtEvent, Department, HumanBindingRequest, HumanSubmissionBinding,
+    ReferenceBinding, TaskId, TranslationLink, TranslationSource,
+};
+
+/// Domain, representation version, then declaration-order request fields.
+/// Candidate bytes and their digest are both covered; no event refers to itself.
+pub fn human_binding_request_hash(request: &HumanBindingRequest) -> String {
+    let bytes = serde_json::to_vec(&("ziyuan/human-submission-bind", 1, request))
+        .expect("binding request contains only JSON-serializable fields");
+    sha256(&bytes)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 /// 退回理由的长度上限（字符）。
 const MAX_REASON: usize = 500;
@@ -88,6 +107,105 @@ fn check_output_path(link: &TranslationLink) -> Result<(), GovernanceError> {
 }
 
 impl Court {
+    /// Internal pending material only. Caller must validate candidate semantics,
+    /// authentication, material freshness and actual log references separately.
+    /// A replayed duplicate is rejected, even when its contents are identical.
+    pub fn propose_human_submission_binding(
+        &self,
+        binding: HumanSubmissionBinding,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let r = &binding.request;
+        check_project(&r.project)?;
+        check_block(&r.block)?;
+        for id in [&r.request_id, &r.submission_id] {
+            if !(1..=128).contains(&id.len())
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return Err(invalid(
+                    "人工送审请求标识须为 1–128 位字母、数字、短横线或下划线",
+                ));
+            }
+        }
+        if !is_lower_hex(&r.revision, 32) {
+            return Err(invalid("人工草稿修订须为 32 位小写十六进制"));
+        }
+        for hash in [
+            &r.basis.project_hash,
+            &r.basis.source_hash,
+            &r.basis.zhupi_hash,
+            &r.candidate_hash,
+            &binding.request_hash,
+        ] {
+            check_hash("人工送审摘要", hash)?;
+        }
+        if let Some(hash) = &r.basis.translation_hash {
+            check_hash("原译稿摘要", hash)?;
+        }
+        {
+            let event = match &r.previous {
+                TranslationSource::None {} => None,
+                TranslationSource::Model {
+                    task,
+                    changes_version,
+                    event,
+                } => {
+                    if task.0 == 0 {
+                        return Err(invalid("模型来源须为真实诏令，不得借用零号"));
+                    }
+                    check_hash("模型改动版本", changes_version)?;
+                    Some(event)
+                }
+                TranslationSource::Human {
+                    operation_id,
+                    event,
+                } => {
+                    if !is_lower_hex(operation_id, 32) {
+                        return Err(invalid("人工准奏操作须为 32 位小写十六进制"));
+                    }
+                    Some(event)
+                }
+            };
+            if let Some(event) = event {
+                check_hash("来源事件摘要", &event.hash)?;
+            }
+        }
+        if r.candidate.is_empty()
+            || sha256(r.candidate.as_bytes()) != r.candidate_hash
+            || human_binding_request_hash(r) != binding.request_hash
+        {
+            return Err(invalid("人工送审候选或请求摘要不符"));
+        }
+        // Bound the actual hex-encoded event, including JSON escaping, not text length.
+        let json = serde_json::to_vec(&binding).expect("binding is JSON-serializable");
+        if json.len() > (8 * 1024 * 1024 - "v1\tHUMANBOUND\t".len()) / 2 {
+            return Err(invalid("人工送审绑定事件超过 8 MiB"));
+        }
+        if self
+            .human_submission_binding(&r.project, &r.block, &r.request_id)
+            .is_some()
+        {
+            return Err(invalid("人工送审请求已入簿，不得重复发布"));
+        }
+        Ok(CourtEvent::HumanSubmissionBound {
+            binding: Box::new(binding),
+        })
+    }
+
+    /// Frozen pending receipt; never an approved source or finalized translation.
+    pub fn human_submission_binding(
+        &self,
+        project: &str,
+        block: &str,
+        request_id: &str,
+    ) -> Option<&HumanSubmissionBinding> {
+        self.human_bindings
+            .get(project)?
+            .get(block)?
+            .get(request_id)
+    }
+
     /// Bind selected references once, before the linked writer starts execution.
     pub fn propose_translation_references(
         &self,

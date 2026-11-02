@@ -15,7 +15,7 @@ use ziyuan_app::{
         TargetMark, TargetMarkKind, TranslationError, Translations,
     },
 };
-use ziyuan_storage::{JsonFileError, LockScope, Workspace};
+use ziyuan_storage::{EventLog, EventStore, JsonFileError, LockScope, Workspace};
 
 const BLOCK: &str = "c0001-b0001";
 struct Fixture {
@@ -117,6 +117,132 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn bound_literary_candidate_survives_lost_drafts_without_becoming_approved() {
+    use ziyuan_core::{HumanActor, TranslationSource};
+    let f = Fixture::new();
+    let request = f.marked_request();
+    let saved = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let submission = f
+        .service()
+        .submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                request_id: "literary-submission".into(),
+                expected_revision: saved.revision,
+            },
+        )
+        .unwrap();
+    let binding = submission
+        .prepare_binding(
+            "bind-1".into(),
+            HumanActor::Local,
+            TranslationSource::None {},
+        )
+        .unwrap();
+    let mut forged = submission.clone();
+    forged.candidate_hash = "0".repeat(64);
+    assert!(
+        forged
+            .prepare_binding(
+                "bind-1".into(),
+                HumanActor::Local,
+                TranslationSource::None {}
+            )
+            .is_err()
+    );
+    assert_eq!(
+        binding.request.candidate.as_bytes(),
+        submission.candidate().unwrap().serialized().unwrap()
+    );
+
+    let session = ziyuan_app::Session::found(EventLog::new(&f.root)).unwrap();
+    let event = session
+        .court()
+        .propose_human_submission_binding(binding.clone())
+        .unwrap();
+    // Test the internal event path only; no production publication entry opens.
+    let count = session.event_count();
+    drop(session);
+    EventLog::new(&f.root).append(count, &[event]).unwrap();
+    fs::remove_file(f.path()).unwrap();
+    let reopened = ziyuan_app::Session::open(EventLog::new(&f.root)).unwrap();
+    let frozen = reopened
+        .court()
+        .human_submission_binding(&f.project.id, BLOCK, "bind-1")
+        .unwrap();
+    assert_eq!(frozen, &binding);
+    let candidate = ReviewCandidate::from_binding(frozen).unwrap();
+    assert_eq!(
+        candidate.paragraphs, request.paragraphs,
+        "ruby, dots, bold and italic survive in their original order"
+    );
+    assert_eq!(
+        candidate.serialized().unwrap(),
+        binding.request.candidate.as_bytes()
+    );
+    assert!(
+        reopened
+            .court()
+            .translation_signoff(&f.project.id, BLOCK)
+            .is_none()
+    );
+    assert_eq!(
+        reopened
+            .court()
+            .translation_tasks(&f.project.id, BLOCK)
+            .count(),
+        0
+    );
+    assert!(
+        f.service()
+            .read_translation(&f.project.id, BLOCK)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(Workspace::open(&f.root).unwrap().generation().unwrap(), 0);
+    assert!(!f.path().exists());
+
+    let reseal = |b: &mut ziyuan_core::HumanSubmissionBinding| {
+        b.request.candidate_hash = ziyuan_storage::content_sha256(b.request.candidate.as_bytes());
+        b.request_hash = ziyuan_governance::human_binding_request_hash(&b.request);
+    };
+    for change in 0..4 {
+        let mut invalid = binding.clone();
+        match change {
+            0 => {
+                invalid.request.candidate.pop();
+            } // Missing canonical final LF.
+            1 => {
+                invalid.request.candidate = invalid
+                    .request
+                    .candidate
+                    .replace("\"schema_version\": 2", "\"schema_version\": 99")
+            }
+            2 => invalid.request.candidate = invalid.request.candidate.replace("ねがい", " "),
+            _ => invalid.request.block = "c0002-b0001".into(),
+        }
+        reseal(&mut invalid); // Even self-consistent hashes cannot legalize bad material.
+        assert!(ReviewCandidate::from_binding(&invalid).is_err());
+    }
+    let mut reading_changed = binding.clone();
+    reading_changed.request.candidate = reading_changed
+        .request
+        .candidate
+        .replace("ねがい", "つきふね");
+    reseal(&mut reading_changed);
+    assert_ne!(
+        reading_changed.request.candidate_hash,
+        binding.request.candidate_hash
+    );
+    assert_ne!(reading_changed.request_hash, binding.request_hash);
+    assert!(ReviewCandidate::from_binding(&reading_changed).is_ok());
 }
 
 #[test]

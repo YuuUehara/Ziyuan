@@ -20,7 +20,7 @@ pub use exam::{ExamRecord, PalaceExam};
 pub use personnel::{Candidate, Caning, NominationBallot};
 pub use replay::founding_events;
 pub use templates::{TemplateUse, builtin_templates};
-pub use translation::Signoff;
+pub use translation::{Signoff, human_binding_request_hash};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -285,6 +285,9 @@ pub struct Court {
     /// 译书各块最近一次御览（定稿或退回），按项目、块 ID。
     #[serde(default)]
     translation_signoffs: BTreeMap<String, BTreeMap<String, Signoff>>,
+    /// Pending human material, deliberately separate from approvals and signoffs.
+    human_bindings:
+        BTreeMap<String, BTreeMap<String, BTreeMap<String, ziyuan_core::HumanSubmissionBinding>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

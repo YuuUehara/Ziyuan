@@ -1278,6 +1278,135 @@ const PROJECT: &str = "0123456789abcdef0123456789abcdef";
 const BLOCK: &str = "c0001-b0001";
 
 #[test]
+fn human_bindings_check_integrity_scope_and_replay_without_approval() {
+    use ziyuan_core::{
+        DraftBasis, HumanActor, HumanBindingRequest, HumanSubmissionBinding, TranslationSource,
+    };
+    let request = HumanBindingRequest {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        request_id: "bind-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "submit-7".into(),
+        revision: "d".repeat(32),
+        basis: DraftBasis {
+            project_hash: "a".repeat(64),
+            source_hash: "b".repeat(64),
+            context_version: 3,
+            zhupi_hash: "c".repeat(64),
+            translation_hash: None,
+        },
+        // Governance owns the envelope, not the app's candidate schema.
+        candidate: "{}\n".into(),
+        candidate_hash: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356".into(),
+        previous: TranslationSource::None {},
+    };
+    // Independently calculated SHA-256 of the domain/version/ordered request JSON.
+    assert_eq!(
+        human_binding_request_hash(&request),
+        "3864b2134d8fceebb737f2604a9c23f918d226a6dbec9016cfe4a6c7f135fc50"
+    );
+    let binding = HumanSubmissionBinding {
+        request_hash: human_binding_request_hash(&request),
+        request,
+    };
+    let mut events = founding_events(1);
+    let mut court = Court::replay(&events).unwrap();
+    let event = court
+        .propose_human_submission_binding(binding.clone())
+        .unwrap();
+    court.apply(&event).unwrap();
+    events.push(event.clone());
+    assert_eq!(
+        court.human_submission_binding(PROJECT, BLOCK, "bind-1"),
+        Some(&binding)
+    );
+    assert!(court.translation_signoff(PROJECT, BLOCK).is_none());
+    assert_eq!(court.translation_tasks(PROJECT, BLOCK).count(), 0);
+    assert!(
+        court.apply(&event).is_err(),
+        "duplicate log events must not create two receipts"
+    );
+    let from_log = Court::replay(&events).unwrap();
+    let from_snapshot: Court =
+        serde_json::from_slice(&serde_json::to_vec(&court).unwrap()).unwrap();
+    for restored in [from_log, from_snapshot] {
+        assert_eq!(
+            restored.human_submission_binding(PROJECT, BLOCK, "bind-1"),
+            Some(&binding)
+        );
+        assert!(
+            restored
+                .propose_human_submission_binding(binding.clone())
+                .is_err()
+        );
+    }
+    for edit in 0..4 {
+        let mut changed = binding.clone();
+        match edit {
+            0 => changed.request.candidate.push(' '),
+            1 => changed.request.actor = HumanActor::Web,
+            2 => changed.request.basis.context_version += 1,
+            _ => {
+                changed.request.previous = TranslationSource::Model {
+                    task: TaskId(9),
+                    changes_version: "e".repeat(64),
+                    event: ziyuan_core::EventReference {
+                        index: 3,
+                        hash: "f".repeat(64),
+                    },
+                }
+            }
+        }
+        assert_ne!(
+            human_binding_request_hash(&changed.request),
+            binding.request_hash
+        );
+        assert!(
+            Court::replay(&founding_events(1))
+                .unwrap()
+                .propose_human_submission_binding(changed.clone())
+                .is_err()
+        );
+        changed.request_hash = human_binding_request_hash(&changed.request);
+        assert!(
+            court.propose_human_submission_binding(changed).is_err(),
+            "same scoped ID cannot be rebound"
+        );
+    }
+    let mut another_block = binding.clone();
+    another_block.request.block = "c0002-b0001".into();
+    another_block.request_hash = human_binding_request_hash(&another_block.request);
+    court
+        .apply(
+            &court
+                .propose_human_submission_binding(another_block)
+                .unwrap(),
+        )
+        .unwrap();
+
+    let digest = |text: &str| {
+        ring::digest::digest(&ring::digest::SHA256, text.as_bytes())
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    for (candidate, allowed) in [("a".repeat(800_000), true), ("\0".repeat(800_000), false)] {
+        let mut large = binding.clone();
+        large.request.request_id = "capacity".into();
+        large.request.candidate_hash = digest(&candidate);
+        large.request.candidate = candidate;
+        large.request_hash = human_binding_request_hash(&large.request);
+        assert_eq!(
+            court.propose_human_submission_binding(large).is_ok(),
+            allowed,
+            "real escaped/hex event size, not character count"
+        );
+    }
+}
+
+#[test]
 fn translation_references_validate_proposals_and_replay() {
     use ziyuan_core::ReferenceBinding;
     let mut court = Court::replay(&founding_events(1)).unwrap();

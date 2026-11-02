@@ -2446,7 +2446,9 @@ dependencies = [
 name = "ziyuan-governance"
 version = "1.4.1"
 dependencies = [
+ "ring",
  "serde",
+ "serde_json",
  "ziyuan-core",
 ]
 

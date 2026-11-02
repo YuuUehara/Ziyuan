@@ -141,6 +141,7 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         | OfficialPardoned { .. }
         | TemplateSaved { .. }
         | TemplateRemoved { .. }
+        | HumanSubmissionBound { .. }
         | TranslationFinalized { .. }
         | TranslationReopened { .. } => Vec::new(),
     }
@@ -446,6 +447,10 @@ pub fn describe_event(event: &CourtEvent) -> String {
                 task.0, binding.submission
             )
         }
+        CourtEvent::HumanSubmissionBound { binding } => format!(
+            "人工送审已入簿：{} {}（待决，尚未准奏）",
+            binding.request.block, binding.request.submission_id
+        ),
         CourtEvent::TranslationFinalized { block, .. } => format!("御览定稿：{block}"),
         CourtEvent::TranslationReopened { block, reason, .. } => {
             format!("退回重修：{block}（{reason}）")

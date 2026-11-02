@@ -441,6 +441,10 @@ pub enum CourtEvent {
         task: TaskId,
         binding: ReferenceBinding,
     },
+    /// Frozen human submission; no task, disk write, approval or finalization.
+    HumanSubmissionBound {
+        binding: Box<crate::HumanSubmissionBinding>,
+    },
     /// 御览定稿：皇帝签署一块的译稿（`translation_hash` 为定稿 zh.json 的 SHA-256），
     /// 并记下当时的上下文版本与朱批版本。
     TranslationFinalized {

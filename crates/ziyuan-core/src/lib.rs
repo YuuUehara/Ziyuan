@@ -2,6 +2,7 @@
 mod agent;
 mod changes;
 mod event;
+mod human_translation;
 mod office;
 mod records;
 mod review;
@@ -13,6 +14,10 @@ pub use changes::{FileChange, Hunk};
 pub use event::{
     CourtEvent, DagNode, Edict, Nomination, ReferenceBinding, Speech, Subtask, Template,
     TranslationKind, TranslationLink,
+};
+pub use human_translation::{
+    DraftBasis, EventReference, HumanActor, HumanBindingRequest, HumanSubmissionBinding,
+    TranslationSource,
 };
 pub use office::{BudgetScope, Department, GovernanceMode, Office};
 pub use records::{Record, find_records, search_records};

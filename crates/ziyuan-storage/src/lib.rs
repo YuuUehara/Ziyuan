@@ -159,6 +159,15 @@ pub fn encode_event_line(event: &CourtEvent) -> String {
     codec::encode_event(event)
 }
 
+/// Identity of a canonical event, not the hash of a raw log prefix.
+/// The caller supplies the event's zero-based position in that log.
+pub fn event_reference(index: u64, event: &CourtEvent) -> ziyuan_core::EventReference {
+    ziyuan_core::EventReference {
+        index,
+        hash: content_sha256(encode_event_line(event).as_bytes()),
+    }
+}
+
 /// 恢复记录里目标摘要的格式：64 位小写十六进制（不带 `sha256:` 前缀）。
 pub fn content_sha256(bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
@@ -669,7 +678,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 23] = [
+pub const RELEASES: [&str; 24] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -694,6 +703,8 @@ pub const RELEASES: [&str; 23] = [
     "1.3.0",
     "1.4.0",
     "1.4.1",
+    // Reserved development reader floor; not a published release or package bump.
+    "1.5.0-dev.1",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。
