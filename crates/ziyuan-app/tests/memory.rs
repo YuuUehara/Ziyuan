@@ -8,9 +8,7 @@ use ziyuan_app::Session;
 use ziyuan_app::text_project::{NewProject, Provenance, TextProjects};
 use ziyuan_app::translation::{BlockState, Translations, output_rel};
 use ziyuan_core::{CourtEvent, FileChange};
-use ziyuan_memory::{
-    Embedding, EmbeddingProvider, LocalProvider, MemoryError, MemoryIndex, ModelSignature,
-};
+use ziyuan_memory::{Embedding, EmbeddingProvider, LocalProvider, MemoryError, ModelSignature};
 use ziyuan_storage::{EventLog, EventStore, LockScope, Workspace};
 
 const BLOCK: &str = "c0001-b0001";
@@ -337,6 +335,8 @@ fn empty_scope_is_one_project_and_missing_current_authorization_is_rejected() {
 #[cfg(unix)]
 #[test]
 fn symlink_cache_directory_is_rejected_for_read_and_build() {
+    use ziyuan_memory::MemoryIndex;
+
     let f = Fixture::new();
     let s = f.finalized();
     let elsewhere = f.root.join("elsewhere");

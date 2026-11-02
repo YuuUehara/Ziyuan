@@ -29,7 +29,7 @@ pub(crate) fn read_huidian(data: Vec<u8>) -> serde_json::Result<Huidian> {
 
 /// 会典由哪一版及状态格式所修。源码仍使用旧包版本号时也必须隔开新增字段，
 /// 防止旧二进制跳过新事件、从会典中静默丢失人工送审绑定。
-pub(crate) fn huidian_tag() -> String {
+pub fn huidian_tag() -> String {
     format!("v{}-human-bindings-v1", env!("CARGO_PKG_VERSION"))
 }
 

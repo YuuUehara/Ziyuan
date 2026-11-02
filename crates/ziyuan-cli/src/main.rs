@@ -225,6 +225,12 @@ fn chronicle(session: &mut Session<EventLog>) {
     }
 }
 
+/// 会典是否由本版当前状态格式所修。只比标签，不代表会典内容一定可用；
+/// 打不开或与事件簿对不上时，打开会典仍会退回重读实录。
+fn huidian_is_current(tag: &str) -> bool {
+    tag == ziyuan_app::huidian_tag()
+}
+
 /// `ziyuan migrate --json`：与文字报告同一份检查。
 fn migrate_json(log: &EventLog) -> serde_json::Value {
     let version = env!("CARGO_PKG_VERSION");
@@ -246,7 +252,7 @@ fn migrate_json(log: &EventLog) -> serde_json::Value {
         "huidian": log.snapshot_header().map(|(events, tag)| serde_json::json!({
             "events": events,
             "tag": tag,
-            "current": tag == format!("v{version}"),
+            "current": huidian_is_current(&tag),
         })),
     })
 }
@@ -284,11 +290,11 @@ fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
         println!("末尾有一行未写完（中断的写入），下次写入前自动截掉。");
     }
     match log.snapshot_header() {
-        Some((events, tag)) if tag == format!("v{version}") => println!(
+        Some((events, tag)) if huidian_is_current(&tag) => println!(
             "《大明会典》.ziyuan/huidian：收前 {events} 条事件，打开时从此接着回放。会典只是缓存，可随时删去。"
         ),
-        Some((events, tag)) => println!(
-            "《大明会典》.ziyuan/huidian：{tag} 所修（收前 {events} 条），本版不沿用，下次打开时重修。"
+        Some((events, _tag)) => println!(
+            "《大明会典》.ziyuan/huidian：收前 {events} 条，由其他版本或旧格式所修，本版不沿用，下次打开时重修。"
         ),
         None => println!(
             "尚无《大明会典》：每满 {} 条事件修一部，打开时从会典接着回放。",
@@ -297,4 +303,17 @@ fn migrate(log: &EventLog) -> Result<(), Box<dyn Error>> {
     }
     println!("无需迁移。史官记：祖宗成法不可轻改。");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::huidian_is_current;
+
+    #[test]
+    fn huidian_tag_is_recognized_as_current_without_matching_the_bare_version() {
+        assert!(huidian_is_current(&ziyuan_app::huidian_tag()));
+        let bare = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert!(!huidian_is_current(&bare));
+        assert!(!huidian_is_current(""));
+    }
 }

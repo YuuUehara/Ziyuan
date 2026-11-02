@@ -44,7 +44,7 @@ pub use follow::{
     follow_station,
 };
 pub use history::{HistoryEntry, HistoryFilter, describe_event, history_entries};
-pub use huidian::HUIDIAN_EVERY;
+pub use huidian::{HUIDIAN_EVERY, huidian_tag};
 pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note, vacancies};
 pub use preview::{PreviewFile, PreviewHunk, PreviewLine, PreviewSpan, preview_changes};
 pub use reports::{describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report};
