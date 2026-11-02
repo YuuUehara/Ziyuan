@@ -1,0 +1,73 @@
+{
+  "fixture_version": 1,
+  "purpose": "N0 design acceptance inputs; not a production project or evidence of implemented behavior",
+  "rights": "Original synthetic material created for this repository; reusable as repository test fixtures",
+  "project": "n0-lantern",
+  "source_language": "ja",
+  "target_language": "zh",
+  "chapters": [
+    {"id": "c01", "source_name": "z-first.txt", "paragraphs": [
+      {"id": "p01", "block": "b01", "source": "港では、名を明かさない女が灯台を見ていた。", "target": "港口，一个不肯透露姓名的女人望着灯塔。"},
+      {"id": "p02", "block": "b01", "source": "船長の蓮は言った。「今夜は出ない。」", "target": "船长莲说：“今晚不出航。”"},
+      {"id": "p03", "block": "b02", "source": "薬師の蓮は、船長とは別人だった。", "target": "药师莲与船长并非同一人。"}
+    ]},
+    {"id": "c02", "source_name": "a-second.txt", "paragraphs": [
+      {"id": "p04", "block": "b03", "source": "皆はその女を「灯守」と呼んだ。", "target": "大家都叫那个女人“守灯人”。"},
+      {"id": "p05", "block": "b03", "source": "弟は灯守を「姉さん」と呼んだ。", "target": "弟弟叫守灯人“姐姐”。"},
+      {"id": "p06", "block": "b03", "source": "監督は灯守に言った。「灯守さん、こちらへ。」", "target": "主管对守灯人说：“守灯人，请到这边来。”"}
+    ]},
+    {"id": "c03", "source_name": "m-third.txt", "paragraphs": [
+      {"id": "p07", "block": "b04", "source": "昨日のことを思い出した。女の本名は美緒だった。", "target": "她想起昨天的事。那个女人的真名叫美绪。"},
+      {"id": "p08", "block": "b04", "source": "この町で「月舟」は祭りの灯籠を指す。船ではない。", "target": "在这座镇子里，“月舟”指祭典的灯笼，并不是船。"},
+      {"id": "p09", "block": "b05", "source": "蓮は月舟を持って港へ戻った。", "target": "莲提着月舟回到港口。"}
+    ]}
+  ],
+  "people": [
+    {"id": "woman", "name": "未明身份的女人", "term_ids": ["lantern-keeper", "mio"], "available_from": "p01"},
+    {"id": "ren-captain", "name": "蓮", "term_ids": ["ren"], "available_from": "p02"},
+    {"id": "ren-healer", "name": "蓮", "term_ids": ["ren"], "available_from": "p03"},
+    {"id": "brother", "name": "弟", "term_ids": [], "available_from": "p05"},
+    {"id": "supervisor", "name": "監督", "term_ids": [], "available_from": "p06"}
+  ],
+  "terms": [
+    {"id": "ren", "source": "蓮", "allowed": ["莲"], "available_from": "p02", "range": ["p02", "p09"], "judgment": "confirmed"},
+    {"id": "lantern-keeper", "source": "灯守", "allowed": ["守灯人"], "available_from": "p04", "range": ["p04", "p09"], "judgment": "confirmed"},
+    {"id": "mio", "source": "美緒", "allowed": ["美绪"], "available_from": "p07", "range": ["p07", "p09"], "judgment": "confirmed"},
+    {"id": "sister", "source": "姉さん", "allowed": ["姐姐"], "available_from": "p05", "range": ["p05", "p05"], "speaker": "brother", "judgment": "confirmed"},
+    {"id": "moon-lantern", "source": "月舟", "allowed": ["月舟"], "available_from": "p08", "range": ["p08", "p09"], "judgment": "tentative"}
+  ],
+  "cases": [
+    {"id": "identity-distinct", "phase": "N2", "input": {"paragraphs": ["p02", "p03"], "person_ids": ["ren-captain", "ren-healer"]}, "expected": {"auto_merge": false, "distinct_people": 2}},
+    {"id": "alias-manual", "phase": "N2", "input": {"paragraphs": ["p04", "p07"], "person_ids": ["woman"], "manual_link": true}, "expected": {"linked_person": "woman", "global_name_replacement": false}},
+    {"id": "valid-address-variation", "phase": "N3", "input": {"paragraphs": ["p05", "p06"], "person_ids": ["woman", "brother", "supervisor"]}, "expected": {"forced_uniform_address": false, "confirmed_error_count": 0}},
+    {"id": "wrong-same-scope-address", "phase": "N3", "input": {"paragraphs": ["p05"], "term_ids": ["sister"], "speaker": "brother", "target_override": "弟弟叫守灯人“母亲”。"}, "expected": {"lexical_candidate": true, "auto_replace": false}},
+    {"id": "scope-outside", "phase": "N2", "input": {"paragraphs": ["p06"], "term_ids": ["sister"], "speaker": "supervisor"}, "expected": {"applicable": false}},
+    {"id": "speaker-unknown", "phase": "N2", "input": {"paragraphs": ["p05"], "term_ids": ["sister"], "speaker": null}, "expected": {"applicable": false, "needs_review": true}},
+    {"id": "future-name-hidden", "phase": "N2", "input": {"paragraphs": ["p01"], "block": "b01", "term_ids": ["mio"]}, "expected": {"automatic_outbound": false, "forbidden_outbound_strings": ["美緒", "美绪"]}},
+    {"id": "intrablock-reveal", "phase": "N2", "input": {"paragraphs": ["p04", "p05", "p06"], "block": "b03", "term_ids": ["sister"]}, "expected": {"automatic_outbound": false, "reason": "available_from follows block start"}},
+    {"id": "explicit-future-reference", "phase": "N2", "input": {"paragraphs": ["p01", "p07"], "term_ids": ["mio"], "explicit_revision_selection": true}, "expected": {"requires_warning_and_preview": true, "selection_snapshot": true, "permanent_permission_expansion": false}},
+    {"id": "order-not-filename-or-story-time", "phase": "N2", "input": {"paragraphs": ["p01", "p04", "p07"]}, "expected": {"chapter_order": ["c01", "c02", "c03"], "flashback_reorders_visibility": false}},
+    {"id": "uncertain-speaker-and-term", "phase": "N3", "input": {"paragraphs": ["p09"], "term_ids": ["moon-lantern"], "speaker": null}, "expected": {"auto_person_assignment": false, "tentative_becomes_confirmed": false}},
+    {"id": "save-empty-draft", "phase": "N1a", "input": {"paragraphs": ["p01", "p02"], "draft_texts": {"p01": "试译", "p02": ""}, "operation": "save"}, "expected": {"save_allowed": true, "submission_allowed": false, "approved_output_unchanged": true}},
+    {"id": "save-conflict", "phase": "N1a", "input": {"paragraphs": ["p01"], "expected_revision": "draft-r1", "current_revision": "draft-r2", "operation": "save"}, "expected": {"result": "conflict", "persisted_revision": "draft-r2", "preserve_client_text": true}},
+    {"id": "lost-save-response", "phase": "N1a", "input": {"paragraphs": ["p01"], "request_id": "save-17", "same_payload_retry": true, "process_restarted": true}, "expected": {"same_result": true, "revision_increments": 1}},
+    {"id": "request-id-reused-with-other-content", "phase": "N1a", "input": {"paragraphs": ["p01"], "request_id": "save-17", "same_payload_retry": false}, "expected": {"result": "request_identity_conflict", "write_count": 0}},
+    {"id": "viewer-cannot-save", "phase": "N1a", "input": {"paragraphs": ["p01"], "role": "viewer", "operation": "save"}, "expected": {"result": "permission_denied", "write_count": 0}},
+    {"id": "approval-source-aba", "phase": "N1a-2", "input": {"paragraphs": ["p01", "p02"], "base_approval": "approval-A", "current_approval": "approval-B", "same_target_bytes": true}, "expected": {"approval_allowed": false, "result": "baseline_conflict"}},
+    {"id": "submission-immutable", "phase": "N1a-2", "input": {"paragraphs": ["p01", "p02"], "submitted_revision": "draft-r2", "edited_revision": "draft-r3"}, "expected": {"submission_revision": "draft-r2", "new_draft_is_approved": false}},
+    {"id": "changed-rule-review-stale", "phase": "N3", "input": {"paragraphs": ["p05"], "term_ids": ["sister"], "review_rule_revision": "rules-r1", "current_rule_revision": "rules-r2"}, "expected": {"needs_review": true, "historical_resolution_preserved": true, "auto_rewrite": false}},
+    {"id": "pure-human-signoff", "phase": "N1a-2", "input": {"paragraphs": ["p01", "p02"], "origin": "human", "complete_submission": true}, "expected": {"model_requests": 0, "synthetic_task_events": 0, "usage": "not_applicable", "approval_implies_finalized": false}},
+    {"id": "old-scope-is-text", "phase": "N2", "input": {"paragraphs": ["p05"], "legacy_scope": "第二章弟弟称呼姐姐时"}, "expected": {"auto_parse_scope": false, "requires_explicit_upgrade": true}},
+    {"id": "new-event-old-reader", "phase": "N1a-2", "input": {"paragraphs": ["p01"], "reader": "1.4.1", "contains_human_approval_event": true}, "expected": {"result": "upgrade_required", "fallback_to_old_model_writer": false}},
+    {"id": "new-draft-future-format", "phase": "N1a", "input": {"paragraphs": ["p01"], "unsupported_future_format": true}, "expected": {"result": "unsupported_format", "reset_to_empty": false}},
+    {"id": "exception-version-bound", "phase": "N3", "input": {"paragraphs": ["p05"], "exception_target_revision": "target-r1", "current_target_revision": "target-r2"}, "expected": {"needs_review": true, "auto_suppress": false}},
+    {"id": "scope-inclusive-boundary", "phase": "N2", "input": {"paragraphs": ["p05"], "term_ids": ["sister"], "speaker": "brother"}, "expected": {"applicable": true}},
+    {"id": "available-at-block-start", "phase": "N2", "input": {"paragraphs": ["p04", "p05", "p06"], "block": "b03", "term_ids": ["lantern-keeper"]}, "expected": {"automatic_outbound_eligible": true, "requires_approved_context": true}},
+    {"id": "scope-intersection-not-union", "phase": "N2", "input": {"paragraphs": ["p05"], "term_ids": ["sister"], "speaker": "supervisor"}, "expected": {"applicable": false}},
+    {"id": "save-source-changed", "phase": "N1a", "input": {"paragraphs": ["p01"], "base_source_revision": "source-r1", "current_source_revision": "source-r2"}, "expected": {"result": "source_changed", "write_count": 0}},
+    {"id": "draft-corrupt-not-empty", "phase": "N1a", "input": {"paragraphs": ["p01"], "corrupt_persisted_draft": true}, "expected": {"result": "corrupt_data", "reset_to_empty": false}},
+    {"id": "old-project-read-unchanged", "phase": "N1a", "input": {"paragraphs": ["p01", "p02"], "legacy_project": true, "operation": "read"}, "expected": {"rewritten_originals": 0, "rewritten_snapshots": 0, "changed_paragraph_ids": 0}},
+    {"id": "approval-during-model-task", "phase": "N1a-2", "input": {"paragraphs": ["p01", "p02"], "active_model_task": true}, "expected": {"result": "block_busy", "auto_cancel_task": false, "approved_output_unchanged": true}},
+    {"id": "approval-recovery-pending", "phase": "N1a-2", "input": {"paragraphs": ["p01", "p02"], "pending_write_recovery": true}, "expected": {"result": "recovery_required", "new_approval_records": 0}}
+  ]
+}

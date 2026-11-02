@@ -9,6 +9,7 @@
 //! `blocks/<块>.json` 逐字节相同，即 [`PromptBlock::serialized`]）的哈希；
 //! 译稿哈希是 `zh.json` 文件字节的哈希。
 mod context;
+mod draft;
 mod export;
 mod export_package;
 mod finished;
@@ -27,6 +28,7 @@ pub use context::{
     ContextManifest, ContextSnapshot, GLOSSARY_FILE, GlossaryEntry, ManifestFile, STYLE_FILE,
     SUMMARIES_DIR, parse_glossary,
 };
+pub use draft::{DraftBasis, DraftParagraph, DraftReceipt, DraftSave, DraftView, HumanDraft};
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
 pub use references::{
@@ -70,6 +72,9 @@ pub enum TranslationError {
     Io(io::Error),
     Storage(JsonFileError),
     Invalid(String),
+    DraftConflict { current: Option<String> },
+    DraftRequestConflict,
+    DraftBasisChanged,
 }
 impl fmt::Display for TranslationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -78,6 +83,14 @@ impl fmt::Display for TranslationError {
             Self::Io(e) => write!(f, "文件读写失败：{e}"),
             Self::Storage(e) => e.fmt(f),
             Self::Invalid(s) => f.write_str(s),
+            Self::DraftConflict { current } => {
+                write!(
+                    f,
+                    "人工草稿修订冲突，现行修订为 {current:?}；请保留输入并重新读取"
+                )
+            }
+            Self::DraftRequestConflict => f.write_str("人工草稿请求身份已被不同内容使用"),
+            Self::DraftBasisChanged => f.write_str("人工草稿来源或上下文已变化，请重新读取并核对"),
         }
     }
 }
