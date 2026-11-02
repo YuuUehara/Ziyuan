@@ -1,8 +1,8 @@
 //! Local human drafts and immutable review submissions, never approved writes.
 //! Text, submissions and durable retry receipts share one atomic JSON publication.
 use super::{
-    Result, TargetMark, TranslationError, Translations, ensure_plain_dirs, find_block, invalid,
-    markup, sha256_hex,
+    Result, TargetMark, TargetMarkKind, TranslationError, Translations, ensure_plain_dirs,
+    find_block, invalid, markup, sha256_hex,
 };
 use crate::text_project::{BlockParagraph, PromptBlock};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -89,19 +89,109 @@ pub struct HumanSubmission {
 }
 
 impl HumanSubmission {
-    /// The legacy candidate format cannot represent target marks. Never flatten
-    /// rich drafts into this format, even if a caller constructs a snapshot itself.
-    pub fn candidate(&self) -> Result<PromptBlock> {
-        if self.draft.paragraphs.iter().any(|p| !p.marks.is_empty()) {
-            return Err(invalid(
-                "含文学标记的人工稿暂只支持保存／恢复，不能转为纯文本提交",
-            ));
-        }
-        Ok(PromptBlock {
-            schema_version: 1,
+    /// Legacy plain candidates keep their exact bytes; marked candidates use v2.
+    /// Neither representation confers approval or formal export eligibility.
+    pub fn candidate(&self) -> Result<ReviewCandidate> {
+        let candidate = ReviewCandidate {
+            schema_version: if self.draft.paragraphs.iter().any(|p| !p.marks.is_empty()) {
+                2
+            } else {
+                1
+            },
             block_id: self.draft.block.clone(),
+            paragraphs: self.draft.paragraphs.clone(),
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+}
+
+/// Target-only review JSON. v1 is byte-compatible with plain PromptBlock;
+/// v2 preserves marks and must not enter the legacy model/approval pipeline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewCandidate {
+    pub schema_version: u32,
+    pub block_id: String,
+    pub paragraphs: Vec<DraftParagraph>,
+}
+
+/// Representation profiles, not a list of implemented formal exporters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFormat {
+    ReviewJson,
+    LegacyPromptJson,
+    PlainText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnsupportedTargetMark {
+    pub paragraph_id: String,
+    /// Index in the candidate's original, unsorted marks array.
+    pub mark_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReviewFormatCheck {
+    pub format: ReviewFormat,
+    /// Mark semantics only, not project identity or approval eligibility.
+    pub lossless: bool,
+    pub unsupported_marks: Vec<UnsupportedTargetMark>,
+}
+
+impl ReviewCandidate {
+    fn validate(&self) -> Result<()> {
+        if !matches!(self.schema_version, 1 | 2)
+            || (self.schema_version == 1 && self.paragraphs.iter().any(|p| !p.marks.is_empty()))
+        {
+            return Err(invalid("不支持的人工候选版本或 v1 含文学标记"));
+        }
+        markup::validate(&self.paragraphs)?;
+        if self.paragraphs.iter().flat_map(|p| &p.marks).any(
+            |m| matches!(&m.kind, TargetMarkKind::Ruby { reading } if reading.trim().is_empty()),
+        ) {
+            return Err(invalid("送审候选的注音读音不得为空或全为空白"));
+        }
+        Ok(())
+    }
+
+    /// Exact hash input, including target marks and the final newline.
+    pub fn serialized(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let mut bytes = serde_json::to_vec_pretty(self)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    /// Read-only diagnostic. No conversion, file output or implicit lossy choice.
+    pub fn check_format(&self, format: ReviewFormat) -> Result<ReviewFormatCheck> {
+        self.validate()?;
+        let mut unsupported_marks = Vec::new();
+        if format != ReviewFormat::ReviewJson {
+            for paragraph in &self.paragraphs {
+                for mark_index in 0..paragraph.marks.len() {
+                    unsupported_marks.push(UnsupportedTargetMark {
+                        paragraph_id: paragraph.id.clone(),
+                        mark_index,
+                    });
+                }
+            }
+        }
+        Ok(ReviewFormatCheck {
+            format,
+            lossless: unsupported_marks.is_empty(),
+            unsupported_marks,
+        })
+    }
+
+    /// Only for reusing paragraph membership/completeness validation. Never
+    /// stored, hashed or published as the marked candidate.
+    fn text_structure(&self) -> PromptBlock {
+        PromptBlock {
+            schema_version: 1,
+            block_id: self.block_id.clone(),
             paragraphs: self
-                .draft
                 .paragraphs
                 .iter()
                 .map(|p| BlockParagraph {
@@ -110,7 +200,7 @@ impl HumanSubmission {
                     inlines: Vec::new(),
                 })
                 .collect(),
-        })
+        }
     }
 }
 
@@ -186,7 +276,7 @@ impl Translations {
             &self.root,
             &[".ziyuan", "text-projects", project, "human-drafts"],
         )?;
-        let file = JsonFile::new(dir.join(format!("{block}.json")), 3, MAX_FILE_BYTES);
+        let file = JsonFile::new(dir.join(format!("{block}.json")), 4, MAX_FILE_BYTES);
         for path in [file.path(), file.lock_path()] {
             match fs::symlink_metadata(path) {
                 Ok(m) if m.is_file() && !m.file_type().is_symlink() => {}
@@ -374,8 +464,11 @@ impl Translations {
             draft: book.draft.clone(),
             candidate_hash: String::new(),
         };
-        let bytes = submission.candidate()?.serialized()?;
-        let report = self.texts().check(project, block, &bytes)?;
+        let candidate = submission.candidate()?;
+        let bytes = candidate.serialized()?;
+        let report =
+            self.texts()
+                .check(project, block, &candidate.text_structure().serialized()?)?;
         if !report.valid {
             return Err(invalid(format!(
                 "人工提交结构检查未通过：{:?}",

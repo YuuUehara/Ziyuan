@@ -31,7 +31,7 @@ pub use context::{
 };
 pub use draft::{
     DraftBasis, DraftParagraph, DraftReceipt, DraftSave, DraftSubmit, DraftView, HumanDraft,
-    HumanSubmission,
+    HumanSubmission, ReviewCandidate, ReviewFormat, ReviewFormatCheck, UnsupportedTargetMark,
 };
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};

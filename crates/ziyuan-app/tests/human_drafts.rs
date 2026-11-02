@@ -11,8 +11,8 @@ use std::{
 use ziyuan_app::{
     text_project::{NewProject, Project, Provenance, TextProjects},
     translation::{
-        DraftParagraph, DraftSave, DraftSubmit, HumanSubmission, TargetMark, TargetMarkKind,
-        TranslationError, Translations,
+        DraftParagraph, DraftSave, DraftSubmit, HumanSubmission, ReviewCandidate, ReviewFormat,
+        TargetMark, TargetMarkKind, TranslationError, Translations,
     },
 };
 use ziyuan_storage::{JsonFileError, LockScope, Workspace};
@@ -484,102 +484,109 @@ fn corrupt_future_and_failed_publications_never_reset_the_previous_draft() {
 
 #[test]
 fn submissions_survive_new_drafts_and_restart_without_becoming_approved() {
-    let f = Fixture::new();
-    let _session = ziyuan_app::Session::found(ziyuan_storage::EventLog::new(&f.root)).unwrap();
-    let events_before = fs::read(f.root.join(".ziyuan/court.log")).unwrap();
-    let mut request = f.request();
-    request.paragraphs[1].text = "船长莲说：今晚不出海。".into();
-    request.paragraphs.push(DraftParagraph {
-        id: "c0001-p0003".into(),
-        text: "药师莲和船长并非同一人。".into(),
-        marks: Vec::new(),
-    });
-    let receipt = f
-        .service()
-        .save_human_draft(&f.project.id, BLOCK, &request)
-        .unwrap();
-    let submit = DraftSubmit {
-        request_id: "review-3".into(),
-        expected_revision: receipt.revision,
-    };
-    let submission = f
-        .service()
-        .submit_human_draft(&f.project.id, BLOCK, &submit)
-        .unwrap();
-    assert_eq!(submission.draft.paragraphs, request.paragraphs);
-    let candidate = submission.candidate().unwrap().serialized().unwrap();
-    assert!(
-        TextProjects::new(&f.root)
-            .check(&f.project.id, BLOCK, &candidate)
-            .unwrap()
-            .valid
-    );
-    let hash: String = ring::digest::digest(&ring::digest::SHA256, &candidate)
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    assert_eq!(submission.candidate_hash, hash);
-    let mut next = f.request();
-    next.request_id = "after-submit".into();
-    next.paragraphs[0].text = "仍在修改中的下一稿".into();
-    let next_receipt = f
-        .service()
-        .save_human_draft(&f.project.id, BLOCK, &next)
-        .unwrap();
-    // Historical retry is a receipt lookup, even after material changes.
-    f.service()
-        .set_zhupi(&f.project.id, BLOCK, "c0001-p0001", "待复核称谓")
-        .unwrap();
-    let before = fs::read(f.path()).unwrap();
-    assert_eq!(
-        f.service()
+    for marked in [false, true] {
+        let f = Fixture::new();
+        let _session = ziyuan_app::Session::found(ziyuan_storage::EventLog::new(&f.root)).unwrap();
+        let events_before = fs::read(f.root.join(".ziyuan/court.log")).unwrap();
+        let mut request = f.request();
+        request.paragraphs[1].text = "船长莲说：今晚不出海。".into();
+        request.paragraphs.push(DraftParagraph {
+            id: "c0001-p0003".into(),
+            text: "药师莲和船长并非同一人。".into(),
+            marks: Vec::new(),
+        });
+        if marked {
+            request = f.marked_request();
+        }
+        let receipt = f
+            .service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .unwrap();
+        let submit = DraftSubmit {
+            request_id: "review-3".into(),
+            expected_revision: receipt.revision,
+        };
+        let submission = f
+            .service()
             .submit_human_draft(&f.project.id, BLOCK, &submit)
-            .unwrap(),
-        submission
-    );
-    assert!(matches!(
-        f.service().submit_human_draft(
-            &f.project.id,
-            BLOCK,
-            &DraftSubmit {
-                expected_revision: next_receipt.revision.clone(),
-                ..submit.clone()
-            }
-        ),
-        Err(TranslationError::DraftRequestConflict)
-    ));
-    for (name, bytes) in [
-        ("request.json", serde_json::to_vec(&next).unwrap()),
-        ("receipt.json", serde_json::to_vec(&next_receipt).unwrap()),
-        ("submission.json", serde_json::to_vec(&submission).unwrap()),
-    ] {
-        fs::write(f.root.join(name), bytes).unwrap();
-    }
-    let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "draft_process_worker", "--nocapture"])
-        .env("ZIYUAN_DRAFT_TEST_ROOT", &f.root)
-        .env("ZIYUAN_DRAFT_TEST_PROJECT", &f.project.id)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read(f.path()).unwrap(), before);
-    assert_eq!(Workspace::open(&f.root).unwrap().generation().unwrap(), 0);
-    assert!(
+            .unwrap();
+        assert_eq!(submission.draft.paragraphs, request.paragraphs);
+        let candidate = submission.candidate().unwrap().serialized().unwrap();
+        assert_eq!(
+            TextProjects::new(&f.root)
+                .check(&f.project.id, BLOCK, &candidate)
+                .unwrap()
+                .valid,
+            !marked,
+            "marked v2 must remain outside the legacy model candidate protocol"
+        );
+        let hash: String = ring::digest::digest(&ring::digest::SHA256, &candidate)
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(submission.candidate_hash, hash);
+        let mut next = f.request();
+        next.request_id = "after-submit".into();
+        next.paragraphs[0].text = "仍在修改中的下一稿".into();
+        let next_receipt = f
+            .service()
+            .save_human_draft(&f.project.id, BLOCK, &next)
+            .unwrap();
+        // Historical retry is a receipt lookup, even after material changes.
         f.service()
-            .read_translation(&f.project.id, BLOCK)
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        fs::read(f.root.join(".ziyuan/court.log")).unwrap(),
-        events_before
-    );
+            .set_zhupi(&f.project.id, BLOCK, "c0001-p0001", "待复核称谓")
+            .unwrap();
+        let before = fs::read(f.path()).unwrap();
+        assert_eq!(
+            f.service()
+                .submit_human_draft(&f.project.id, BLOCK, &submit)
+                .unwrap(),
+            submission
+        );
+        assert!(matches!(
+            f.service().submit_human_draft(
+                &f.project.id,
+                BLOCK,
+                &DraftSubmit {
+                    expected_revision: next_receipt.revision.clone(),
+                    ..submit.clone()
+                }
+            ),
+            Err(TranslationError::DraftRequestConflict)
+        ));
+        for (name, bytes) in [
+            ("request.json", serde_json::to_vec(&next).unwrap()),
+            ("receipt.json", serde_json::to_vec(&next_receipt).unwrap()),
+            ("submission.json", serde_json::to_vec(&submission).unwrap()),
+        ] {
+            fs::write(f.root.join(name), bytes).unwrap();
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "draft_process_worker", "--nocapture"])
+            .env("ZIYUAN_DRAFT_TEST_ROOT", &f.root)
+            .env("ZIYUAN_DRAFT_TEST_PROJECT", &f.project.id)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(f.path()).unwrap(), before);
+        assert_eq!(Workspace::open(&f.root).unwrap().generation().unwrap(), 0);
+        assert!(
+            f.service()
+                .read_translation(&f.project.id, BLOCK)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fs::read(f.root.join(".ziyuan/court.log")).unwrap(),
+            events_before
+        );
+    }
 }
 
 #[test]
@@ -702,7 +709,7 @@ fn legacy_read_is_non_mutating_and_new_format_blocks_old_readers_and_corrupt_sna
     // Exact legacy shapes: empty marks must not alter old receipt hashes.
     let mut legacy: serde_json::Value =
         serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
-    for schema in [1, 2] {
+    for schema in [1, 2, 3] {
         legacy["schema_version"] = schema.into();
         if schema == 1 {
             legacy["data"]
@@ -737,7 +744,7 @@ fn legacy_read_is_non_mutating_and_new_format_blocks_old_readers_and_corrupt_sna
         .submit_human_draft(&f.project.id, BLOCK, &submit)
         .unwrap();
     let good = fs::read(f.path()).unwrap();
-    for supported in [1, 2] {
+    for supported in [1, 2, 3] {
         let old_reader = ziyuan_storage::JsonFile::<serde_json::Value>::new(
             f.path(),
             supported,
@@ -745,7 +752,7 @@ fn legacy_read_is_non_mutating_and_new_format_blocks_old_readers_and_corrupt_sna
         );
         assert!(matches!(
             old_reader.load(),
-            Err(JsonFileError::Newer { found: 3, .. })
+            Err(JsonFileError::Newer { found: 4, .. })
         ));
         let result = old_reader
             .update::<(), JsonFileError>(|_| panic!("old writer must never reach publication"));
@@ -813,7 +820,7 @@ fn legacy_read_is_non_mutating_and_new_format_blocks_old_readers_and_corrupt_sna
 }
 
 #[test]
-fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() {
+fn marked_submissions_are_lossless_and_old_plain_submissions_remain_immutable() {
     let f = Fixture::new();
     let mut marked = f.marked_request();
     let mut plain = marked.clone();
@@ -831,6 +838,30 @@ fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() 
         .service()
         .submit_human_draft(&f.project.id, BLOCK, &submit)
         .unwrap();
+    // Independently fixed legacy bytes, not a second call to the new serializer.
+    let legacy = r#"{
+  "schema_version": 1,
+  "block_id": "c0001-b0001",
+  "paragraphs": [
+    {
+      "id": "c0001-p0001",
+      "text": "甲月舟乙"
+    },
+    {
+      "id": "c0001-p0002",
+      "text": "船长莲"
+    },
+    {
+      "id": "c0001-p0003",
+      "text": "药师莲"
+    }
+  ]
+}
+"#;
+    assert_eq!(
+        snapshot.candidate().unwrap().serialized().unwrap(),
+        legacy.as_bytes()
+    );
     marked.expected_revision = Some(first.revision);
     let receipt = f
         .service()
@@ -845,28 +876,37 @@ fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() 
         .unwrap();
     assert_eq!(draft.paragraphs, marked.paragraphs);
     assert_eq!(&draft.paragraphs[0].text[3..9], "月舟");
+    let rich = f
+        .service()
+        .submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                request_id: "rich-review".into(),
+                expected_revision: receipt.revision.clone(),
+            },
+        )
+        .unwrap();
+    let candidate = rich.candidate().unwrap();
+    assert_eq!(candidate.schema_version, 2);
+    assert_eq!(candidate.paragraphs, marked.paragraphs);
+    let bytes = candidate.serialized().unwrap();
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    assert_eq!(
+        serde_json::from_slice::<ReviewCandidate>(&bytes).unwrap(),
+        candidate
+    );
+    assert_ne!(rich.candidate_hash, snapshot.candidate_hash);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["paragraphs"][0]["marks"],
+        serde_json::json!([
+            {"start":3,"end":9,"kind":{"type":"ruby","reading":"ねがい"}},
+            {"start":3,"end":9,"kind":{"type":"emphasis_dots"}},
+            {"start":9,"end":12,"kind":{"type":"emphasis"}},
+            {"start":0,"end":3,"kind":{"type":"strong"}}
+        ])
+    );
     let before = fs::read(f.path()).unwrap();
-    assert!(
-        f.service()
-            .submit_human_draft(
-                &f.project.id,
-                BLOCK,
-                &DraftSubmit {
-                    request_id: "rich-review".into(),
-                    expected_revision: receipt.revision.clone(),
-                }
-            )
-            .is_err()
-    );
-    assert!(
-        HumanSubmission {
-            request_id: "constructed".into(),
-            draft,
-            candidate_hash: String::new()
-        }
-        .candidate()
-        .is_err()
-    );
     assert_eq!(
         f.service()
             .submit_human_draft(&f.project.id, BLOCK, &submit)
@@ -875,7 +915,7 @@ fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() 
     );
     assert_eq!(
         f.service().human_submissions(&f.project.id, BLOCK).unwrap(),
-        vec![snapshot]
+        vec![snapshot, rich.clone()]
     );
     let mut changed = marked.clone();
     changed.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
@@ -892,23 +932,37 @@ fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() 
         receipt
     );
     assert_eq!(fs::read(f.path()).unwrap(), before);
-    // Unfinished ruby input is still recoverable draft text, never a submission.
-    changed.request_id = "unfinished-reading".into();
+    // Only ruby changes; base text and other marks are identical.
+    changed.request_id = "changed-reading".into();
     changed.expected_revision = Some(receipt.revision);
-    changed.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
-        reading: String::new(),
-    };
-    f.service()
+    let updated = f
+        .service()
         .save_human_draft(&f.project.id, BLOCK, &changed)
         .unwrap();
+    let new_rich = f
+        .service()
+        .submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                request_id: "changed-review".into(),
+                expected_revision: updated.revision,
+            },
+        )
+        .unwrap();
+    assert_ne!(new_rich.candidate_hash, rich.candidate_hash);
     assert_eq!(
         f.service()
-            .human_draft(&f.project.id, BLOCK)
-            .unwrap()
-            .draft
-            .unwrap()
-            .paragraphs,
-        changed.paragraphs
+            .submit_human_draft(
+                &f.project.id,
+                BLOCK,
+                &DraftSubmit {
+                    request_id: rich.request_id.clone(),
+                    expected_revision: rich.draft.revision.clone(),
+                }
+            )
+            .unwrap(),
+        rich
     );
     assert!(
         f.service()
@@ -917,6 +971,171 @@ fn marked_drafts_are_not_flattened_and_old_plain_submissions_remain_immutable() 
             .is_none()
     );
     assert_eq!(Workspace::open(&f.root).unwrap().generation().unwrap(), 0);
+}
+
+#[test]
+fn marked_candidate_format_checks_are_explicit_and_refuse_invalid_material() {
+    let f = Fixture::new();
+    let mut request = f.marked_request();
+    // Literal HTML and delimiters remain data in both base and literary reading.
+    request.paragraphs[1].text = "<script>unsafe()</script>｜字《音》".into();
+    request.paragraphs[1].marks = vec![TargetMark {
+        start: 0,
+        end: 8,
+        kind: TargetMarkKind::Ruby {
+            reading: " <&《》> ".into(),
+        },
+    }];
+    let receipt = f
+        .service()
+        .save_human_draft(&f.project.id, BLOCK, &request)
+        .unwrap();
+    let submission = f
+        .service()
+        .submit_human_draft(
+            &f.project.id,
+            BLOCK,
+            &DraftSubmit {
+                request_id: "formats".into(),
+                expected_revision: receipt.revision,
+            },
+        )
+        .unwrap();
+    let candidate = submission.candidate().unwrap();
+    let before = fs::read(f.path()).unwrap();
+    let supported = candidate.check_format(ReviewFormat::ReviewJson).unwrap();
+    assert!(supported.lossless);
+    assert!(supported.unsupported_marks.is_empty());
+    for format in [ReviewFormat::LegacyPromptJson, ReviewFormat::PlainText] {
+        let report = candidate.check_format(format).unwrap();
+        assert!(!report.lossless);
+        let locations: Vec<_> = report
+            .unsupported_marks
+            .iter()
+            .map(|m| (m.paragraph_id.as_str(), m.mark_index))
+            .collect();
+        assert_eq!(
+            locations,
+            vec![
+                ("c0001-p0001", 0),
+                ("c0001-p0001", 1),
+                ("c0001-p0001", 2),
+                ("c0001-p0001", 3),
+                ("c0001-p0002", 0),
+            ]
+        );
+    }
+    let decoded: ReviewCandidate =
+        serde_json::from_slice(&candidate.serialized().unwrap()).unwrap();
+    assert_eq!(decoded.paragraphs, request.paragraphs);
+    let mut plain = candidate.clone();
+    for p in &mut plain.paragraphs {
+        p.marks.clear();
+    }
+    plain.schema_version = 1;
+    for format in [
+        ReviewFormat::ReviewJson,
+        ReviewFormat::LegacyPromptJson,
+        ReviewFormat::PlainText,
+    ] {
+        assert!(plain.check_format(format).unwrap().lossless);
+    }
+    for version in [0, 1, 3, u32::MAX] {
+        let mut invalid = candidate.clone();
+        invalid.schema_version = version;
+        assert!(invalid.serialized().is_err());
+        assert!(invalid.check_format(ReviewFormat::ReviewJson).is_err());
+    }
+    let mut invalid = candidate.clone();
+    invalid.paragraphs[0].marks[0].start = 4; // Splits 月 in UTF-8.
+    assert!(invalid.serialized().is_err());
+    assert!(invalid.check_format(ReviewFormat::ReviewJson).is_err());
+    let mut unknown = serde_json::to_value(&candidate).unwrap();
+    unknown["paragraphs"][0]["marks"][0]["kind"]["position"] = "above".into();
+    assert!(serde_json::from_value::<ReviewCandidate>(unknown).is_err());
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+    // A corrupted candidate digest cannot be hidden by intact draft receipts.
+    let mut corrupt: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    corrupt["data"]["submissions"]["formats"]["candidate_hash"] = "0".repeat(64).into();
+    let corrupt = serde_json::to_vec(&corrupt).unwrap();
+    fs::write(f.path(), &corrupt).unwrap();
+    assert!(matches!(
+        f.service().human_submissions(&f.project.id, BLOCK),
+        Err(TranslationError::Storage(JsonFileError::Corrupt(_)))
+    ));
+    assert!(
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .is_err()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), corrupt);
+}
+
+#[test]
+fn incomplete_marked_submissions_retain_drafts_and_do_not_publish() {
+    let f = Fixture::new();
+    let complete = f.marked_request();
+    for n in 0..4 {
+        let mut request = complete.clone();
+        request.request_id = format!("unfinished-{n}");
+        request.expected_revision = f
+            .service()
+            .human_draft(&f.project.id, BLOCK)
+            .unwrap()
+            .draft
+            .map(|d| d.revision);
+        match n {
+            0 | 1 => {
+                request.paragraphs[0].marks[0].kind = TargetMarkKind::Ruby {
+                    reading: if n == 0 { "" } else { " \t　" }.into(),
+                }
+            }
+            2 => {
+                request.paragraphs.pop();
+            }
+            _ => request.paragraphs[2].text = "　 \t".into(),
+        }
+        let receipt = f
+            .service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .unwrap();
+        let before = fs::read(f.path()).unwrap();
+        assert!(
+            f.service()
+                .submit_human_draft(
+                    &f.project.id,
+                    BLOCK,
+                    &DraftSubmit {
+                        request_id: "never-published".into(),
+                        expected_revision: receipt.revision,
+                    }
+                )
+                .is_err()
+        );
+        let draft = f
+            .service()
+            .human_draft(&f.project.id, BLOCK)
+            .unwrap()
+            .draft
+            .unwrap();
+        assert_eq!(draft.paragraphs, request.paragraphs);
+        if n < 2 {
+            let incomplete = ReviewCandidate {
+                schema_version: 2,
+                block_id: BLOCK.into(),
+                paragraphs: draft.paragraphs,
+            };
+            assert!(incomplete.serialized().is_err());
+            assert!(incomplete.check_format(ReviewFormat::ReviewJson).is_err());
+        }
+        assert!(
+            f.service()
+                .human_submissions(&f.project.id, BLOCK)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fs::read(f.path()).unwrap(), before);
+    }
 }
 
 #[test]
