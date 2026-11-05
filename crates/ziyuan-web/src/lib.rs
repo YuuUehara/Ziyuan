@@ -48,6 +48,12 @@ use crate::views::{
 };
 const INDEX_HTML: &str = include_str!("index.html");
 
+/// 人工译稿标记编辑器的纯逻辑（`editor-core.mjs`）。浏览器经 `/assets/editor-core.mjs`
+/// 取它，`node --test` 也读同一份源码，故界面、模块与服务端口径不会各说各话。
+const EDITOR_CORE: &str = include_str!("editor-core.mjs");
+/// 人工译稿编辑器界面（`human-editor.mjs`），同样由 `node --test` 直接读源码测试。
+const HUMAN_EDITOR: &str = include_str!("human-editor.mjs");
+
 /// 随界面内置的字体（JetBrains Mono，SIL OFL 1.1，许可证见 `fonts/JetBrainsMono-OFL.txt`）。
 /// 中文与日文字体不内置，见 docs/guide.md。
 const FONTS: &[(&str, &[u8])] = &[
@@ -86,6 +92,28 @@ async fn font(axum::extract::Path(name): axum::extract::Path<String>) -> axum::r
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// 前端静态资源：`/assets/{name}`。
+///
+/// 只有两份脚本模块，未知资源一律 404。缓存用 `no-cache`（不是 `no-store`）：界面与模块
+/// 必须同版本，浏览器可以存副本但每次都要回来核对，免得拿旧模块去跑新界面。
+async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    use axum::response::IntoResponse;
+    let body = match name.as_str() {
+        "editor-core.mjs" => EDITOR_CORE,
+        "human-editor.mjs" => HUMAN_EDITOR,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 pub struct Config {
@@ -226,6 +254,27 @@ fn router_for(app: AppState) -> Router {
             "/text/{project}/blocks/{block}/finalize",
             post(text::finalize),
         )
+        .route("/text/{project}/human/progress", get(text::human_progress))
+        .route(
+            "/text/{project}/blocks/{block}/human",
+            get(text::human_view),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/human/draft",
+            post(text::human_draft_save),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/human/submit",
+            post(text::human_submit),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/human/approve",
+            post(text::human_approve),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/human/finalize",
+            post(text::human_finalize),
+        )
         .route("/text/{project}/blocks/{block}/reopen", post(text::reopen))
         .route("/text/{project}/blocks/{block}/issue", post(text::issue))
         .route(
@@ -242,10 +291,15 @@ fn router_for(app: AppState) -> Router {
         .route("/notes/{id}/remove", post(text::note_remove))
         .route("/notes/{id}/promote", post(text::note_promote))
         .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
+    // 静态资源与 API 同一把令牌：没有令牌仍 401，观政可读（只 GET）。
+    let assets = Router::new()
+        .route("/{name}", get(asset))
+        .route_layer(middleware::from_fn_with_state(app.clone(), require_token));
     Router::new()
         .route("/", get(index))
         .route("/login", post(login))
         .route("/fonts/{name}", get(font))
+        .nest("/assets", assets)
         .nest("/api", api)
         .with_state(app)
 }

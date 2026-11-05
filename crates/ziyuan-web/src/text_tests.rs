@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_app::Session;
 use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects};
-use ziyuan_app::translation::{block_dir_rel, block_source_hash, context_dir_rel, output_rel};
+use ziyuan_app::translation::{
+    ReviewCandidate, block_dir_rel, block_source_hash, context_dir_rel, output_rel,
+};
 use ziyuan_core::{
     AgentId, Capability, CourtEvent, Department, FileChange, Seal, TaskId, TranslationKind,
     TranslationLink,
@@ -1159,7 +1161,9 @@ fn text_frontend_contract() {
         "human_approved: [\"finalize\"]",
         "human_stale: [\"finalize\"]",
         "已人工定稿；要重译或修订请先退回重修",
-        "命令行运行 ziyuan text human finalize",
+        "已人工准奏并落盘；请在上方人工编辑器核对后人工御览定稿",
+        "import(`/assets/human-editor.mjs",
+        "id=\"text-human-editor\"",
         "人工版本失效：原文、上下文或朱批已变",
         "case \"zhupi_changed\": return \"朱批已变\";",
         "b.status.state.state === \"human_stale\"",
@@ -1630,6 +1634,589 @@ async fn selected_references_http_permissions_confirmation_replay_and_snapshot()
             .await
             .1,
         issued
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+// ---- 人工译稿：只读查看、草稿、送审、准奏、定稿 ----
+
+/// 递归列出全部目录及文件摘要，包含空目录以捕获只读入口的 mkdir。
+fn all_files(root: &Path) -> std::collections::BTreeMap<PathBuf, String> {
+    fn walk(dir: &Path, into: &mut std::collections::BTreeMap<PathBuf, String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                into.insert(path.clone(), "directory".into());
+                walk(&path, into);
+            } else {
+                into.insert(path.clone(), sha256_hex(&fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    walk(root, &mut files);
+    files
+}
+
+/// 多章项目：每个 (文件名, 正文) 成一章一块。
+fn project_files(root: &Path, title: &str, files: &[(&str, &str)]) -> Project {
+    let texts = TextProjects::new(root);
+    let project = texts
+        .create(NewProject {
+            title: title.into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let mut paths = Vec::new();
+    for (name, body) in files {
+        let path = root.join(name);
+        fs::write(&path, body).unwrap();
+        paths.push(path);
+    }
+    texts.import(&project.id, &paths).unwrap()
+}
+
+fn block_ref<'a>(project: &'a Project, block: &str) -> &'a ziyuan_app::text_project::PromptBlock {
+    project
+        .chapters
+        .iter()
+        .flat_map(|c| &c.blocks)
+        .find(|b| b.block_id == block)
+        .unwrap()
+}
+
+/// 每段「人工：原文」的草稿请求体（`DraftSave` 的 JSON 形状）。
+fn draft_body(
+    project: &Project,
+    block: &str,
+    basis: &Value,
+    expected: Option<&str>,
+    request_id: &str,
+) -> Value {
+    let paragraphs: Vec<Value> = block_ref(project, block)
+        .paragraphs
+        .iter()
+        .map(|p| json!({ "id": p.id, "text": format!("人工：{}", p.text) }))
+        .collect();
+    json!({
+        "request_id": request_id,
+        "expected_revision": expected,
+        "basis": basis.clone(),
+        "paragraphs": paragraphs,
+    })
+}
+
+fn zh_path(root: &Path, project: &Project, block: &str) -> PathBuf {
+    root.join(output_rel(&project.id, block))
+}
+
+/// 由草稿段落推出准奏该产生的目标：（格式, 字节）。带标记即第二版。
+fn expected_target(block: &str, paragraphs: &Value) -> (String, Vec<u8>) {
+    let has_marks = paragraphs.as_array().is_some_and(|paragraphs| {
+        paragraphs.iter().any(|p| {
+            p.get("marks")
+                .and_then(Value::as_array)
+                .is_some_and(|marks| !marks.is_empty())
+        })
+    });
+    let candidate: ReviewCandidate = serde_json::from_value(json!({
+        "schema_version": if has_marks { 2 } else { 1 },
+        "block_id": block,
+        "paragraphs": paragraphs.clone(),
+    }))
+    .unwrap();
+    let target = candidate.approved_target().unwrap();
+    (target.format().to_owned(), target.bytes().unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_view_is_read_only_and_reports_no_draft() {
+    for founded in [false, true] {
+        let (base, root) = start(&format!("human-view-{founded}"), founded).await;
+        let p = project(&root, "人工只读", "夜が明ける。\n");
+        let block = p.chapters[0].blocks[0].block_id.clone();
+        let route = format!("/text/{}/blocks/{}/human", p.id, block);
+        assert_eq!(call(&base, &route, None, None).await.0, 401);
+        let before = all_files(&root);
+        let (code, view) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(code, 200, "{view}");
+        assert_eq!(
+            all_files(&root),
+            before,
+            "只读 GET 不得改写或新增任何文件（含 lock 与控制目录里的文件）"
+        );
+        assert_eq!(view["draft"], Value::Null);
+        assert_eq!(view["revision"], Value::Null);
+        assert!(
+            view["message"].as_str().unwrap().contains("尚无草稿"),
+            "{view}"
+        );
+        assert_eq!(view["founded"], json!(founded));
+        assert_eq!(view["human"]["approved"], json!(false));
+        assert_eq!(view["human"]["finalized"], json!(false));
+        assert_eq!(view["human"]["operation_id"], Value::Null);
+        assert!(view["basis"]["source_hash"].is_string(), "{view}");
+        assert!(!zh_path(&root, &p, &block).exists());
+        if founded {
+            assert_eq!(view["status"]["state"]["state"], json!("not_started"));
+        } else {
+            assert_eq!(view["status"], Value::Null);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_draft_save_conflicts_and_mark_roundtrip() {
+    let (base, root) = start("human-draft", true).await;
+    let p = project(&root, "人工草稿", "夜が明ける。\n");
+    let block = p.chapters[0].blocks[0].block_id.clone();
+    let view_route = format!("/text/{}/blocks/{}/human", p.id, block);
+    let save_route = format!("{view_route}/draft");
+    let (code, view) = call(&base, &view_route, Some(TOKEN), None).await;
+    assert_eq!(code, 200, "{view}");
+    let basis = view["basis"].clone();
+
+    let body = draft_body(&p, &block, &basis, None, "save-1");
+    let (code, first) = call(&base, &save_route, Some(TOKEN), Some(body.clone())).await;
+    assert_eq!(code, 200, "{first}");
+    let revision = first["revision"].as_str().unwrap().to_owned();
+    assert!(first["content_hash"].is_string());
+    // 同请求同内容：返回原回执，不推进修订号。
+    let (code, again) = call(&base, &save_route, Some(TOKEN), Some(body)).await;
+    assert_eq!(code, 200, "{again}");
+    assert_eq!(again["revision"], json!(revision));
+
+    // 旧修订号：409 且带当前修订号；盘上仍是旧稿。
+    let mut stale = draft_body(&p, &block, &basis, Some(&"0".repeat(32)), "save-2");
+    let (code, conflict) = call(&base, &save_route, Some(TOKEN), Some(stale.clone())).await;
+    assert_eq!(code, 409, "{conflict}");
+    assert_eq!(conflict["current"], json!(revision));
+    assert!(conflict["error"].is_string(), "{conflict}");
+    let (_, after_conflict) = call(&base, &view_route, Some(TOKEN), None).await;
+    assert_eq!(after_conflict["revision"], json!(revision));
+    assert_eq!(
+        after_conflict["draft"]["paragraphs"][0]["text"],
+        json!("人工：夜が明ける。")
+    );
+
+    // 同请求号异内容：409，说明请求号已被占用。
+    stale["request_id"] = json!("save-1");
+    stale["expected_revision"] = json!(revision);
+    stale["paragraphs"][0]["text"] = json!("改过的译文");
+    let (code, taken) = call(&base, &save_route, Some(TOKEN), Some(stale)).await;
+    assert_eq!(code, 409, "{taken}");
+    assert!(taken["message"].as_str().unwrap().contains("request_id"));
+
+    // 材料基准过期：409 且要求重新读取。
+    let mut old_basis = basis.clone();
+    old_basis["source_hash"] = json!("f".repeat(64));
+    let body = draft_body(&p, &block, &old_basis, Some(&revision), "save-3");
+    let (code, changed) = call(&base, &save_route, Some(TOKEN), Some(body)).await;
+    assert_eq!(code, 409, "{changed}");
+    assert!(
+        changed["error"].as_str().unwrap().contains("重新读取"),
+        "{changed}"
+    );
+
+    // 标记往返：ruby ＋ emphasis 逐字段读回一致。
+    let marked = json!({
+        "request_id": "save-marks",
+        "expected_revision": revision,
+        "basis": basis,
+        "paragraphs": [{
+            "id": block_ref(&p, &block).paragraphs[0].id,
+            "text": "夜明け",
+            "marks": [
+                {"start": 0, "end": 3, "kind": {"type": "ruby", "reading": "よ"}},
+                {"start": 3, "end": 6, "kind": {"type": "emphasis"}}
+            ]
+        }]
+    });
+    let (code, saved_marks) = call(&base, &save_route, Some(TOKEN), Some(marked.clone())).await;
+    assert_eq!(code, 200, "{saved_marks}");
+    let (_, view) = call(&base, &view_route, Some(VIEWER), None).await;
+    assert_eq!(view["draft"]["paragraphs"], marked["paragraphs"]);
+    assert_eq!(view["revision"], saved_marks["revision"]);
+
+    // 非法字素边界（start 切在 UTF-8 中间）：400，旧稿不动。
+    let mut broken = marked.clone();
+    broken["request_id"] = json!("save-broken");
+    broken["expected_revision"] = saved_marks["revision"].clone();
+    broken["paragraphs"][0]["marks"][0]["start"] = json!(1);
+    let (code, invalid) = call(&base, &save_route, Some(TOKEN), Some(broken)).await;
+    assert_eq!(code, 400, "{invalid}");
+    let (_, unchanged) = call(&base, &view_route, Some(VIEWER), None).await;
+    assert_eq!(unchanged["draft"]["paragraphs"], marked["paragraphs"]);
+    assert_eq!(unchanged["revision"], saved_marks["revision"]);
+    assert!(!zh_path(&root, &p, &block).exists(), "保存草稿不得写译稿");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_round_lands_plain_and_marked_targets_and_is_idempotent() {
+    let (base, root) = start("human-round", true).await;
+    let p = project_files(
+        &root,
+        "人工全流程",
+        &[("c1.txt", "夜が明ける。\n"), ("c2.txt", "唄う。\n")],
+    );
+    let plain = p.chapters[0].blocks[0].block_id.clone();
+    let marked = p.chapters[1].blocks[0].block_id.clone();
+    for (block, with_marks) in [(&plain, false), (&marked, true)] {
+        let view_route = format!("/text/{}/blocks/{block}/human", p.id);
+        let save_route = format!("{view_route}/draft");
+        let submit_route = format!("{view_route}/submit");
+        let approve_route = format!("{view_route}/approve");
+        let finalize_route = format!("{view_route}/finalize");
+        let (code, view) = call(&base, &view_route, Some(TOKEN), None).await;
+        assert_eq!(code, 200, "{view}");
+        let mut body = draft_body(&p, block, &view["basis"], None, &format!("save-{block}"));
+        if with_marks {
+            body["paragraphs"][0]["text"] = json!("唄声");
+            body["paragraphs"][0]["marks"] = json!([
+                {"start": 0, "end": 3, "kind": {"type": "ruby", "reading": "うた"}},
+                {"start": 3, "end": 6, "kind": {"type": "strong"}}
+            ]);
+        }
+        let (code, saved) = call(&base, &save_route, Some(TOKEN), Some(body)).await;
+        assert_eq!(code, 200, "{saved}");
+        let revision = saved["revision"].as_str().unwrap().to_owned();
+
+        // 送审：同修订号派生同一请求；重复发布不追加。
+        let (code, submitted) = call(&base, &submit_route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 200, "{submitted}");
+        assert_eq!(submitted["published"], json!(true), "{submitted}");
+        assert_eq!(
+            submitted["submit_request_id"],
+            json!(format!("submit-r{revision}"))
+        );
+        let binding = submitted["binding_hash"].clone();
+        let (code, again) = call(&base, &submit_route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 200, "{again}");
+        assert_eq!(again["published"], json!(false));
+        assert_eq!(again["binding_hash"], binding);
+        assert!(again["message"].as_str().unwrap().contains("此前已入簿"));
+
+        // 准奏即落盘：zh.json 字节等于期望目标。
+        let (code, approved) = call(&base, &approve_route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 200, "{approved}");
+        assert_eq!(approved["approved"], json!(true), "{approved}");
+        let operation = approved["operation_id"].as_str().unwrap().to_owned();
+        assert_eq!(operation.len(), 32, "{approved}");
+        let (_, draft_view) = call(&base, &view_route, Some(VIEWER), None).await;
+        let (format, bytes) = expected_target(block, &draft_view["draft"]["paragraphs"]);
+        assert_eq!(
+            format,
+            if with_marks {
+                // 带标记候选按第二版落盘。
+                "zh-json/2"
+            } else {
+                "zh-json/1"
+            }
+        );
+        assert_eq!(approved["target_format"], json!(format), "{approved}");
+        assert_eq!(approved["target_hash"], json!(sha256_hex(&bytes)));
+        assert_eq!(fs::read(zh_path(&root, &p, block)).unwrap(), bytes);
+
+        // 重复准奏幂等。
+        let (code, repeated) = call(&base, &approve_route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 200, "{repeated}");
+        assert_eq!(repeated["approved"], json!(false), "{repeated}");
+        assert_eq!(repeated["operation_id"], json!(operation));
+
+        // 定稿及其幂等。
+        let (code, finalized) = call(&base, &finalize_route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 200, "{finalized}");
+        assert_eq!(finalized["finalized"], json!(true), "{finalized}");
+        let (code, repeated) = call(&base, &finalize_route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 200, "{repeated}");
+        assert_eq!(repeated["finalized"], json!(false), "{repeated}");
+
+        // 状态与人工事实（只读）。
+        let (_, view) = call(&base, &view_route, Some(VIEWER), None).await;
+        assert_eq!(view["status"]["state"]["state"], json!("human_finalized"));
+        assert_eq!(view["human"]["approved"], json!(true));
+        assert_eq!(view["human"]["finalized"], json!(true));
+        assert_eq!(view["human"]["operation_id"], json!(operation));
+        assert_eq!(view["human"]["target_format"], json!(format));
+        assert_eq!(view["human"]["target_hash"], json!(sha256_hex(&bytes)));
+    }
+    // 每块恰有一条送审、一条准奏、一条定稿。
+    let history = EventLog::new(&root).load().unwrap();
+    for event in &history {
+        let actor = match event {
+            CourtEvent::HumanSubmissionBound { binding } => Some(binding.request.actor),
+            CourtEvent::HumanTranslationApproved { approval } => Some(approval.request.actor),
+            _ => None,
+        };
+        if let Some(actor) = actor {
+            assert_eq!(actor, ziyuan_core::HumanActor::Web);
+        }
+    }
+    for block in [&plain, &marked] {
+        let bound = history
+            .iter()
+            .filter(|e| {
+                matches!(e, CourtEvent::HumanSubmissionBound { binding }
+                    if &binding.request.block == block)
+            })
+            .count();
+        let approved = history
+            .iter()
+            .filter(|e| {
+                matches!(e, CourtEvent::HumanTranslationApproved { approval }
+                    if &approval.request.block == block)
+            })
+            .count();
+        let finalized = history
+            .iter()
+            .filter(|e| {
+                matches!(e, CourtEvent::HumanTranslationFinalized { finalization }
+                    if &finalization.block == block)
+            })
+            .count();
+        assert_eq!((bound, approved, finalized), (1, 1, 1), "{block}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_writes_without_court_ask_to_found_first() {
+    let (base, root) = start("human-no-court", false).await;
+    let p = project(&root, "未开国", "夜が明ける。\n");
+    let block = p.chapters[0].blocks[0].block_id.clone();
+    let view_route = format!("/text/{}/blocks/{}/human", p.id, block);
+    // 草稿不经朝廷，未开国也能保存。
+    let (code, view) = call(&base, &view_route, Some(TOKEN), None).await;
+    assert_eq!(code, 200, "{view}");
+    let body = draft_body(&p, &block, &view["basis"], None, "save-1");
+    let (code, saved) = call(
+        &base,
+        &format!("{view_route}/draft"),
+        Some(TOKEN),
+        Some(body),
+    )
+    .await;
+    assert_eq!(code, 200, "{saved}");
+    for (action, route) in [
+        ("submit", format!("{view_route}/submit")),
+        ("approve", format!("{view_route}/approve")),
+        ("finalize", format!("{view_route}/finalize")),
+    ] {
+        let (code, error) = call(&base, &route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 400, "{action}: {error}");
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains("先开国"), "{action}: {message}");
+    }
+    assert!(!root.join(".ziyuan/court.log").exists(), "不得伪造开国");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_writes_report_unreadable_history_without_init_hint() {
+    let (base, root) = start("human-bad-court", true).await;
+    let p = project(&root, "损坏事件簿", "夜が明ける。\n");
+    let block = &p.chapters[0].blocks[0].block_id;
+    fs::write(root.join(".ziyuan/court.log"), "broken history\n").unwrap();
+    let before = all_files(&root);
+    for action in ["submit", "approve", "finalize"] {
+        let route = format!("/text/{}/blocks/{block}/human/{action}", p.id);
+        let (code, error) = call(&base, &route, Some(TOKEN), Some(json!({}))).await;
+        assert_eq!(code, 400, "{action}: {error}");
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains("事件簿"), "{action}: {message}");
+        assert!(!message.contains("先开国"), "{action}: {message}");
+        assert!(!message.contains(root.to_str().unwrap()));
+        assert_eq!(all_files(&root), before);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_progress_rejects_malformed_drafts_and_non_directory_ancestors() {
+    let (base, root) = start("human-progress-corrupt", true).await;
+    let p = project(&root, "草稿损坏", "夜が明ける。\n");
+    let block = &p.chapters[0].blocks[0].block_id;
+    let dir = root
+        .join(".ziyuan/text-projects")
+        .join(&p.id)
+        .join("human-drafts");
+    let route = format!("/text/{}/human/progress", p.id);
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join(format!("{block}.json"));
+    for body in [
+        "{}",
+        "{\"data\":{\"draft\":{\"paragraphs\":[]}}}",
+        "not json",
+    ] {
+        fs::write(&path, body).unwrap();
+        let before = all_files(&root);
+        let (code, error) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(code, 400, "{body}: {error}");
+        assert_eq!(all_files(&root), before);
+    }
+    fs::remove_file(path).unwrap();
+    fs::remove_dir(&dir).unwrap();
+    fs::write(&dir, "not a directory").unwrap();
+    assert_eq!(call(&base, &route, Some(VIEWER), None).await.0, 400);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn human_progress_counts_chapters_and_next_untranslated() {
+    let (base, root) = start("human-progress", true).await;
+    let p = project_files(
+        &root,
+        "人工进度",
+        &[("c1.txt", "夜が明ける。\n"), ("c2.txt", "唄う。\n")],
+    );
+    let first = p.chapters[0].blocks[0].block_id.clone();
+    let second = p.chapters[1].blocks[0].block_id.clone();
+    let route = format!("/text/{}/human/progress", p.id);
+    assert_eq!(call(&base, &route, None, None).await.0, 401);
+    let before = all_files(&root);
+    let (code, progress) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{progress}");
+    assert_eq!(all_files(&root), before, "进度只读");
+    assert_eq!(progress["founded"], json!(true));
+    assert_eq!(progress["totals"]["total"], json!(2));
+    assert_eq!(progress["totals"]["drafted"], json!(0));
+    assert_eq!(progress["totals"]["submitted"], json!(0));
+    assert_eq!(progress["totals"]["approved"], json!(0));
+    assert_eq!(progress["totals"]["finalized"], json!(0));
+    assert_eq!(progress["totals"]["not_started"], json!(2));
+    assert_eq!(progress["next_untranslated"], json!(first));
+    assert_eq!(progress["chapters"].as_array().unwrap().len(), 2);
+    assert_eq!(progress["chapters"][0]["chapter"], p.chapters[0].id);
+    assert_eq!(progress["chapters"][0]["total"], json!(1));
+
+    // 只保存第一块：草稿计 1，下一块是第二块。
+    let (_, view) = call(
+        &base,
+        &format!("/text/{}/blocks/{first}/human", p.id),
+        Some(TOKEN),
+        None,
+    )
+    .await;
+    let body = draft_body(&p, &first, &view["basis"], None, "save-first");
+    assert_eq!(
+        call(
+            &base,
+            &format!("/text/{}/blocks/{first}/human/draft", p.id),
+            Some(TOKEN),
+            Some(body)
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, progress) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(progress["totals"]["drafted"], json!(1));
+    assert_eq!(progress["totals"]["not_started"], json!(1));
+    assert_eq!(progress["chapters"][0]["drafted"], json!(1));
+    assert_eq!(progress["chapters"][1]["drafted"], json!(0));
+    assert_eq!(progress["next_untranslated"], json!(second));
+
+    // 送审并准奏第一块：已送审／已准奏各 1。
+    for action in ["submit", "approve"] {
+        let (code, body) = call(
+            &base,
+            &format!("/text/{}/blocks/{first}/human/{action}", p.id),
+            Some(TOKEN),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(code, 200, "{action}: {body}");
+    }
+    let (_, progress) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(progress["totals"]["submitted"], json!(1));
+    assert_eq!(progress["totals"]["approved"], json!(1));
+    assert_eq!(progress["totals"]["finalized"], json!(0));
+
+    // 两块都有草稿后没有下一块待起草；定稿再计 1。
+    let (_, view) = call(
+        &base,
+        &format!("/text/{}/blocks/{second}/human", p.id),
+        Some(TOKEN),
+        None,
+    )
+    .await;
+    let body = draft_body(&p, &second, &view["basis"], None, "save-second");
+    assert_eq!(
+        call(
+            &base,
+            &format!("/text/{}/blocks/{second}/human/draft", p.id),
+            Some(TOKEN),
+            Some(body)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &base,
+            &format!("/text/{}/blocks/{first}/human/finalize", p.id),
+            Some(TOKEN),
+            Some(json!({}))
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, progress) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(progress["totals"]["drafted"], json!(2));
+    assert_eq!(progress["totals"]["not_started"], json!(0));
+    assert_eq!(progress["totals"]["finalized"], json!(1));
+    assert_eq!(progress["next_untranslated"], Value::Null);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn viewer_cannot_post_human_endpoints_and_disk_is_untouched() {
+    let (base, root) = start("human-viewer", true).await;
+    let p = project(&root, "观政只读", "夜が明ける。\n");
+    let block = p.chapters[0].blocks[0].block_id.clone();
+    let view_route = format!("/text/{}/blocks/{}/human", p.id, block);
+    let (_, view) = call(&base, &view_route, Some(TOKEN), None).await;
+    let body = draft_body(&p, &block, &view["basis"], None, "save-1");
+    let draft_route = format!("{view_route}/draft");
+    assert_eq!(
+        call(&base, &draft_route, Some(TOKEN), Some(body.clone()))
+            .await
+            .0,
+        200
+    );
+    let before = all_files(&root);
+    for (route, payload) in [
+        (draft_route.clone(), body),
+        (format!("{view_route}/submit"), json!({})),
+        (format!("{view_route}/approve"), json!({})),
+        (format!("{view_route}/finalize"), json!({})),
+    ] {
+        let (code, error) = call(&base, &route, Some(VIEWER), Some(payload)).await;
+        assert_eq!(code, 403, "{route}: {error}");
+        assert!(
+            error["error"].as_str().unwrap().contains("观政令牌"),
+            "{error}"
+        );
+    }
+    assert_eq!(all_files(&root), before, "观政的四个 POST 不得改动盘面");
+    // 只读的人工查看与进度仍可看。
+    assert_eq!(call(&base, &view_route, Some(VIEWER), None).await.0, 200);
+    assert_eq!(
+        call(
+            &base,
+            &format!("/text/{}/human/progress", p.id),
+            Some(VIEWER),
+            None
+        )
+        .await
+        .0,
+        200
     );
     fs::remove_dir_all(root).unwrap();
 }

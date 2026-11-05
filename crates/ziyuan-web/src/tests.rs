@@ -16,6 +16,99 @@ pub(crate) const TOKEN: &str = "test-token";
 pub(crate) const VIEWER: &str = "viewer-token";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn editor_module_is_authenticated_and_served_from_the_tested_source() {
+    let (base, root) = start("editor-assets").await;
+    for (name, source, token, expected) in [
+        (
+            "editor-core.mjs",
+            include_str!("editor-core.mjs"),
+            None,
+            401,
+        ),
+        (
+            "editor-core.mjs",
+            include_str!("editor-core.mjs"),
+            Some(TOKEN),
+            200,
+        ),
+        (
+            "editor-core.mjs",
+            include_str!("editor-core.mjs"),
+            Some(VIEWER),
+            200,
+        ),
+        (
+            "human-editor.mjs",
+            include_str!("human-editor.mjs"),
+            None,
+            401,
+        ),
+        (
+            "human-editor.mjs",
+            include_str!("human-editor.mjs"),
+            Some(TOKEN),
+            200,
+        ),
+        (
+            "human-editor.mjs",
+            include_str!("human-editor.mjs"),
+            Some(VIEWER),
+            200,
+        ),
+    ] {
+        let url = format!("{base}/assets/{name}?retry=1");
+        let (code, kind, cache, body) = tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut request = agent.get(&url);
+            if let Some(token) = token {
+                request = request.header("Authorization", &format!("Bearer {token}"));
+            }
+            let mut response = request.call().unwrap();
+            let header = |key| {
+                response
+                    .headers()
+                    .get(key)
+                    .map(|v| v.to_str().unwrap().to_owned())
+            };
+            let kind = header("content-type");
+            let cache = header("cache-control");
+            let code = response.status().as_u16();
+            let body = response.body_mut().read_to_string().unwrap();
+            (code, kind, cache, body)
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, expected, "{name}");
+        if code == 200 {
+            assert_eq!(kind.as_deref(), Some("text/javascript; charset=utf-8"));
+            assert_eq!(cache.as_deref(), Some("no-cache"));
+            assert_eq!(body, source, "{name}");
+        }
+    }
+    let url = format!("{base}/assets/missing.mjs");
+    let code = tokio::task::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        agent
+            .get(&url)
+            .header("Cookie", &format!("ziyuan_token={VIEWER}"))
+            .call()
+            .unwrap()
+            .status()
+            .as_u16()
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 404);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bundled_fonts_are_served_without_a_token_and_carry_their_license() {
     let (base, _) = start("fonts").await;
     let fetch = |path: &'static str| {
