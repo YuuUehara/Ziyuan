@@ -100,14 +100,15 @@ impl Fx {
             .unwrap()
     }
     fn write_glossary(&self, body: &str) {
-        self.t().ensure_context_draft(&self.project).unwrap();
-        fs::write(
-            self.root
-                .join(context_dir_rel(&self.project))
-                .join(GLOSSARY_FILE),
-            body,
-        )
-        .unwrap();
+        let path = self
+            .root
+            .join(context_dir_rel(&self.project))
+            .join(GLOSSARY_FILE);
+        // 修复测试故意写坏的草稿不应先读取旧内容；首次仍照常初始化草稿。
+        if !path.exists() {
+            self.t().ensure_context_draft(&self.project).unwrap();
+        }
+        fs::write(path, body).unwrap();
     }
     fn write_summary(&self, chapter: &str, body: &str) {
         self.t().ensure_context_draft(&self.project).unwrap();

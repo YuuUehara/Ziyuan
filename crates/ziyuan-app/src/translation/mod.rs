@@ -14,6 +14,7 @@ mod export;
 mod export_package;
 mod finished;
 mod gate;
+mod glossary;
 mod markup;
 mod references;
 mod session;
@@ -38,6 +39,10 @@ pub use draft::{
 };
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
+pub use glossary::{
+    AddressRule, Glossary, GlossaryEvidence, GlossaryPosition, GlossaryScope, GlossarySpeaker,
+    GlossaryStance, GlossaryStatus, Person, PersonVoice, StructuredGlossary, Term, TermCategory,
+};
 pub use markup::{TargetMark, TargetMarkKind};
 pub use references::{
     MAX_REFERENCE_BYTES, MAX_REFERENCES, ReferencePreview, ReferenceRequest, ReferenceSelection,

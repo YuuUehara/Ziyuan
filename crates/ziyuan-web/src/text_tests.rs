@@ -3,7 +3,7 @@
 use super::*;
 use crate::tests::{TOKEN, VIEWER, call};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +20,150 @@ use ziyuan_core::{
 use ziyuan_governance::{Court, founding_events};
 use ziyuan_runtime::{DemoBackend, Limits};
 use ziyuan_storage::{EventLog, EventStore};
+
+fn context_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(base).unwrap().to_owned();
+            if path.is_dir() {
+                out.insert(relative, None);
+                visit(base, &path, out);
+            } else {
+                out.insert(relative, Some(fs::read(path).unwrap()));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    visit(root, root, &mut out);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_v2_http_approval_refuses_before_filling_missing_draft_files() {
+    let (base, root) = start("context-v2-approve", false).await;
+    let p = project(&root, "第二版拒绝", "勇者。\n");
+    let dir = root.join(context_dir_rel(&p.id));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("glossary.json"),
+        r#"{"format":2,"terms":[],"persons":[]}"#,
+    )
+    .unwrap();
+    let before = context_tree(&root);
+    let route = format!("/text/{}/context/approve", p.id);
+    assert_eq!(
+        call(&base, &route, Some(VIEWER), Some(json!({}))).await.0,
+        403
+    );
+    let (code, error) = call(&base, &route, Some(TOKEN), Some(json!({}))).await;
+    assert_eq!(code, 400, "{error}");
+    assert!(
+        error.to_string().contains("人物／术语资料尚未开放"),
+        "{error}"
+    );
+    assert_eq!(context_tree(&root), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_v2_http_snapshot_refusal_keeps_message_and_missing_helpers() {
+    for founded in [false, true] {
+        let (base, root) = start(&format!("context-v2-snapshot-{founded}"), founded).await;
+        let p = project(&root, "手工第二版快照", "勇者。\n");
+        let block = &p.chapters[0].blocks[0].block_id;
+        let t = ziyuan_app::translation::Translations::new(&root);
+        t.ensure_context_draft(&p.id).unwrap();
+        t.approve_context(&p.id).unwrap();
+        let snapshot = root
+            .join(".ziyuan/text-projects")
+            .join(&p.id)
+            .join("context/v1");
+        let glossary = br#"{"format":2,"terms":[],"persons":[]}"#;
+        fs::write(snapshot.join("glossary.json"), glossary).unwrap();
+        let manifest_file = snapshot.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_file).unwrap()).unwrap();
+        for entry in manifest["files"].as_array_mut().unwrap() {
+            if entry["path"] == "glossary.json" {
+                entry["sha256"] = json!(sha256_hex(glossary));
+                entry["bytes"] = json!(glossary.len());
+            }
+        }
+        fs::write(manifest_file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let draft = root.join(context_dir_rel(&p.id));
+        fs::remove_file(draft.join("style.md")).unwrap();
+        fs::remove_dir(draft.join("summaries")).unwrap();
+        let before = context_tree(&root);
+        let (code, error) = call(
+            &base,
+            &format!("/text/{}/blocks/{block}/verification", p.id),
+            Some(VIEWER),
+            None,
+        )
+        .await;
+        assert_eq!(code, 400, "{error}");
+        assert!(
+            error.to_string().contains("人物／术语资料尚未开放"),
+            "{error}"
+        );
+        assert!(context_tree(&root) == before, "读取勘校不得改盘");
+        let (code, error) = call(
+            &base,
+            &format!("/text/{}/context/approve", p.id),
+            Some(TOKEN),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(code, 400, "{error}");
+        assert!(
+            error.to_string().contains("人物／术语资料尚未开放"),
+            "{error}"
+        );
+        assert!(
+            context_tree(&root) == before,
+            "拒绝前不得补出草稿文件或目录"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_v2_http_viewer_reports_unsupported_exported_glossary_without_writes() {
+    let (base, root) = start("context-v2-viewer", false).await;
+    let p = project(&root, "观政第二版", "勇者。\n");
+    let block = &p.chapters[0].blocks[0].block_id;
+    let dir = root.join(block_dir_rel(&p.id, block));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("context.json");
+    let route = format!("/text/{}/blocks/{block}", p.id);
+    for glossary in [
+        json!({"format":2,"terms":[],"persons":[]}),
+        json!({"format":3,"terms":[],"persons":[]}),
+        json!([{"source":"勇者","allowed":["勇士"],"scope":"自由文本"}]),
+    ] {
+        let text = json!({"version":1,"glossary":glossary,"style":"","summaries":{}}).to_string();
+        fs::write(&path, &text).unwrap();
+        let before = context_tree(&root);
+        let (code, view) = call(&base, &route, Some(VIEWER), None).await;
+        assert_eq!(code, 200, "{view}");
+        assert_eq!(context_tree(&root), before);
+        assert_eq!(view["context"]["text"], text);
+        if glossary.is_array() {
+            assert_eq!(view["context"]["value"]["glossary"], glossary);
+            assert!(view["context"]["error"].is_null());
+        } else {
+            assert!(view["context"]["value"].is_null(), "{view}");
+            let error = view["context"]["error"].as_str().unwrap();
+            if glossary["format"] == 2 {
+                assert!(error.contains("人物／术语资料尚未开放"), "{error}");
+            } else {
+                assert!(error.contains("升级"), "{error}");
+            }
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verification_http_readonly_strict_permissions_stale_and_history() {

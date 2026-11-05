@@ -39,8 +39,12 @@ fn missing_block(project: &str, block: &str) -> ApiError {
     )))
 }
 
-fn verification_error(_: impl std::fmt::Display) -> ApiError {
-    ApiError::bad("词证或复核不可用：请检查段落、关联依据与材料；材料变化后请重新读取再复核。")
+fn verification_error(error: impl std::fmt::Display) -> ApiError {
+    if error.to_string().contains("人物／术语资料尚未开放") {
+        ApiError::bad("人物／术语资料尚未开放")
+    } else {
+        ApiError::bad("词证或复核不可用：请检查段落、关联依据与材料；材料变化后请重新读取再复核。")
+    }
 }
 
 pub(crate) async fn evidence_add(
@@ -384,8 +388,23 @@ fn material_file(dir: &Path, name: &str) -> (Option<Value>, Option<String>, Stri
         return (None, None, String::new());
     };
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    match serde_json::from_slice(&bytes) {
-        Ok(value) => (Some(value), None, text),
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => {
+            // context.json 可能被手工改写，不能把第二版对象当旧数组交给页面。
+            if name == "context.json"
+                && let Some(glossary) = value.get("glossary")
+            {
+                let result = serde_json::to_vec(glossary)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        ziyuan_app::translation::parse_glossary(&bytes).map_err(|e| e.to_string())
+                    });
+                if let Err(error) = result {
+                    return (None, Some(error), text);
+                }
+            }
+            (Some(value), None, text)
+        }
         Err(e) => (None, Some(e.to_string()), text),
     }
 }

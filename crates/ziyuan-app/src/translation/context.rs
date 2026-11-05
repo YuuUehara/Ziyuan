@@ -18,10 +18,10 @@ const MANIFEST_FILE: &str = "manifest.json";
 const GLOSSARY_BYTES: usize = 1024 * 1024;
 const STYLE_BYTES: usize = 256 * 1024;
 const SUMMARY_BYTES: usize = 64 * 1024;
-const MAX_ENTRIES: usize = 5000;
-const MAX_TERM: usize = 200;
-const MAX_ALLOWED: usize = 16;
-const MAX_NOTE: usize = 500;
+pub(super) const MAX_ENTRIES: usize = 5000;
+pub(super) const MAX_TERM: usize = 200;
+pub(super) const MAX_ALLOWED: usize = 16;
+pub(super) const MAX_NOTE: usize = 500;
 
 /// 术语表一条：原文、允许译法（至少一种）、可选作用范围与备注。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ pub(crate) fn summary_hashes(files: &[ManifestFile]) -> BTreeMap<String, String>
         .collect()
 }
 
-fn check_text(what: &str, text: &str, max: usize) -> Result<()> {
+pub(super) fn check_text(what: &str, text: &str, max: usize) -> Result<()> {
     if text.trim().is_empty() {
         return Err(invalid(format!("{what}不能为空")));
     }
@@ -101,6 +101,10 @@ fn check_text(what: &str, text: &str, max: usize) -> Result<()> {
 
 /// 校验术语表 JSON：数组，每条原文与各允许译法非空、有长度上限，不得有未知字段。
 pub fn parse_glossary(bytes: &[u8]) -> Result<Vec<GlossaryEntry>> {
+    super::glossary::Glossary::parse(bytes)?.into_legacy()
+}
+
+pub(crate) fn parse_legacy_glossary(bytes: &[u8]) -> Result<Vec<GlossaryEntry>> {
     let entries: Vec<GlossaryEntry> = serde_json::from_slice(bytes)
         .map_err(|e| invalid(format!("{GLOSSARY_FILE} 格式不对：{e}")))?;
     if entries.len() > MAX_ENTRIES {
@@ -134,6 +138,15 @@ struct DraftFile {
     bytes: Vec<u8>,
 }
 
+fn checked_legacy_glossary(
+    bytes: &[u8],
+    project: &crate::text_project::Project,
+) -> Result<Vec<GlossaryEntry>> {
+    let glossary = super::glossary::Glossary::parse(bytes)?;
+    glossary.validate_project(project)?;
+    glossary.into_legacy()
+}
+
 fn version_of(name: &str) -> Option<u32> {
     let digits = name.strip_prefix('v')?;
     if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -160,7 +173,15 @@ impl Translations {
 
     /// 草稿缺什么补什么：`glossary.json`（空数组）、`style.md`、`summaries/`。已有的不动。
     pub fn ensure_context_draft(&self, project: &str) -> Result<()> {
-        self.project(project)?;
+        let p = self.project(project)?;
+        // 先只读预检，不能因第二版资料尚未开放而补出文体、目录或锁文件。
+        let existing = super::check_plain_dirs(&self.root, &["translations", project, "context"])?;
+        if let Some(text) =
+            read_text_opt(&existing.join(GLOSSARY_FILE), GLOSSARY_FILE, GLOSSARY_BYTES)?
+        {
+            checked_legacy_glossary(text.as_bytes(), &p)?;
+        }
+        self.current_context(project)?;
         let dir = ensure_plain_dirs(&self.root, &["translations", project, "context"])?;
         ensure_plain_dirs(&dir, &[SUMMARIES_DIR])?;
         for (name, body) in [
@@ -181,13 +202,13 @@ impl Translations {
         Ok(())
     }
 
-    /// 读并校验草稿；缺的术语表视为空，缺的文体视为空串。`chapters` 为本项目的章 ID。
-    fn read_draft(&self, project: &str, chapters: &[String]) -> Result<Vec<DraftFile>> {
-        let dir = self.draft_dir(project);
+    /// 读并校验草稿；缺的术语表视为空，缺的文体视为空串。
+    fn read_draft(&self, project: &crate::text_project::Project) -> Result<Vec<DraftFile>> {
+        let dir = self.draft_dir(&project.id);
         let mut files = Vec::new();
         let glossary = read_text_opt(&dir.join(GLOSSARY_FILE), GLOSSARY_FILE, GLOSSARY_BYTES)?
             .unwrap_or_else(|| "[]\n".into());
-        parse_glossary(glossary.as_bytes())?;
+        checked_legacy_glossary(glossary.as_bytes(), project)?;
         files.push(DraftFile {
             path: GLOSSARY_FILE.into(),
             bytes: glossary.into_bytes(),
@@ -218,7 +239,7 @@ impl Translations {
                 names.sort();
                 for name in names {
                     let chapter = name.strip_suffix(".md").unwrap_or("");
-                    if !chapters.iter().any(|c| c == chapter) {
+                    if !project.chapters.iter().any(|c| c.id == chapter) {
                         return Err(invalid(format!(
                             "summaries/{name}：须为本项目的章 ID 加 .md（如 c0001.md）"
                         )));
@@ -239,6 +260,9 @@ impl Translations {
     /// 批准上下文草稿：校验后存为新快照 `v<N>`（N 递增，从不覆盖），返回版本。
     /// 草稿与现行快照完全相同时不建新版，返回现行版本。
     pub fn approve_context(&self, project: &str) -> Result<u32> {
+        // Workspace::open／lock 可能初始化写协议；不支持的资料须在这之前拒绝。
+        self.read_draft(&self.project(project)?)?;
+        self.current_context(project)?;
         let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
         let _guard = workspace
             .lock(LockScope::Workspace)
@@ -247,8 +271,7 @@ impl Translations {
             .ensure_writable()
             .map_err(|e| invalid(e.to_string()))?;
         let p = self.project(project)?;
-        let chapters: Vec<String> = p.chapters.iter().map(|c| c.id.clone()).collect();
-        let draft = self.read_draft(project, &chapters)?;
+        let draft = self.read_draft(&p)?;
         let files: Vec<ManifestFile> = draft
             .iter()
             .map(|f| ManifestFile {
@@ -375,7 +398,8 @@ impl Translations {
             let text = String::from_utf8(bytes)
                 .map_err(|_| invalid(format!("上下文 v{version} 的 {} 不是 UTF-8", file.path)))?;
             if file.path == GLOSSARY_FILE {
-                snapshot.glossary = parse_glossary(text.as_bytes())?;
+                snapshot.glossary =
+                    checked_legacy_glossary(text.as_bytes(), &self.project(project)?)?;
             } else if file.path == STYLE_FILE {
                 snapshot.style = text;
             } else if let Some(chapter) = file

@@ -341,12 +341,14 @@ impl Notes {
         let dir = self.root.join(context_dir_rel(project));
         // 草稿是读改写：先加锁，免得两个进程同时并入时丢条目。
         let _lock = DirLock::acquire(&dir)?;
+        // 文体札记也不可绕过人物／术语资料的拒绝边界；锁内重读防止预检后换版。
+        let glossary = read_text_opt(&dir.join(GLOSSARY_FILE), GLOSSARY_FILE, GLOSSARY_BYTES)?
+            .unwrap_or_else(|| "[]\n".into());
+        let entries = parse_glossary(glossary.as_bytes())?;
         match note.kind {
             NoteKind::Word => {
                 let path = dir.join(GLOSSARY_FILE);
-                let text = read_text_opt(&path, GLOSSARY_FILE, GLOSSARY_BYTES)?
-                    .unwrap_or_else(|| "[]\n".into());
-                let mut entries = parse_glossary(text.as_bytes())?;
+                let mut entries = entries;
                 let exists = entries
                     .iter()
                     .any(|e| e.source == note.source && e.allowed.contains(&note.zh));
