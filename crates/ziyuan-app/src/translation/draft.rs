@@ -1,8 +1,8 @@
 //! Local human drafts and immutable review submissions, never approved writes.
 //! Text, submissions and durable retry receipts share one atomic JSON publication.
 use super::{
-    Result, TargetMark, TargetMarkKind, TranslationError, Translations, ensure_plain_dirs,
-    find_block, invalid, markup, sha256_hex,
+    Result, TargetMark, TargetMarkKind, TranslationError, Translations, check_plain_dirs,
+    ensure_plain_dirs, find_block, invalid, markup, sha256_hex,
 };
 use crate::text_project::{BlockParagraph, PromptBlock};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -44,8 +44,8 @@ pub struct HumanDraft {
     pub paragraphs: Vec<DraftParagraph>,
 }
 
-/// Full-block replacement. Local callers are trusted; future remote entry points
-/// must authenticate write access before calling this API (there is no Web endpoint).
+/// Full-block replacement. Local callers are trusted; remote entry points
+/// must authenticate write access before calling this API.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DraftSave {
@@ -348,7 +348,7 @@ impl Translations {
         guard: &WriteGuard,
         binding: &ziyuan_core::HumanSubmissionBinding,
     ) -> Result<Option<ziyuan_core::CourtEvent>> {
-        self.check_human_binding(guard, binding)
+        self.check_human_binding(guard, binding, ziyuan_core::HumanActor::Local)
             .map(|(_, event)| event)
     }
 
@@ -361,8 +361,26 @@ impl Translations {
         guard: &WriteGuard,
         binding: &ziyuan_core::HumanSubmissionBinding,
     ) -> Result<bool> {
+        self.publish_human_binding_as(guard, binding, ziyuan_core::HumanActor::Local)
+    }
+
+    /// Authenticated Web entry only: the caller must enforce write-token access.
+    pub fn publish_web_human_binding(
+        &self,
+        guard: &WriteGuard,
+        binding: &ziyuan_core::HumanSubmissionBinding,
+    ) -> Result<bool> {
+        self.publish_human_binding_as(guard, binding, ziyuan_core::HumanActor::Web)
+    }
+
+    fn publish_human_binding_as(
+        &self,
+        guard: &WriteGuard,
+        binding: &ziyuan_core::HumanSubmissionBinding,
+        actor: ziyuan_core::HumanActor,
+    ) -> Result<bool> {
         loop {
-            let (history, event) = self.check_human_binding(guard, binding)?;
+            let (history, event) = self.check_human_binding(guard, binding, actor)?;
             let Some(event) = event else {
                 return Ok(false);
             };
@@ -387,6 +405,7 @@ impl Translations {
         &self,
         guard: &WriteGuard,
         binding: &ziyuan_core::HumanSubmissionBinding,
+        actor: ziyuan_core::HumanActor,
     ) -> Result<(
         Vec<ziyuan_core::CourtEvent>,
         Option<ziyuan_core::CourtEvent>,
@@ -412,10 +431,9 @@ impl Translations {
             ));
         }
         let r = &binding.request;
-        // There is no authenticated remote publication entry. A payload cannot
-        // turn this trusted local API into a Web user's authorization.
-        if r.actor != ziyuan_core::HumanActor::Local {
-            return Err(invalid("本地人工送审准入不接受网页操作来源"));
+        // The trusted entry point, never the payload, determines the channel.
+        if r.actor != actor {
+            return Err(invalid("人工送审来源与已认证入口不符"));
         }
         if self.texts().project_protocol(&r.project)? != 3 {
             return Err(invalid("人工送审准入须先为项目清单换版"));
@@ -472,9 +490,23 @@ impl Translations {
     }
 
     fn draft_file(&self, project: &str, block: &str) -> Result<JsonFile<DraftBook>> {
+        self.draft_file_with_dirs(project, block, true)
+    }
+
+    fn draft_file_with_dirs(
+        &self,
+        project: &str,
+        block: &str,
+        create: bool,
+    ) -> Result<JsonFile<DraftBook>> {
         // Membership is checked before using either identifier as a path component.
         find_block(&self.project(project)?, block)?;
-        let dir = ensure_plain_dirs(
+        let dirs = if create {
+            ensure_plain_dirs
+        } else {
+            check_plain_dirs
+        };
+        let dir = dirs(
             &self.root,
             &[".ziyuan", "text-projects", project, "human-drafts"],
         )?;
@@ -507,15 +539,31 @@ impl Translations {
     /// Read-only view of the current human draft; never locks, writes or upgrades.
     pub fn peek_human_draft(&self, project: &str, block: &str) -> Result<DraftView> {
         let basis = self.draft_basis(project, block)?;
-        let draft = self
-            .draft_file(project, block)?
+        let draft = self.load_human_draft(project, block, false)?;
+        Ok(DraftView { basis, draft })
+    }
+
+    fn load_human_draft(
+        &self,
+        project: &str,
+        block: &str,
+        create: bool,
+    ) -> Result<Option<HumanDraft>> {
+        self.draft_file_with_dirs(project, block, create)?
             .load()?
             .map(|s| {
                 s.value.check(project, block)?;
                 Ok::<_, TranslationError>(s.value.draft)
             })
-            .transpose()?;
-        Ok(DraftView { basis, draft })
+            .transpose()
+    }
+
+    /// Read-only progress check using the same typed file and path validation as the editor.
+    /// A saved draft counts as started once any paragraph contains non-whitespace text.
+    pub fn human_draft_written(&self, project: &str, block: &str) -> Result<bool> {
+        Ok(self
+            .load_human_draft(project, block, false)?
+            .is_some_and(|draft| draft.paragraphs.iter().any(|p| !p.text.trim().is_empty())))
     }
 
     /// Reopen current text even if its stored basis is stale. Acquires workspace
@@ -529,14 +577,7 @@ impl Translations {
             .ensure_writable()
             .map_err(|e| invalid(e.to_string()))?;
         let basis = self.draft_basis(project, block)?;
-        let draft = self
-            .draft_file(project, block)?
-            .load()?
-            .map(|s| {
-                s.value.check(project, block)?;
-                Ok::<_, TranslationError>(s.value.draft)
-            })
-            .transpose()?;
+        let draft = self.load_human_draft(project, block, true)?;
         Ok(DraftView { basis, draft })
     }
 
@@ -713,6 +754,44 @@ impl Translations {
         binding_id: &str,
         expected_revision: &str,
     ) -> Result<ziyuan_core::HumanSubmissionBinding> {
+        self.prepare_human_submission_as(
+            project,
+            block,
+            request_id,
+            binding_id,
+            expected_revision,
+            ziyuan_core::HumanActor::Local,
+        )
+    }
+
+    /// Authenticated Web entry only: the caller must enforce write-token access.
+    pub fn prepare_web_human_submission(
+        &self,
+        project: &str,
+        block: &str,
+        request_id: &str,
+        binding_id: &str,
+        expected_revision: &str,
+    ) -> Result<ziyuan_core::HumanSubmissionBinding> {
+        self.prepare_human_submission_as(
+            project,
+            block,
+            request_id,
+            binding_id,
+            expected_revision,
+            ziyuan_core::HumanActor::Web,
+        )
+    }
+
+    fn prepare_human_submission_as(
+        &self,
+        project: &str,
+        block: &str,
+        request_id: &str,
+        binding_id: &str,
+        expected_revision: &str,
+        actor: ziyuan_core::HumanActor,
+    ) -> Result<ziyuan_core::HumanSubmissionBinding> {
         let submission = self.submit_human_draft(
             project,
             block,
@@ -730,7 +809,7 @@ impl Translations {
             ));
         }
         let previous = super::resolve_translation_source(&history, project, block)?.source;
-        submission.prepare_binding(binding_id.into(), ziyuan_core::HumanActor::Local, previous)
+        submission.prepare_binding(binding_id.into(), actor, previous)
     }
 
     /// Includes stale historical snapshots; reads never upgrade or reset storage.
@@ -751,7 +830,7 @@ impl Translations {
 }
 
 impl Translations {
-    /// Local-only human finalization under the caller's matching lock.
+    /// Human finalization under the caller's matching lock; remote callers authenticate writes.
     /// Appends only the finalization fact; never writes zh.json or a model task.
     pub fn finalize_human_translation(
         &self,
@@ -1032,6 +1111,26 @@ impl Translations {
         project: &str,
         block: &str,
     ) -> Result<bool> {
+        self.approve_human_submission_as(guard, project, block, ziyuan_core::HumanActor::Local)
+    }
+
+    /// Authenticated Web entry only: the caller must enforce write-token access.
+    pub fn approve_web_human_submission(
+        &self,
+        guard: &mut WriteGuard,
+        project: &str,
+        block: &str,
+    ) -> Result<bool> {
+        self.approve_human_submission_as(guard, project, block, ziyuan_core::HumanActor::Web)
+    }
+
+    fn approve_human_submission_as(
+        &self,
+        guard: &mut WriteGuard,
+        project: &str,
+        block: &str,
+        actor: ziyuan_core::HumanActor,
+    ) -> Result<bool> {
         let workspace = guard.workspace().clone();
         self.check_human_write(&workspace, project, "人工准奏")?;
         let log = EventLog::new(workspace.root());
@@ -1094,7 +1193,7 @@ impl Translations {
             project: project.into(),
             block: block.into(),
             request_id: request_id.clone(),
-            actor: ziyuan_core::HumanActor::Local,
+            actor,
             submission_id: binding_id,
             binding: binding_event,
             previous: binding.request.previous.clone(),

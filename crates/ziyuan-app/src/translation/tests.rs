@@ -378,6 +378,10 @@ fn human_binding_admission_resolves_approval_order_and_preserves_receipt_identit
         t.publish_human_binding(&guard, &web).is_err(),
         "authorization precedes receipt lookup"
     );
+    assert!(
+        t.publish_web_human_binding(&guard, &binding).is_err(),
+        "the Web entry also rejects a mismatched channel before receipt lookup"
+    );
     let mut conflict = binding.clone();
     conflict.request.submission_id.push('x');
     conflict.request_hash = ziyuan_governance::human_binding_request_hash(&conflict.request);
@@ -2785,6 +2789,62 @@ fn marked_markdown_renders_ruby_and_styles() {
         }],
     };
     assert!(marked_text(&dotted).is_err());
+}
+
+#[test]
+fn peek_human_draft_does_not_create_directories() {
+    let fx = Fx::new("peek-missing-draft");
+    let dir = fx
+        .root
+        .join(".ziyuan/text-projects")
+        .join(&fx.project)
+        .join("human-drafts");
+    assert!(!dir.exists());
+    let view = fx.t().peek_human_draft(&fx.project, B1).unwrap();
+    assert!(view.draft.is_none());
+    assert!(!dir.exists(), "只读读取不得创建空目录");
+}
+
+#[test]
+fn peek_human_draft_rejects_non_directory_ancestors_and_invalid_blocks() {
+    let fx = Fx::new("peek-draft-paths");
+    let dir = fx
+        .root
+        .join(".ziyuan/text-projects")
+        .join(&fx.project)
+        .join("human-drafts");
+    assert!(fx.t().peek_human_draft(&fx.project, "../outside").is_err());
+    assert!(!dir.exists());
+    fs::write(&dir, "not a directory").unwrap();
+    assert!(fx.t().peek_human_draft(&fx.project, B1).is_err());
+    assert_eq!(fs::read_to_string(&dir).unwrap(), "not a directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn peek_human_draft_rejects_symlink_ancestors_and_files() {
+    use std::os::unix::fs::symlink;
+    let fx = Fx::new("peek-draft-symlink");
+    let dir = fx
+        .root
+        .join(".ziyuan/text-projects")
+        .join(&fx.project)
+        .join("human-drafts");
+    let outside = fx.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, &dir).unwrap();
+    assert!(fx.t().peek_human_draft(&fx.project, B1).is_err());
+    fs::remove_file(&dir).unwrap();
+    fs::create_dir(&dir).unwrap();
+    for path in [
+        dir.join(format!("{B1}.json")),
+        dir.join(format!("{B1}.json.lock")),
+    ] {
+        symlink(outside.join("missing"), &path).unwrap();
+        assert!(fx.t().peek_human_draft(&fx.project, B1).is_err());
+        fs::remove_file(path).unwrap();
+    }
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
 }
 
 #[test]

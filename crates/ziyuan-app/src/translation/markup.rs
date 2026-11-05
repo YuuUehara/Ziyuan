@@ -90,3 +90,28 @@ pub(super) fn validate(paragraphs: &[DraftParagraph]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    /// 与 `crates/ziyuan-web/src/editor-core.test.mjs` 共用同一张字素表：
+    /// 前端按 ICU（`Intl.Segmenter`）取边界与换算 UTF-8 字节，服务端按
+    /// `unicode-segmentation`（UAX #29）复核。两边切分不同的话，界面加出的标记
+    /// 会被服务端拒绝，用户只能看到 400，所以这里固定住这几种容易分歧的写法。
+    #[test]
+    fn grapheme_boundaries_agree_with_web_editor() {
+        for (text, expected) in [
+            ("甲月", vec!["甲", "月"]),
+            ("e\u{301}x", vec!["e\u{301}", "x"]),
+            ("😀a", vec!["😀", "a"]),
+            ("👨‍👩‍👧a", vec!["👨‍👩‍👧", "a"]),
+        ] {
+            assert_eq!(
+                text.graphemes(true).collect::<Vec<_>>(),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+}

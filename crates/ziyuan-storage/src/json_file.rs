@@ -299,7 +299,8 @@ impl Write for Limited {
 }
 
 impl<T: Serialize + DeserializeOwned> JsonFile<T> {
-    /// 持共享锁读取当前状态；文件不存在时直接返回 `Ok(None)`，不创建目录或锁文件。
+    /// 读取当前状态；文件不存在时直接返回 `Ok(None)`。从不创建目录或锁文件：锁文件已在时
+    /// 持共享锁读，不在时直接读（写入一律整文件改名发布，读到的只会是完整的旧版或新版）。
     /// 并发首次写入可以在此后发布；不存在的观察点在线性化上先于该次发布。
     pub fn load(&self) -> Result<Option<Stored<T>>, JsonFileError> {
         match fs::symlink_metadata(&self.path) {
@@ -307,7 +308,11 @@ impl<T: Serialize + DeserializeOwned> JsonFile<T> {
             Err(e) => return Err(e.into()),
             Ok(_) => {}
         }
-        let _lock = self.acquire(true)?;
+        let _lock = match fs::symlink_metadata(&self.lock_path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+            Ok(_) => Some(self.acquire(true)?),
+        };
         self.read_locked()
     }
 
@@ -687,6 +692,17 @@ mod tests {
         }
         file.fault = None;
         assert_eq!(bump(&file).unwrap().revision, 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_never_creates_a_missing_lock_file() {
+        let dir = temp_dir("load-no-lock");
+        let file = counter_file(&dir);
+        bump(&file).unwrap();
+        fs::remove_file(file.lock_path()).unwrap();
+        assert_eq!(file.load().unwrap().unwrap().value.n, 1);
+        assert!(!file.lock_path().exists(), "纯读取不应建锁文件");
         fs::remove_dir_all(dir).unwrap();
     }
 

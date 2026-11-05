@@ -230,6 +230,15 @@ pub(crate) fn find_block<'a>(
 
 /// 自 `root` 起逐级确认（缺则建）普通目录，拒绝符号链接与非目录，返回最末一级。
 pub(crate) fn ensure_plain_dirs(root: &Path, parts: &[&str]) -> Result<PathBuf> {
+    plain_dirs(root, parts, true)
+}
+
+/// 逐级确认已有目录，缺失时不创建；仍检查每个已有祖先以拒绝符号链接。
+pub(crate) fn check_plain_dirs(root: &Path, parts: &[&str]) -> Result<PathBuf> {
+    plain_dirs(root, parts, false)
+}
+
+fn plain_dirs(root: &Path, parts: &[&str], create: bool) -> Result<PathBuf> {
     let mut path = root.to_path_buf();
     for part in parts {
         if part.is_empty() || *part == "." || *part == ".." || part.contains(['/', '\\']) {
@@ -244,6 +253,7 @@ pub(crate) fn ensure_plain_dirs(root: &Path, parts: &[&str]) -> Result<PathBuf> 
                     path.display()
                 )));
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !create => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
