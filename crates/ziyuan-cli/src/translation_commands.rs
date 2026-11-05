@@ -454,7 +454,7 @@ fn print_statuses(statuses: &[BlockStatus]) {
             s.tasks
         );
         match &s.state {
-            BlockState::Stale { reasons, .. } => {
+            BlockState::Stale { reasons, .. } | BlockState::HumanStale { reasons, .. } => {
                 for reason in reasons {
                     println!("  {}", reason.describe());
                 }

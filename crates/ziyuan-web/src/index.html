@@ -1871,6 +1871,7 @@ function textStaleText(reason) {
     case "summary_changed": return `前情摘要有变：${(reason.chapters || []).join("、")}`;
     case "translation_edited": return "磁盘上的译稿与已准奏或已定稿的不同";
     case "translation_missing": return "已准奏的译稿不见了";
+    case "zhupi_changed": return "朱批已变";
     default: return String(reason.reason || "版本失效");
   }
 }
@@ -1950,9 +1951,11 @@ function renderTextNow() {
     if (b.status) {
       const kind = b.status.state && b.status.state.state;
       // 与奉天殿诏令同一套徽章：待准奏、待御览用朱印，执行中用 assigned。
+      // 人工准奏待定稿也用朱印；人工定稿同“定稿”，人工版本失效同“版本失效”。
       const tone = {
         finalized: "accept", failed: "failed", stale: "failed", running: "assigned",
         awaiting_approval: "awaiting", awaiting_yulan: "awaiting", cancelled: "cancelled", uncertain: "pending",
+        human_approved: "awaiting", human_finalized: "accept", human_stale: "failed",
       }[kind] || "";
       statusLine.push(`<span class="badge ${tone}">${esc(b.status.label)}</span>`);
       if (b.status.note) statusLine.push(esc(b.status.note));
@@ -1994,10 +1997,13 @@ function renderTextNow() {
           b.check.issues.map((i) => `<li>${esc(i.message)}${i.paragraph_id ? `（${esc(i.paragraph_id)}）` : ""}</li>`).join("")
         }</ul></div>`);
   }
-  if (b && b.status && b.status.state && b.status.state.state === "stale") {
+  if (b && b.status && b.status.state && (b.status.state.state === "stale" || b.status.state.state === "human_stale")) {
+    const human = b.status.state.state === "human_stale";
     materials.push(`<div class="text-material"><b>版本失效</b><ul class="text-problems">${
       b.status.state.reasons.map((r) => `<li>${esc(textStaleText(r))}</li>`).join("")
-    }</ul><p class="hint">失效的块须下修订诏令重修；已准奏的译稿不会自动覆盖。</p></div>`);
+    }</ul><p class="hint">${human
+      ? "人工稿的原文、上下文或朱批已变，须重新保存人工草稿、送审、准奏、定稿（命令行 ziyuan text human save／submit／approve／finalize）；Web 尚未开放人工流程。"
+      : "失效的块须下修订诏令重修；已准奏的译稿不会自动覆盖。"}</p></div>`);
   }
   if (b) {
     const ctx = b.context && b.context.value;
@@ -2045,11 +2051,17 @@ function renderTextNow() {
     finalized: ["translate", "revise"],
     running: ["translate", "review", "revise", "finalize"],
     awaiting_approval: ["translate", "review", "revise", "finalize"],
+    human_finalized: ["translate", "review", "revise", "finalize"],
+    human_approved: ["finalize"],
+    human_stale: ["finalize"],
   }[kind] || [];
   const why = {
     finalized: "已御览定稿；要重译或修订请先退回重修",
     running: "有诏令未结：先执行（ziyuan run），不要重复下诏",
     awaiting_approval: "译稿待准奏：先到奉天殿准奏或驳回",
+    human_finalized: "已人工定稿；要重译或修订请先退回重修，再重新保存人工草稿、送审、准奏、定稿",
+    human_approved: "已人工准奏并落盘；Web 尚未开放人工定稿，请在命令行运行 ziyuan text human finalize",
+    human_stale: "人工版本失效：原文、上下文或朱批已变；请重新保存人工草稿、送审、准奏、定稿",
   }[kind];
   $("text-actions").innerHTML = [
     ["translate", "初译", "导出材料，下工部初译诏令（只入队，须批红后执行）"],

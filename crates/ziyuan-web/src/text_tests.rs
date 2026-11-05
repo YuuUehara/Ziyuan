@@ -1147,12 +1147,22 @@ fn text_frontend_contract() {
         crate::INDEX_HTML.contains(".badge.seal { white-space: normal; overflow-wrap: anywhere; }")
     );
     // 按钮与 text status 的下一步一致：定稿后不能直接初译、修订，执行中与待准奏时不再下诏或定稿。
+    // 人工三种状态复用既有徽章配色，理由与提示照服务端事实写。
     for expected in [
         "已御览定稿；要重译或修订请先退回重修",
         "finalized: [\"translate\", \"revise\"]",
         "running: [\"translate\", \"review\", \"revise\", \"finalize\"]",
         "awaiting_approval: [\"translate\", \"review\", \"revise\", \"finalize\"]",
         "awaiting_approval: \"awaiting\"",
+        "human_approved: \"awaiting\", human_finalized: \"accept\", human_stale: \"failed\"",
+        "human_finalized: [\"translate\", \"review\", \"revise\", \"finalize\"]",
+        "human_approved: [\"finalize\"]",
+        "human_stale: [\"finalize\"]",
+        "已人工定稿；要重译或修订请先退回重修",
+        "命令行运行 ziyuan text human finalize",
+        "人工版本失效：原文、上下文或朱批已变",
+        "case \"zhupi_changed\": return \"朱批已变\";",
+        "b.status.state.state === \"human_stale\"",
         "ziyuan text init、ziyuan text import",
     ] {
         assert!(crate::INDEX_HTML.contains(expected), "missing {expected}");

@@ -723,12 +723,16 @@ fn text_help_shows_usage_without_a_project() {
             "text show",
             "text check",
             "--candidate",
+            "text human submit",
+            "text human approve",
+            "text human finalize",
         ] {
             assert!(help.contains(needle), "{args:?} 缺少 {needle}：{help}");
         }
     }
     let help = stdout(&ok(root, &["help"]));
     assert!(help.contains("ziyuan text init"), "{help}");
+    assert!(help.contains("ziyuan text human"), "{help}");
     let bash = stdout(&ok(root, &["completions", "bash"]));
     assert!(bash.contains("text"));
     assert!(!root.join(".ziyuan").exists());
@@ -883,6 +887,7 @@ fn new_cli_usage_and_completions() {
             "resume",
             // 补全词取自 help.rs 的子命令清单：从任一清单里漏掉 `recovery` 都会在这里失败。
             "recovery",
+            "human",
             "memory",
             "query",
         ] {
@@ -1539,4 +1544,262 @@ fn selected_reference_preview_and_persisted_submission_are_offline() {
     let human = stdout(&ok(root, &["text", "references", "show", &task]));
     assert!(human.contains("stale"));
     assert!(human.contains(preview["prompt"].as_str().unwrap()));
+}
+
+#[test]
+fn human_draft_save_then_peek_round_trips() {
+    let dir = TempDir::new("human-draft");
+    let root = dir.path();
+    let id = init_json(root, "草稿项目", "ja");
+    dir.write("a.md", "# 章一\n\n夜が明ける。\n");
+    let preview = ok_json(
+        root,
+        &[
+            "text",
+            "preview",
+            &id,
+            "a.md",
+            "--chapter-title",
+            "章一",
+            "--json",
+        ],
+    );
+    let fingerprint = preview["fingerprint"].as_str().unwrap();
+    let project = ok_json(
+        root,
+        &[
+            "text",
+            "import",
+            &id,
+            "a.md",
+            "--chapter-title",
+            "章一",
+            "--confirm",
+            fingerprint,
+            "--json",
+        ],
+    );
+    let block = project["chapters"][0]["blocks"][0]["block_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let paragraph = project["chapters"][0]["blocks"][0]["paragraphs"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let view = ok_json(root, &["text", "human", "show", &id, &block, "--json"]);
+    let save = json!({
+        "request_id": "save-1",
+        "expected_revision": null,
+        "basis": view["basis"],
+        "paragraphs": [{"id": paragraph, "text": "人工译文"}],
+    });
+    dir.write("draft.json", &save.to_string());
+    let out = ok(
+        root,
+        &[
+            "text",
+            "human",
+            "save",
+            &id,
+            &block,
+            "--file",
+            "draft.json",
+            "--json",
+        ],
+    );
+    let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(receipt["revision"].as_str().is_some());
+    let view = ok_json(root, &["text", "human", "show", &id, &block, "--json"]);
+    assert_eq!(view["draft"]["paragraphs"][0]["text"], "人工译文");
+    no_court(root);
+}
+
+#[test]
+fn human_submit_freezes_candidate_and_is_idempotent() {
+    let dir = TempDir::new("human-submit");
+    let root = dir.path();
+    ok(root, &["init"]);
+    let id = init_json(root, "送审项目", "ja");
+    dir.write("a.md", "# 章一\n\n夜が明ける。\n");
+    let preview = ok_json(
+        root,
+        &[
+            "text",
+            "preview",
+            &id,
+            "a.md",
+            "--chapter-title",
+            "章一",
+            "--json",
+        ],
+    );
+    let fingerprint = preview["fingerprint"].as_str().unwrap();
+    let project = ok_json(
+        root,
+        &[
+            "text",
+            "import",
+            &id,
+            "a.md",
+            "--chapter-title",
+            "章一",
+            "--confirm",
+            fingerprint,
+            "--json",
+        ],
+    );
+    let block = project["chapters"][0]["blocks"][0]["block_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut paragraphs: Vec<Value> = Vec::new();
+    for block in project["chapters"][0]["blocks"].as_array().unwrap() {
+        for p in block["paragraphs"].as_array().unwrap() {
+            let id = p["id"].as_str().unwrap().to_owned();
+            if seen.insert(id.clone()) {
+                paragraphs.push(json!({"id": id, "text": "人工译文"}));
+            }
+        }
+    }
+    paragraphs.sort_by_key(|p| p["id"].as_str().unwrap_or_default().to_owned());
+    let view = ok_json(root, &["text", "human", "show", &id, &block, "--json"]);
+    let save = json!({
+        "request_id": "save-1",
+        "expected_revision": null,
+        "basis": view["basis"],
+        "paragraphs": paragraphs,
+    });
+    dir.write("draft.json", &save.to_string());
+    ok(
+        root,
+        &["text", "human", "save", &id, &block, "--file", "draft.json"],
+    );
+    let first = ok_json(root, &["text", "human", "submit", &id, &block, "--json"]);
+    assert_eq!(first["published"], true);
+    assert!(root.join(".ziyuan/court.log").exists());
+    let second = ok_json(root, &["text", "human", "submit", &id, &block, "--json"]);
+    assert_eq!(second["published"], false);
+    let zh = root
+        .join("translations")
+        .join(&id)
+        .join(&block)
+        .join("zh.json");
+    assert!(!zh.exists(), "送审不写译稿");
+    let approved = stdout(&ok(root, &["text", "human", "approve", &id, &block]));
+    assert!(approved.contains("已准奏并落盘"), "{approved}");
+    assert!(
+        approved.contains(&format!("下一步：ziyuan text human finalize {id} {block}")),
+        "{approved}"
+    );
+    assert!(!approved.contains("已批准"), "{approved}");
+    let written = std::fs::read(&zh).expect("准奏即落盘");
+    let target: Value = serde_json::from_slice(&written).unwrap();
+    assert_eq!(target["schema_version"], 1, "无标记候选按第一版落盘");
+    let again = ok_json(root, &["text", "human", "approve", &id, &block, "--json"]);
+    assert_eq!(again["approved"], false);
+    let again = stdout(&ok(root, &["text", "human", "approve", &id, &block]));
+    assert!(again.contains("ziyuan text human finalize"), "{again}");
+    assert!(!root.join(".ziyuan/recovery.json").exists());
+    let log = std::fs::read(root.join(".ziyuan/court.log")).unwrap();
+    let applied = ok_json(root, &["text", "human", "apply", &id, &block, "--json"]);
+    assert_eq!(applied["applied"], false);
+    assert_eq!(applied["already_written"], true);
+    let applied = stdout(&ok(root, &["text", "human", "apply", &id, &block]));
+    assert!(applied.contains("准奏时已落盘"), "{applied}");
+    assert!(
+        applied.contains(&format!("下一步：ziyuan text human finalize {id} {block}")),
+        "{applied}"
+    );
+    assert_eq!(std::fs::read(&zh).unwrap(), written, "apply 只读");
+    assert_eq!(
+        std::fs::read(root.join(".ziyuan/court.log")).unwrap(),
+        log,
+        "apply 只读"
+    );
+    let finalized = stdout(&ok(root, &["text", "human", "finalize", &id, &block]));
+    assert!(finalized.contains("已定稿"), "{finalized}");
+    assert!(
+        finalized.contains(&format!("下一步：ziyuan text export-finished {id}")),
+        "{finalized}"
+    );
+    let again_final = ok_json(root, &["text", "human", "finalize", &id, &block, "--json"]);
+    assert_eq!(again_final["finalized"], false);
+    // The suggested next step really exports a human finalization.
+    let exported = ok_json(root, &["text", "export-finished", &id, "--json"]);
+    assert_eq!(
+        exported["manifest"]["chapters"][0]["blocks"][0]["source"],
+        "human"
+    );
+
+    // 第二轮：带注音的新修订号，按第二版落盘并可再定稿。
+    let view = ok_json(root, &["text", "human", "show", &id, &block, "--json"]);
+    let mut marked = paragraphs.clone();
+    marked[0] = json!({
+        "id": marked[0]["id"],
+        "text": "人工译文",
+        "marks": [{"start": 0, "end": 6, "kind": {"type": "ruby", "reading": "じんこう"}}],
+    });
+    let save = json!({
+        "request_id": "save-2",
+        "expected_revision": view["draft"]["revision"],
+        "basis": view["basis"],
+        "paragraphs": marked,
+    });
+    dir.write("draft.json", &save.to_string());
+    let saved = stdout(&ok(
+        root,
+        &["text", "human", "save", &id, &block, "--file", "draft.json"],
+    ));
+    assert!(saved.contains("修订号"), "{saved}");
+    assert!(!saved.contains("revision"), "{saved}");
+    let shown = stdout(&ok(root, &["text", "human", "show", &id, &block]));
+    assert!(shown.contains("修订号："), "{shown}");
+    ok(root, &["text", "human", "submit", &id, &block]);
+    ok(root, &["text", "human", "approve", &id, &block]);
+    let target: Value = serde_json::from_slice(&std::fs::read(&zh).unwrap()).unwrap();
+    assert_eq!(target["schema_version"], 2, "带标记候选按第二版落盘");
+    let status = stdout(&ok(root, &["text", "status", &id]));
+    assert!(
+        status.contains("已人工准奏"),
+        "新一轮准奏不被旧定稿遮住：{status}"
+    );
+    assert!(status.contains("可人工定稿"), "{status}");
+    let finalized = ok_json(root, &["text", "human", "finalize", &id, &block, "--json"]);
+    assert_eq!(finalized["finalized"], true);
+    let status = stdout(&ok(root, &["text", "status", &id]));
+    assert!(status.contains("已人工定稿"), "{status}");
+    // TXT would drop the ruby: the batch is refused and no archive appears.
+    let out = ziyuan(
+        root,
+        &["text", "export-finished", &id, "--output", "plain.tar"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("整批未导出") && err.contains("--format md"),
+        "{err}"
+    );
+    assert!(!root.join("plain.tar").exists(), "拒绝时不得留下归档");
+    ok(
+        root,
+        &[
+            "text",
+            "export-finished",
+            &id,
+            "--format",
+            "md",
+            "--output",
+            "marked.tar",
+        ],
+    );
+    assert!(root.join("marked.tar").exists());
+
+    // 外部改动 zh.json 后 apply 只报不符，不改盘。
+    std::fs::write(&zh, b"outside\n").unwrap();
+    let out = ziyuan(root, &["text", "human", "apply", &id, &block]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("不符"));
+    assert_eq!(std::fs::read(&zh).unwrap(), b"outside\n");
 }
