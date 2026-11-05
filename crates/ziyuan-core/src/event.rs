@@ -445,6 +445,15 @@ pub enum CourtEvent {
     HumanSubmissionBound {
         binding: Box<crate::HumanSubmissionBinding>,
     },
+    /// Durable human approval fact. It references a frozen binding and does not
+    /// write the target, finalize, or export anything by itself.
+    HumanTranslationApproved {
+        approval: Box<crate::HumanApproval>,
+    },
+    /// Human finalization fact: references the approval receipt, never a model task.
+    HumanTranslationFinalized {
+        finalization: Box<crate::HumanFinalization>,
+    },
     /// 御览定稿：皇帝签署一块的译稿（`translation_hash` 为定稿 zh.json 的 SHA-256），
     /// 并记下当时的上下文版本与朱批版本。
     TranslationFinalized {

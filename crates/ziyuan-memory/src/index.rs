@@ -41,7 +41,7 @@ use crate::record::{Identity, MemoryRecord, Watermark, sha256_hex};
 use crate::watermark::{WatermarkReader, require_publishable};
 
 /// 本版认识的索引格式版本。
-pub const FORMAT_VERSION: u64 = 1;
+pub const FORMAT_VERSION: u64 = 2;
 
 /// `.ziyuan/` 下的记忆库目录（相对工作区根）。
 const MEMORY_DIR: [&str; 2] = [".ziyuan", "memory"];
@@ -491,6 +491,7 @@ mod tests {
                 translation_hash: sha256_hex(b"zh.json"),
                 context_version: 2,
                 zhupi_version: 1,
+                human: None,
             },
             embedding: EmbeddingSignature {
                 provider: signature.provider,

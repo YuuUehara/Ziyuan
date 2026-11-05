@@ -142,6 +142,8 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         | TemplateSaved { .. }
         | TemplateRemoved { .. }
         | HumanSubmissionBound { .. }
+        | HumanTranslationApproved { .. }
+        | HumanTranslationFinalized { .. }
         | TranslationFinalized { .. }
         | TranslationReopened { .. } => Vec::new(),
     }
@@ -450,6 +452,14 @@ pub fn describe_event(event: &CourtEvent) -> String {
         CourtEvent::HumanSubmissionBound { binding } => format!(
             "人工送审已入簿：{} {}（待决，尚未准奏）",
             binding.request.block, binding.request.submission_id
+        ),
+        CourtEvent::HumanTranslationApproved { approval } => format!(
+            "人工准奏：{} 准予一次 {} 改动（操作 {}；落盘状态另核）",
+            approval.request.block, approval.request.target.format, approval.operation_id
+        ),
+        CourtEvent::HumanTranslationFinalized { finalization } => format!(
+            "人工定稿：{}（操作 {}；人工复核，未运行模型双审）",
+            finalization.block, finalization.approval_operation_id
         ),
         CourtEvent::TranslationFinalized { block, .. } => format!("御览定稿：{block}"),
         CourtEvent::TranslationReopened { block, reason, .. } => {

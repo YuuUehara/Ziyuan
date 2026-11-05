@@ -20,6 +20,7 @@ pub use embed::{Embedding, EmbeddingProvider, ModelSignature, Unavailable};
 pub use index::{FORMAT_VERSION, MemoryIndex};
 pub use local::LocalProvider;
 pub use pair::{PairingProblem, ParaPairInput, ParagraphPair, PromptBlockView, pair_paragraphs};
+pub use record::HumanOrigin;
 pub use record::{
     Digests, EmbeddingSignature, Identity, MemoryRecord, Origin, Text, Watermark, sha256_hex,
     workspace_id_from_canonical_text,

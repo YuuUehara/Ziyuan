@@ -51,6 +51,18 @@ pub struct Digests {
     pub block_target_sha256: String,
 }
 
+/// 人工定稿的额外来源；旧模型记录为 None。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct HumanOrigin {
+    pub operation_id: String,
+    /// 事件簿中批准事件的下标；含义同 Origin::finalized_events 的水位。
+    pub approval_event: usize,
+    pub target_format: String,
+    pub context_version: u32,
+    pub zhupi_hash: String,
+}
+
 /// 定稿来源：哪几次定稿事件立下了这一版，以及当时的上下文与朱批版本。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -64,6 +76,9 @@ pub struct Origin {
     pub translation_hash: String,
     pub context_version: u32,
     pub zhupi_version: u32,
+    /// 人工定稿时记录批准身份与目标格式；旧模型记录缺省为 None。
+    #[serde(default)]
+    pub human: Option<HumanOrigin>,
 }
 
 /// 嵌入签名：换了提供方、模型、修订、维度或度量，索引即不可再用。
@@ -317,6 +332,7 @@ mod tests {
                 translation_hash: sha256_hex(b"zh.json"),
                 context_version: 2,
                 zhupi_version: 1,
+                human: None,
             },
             embedding: EmbeddingSignature {
                 provider: "local".into(),

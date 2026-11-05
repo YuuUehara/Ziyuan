@@ -13,7 +13,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::recovery::{
-    MAX_RECORD_BYTES, RecordState, RecoveryError, RecoveryRecord, decode_record, encode_record,
+    DecodedRecovery, MAX_RECORD_BYTES, RecordState, RecoveryError, RecoveryRecord,
+    RecoveryRecordV2, decode_record, decode_record_any, encode_record, encode_record_v2,
 };
 
 pub const DEFAULT_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -238,6 +239,16 @@ impl Workspace {
         read_record(&dir.join(RECORD_FILE))
     }
 
+    /// Read only: the same record decoded as either format. Callers that only
+    /// understand the first format keep using [`Self::pending_record`].
+    pub fn pending_record_any(&self) -> Result<Option<DecodedRecovery>, WorkspaceError> {
+        let dir = self.root.join(".ziyuan");
+        if !check_path(&dir, true)? {
+            return Ok(None);
+        }
+        read_record_any(&dir.join(RECORD_FILE))
+    }
+
     /// 未收尾恢复记录里引用的全部目标路径（`/` 分隔的工作区相对路径）。
     ///
     /// 清理临时文件时用它作受保护集合：记录引用的路径一律不动。
@@ -413,6 +424,38 @@ impl WriteGuard {
         atomic_replace(&path, &bytes)
     }
 
+    /// Write a second-format record atomically. Only `Published` is accepted:
+    /// managed writers publish exactly what they will do; `Prepared` staging and
+    /// terminal states are never created here. A record of either format already
+    /// on disk is never overwritten.
+    pub fn publish_second_format(
+        &mut self,
+        record: &RecoveryRecordV2,
+    ) -> Result<(), WorkspaceError> {
+        if record.state != RecordState::Published {
+            return Err(WorkspaceError::Unsafe(format!(
+                "second-format record state {:?} cannot be published",
+                record.state
+            )));
+        }
+        let root = self.workspace.root();
+        if !same_root(root, &record.workspace) {
+            return Err(WorkspaceError::Unsafe(format!(
+                "recovery record workspace {} is not this workspace {}",
+                record.workspace.display(),
+                root.display()
+            )));
+        }
+        let dir = root.join(".ziyuan");
+        if check_path(&dir, true)? && self.workspace.pending_record_any()?.is_some() {
+            return Err(WorkspaceError::RecordExists {
+                operation_id: record.operation_id.clone(),
+            });
+        }
+        let bytes = encode_record_v2(record)?;
+        atomic_replace(&dir.join(RECORD_FILE), &bytes)
+    }
+
     /// Mark the published record completed. Does not advance the generation.
     pub fn complete(&mut self, operation_id: &str) -> Result<RecoveryRecord, WorkspaceError> {
         let mut record = self.matching(operation_id, RecordState::Published)?;
@@ -475,6 +518,141 @@ impl WriteGuard {
             let _ = dir.sync_all();
         }
         Ok(())
+    }
+
+    /// Complete a second-format record in place. First-format callers keep `complete`.
+    pub fn complete_second_format(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<RecoveryRecordV2, WorkspaceError> {
+        let record = self
+            .workspace
+            .pending_record_any()?
+            .ok_or(WorkspaceError::NoPendingRecord)?;
+        let DecodedRecovery::V2(mut record) = record else {
+            return Err(WorkspaceError::Unsafe("record is not second format".into()));
+        };
+        if record.operation_id != operation_id
+            || record.state != RecordState::Published
+            || !same_root(self.workspace.root(), &record.workspace)
+        {
+            return Err(WorkspaceError::RecordMismatch {
+                operation_id: operation_id.to_string(),
+            });
+        }
+        record.state = RecordState::Completed;
+        self.rewrite_second_format(&record)?;
+        Ok(record)
+    }
+
+    /// Promote a prepared second-format record to published. Only an explicit
+    /// caller decision may move it; the codec never guesses from state names.
+    pub fn publish_prepared_second_format(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<RecoveryRecordV2, WorkspaceError> {
+        let record = self
+            .workspace
+            .pending_record_any()?
+            .ok_or(WorkspaceError::NoPendingRecord)?;
+        let DecodedRecovery::V2(mut record) = record else {
+            return Err(WorkspaceError::Unsafe("record is not second format".into()));
+        };
+        if record.operation_id != operation_id
+            || record.state != RecordState::Prepared
+            || !same_root(self.workspace.root(), &record.workspace)
+        {
+            return Err(WorkspaceError::RecordMismatch {
+                operation_id: operation_id.to_string(),
+            });
+        }
+        record.state = RecordState::Published;
+        self.rewrite_second_format(&record)?;
+        Ok(record)
+    }
+
+    /// Mark a prepared second-format record abandoned after the caller verified
+    /// that nothing was written and the batch is absent.
+    pub fn abandon_prepared_second_format(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<RecoveryRecordV2, WorkspaceError> {
+        let record = self
+            .workspace
+            .pending_record_any()?
+            .ok_or(WorkspaceError::NoPendingRecord)?;
+        let DecodedRecovery::V2(mut record) = record else {
+            return Err(WorkspaceError::Unsafe("record is not second format".into()));
+        };
+        if record.operation_id != operation_id
+            || record.state != RecordState::Prepared
+            || !same_root(self.workspace.root(), &record.workspace)
+        {
+            return Err(WorkspaceError::RecordMismatch {
+                operation_id: operation_id.to_string(),
+            });
+        }
+        record.state = RecordState::Abandoned;
+        self.rewrite_second_format(&record)?;
+        Ok(record)
+    }
+
+    /// Mark a published second-format record abandoned. The caller must have
+    /// verified every target is still old and the batch is absent from the log.
+    pub fn abandon_published_second_format(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<RecoveryRecordV2, WorkspaceError> {
+        let record = self
+            .workspace
+            .pending_record_any()?
+            .ok_or(WorkspaceError::NoPendingRecord)?;
+        let DecodedRecovery::V2(mut record) = record else {
+            return Err(WorkspaceError::Unsafe("record is not second format".into()));
+        };
+        if record.operation_id != operation_id
+            || record.state != RecordState::Published
+            || !same_root(self.workspace.root(), &record.workspace)
+        {
+            return Err(WorkspaceError::RecordMismatch {
+                operation_id: operation_id.to_string(),
+            });
+        }
+        record.state = RecordState::Abandoned;
+        self.rewrite_second_format(&record)?;
+        Ok(record)
+    }
+
+    /// Delete a second-format record after the caller advanced the generation.
+    pub fn remove_second_format(&mut self) -> Result<(), WorkspaceError> {
+        let Some(record) = self.workspace.pending_record_any()? else {
+            return Err(WorkspaceError::NoPendingRecord);
+        };
+        let DecodedRecovery::V2(record) = record else {
+            return Err(WorkspaceError::Unsafe("record is not second format".into()));
+        };
+        if !matches!(
+            record.state,
+            RecordState::Completed | RecordState::Abandoned
+        ) {
+            return Err(WorkspaceError::Unsafe(format!(
+                "recovery record state {:?} cannot be removed",
+                record.state
+            )));
+        }
+        let path = self.workspace.root().join(".ziyuan").join(RECORD_FILE);
+        check_path(&path, false)?;
+        fs::remove_file(&path)?;
+        #[cfg(unix)]
+        if let Ok(dir) = File::open(self.workspace.root().join(".ziyuan")) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    }
+
+    fn rewrite_second_format(&self, record: &RecoveryRecordV2) -> Result<(), WorkspaceError> {
+        let path = self.workspace.root().join(".ziyuan").join(RECORD_FILE);
+        atomic_replace(&path, &encode_record_v2(record)?)
     }
 
     fn readable(&self) -> Result<Option<RecoveryRecord>, WorkspaceError> {
@@ -611,6 +789,17 @@ fn read_record(path: &Path) -> Result<Option<RecoveryRecord>, WorkspaceError> {
         .take(MAX_RECORD_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     decode_record(&bytes).map(Some).map_err(Into::into)
+}
+
+fn read_record_any(path: &Path) -> Result<Option<DecodedRecovery>, WorkspaceError> {
+    if !check_path(path, false)? {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    decode_record_any(&bytes).map(Some).map_err(Into::into)
 }
 
 /// The record codec accepts only `/` or `X:\` leading bytes, while a canonical

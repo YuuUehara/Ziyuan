@@ -7,8 +7,17 @@ use super::{
 use crate::text_project::{BlockParagraph, PromptBlock};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io};
-use ziyuan_storage::{EventLog, EventStore, JsonFile, LockScope, Workspace, WriteGuard};
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    path::{Path, PathBuf},
+};
+use ziyuan_storage::recovery::{
+    ApplicationV2, EventBatch, FileState, HumanApplication, RecoveryRecordV2, TargetState,
+};
+use ziyuan_storage::{
+    EventLog, EventStore, JsonFile, LockScope, RecordState, Workspace, WriteGuard,
+};
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -147,6 +156,8 @@ pub enum ReviewFormat {
     ReviewJson,
     LegacyPromptJson,
     PlainText,
+    /// 只读诊断：受限 HTML 的 Markdown 能表达 ruby、粗体与斜体。
+    MarkdownHtml,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -180,7 +191,7 @@ impl ReviewCandidate {
         Ok(candidate)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if !matches!(self.schema_version, 1 | 2)
             || (self.schema_version == 1 && self.paragraphs.iter().any(|p| !p.marks.is_empty()))
         {
@@ -209,11 +220,31 @@ impl ReviewCandidate {
         let mut unsupported_marks = Vec::new();
         if format != ReviewFormat::ReviewJson {
             for paragraph in &self.paragraphs {
-                for mark_index in 0..paragraph.marks.len() {
-                    unsupported_marks.push(UnsupportedTargetMark {
-                        paragraph_id: paragraph.id.clone(),
-                        mark_index,
-                    });
+                for (mark_index, mark) in paragraph.marks.iter().enumerate() {
+                    let expressible =
+                        match format {
+                            ReviewFormat::MarkdownHtml => {
+                                matches!(
+                                    mark.kind,
+                                    TargetMarkKind::Ruby { .. }
+                                        | TargetMarkKind::Strong {}
+                                        | TargetMarkKind::Emphasis {}
+                                ) && !paragraph.marks.iter().enumerate().any(
+                                    |(other_index, other)| {
+                                        other_index != mark_index
+                                            && other.start < mark.end
+                                            && mark.start < other.end
+                                    },
+                                )
+                            }
+                            _ => false,
+                        };
+                    if !expressible {
+                        unsupported_marks.push(UnsupportedTargetMark {
+                            paragraph_id: paragraph.id.clone(),
+                            mark_index,
+                        });
+                    }
                 }
             }
         }
@@ -226,7 +257,7 @@ impl ReviewCandidate {
 
     /// Only for reusing paragraph membership/completeness validation. Never
     /// stored, hashed or published as the marked candidate.
-    fn text_structure(&self) -> PromptBlock {
+    pub(crate) fn text_structure(&self) -> PromptBlock {
         PromptBlock {
             schema_version: 1,
             block_id: self.block_id.clone(),
@@ -473,6 +504,20 @@ impl Translations {
         })
     }
 
+    /// Read-only view of the current human draft; never locks, writes or upgrades.
+    pub fn peek_human_draft(&self, project: &str, block: &str) -> Result<DraftView> {
+        let basis = self.draft_basis(project, block)?;
+        let draft = self
+            .draft_file(project, block)?
+            .load()?
+            .map(|s| {
+                s.value.check(project, block)?;
+                Ok::<_, TranslationError>(s.value.draft)
+            })
+            .transpose()?;
+        Ok(DraftView { basis, draft })
+    }
+
     /// Reopen current text even if its stored basis is stale. Acquires workspace
     /// exclusion and may create control directories, but changes no events/generation.
     pub fn human_draft(&self, project: &str, block: &str) -> Result<DraftView> {
@@ -658,6 +703,36 @@ impl Translations {
         Ok(submission)
     }
 
+    /// Freeze the current draft and prepare a binding under a workspace lock the caller holds.
+    /// Writes the submission snapshot only; publishing the binding is a separate step.
+    pub fn prepare_human_submission(
+        &self,
+        project: &str,
+        block: &str,
+        request_id: &str,
+        binding_id: &str,
+        expected_revision: &str,
+    ) -> Result<ziyuan_core::HumanSubmissionBinding> {
+        let submission = self.submit_human_draft(
+            project,
+            block,
+            &DraftSubmit {
+                request_id: request_id.into(),
+                expected_revision: expected_revision.into(),
+            },
+        )?;
+        let history = EventLog::new(&self.root)
+            .load()
+            .map_err(|e| invalid(e.to_string()))?;
+        if history.is_empty() {
+            return Err(invalid(
+                "人工送审需要先开国（ziyuan init），以便事件簿记录送审与批准事实",
+            ));
+        }
+        let previous = super::resolve_translation_source(&history, project, block)?.source;
+        submission.prepare_binding(binding_id.into(), ziyuan_core::HumanActor::Local, previous)
+    }
+
     /// Includes stale historical snapshots; reads never upgrade or reset storage.
     pub fn human_submissions(&self, project: &str, block: &str) -> Result<Vec<HumanSubmission>> {
         let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
@@ -672,5 +747,633 @@ impl Translations {
         };
         stored.value.check(project, block)?;
         Ok(stored.value.submissions.into_values().collect())
+    }
+}
+
+impl Translations {
+    /// Local-only human finalization under the caller's matching lock.
+    /// Appends only the finalization fact; never writes zh.json or a model task.
+    pub fn finalize_human_translation(
+        &self,
+        guard: &WriteGuard,
+        project: &str,
+        block: &str,
+    ) -> Result<bool> {
+        loop {
+            let workspace = guard.workspace();
+            if fs::canonicalize(&self.root)? != fs::canonicalize(workspace.root())? {
+                return Err(invalid("人工定稿与所持写锁不属同一工作区"));
+            }
+            workspace
+                .ensure_writable()
+                .map_err(|e| invalid(e.to_string()))?;
+            if workspace
+                .write_protocol()
+                .map_err(|e| invalid(e.to_string()))?
+                != Some(2)
+                || self.texts().project_protocol(project)? != 3
+                || workspace
+                    .pending_record_any()
+                    .map_err(|e| invalid(e.to_string()))?
+                    .is_some()
+            {
+                return Err(invalid("人工定稿须先完成工作区换版，并收尾全部恢复记录"));
+            }
+            let history = EventLog::new(workspace.root())
+                .load()
+                .map_err(|e| invalid(e.to_string()))?;
+            let court =
+                ziyuan_governance::Court::replay(&history).map_err(|e| invalid(e.to_string()))?;
+            let resolved = super::resolve_translation_source(&history, project, block)?;
+            let ziyuan_core::TranslationSource::Human {
+                operation_id,
+                event,
+            } = resolved.source
+            else {
+                return Err(invalid("当前批准来源不是人工准奏，不能人工定稿"));
+            };
+            // Only this approval's own finalization is idempotent. Model signoffs and
+            // earlier human rounds give way: the current source is this human approval,
+            // the same rule status applies.
+            if let Some(ziyuan_governance::Signoff::HumanFinalized {
+                operation_id: signed,
+                ..
+            }) = court.translation_signoff(project, block)
+                && *signed == operation_id
+            {
+                return Ok(false);
+            }
+            let index = usize::try_from(event.index).map_err(|_| invalid("批准事件位置不合法"))?;
+            let Some(ziyuan_core::CourtEvent::HumanTranslationApproved { approval }) =
+                history.get(index)
+            else {
+                return Err(invalid("批准事件不在事件簿的申报位置"));
+            };
+            if approval.operation_id != operation_id {
+                return Err(invalid("批准事件与当前来源不符"));
+            }
+            if court.translation_tasks(project, block).any(|t| {
+                t.status.is_open()
+                    || t.changes
+                        .as_ref()
+                        .is_some_and(|c| c.state == ziyuan_governance::ChangeState::Proposed)
+            }) {
+                return Err(invalid("该块仍有活动或待决的模型任务，人工定稿须先收尾"));
+            }
+            let project_data = self.project(project)?;
+            let source_hash = super::block_source_hash(&project_data, block)?;
+            let context_version = self.context_version(project)?;
+            let zhupi_hash = self.block_zhupi_hash(&project_data, block)?;
+            let bytes = self
+                .read_translation(project, block)?
+                .ok_or_else(|| invalid("磁盘上没有 zh.json"))?;
+            let target = super::read_approved_target(&bytes, block)?;
+            let target_hash = sha256_hex(&bytes);
+            if target.format() != approval.request.target.format
+                || target_hash != approval.request.target.after
+            {
+                return Err(invalid("磁盘译稿与当前人工批准的目标不符"));
+            }
+            let basis = &court
+                .human_submission_binding(project, block, &approval.request.submission_id)
+                .ok_or_else(|| invalid("人工批准引用的送审绑定不存在"))?
+                .request
+                .basis;
+            let reasons = super::status::human_basis_reasons(
+                &super::BlockFacts {
+                    block: block.into(),
+                    chapter: String::new(),
+                    source_hash: source_hash.clone(),
+                    disk_hash: None,
+                    zhupi_hash: zhupi_hash.clone(),
+                },
+                &super::ContextFacts {
+                    current: context_version,
+                    ..Default::default()
+                },
+                &basis.source_hash,
+                basis.context_version,
+                &basis.zhupi_hash,
+            );
+            if !reasons.is_empty() {
+                return Err(invalid(format!(
+                    "送审后材料有变（{}），人工定稿未入簿。\n下一步：重新保存草稿后运行 ziyuan text human submit {project} {block}，再准奏、定稿",
+                    reasons
+                        .iter()
+                        .map(|r| r.describe())
+                        .collect::<Vec<_>>()
+                        .join("；")
+                )));
+            }
+            let finalization = ziyuan_core::HumanFinalization {
+                project: project.into(),
+                block: block.into(),
+                approval_request_id: approval.request.request_id.clone(),
+                approval_operation_id: approval.operation_id.clone(),
+                approval_event: event,
+                submission_id: approval.request.submission_id.clone(),
+                candidate_hash: court
+                    .human_submission_binding(project, block, &approval.request.submission_id)
+                    .ok_or_else(|| invalid("人工批准引用的送审绑定不存在"))?
+                    .request
+                    .candidate_hash
+                    .clone(),
+                source_hash,
+                context_version,
+                zhupi_hash,
+                target_format: target.format().into(),
+                target_hash,
+            };
+            let mut events = Vec::new();
+            let at = crate::time::now();
+            if crate::time::last_clock(&history, None).is_none_or(|t| t / 60 != at / 60) {
+                events.push(ziyuan_core::CourtEvent::Clock(at));
+            }
+            events.push(
+                court
+                    .propose_human_translation_finalized(finalization)
+                    .map_err(|e| invalid(e.to_string()))?,
+            );
+            match EventLog::new(workspace.root()).append_if_unchanged(&history, &events) {
+                Ok(()) => return Ok(true),
+                Err(
+                    ziyuan_storage::StorageError::Conflict { .. }
+                    | ziyuan_storage::StorageError::PrefixChanged,
+                ) => continue,
+                Err(e) => return Err(invalid(e.to_string())),
+            }
+        }
+    }
+}
+
+/// Debug-only interruption points for real child-process tests. Release builds
+/// compile them to nothing and never read the variable.
+#[cfg(debug_assertions)]
+fn interrupt(point: &str) {
+    if std::env::var("ZIYUAN_INTERRUPT_RECOVERY").ok().as_deref() == Some(point) {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn interrupt(_point: &str) {}
+
+/// Submission and binding request ID for one draft revision: each new revision is a
+/// new review round, and retrying the same revision maps to the same receipts.
+pub fn human_submit_request_id(revision: &str) -> String {
+    format!("submit-r{revision}")
+}
+
+/// Approval request ID for one published binding.
+pub fn human_approve_request_id(binding: &str) -> String {
+    format!("approve-{binding}")
+}
+
+/// The recovery codec cannot represent the Windows verbatim prefix.
+fn record_path(root: &Path) -> PathBuf {
+    match root.to_string_lossy().strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => root.to_path_buf(),
+    }
+}
+
+/// After publication nothing is retried or undone: the record is the evidence.
+fn kept_scene(operation_id: &str, what: impl std::fmt::Display) -> TranslationError {
+    invalid(format!(
+        "{what}。\n恢复记录 {operation_id} 仍在盘上，现场已原样保留，未重试也未回滚。\n\
+         请运行 ziyuan text recovery status 核对，再用 ziyuan text recovery finish {operation_id} --yes 收尾，\
+         或在目标仍为旧内容时用 ziyuan text recovery abandon {operation_id} --yes 放弃。"
+    ))
+}
+
+/// Replace `dir/zh.json` through a synced same-directory temporary file.
+fn write_target_durable(dir: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let tmp = dir.join(format!(".zh.json.tmp-{}-{nanos}", std::process::id()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, dir.join("zh.json"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
+    // Persist the rename itself. std cannot open a directory handle for syncing on
+    // Windows, where NTFS journals the rename metadata; there it is skipped.
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+/// The block's most recent published binding, by log order.
+fn latest_binding<'a>(
+    history: &'a [ziyuan_core::CourtEvent],
+    project: &str,
+    block: &str,
+) -> Option<(usize, &'a ziyuan_core::HumanSubmissionBinding)> {
+    history
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, event)| match event {
+            ziyuan_core::CourtEvent::HumanSubmissionBound { binding }
+                if binding.request.project == project && binding.request.block == block =>
+            {
+                Some((index, binding.as_ref()))
+            }
+            _ => None,
+        })
+}
+
+impl Translations {
+    fn check_human_write(&self, workspace: &Workspace, project: &str, what: &str) -> Result<()> {
+        if fs::canonicalize(&self.root)? != fs::canonicalize(workspace.root())? {
+            return Err(invalid(format!("{what}与所持写锁不属同一工作区")));
+        }
+        workspace
+            .ensure_writable()
+            .map_err(|e| invalid(e.to_string()))?;
+        if workspace
+            .write_protocol()
+            .map_err(|e| invalid(e.to_string()))?
+            != Some(2)
+            || self.texts().project_protocol(project)? != 3
+            || workspace
+                .pending_record_any()
+                .map_err(|e| invalid(e.to_string()))?
+                .is_some()
+        {
+            return Err(invalid(format!(
+                "{what}须先完成工作区换版，并收尾全部恢复记录（ziyuan text recovery status）"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Approve the block's latest published binding and land its target in one managed
+    /// transaction under the caller's workspace lock. Every check and the fixed record
+    /// and batch come first; then: reserve odd generation → publish record → write
+    /// zh.json → append batch → Completed → even generation → remove record. A failure
+    /// before publication changes nothing; any failure after it keeps the scene for
+    /// `ziyuan text recovery` and is never retried or rolled back.
+    /// Returns false when this round's approval is already in the log.
+    pub fn approve_human_submission(
+        &self,
+        guard: &mut WriteGuard,
+        project: &str,
+        block: &str,
+    ) -> Result<bool> {
+        let workspace = guard.workspace().clone();
+        self.check_human_write(&workspace, project, "人工准奏")?;
+        let log = EventLog::new(workspace.root());
+        let history = log.load().map_err(|e| invalid(e.to_string()))?;
+        let court =
+            ziyuan_governance::Court::replay(&history).map_err(|e| invalid(e.to_string()))?;
+        let (index, binding) = latest_binding(&history, project, block).ok_or_else(|| {
+            invalid(format!(
+                "该块尚未送审：请先运行 ziyuan text human submit {project} {block}"
+            ))
+        })?;
+        let binding_id = binding.request.request_id.clone();
+        let request_id = human_approve_request_id(&binding_id);
+        if court.human_approval(project, block, &request_id).is_some() {
+            return Ok(false);
+        }
+        if court.human_submission_binding(project, block, &binding_id) != Some(binding) {
+            return Err(invalid(
+                "送审绑定事件与回放结果不符，请运行 ziyuan text recovery status 核对",
+            ));
+        }
+        let binding_event = ziyuan_storage::event_reference(index as u64, &history[index]);
+        let current = super::resolve_translation_source(&history, project, block)?.source;
+        if current != binding.request.previous {
+            return Err(invalid(format!(
+                "送审后当前来源已变（已有新的准奏），这份送审不能再准奏。\n下一步：重新保存草稿后运行 ziyuan text human submit {project} {block}"
+            )));
+        }
+        let before = self
+            .read_translation(project, block)?
+            .map(|bytes| sha256_hex(&bytes));
+        if before != binding.request.basis.translation_hash {
+            return Err(invalid(format!(
+                "磁盘上的 zh.json 自送审后已被改动，本次未写任何文件。\n下一步：核对 {} 后重新保存草稿并运行 ziyuan text human submit {project} {block}",
+                super::output_rel(project, block)
+            )));
+        }
+        if self.draft_basis(project, block)? != binding.request.basis {
+            return Err(invalid(format!(
+                "送审后原文、上下文或朱批已变，本次未写任何文件。\n下一步：重新保存草稿并运行 ziyuan text human submit {project} {block}"
+            )));
+        }
+        let candidate = ReviewCandidate::from_binding(binding)?;
+        let report =
+            self.texts()
+                .check(project, block, &candidate.text_structure().serialized()?)?;
+        if !report.valid {
+            return Err(invalid("送审候选未通过段落归属与完整性检查"));
+        }
+        // The target, not the candidate, decides format and bytes: an unmarked v2
+        // candidate lands as the first format, which finalization can read back.
+        let target = candidate.approved_target()?;
+        let bytes = target.bytes()?;
+        if super::read_approved_target(&bytes, block)?.format() != target.format() {
+            return Err(invalid("批准目标的格式与写出字节不一致"));
+        }
+        let after = sha256_hex(&bytes);
+        let path = super::output_rel(project, block);
+        let request = ziyuan_core::HumanApprovalRequest {
+            project: project.into(),
+            block: block.into(),
+            request_id: request_id.clone(),
+            actor: ziyuan_core::HumanActor::Local,
+            submission_id: binding_id,
+            binding: binding_event,
+            previous: binding.request.previous.clone(),
+            target: ziyuan_core::HumanApprovalTarget {
+                format: target.format().into(),
+                path: path.clone(),
+                before: before.clone(),
+                after: after.clone(),
+            },
+        };
+        let request_hash = ziyuan_governance::human_approval_request_hash(&request);
+        let operation_id =
+            sha256_hex(format!("{request_hash}:{request_id}").as_bytes())[..32].to_owned();
+        let approval = ziyuan_core::HumanApproval {
+            request_hash: request_hash.clone(),
+            request,
+            operation_id: operation_id.clone(),
+        };
+        let mut events = Vec::new();
+        let at = crate::time::now();
+        if crate::time::last_clock(&history, None).is_none_or(|t| t / 60 != at / 60) {
+            events.push(ziyuan_core::CourtEvent::Clock(at));
+        }
+        events.push(
+            court
+                .propose_human_translation_approved(approval)
+                .map_err(|e| invalid(e.to_string()))?,
+        );
+        let expected_bytes = log
+            .history_bytes()
+            .map_err(|e| invalid(e.to_string()))?
+            .unwrap_or(0);
+        let raw_bytes = match fs::metadata(workspace.root().join(".ziyuan").join("court.log")) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
+        if raw_bytes != expected_bytes {
+            return Err(invalid(
+                "事件簿末尾有未写完的残行，本次未写任何文件；请先核对 .ziyuan/court.log",
+            ));
+        }
+        let history_sha256 = log
+            .history_sha256(history.len())
+            .map_err(|e| invalid(e.to_string()))?
+            .ok_or_else(|| invalid("事件簿报不出前缀摘要"))?;
+        let generation = workspace.generation().map_err(|e| invalid(e.to_string()))?;
+        let targets = if before.as_deref() == Some(after.as_str()) {
+            Vec::new()
+        } else {
+            vec![TargetState {
+                path: path.clone(),
+                before: before.clone().map_or(FileState::Absent, FileState::Present),
+                after: FileState::Present(after.clone()),
+            }]
+        };
+        let record = RecoveryRecordV2 {
+            operation_id: operation_id.clone(),
+            workspace: record_path(workspace.root()),
+            generation_before: generation,
+            generation_after: generation + 2,
+            state: RecordState::Published,
+            application: ApplicationV2::Human(HumanApplication {
+                project: project.into(),
+                block: block.into(),
+                approval_request_id: request_id,
+                approval_request_hash: request_hash,
+                previous: binding.request.previous.clone(),
+                target_format: target.format().into(),
+                logical_path: path,
+                before,
+                after: after.clone(),
+            }),
+            events: EventBatch {
+                expected_events: (history.len() + events.len()) as u64,
+                expected_bytes,
+                history_sha256,
+                encoded_events: events
+                    .iter()
+                    .map(ziyuan_storage::encode_event_line)
+                    .collect(),
+            },
+            targets,
+        };
+        // Size, shape and branch validation happen before anything is reserved.
+        ziyuan_storage::recovery::encode_record_v2(&record)
+            .map_err(|e| invalid(format!("人工准奏的恢复记录不合规：{e}")))?;
+
+        guard.reserve().map_err(|e| invalid(e.to_string()))?;
+        if let Err(error) = guard.publish_second_format(&record) {
+            if !matches!(workspace.pending_record_any(), Ok(None)) {
+                return Err(kept_scene(
+                    &operation_id,
+                    format!("发布恢复记录时出错（{error}），盘上可能留有记录"),
+                ));
+            }
+            // Nothing was published, so the reservation can be closed like the model path.
+            let _ = guard.finish();
+            return Err(invalid(format!(
+                "无法发布恢复记录（{error}）：译稿与事件簿均未改动，可直接重试"
+            )));
+        }
+        interrupt("approve-after-publish");
+        if record.targets.is_empty() {
+            let now = self
+                .read_translation(project, block)
+                .map_err(|e| kept_scene(&operation_id, format!("无法核对同字节目标：{e}")))?;
+            if now.map(|bytes| sha256_hex(&bytes)).as_deref() != Some(after.as_str()) {
+                return Err(kept_scene(&operation_id, "同字节准奏的目标在核对后被改动"));
+            }
+        } else {
+            let dir = ensure_plain_dirs(&self.root, &["translations", project, block])
+                .map_err(|e| kept_scene(&operation_id, format!("无法准备译稿目录：{e}")))?;
+            write_target_durable(&dir, &bytes)
+                .map_err(|e| kept_scene(&operation_id, format!("写入 zh.json 失败：{e}")))?;
+        }
+        interrupt("approve-after-target");
+        EventLog::new(workspace.root())
+            .append_if_unchanged(&history, &events)
+            .map_err(|e| kept_scene(&operation_id, format!("追加准奏事件失败（{e}）")))?;
+        interrupt("approve-after-append");
+        guard
+            .complete_second_format(&operation_id)
+            .map_err(|e| kept_scene(&operation_id, format!("标记恢复记录完成失败：{e}")))?;
+        let finished = guard
+            .finish()
+            .map_err(|e| kept_scene(&operation_id, format!("推进代次失败：{e}")))?;
+        if finished != record.generation_after {
+            return Err(kept_scene(
+                &operation_id,
+                format!(
+                    "代次推进到 {finished}，与记录的后代次 {} 不符",
+                    record.generation_after
+                ),
+            ));
+        }
+        guard
+            .remove_second_format()
+            .map_err(|e| kept_scene(&operation_id, format!("清理恢复记录失败：{e}")))?;
+        Ok(true)
+    }
+
+    /// Read-only confirmation for the legacy `apply` step: approval already lands the
+    /// target. Checks that the current source is this block's human approval and that
+    /// zh.json holds its bytes. Returns the approval request ID; never writes.
+    pub fn apply_human_target(&self, project: &str, block: &str) -> Result<String> {
+        find_block(&self.project(project)?, block)?;
+        let workspace = Workspace::open(&self.root).map_err(|e| invalid(e.to_string()))?;
+        if let Some(record) = workspace
+            .pending_record_any()
+            .map_err(|e| invalid(e.to_string()))?
+        {
+            let op = match record {
+                ziyuan_storage::recovery::DecodedRecovery::V1(r) => r.operation_id,
+                ziyuan_storage::recovery::DecodedRecovery::V2(r) => r.operation_id,
+            };
+            return Err(invalid(format!(
+                "工作区仍有未收尾的恢复记录 {op}：请先运行 ziyuan text recovery status 核对并收尾"
+            )));
+        }
+        let history = EventLog::new(&self.root)
+            .load()
+            .map_err(|e| invalid(e.to_string()))?;
+        let resolved = super::resolve_translation_source(&history, project, block)?;
+        let ziyuan_core::TranslationSource::Human {
+            operation_id,
+            event,
+        } = resolved.source
+        else {
+            return Err(invalid(format!(
+                "当前批准来源不是人工准奏，没有可核对的落盘。\n下一步：ziyuan text human approve {project} {block}"
+            )));
+        };
+        let approval = usize::try_from(event.index)
+            .ok()
+            .and_then(|index| history.get(index))
+            .and_then(|e| match e {
+                ziyuan_core::CourtEvent::HumanTranslationApproved { approval }
+                    if approval.operation_id == operation_id =>
+                {
+                    Some(approval)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| invalid("人工准奏事件不在事件簿的申报位置"))?;
+        let disk = self
+            .read_translation(project, block)?
+            .map(|bytes| sha256_hex(&bytes));
+        if disk.as_deref() != Some(approval.request.target.after.as_str()) {
+            return Err(invalid(format!(
+                "磁盘上的 zh.json 与人工准奏落盘的字节不符（可能被外部改动）。\n\
+                 下一步：核对 {} ；如需另起一轮，重新保存草稿后运行 ziyuan text human submit {project} {block}",
+                approval.request.target.path
+            )));
+        }
+        Ok(approval.request.request_id.clone())
+    }
+
+    /// Before `text recovery finish` appends a human batch whose target is already
+    /// written, redo admission under the caller's lock: binding in the fixed prefix,
+    /// unchanged predecessor and materials, frozen candidate matching the record and
+    /// zh.json holding exactly `after`. Reads only.
+    pub fn recheck_human_recovery(
+        &self,
+        guard: &WriteGuard,
+        record: &RecoveryRecordV2,
+    ) -> Result<()> {
+        let ApplicationV2::Human(app) = &record.application else {
+            return Err(invalid("这不是人工准奏的恢复记录"));
+        };
+        if fs::canonicalize(&self.root)? != fs::canonicalize(guard.workspace().root())? {
+            return Err(invalid("复核与所持写锁不属同一工作区"));
+        }
+        let history = EventLog::new(guard.workspace().root())
+            .load()
+            .map_err(|e| invalid(e.to_string()))?;
+        let prefix = record
+            .events
+            .expected_events
+            .checked_sub(record.events.encoded_events.len() as u64)
+            .ok_or_else(|| invalid("恢复记录的事件条数不足以容纳批次"))?;
+        if history.len() as u64 != prefix {
+            return Err(invalid("事件簿条数与记录的固定前缀不符"));
+        }
+        let approval = record
+            .events
+            .encoded_events
+            .iter()
+            .filter_map(|line| ziyuan_storage::decode_event_line(line).ok())
+            .find_map(|event| match event {
+                ziyuan_core::CourtEvent::HumanTranslationApproved { approval } => Some(approval),
+                _ => None,
+            })
+            .ok_or_else(|| invalid("恢复记录里没有人工准奏事件"))?;
+        let r = &approval.request;
+        let binding = usize::try_from(r.binding.index)
+            .ok()
+            .and_then(|index| history.get(index).map(|event| (index, event)))
+            .and_then(|(index, event)| match event {
+                ziyuan_core::CourtEvent::HumanSubmissionBound { binding }
+                    if binding.request.project == app.project
+                        && binding.request.block == app.block
+                        && binding.request.request_id == r.submission_id
+                        && ziyuan_storage::event_reference(index as u64, event) == r.binding =>
+                {
+                    Some(binding.as_ref())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| invalid("送审绑定不在记录声明的前缀位置，或与准奏引用不符"))?;
+        let court =
+            ziyuan_governance::Court::replay(&history).map_err(|e| invalid(e.to_string()))?;
+        court
+            .propose_human_translation_approved((*approval).clone())
+            .map_err(|e| invalid(format!("准奏事件已不能入簿：{e}")))?;
+        let current = super::resolve_translation_source(&history, &app.project, &app.block)?;
+        if current.source != app.previous {
+            return Err(invalid("当前来源已不是记录里的前一来源（已有新的准奏）"));
+        }
+        // The disk translation is expected to be this transaction's `after`; the frozen
+        // basis must instead name the record's `before`.
+        let mut basis = self.draft_basis(&app.project, &app.block)?;
+        basis.translation_hash = binding.request.basis.translation_hash.clone();
+        if basis != binding.request.basis {
+            return Err(invalid("送审后原文、上下文或朱批已变"));
+        }
+        if binding.request.basis.translation_hash != app.before {
+            return Err(invalid("送审时的旧译稿摘要与记录的准奏前摘要不符"));
+        }
+        let target = ReviewCandidate::from_binding(binding)?.approved_target()?;
+        if target.format() != app.target_format || sha256_hex(&target.bytes()?) != app.after {
+            return Err(invalid("冻结候选的批准目标与记录不符"));
+        }
+        let disk = self
+            .read_translation(&app.project, &app.block)?
+            .map(|bytes| sha256_hex(&bytes));
+        if disk.as_deref() != Some(app.after.as_str()) {
+            return Err(invalid("磁盘上的 zh.json 不是记录中的新内容"));
+        }
+        Ok(())
     }
 }

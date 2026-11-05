@@ -201,6 +201,7 @@ mod tests {
                 translation_hash: sha256_hex(b"zh.json"),
                 context_version: 2,
                 zhupi_version: 1,
+                human: None,
             },
             embedding: EmbeddingSignature {
                 provider: signature.provider.clone(),

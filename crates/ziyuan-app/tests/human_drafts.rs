@@ -1606,3 +1606,467 @@ fn static_symlinks_do_not_redirect_draft_writes() {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn approved_targets_keep_plain_bytes_and_refuse_unknown_formats() {
+    use ziyuan_app::text_project::{BlockParagraph, PromptBlock};
+    use ziyuan_app::translation::{
+        ApprovedTarget, DraftParagraph, ReviewCandidate, TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN,
+        TargetMark, TargetMarkKind, read_approved_target,
+    };
+    let block = "c0001-b0001";
+    let plain = ReviewCandidate {
+        schema_version: 1,
+        block_id: block.into(),
+        paragraphs: vec![DraftParagraph {
+            id: "p1".into(),
+            text: "夜".into(),
+            marks: Vec::new(),
+        }],
+    };
+    let target = plain.approved_target().unwrap();
+    assert_eq!(target.format(), TARGET_FORMAT_PLAIN);
+    let legacy = PromptBlock {
+        schema_version: 1,
+        block_id: block.into(),
+        paragraphs: vec![BlockParagraph {
+            id: "p1".into(),
+            text: "夜".into(),
+            inlines: Vec::new(),
+        }],
+    }
+    .serialized()
+    .unwrap();
+    let bytes = target.bytes().unwrap();
+    assert_eq!(bytes, legacy, "plain targets must keep old zh.json bytes");
+    assert_eq!(read_approved_target(&bytes, block).unwrap(), target);
+    assert!(read_approved_target(&bytes, "c0002-b0001").is_err());
+
+    let marked = ReviewCandidate {
+        schema_version: 2,
+        block_id: block.into(),
+        paragraphs: vec![DraftParagraph {
+            id: "p1".into(),
+            text: "夜が明ける".into(),
+            marks: vec![TargetMark {
+                start: 0,
+                end: 3,
+                kind: TargetMarkKind::Ruby {
+                    reading: "よ".into(),
+                },
+            }],
+        }],
+    };
+    let target = marked.approved_target().unwrap();
+    assert_eq!(target.format(), TARGET_FORMAT_MARKED);
+    let bytes = target.bytes().unwrap();
+    assert_eq!(bytes, marked.serialized().unwrap());
+    match read_approved_target(&bytes, block).unwrap() {
+        ApprovedTarget::Marked(read) => assert_eq!(read, marked),
+        ApprovedTarget::Plain(_) => panic!("marked target must not be downgraded"),
+    }
+
+    let mixed = serde_json::json!({
+        "schema_version": 1,
+        "block_id": block,
+        "paragraphs": [{"id": "p1", "text": "夜", "marks": []}],
+    })
+    .to_string();
+    assert!(
+        read_approved_target(mixed.as_bytes(), block).is_err(),
+        "v1 must not carry marks, even empty ones"
+    );
+
+    let empty = serde_json::json!({
+        "schema_version": 2,
+        "block_id": block,
+        "paragraphs": [{"id": "p1", "text": "夜"}],
+    })
+    .to_string();
+    assert!(
+        read_approved_target(empty.as_bytes(), block).is_err(),
+        "v2 without marks is not a canonical target"
+    );
+
+    let future = serde_json::json!({
+        "schema_version": 3,
+        "block_id": block,
+        "paragraphs": [],
+    })
+    .to_string();
+    let error = read_approved_target(future.as_bytes(), block)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("第 3 版"), "{error}");
+
+    let unknown = serde_json::json!({
+        "schema_version": 2,
+        "block_id": block,
+        "paragraphs": [{"id": "p1", "text": "夜", "marks": [], "extra": 1}],
+    })
+    .to_string();
+    assert!(read_approved_target(unknown.as_bytes(), block).is_err());
+}
+
+#[test]
+fn markdown_capability_reports_only_losslessly_expressible_marks() {
+    use ziyuan_app::translation::{
+        DraftParagraph, ReviewCandidate, ReviewFormat, TargetMark, TargetMarkKind,
+    };
+    let block = "c0001-b0001";
+    let ruby = ReviewCandidate {
+        schema_version: 2,
+        block_id: block.into(),
+        paragraphs: vec![DraftParagraph {
+            id: "p1".into(),
+            text: "夜が明ける".into(),
+            marks: vec![TargetMark {
+                start: 0,
+                end: 3,
+                kind: TargetMarkKind::Ruby {
+                    reading: "よ".into(),
+                },
+            }],
+        }],
+    };
+    assert!(
+        ruby.check_format(ReviewFormat::MarkdownHtml)
+            .unwrap()
+            .lossless
+    );
+    assert!(!ruby.check_format(ReviewFormat::PlainText).unwrap().lossless);
+    assert!(
+        ruby.check_format(ReviewFormat::ReviewJson)
+            .unwrap()
+            .lossless
+    );
+
+    let dotted = ReviewCandidate {
+        schema_version: 2,
+        block_id: block.into(),
+        paragraphs: vec![DraftParagraph {
+            id: "p1".into(),
+            text: "夜".into(),
+            marks: vec![TargetMark {
+                start: 0,
+                end: 3,
+                kind: TargetMarkKind::EmphasisDots {},
+            }],
+        }],
+    };
+    let check = dotted.check_format(ReviewFormat::MarkdownHtml).unwrap();
+    assert!(!check.lossless);
+    assert_eq!(check.unsupported_marks.len(), 1);
+
+    let stacked = ReviewCandidate {
+        schema_version: 2,
+        block_id: block.into(),
+        paragraphs: vec![DraftParagraph {
+            id: "p1".into(),
+            text: "夜".into(),
+            marks: vec![
+                TargetMark {
+                    start: 0,
+                    end: 3,
+                    kind: TargetMarkKind::Ruby {
+                        reading: "よ".into(),
+                    },
+                },
+                TargetMark {
+                    start: 0,
+                    end: 3,
+                    kind: TargetMarkKind::Strong {},
+                },
+            ],
+        }],
+    };
+    assert!(
+        !stacked
+            .check_format(ReviewFormat::MarkdownHtml)
+            .unwrap()
+            .lossless
+    );
+}
+
+/// Approval in one managed transaction: helpers drive the public API exactly as the CLI does.
+mod approval {
+    use super::*;
+    use ziyuan_app::translation::{
+        TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN, human_approve_request_id,
+        human_submit_request_id, read_approved_target,
+    };
+    use ziyuan_core::{HumanApproval, HumanSubmissionBinding};
+    use ziyuan_storage::{EventStore, WriteGuard};
+
+    fn founded(f: &Fixture) {
+        if EventLog::new(&f.root).load().unwrap().is_empty() {
+            drop(ziyuan_app::Session::found(EventLog::new(&f.root)).unwrap());
+        }
+    }
+
+    fn guard(f: &Fixture) -> WriteGuard {
+        let workspace = Workspace::open(&f.root).unwrap();
+        let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+        guard.upgrade_write_protocol().unwrap();
+        TextProjects::new(&f.root)
+            .upgrade_project_protocol(&f.project.id, &guard)
+            .unwrap();
+        guard
+    }
+
+    fn plain_request(f: &Fixture) -> DraftSave {
+        let mut request = f.marked_request();
+        for paragraph in &mut request.paragraphs {
+            paragraph.marks.clear();
+        }
+        request
+    }
+
+    fn save(f: &Fixture, mut request: DraftSave, id: &str) -> String {
+        let view = f.service().human_draft(&f.project.id, BLOCK).unwrap();
+        request.request_id = id.into();
+        request.expected_revision = view.draft.map(|d| d.revision);
+        request.basis = view.basis;
+        f.service()
+            .save_human_draft(&f.project.id, BLOCK, &request)
+            .unwrap()
+            .revision
+    }
+
+    fn prepare(f: &Fixture, revision: &str) -> HumanSubmissionBinding {
+        founded(f);
+        let id = human_submit_request_id(revision);
+        f.service()
+            .prepare_human_submission(&f.project.id, BLOCK, &id, &id, revision)
+            .unwrap()
+    }
+
+    fn submit(f: &Fixture, revision: &str) -> HumanSubmissionBinding {
+        let binding = prepare(f, revision);
+        let guard = guard(f);
+        assert!(f.service().publish_human_binding(&guard, &binding).unwrap());
+        binding
+    }
+
+    /// Publish a binding the admission path would refuse, to reach the approval's own checks.
+    fn force_bind(f: &Fixture, binding: HumanSubmissionBinding) {
+        let mut log = EventLog::new(&f.root);
+        let history = log.load().unwrap();
+        let court = ziyuan_governance::Court::replay(&history).unwrap();
+        let event = court.propose_human_submission_binding(binding).unwrap();
+        log.append_if_unchanged(&history, &[event]).unwrap();
+    }
+
+    fn reseal(binding: &mut HumanSubmissionBinding) {
+        binding.request.candidate_hash =
+            ziyuan_storage::content_sha256(binding.request.candidate.as_bytes());
+        binding.request_hash = ziyuan_governance::human_binding_request_hash(&binding.request);
+    }
+
+    fn approve(f: &Fixture) -> Result<bool, TranslationError> {
+        let mut guard = guard(f);
+        f.service()
+            .approve_human_submission(&mut guard, &f.project.id, BLOCK)
+    }
+
+    fn finalize(f: &Fixture) -> Result<bool, TranslationError> {
+        let guard = guard(f);
+        f.service()
+            .finalize_human_translation(&guard, &f.project.id, BLOCK)
+    }
+
+    fn target(f: &Fixture) -> Option<Vec<u8>> {
+        f.service().read_translation(&f.project.id, BLOCK).unwrap()
+    }
+
+    fn generation(f: &Fixture) -> u64 {
+        Workspace::open(&f.root).unwrap().generation().unwrap()
+    }
+
+    /// Byte snapshot of everything an approval may touch.
+    fn evidence(f: &Fixture) -> Vec<Option<Vec<u8>>> {
+        [
+            f.root.join(".ziyuan/court.log"),
+            f.root.join(".ziyuan/write.generation"),
+            f.root.join(".ziyuan/recovery.json"),
+            f.root
+                .join("translations")
+                .join(&f.project.id)
+                .join(BLOCK)
+                .join("zh.json"),
+        ]
+        .iter()
+        .map(|path| fs::read(path).ok())
+        .collect()
+    }
+
+    fn approval(f: &Fixture, binding: &HumanSubmissionBinding) -> HumanApproval {
+        let session = ziyuan_app::Session::open(EventLog::new(&f.root)).unwrap();
+        session
+            .court()
+            .human_approval(
+                &f.project.id,
+                BLOCK,
+                &human_approve_request_id(&binding.request.request_id),
+            )
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn approval_lands_plain_and_marked_targets_and_new_rounds_finalize_again() {
+        let f = Fixture::new();
+        // Round 1: plain text lands as the first format, byte-compatible with legacy zh.json.
+        let revision = save(&f, plain_request(&f), "save-a");
+        let binding = submit(&f, &revision);
+        assert_eq!(binding.request.request_id, format!("submit-r{revision}"));
+        let generation_before = generation(&f);
+        assert!(approve(&f).unwrap());
+        let bytes = target(&f).expect("approval writes zh.json");
+        let expected = ReviewCandidate::from_binding(&binding)
+            .unwrap()
+            .approved_target()
+            .unwrap();
+        assert_eq!(bytes, expected.bytes().unwrap());
+        assert_eq!(
+            read_approved_target(&bytes, BLOCK).unwrap().format(),
+            TARGET_FORMAT_PLAIN
+        );
+        assert_eq!(generation(&f), generation_before + 2);
+        assert!(!f.root.join(".ziyuan/recovery.json").exists());
+        let first = approval(&f, &binding);
+        assert_eq!(first.request.target.before, None);
+        assert_eq!(
+            first.request.target.after,
+            ziyuan_storage::content_sha256(&bytes)
+        );
+        let settled = evidence(&f);
+        assert!(!approve(&f).unwrap(), "same round is idempotent");
+        assert_eq!(evidence(&f), settled, "idempotent approval writes nothing");
+        assert!(finalize(&f).unwrap());
+        assert!(!finalize(&f).unwrap());
+
+        // Round 2: a marked draft under a new revision replaces the target and finalizes anew.
+        let revision = save(&f, f.marked_request(), "save-b");
+        let binding = submit(&f, &revision);
+        assert!(approve(&f).unwrap());
+        let marked = target(&f).unwrap();
+        assert_eq!(marked, binding.request.candidate.as_bytes());
+        assert_eq!(
+            read_approved_target(&marked, BLOCK).unwrap().format(),
+            TARGET_FORMAT_MARKED
+        );
+        let second = approval(&f, &binding);
+        assert_eq!(
+            second.request.target.before,
+            Some(ziyuan_storage::content_sha256(&bytes))
+        );
+        assert!(
+            finalize(&f).unwrap(),
+            "an earlier round's signoff gives way"
+        );
+        assert!(!finalize(&f).unwrap());
+
+        // Round 3: same bytes again; zero targets, zh.json untouched, still a new approval.
+        let revision = save(&f, f.marked_request(), "save-c");
+        let binding = submit(&f, &revision);
+        let generation_before = generation(&f);
+        assert!(approve(&f).unwrap());
+        assert_eq!(target(&f).unwrap(), marked);
+        assert_eq!(generation(&f), generation_before + 2);
+        let third = approval(&f, &binding);
+        assert_eq!(
+            third.request.target.before.as_deref(),
+            Some(third.request.target.after.as_str())
+        );
+        assert!(finalize(&f).unwrap());
+    }
+
+    #[test]
+    fn unmarked_second_version_candidate_lands_as_the_first_format() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "save-a");
+        let plain = prepare(&f, &revision);
+        let mut candidate = ReviewCandidate::from_binding(&plain).unwrap();
+        candidate.schema_version = 2;
+        let mut binding = plain.clone();
+        binding.request.candidate = String::from_utf8(candidate.serialized().unwrap()).unwrap();
+        reseal(&mut binding);
+        assert_ne!(binding.request.candidate, plain.request.candidate);
+        force_bind(&f, binding.clone());
+        assert!(approve(&f).unwrap());
+        let bytes = target(&f).unwrap();
+        let legacy = ReviewCandidate::from_binding(&plain)
+            .unwrap()
+            .approved_target()
+            .unwrap()
+            .bytes()
+            .unwrap();
+        assert_eq!(bytes, legacy, "an unmarked v2 candidate keeps legacy bytes");
+        assert_eq!(
+            approval(&f, &binding).request.target.format,
+            TARGET_FORMAT_PLAIN
+        );
+        assert!(finalize(&f).unwrap());
+    }
+
+    #[test]
+    fn approval_refuses_changed_disk_or_material_without_writing() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "save-a");
+        submit(&f, &revision);
+        let dir = f.root.join("translations").join(&f.project.id).join(BLOCK);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("zh.json"), b"outside edit\n").unwrap();
+        let before = evidence(&f);
+        let error = approve(&f).unwrap_err().to_string();
+        assert!(error.contains("已被改动"), "{error}");
+        assert!(error.contains("ziyuan text human submit"), "{error}");
+        assert_eq!(evidence(&f), before);
+        fs::remove_file(dir.join("zh.json")).unwrap();
+
+        f.service()
+            .set_zhupi(&f.project.id, BLOCK, "c0001-p0001", "朱批")
+            .unwrap();
+        let before = evidence(&f);
+        let error = approve(&f).unwrap_err().to_string();
+        assert!(error.contains("朱批已变"), "{error}");
+        assert_eq!(evidence(&f), before);
+    }
+
+    #[test]
+    fn approval_refuses_a_binding_whose_predecessor_was_replaced() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "save-a");
+        submit(&f, &revision);
+        assert!(approve(&f).unwrap());
+        // A binding that still names the old source after another approval landed.
+        let revision = save(&f, f.marked_request(), "save-b");
+        let mut binding = prepare(&f, &revision);
+        assert_ne!(
+            binding.request.previous,
+            ziyuan_core::TranslationSource::None {}
+        );
+        binding.request.previous = ziyuan_core::TranslationSource::None {};
+        reseal(&mut binding);
+        force_bind(&f, binding);
+        let before = evidence(&f);
+        let error = approve(&f).unwrap_err().to_string();
+        assert!(error.contains("当前来源已变"), "{error}");
+        assert_eq!(evidence(&f), before);
+    }
+
+    #[test]
+    fn approval_refuses_an_unfinished_log_line_before_reserving() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "save-a");
+        submit(&f, &revision);
+        let log = f.root.join(".ziyuan/court.log");
+        let mut bytes = fs::read(&log).unwrap();
+        bytes.extend_from_slice(b"v1\tCLOCK");
+        fs::write(&log, &bytes).unwrap();
+        let before = evidence(&f);
+        assert!(approve(&f).is_err());
+        assert_eq!(evidence(&f), before);
+    }
+}

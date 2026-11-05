@@ -3,7 +3,7 @@ use super::{chapter_rank, sha256_hex};
 use crate::edicts::selected_files;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use ziyuan_core::{CourtEvent, TaskId, TranslationKind};
+use ziyuan_core::{CourtEvent, TaskId, TranslationKind, TranslationSource};
 use ziyuan_governance::{ChangeState, Court, Signoff, Task, TaskStatus};
 
 /// 下一步：已准奏初译后先审校，审校齐了再修订。
@@ -27,6 +27,8 @@ pub enum StaleReason {
     TranslationEdited,
     /// 已准奏的 `zh.json` 不见了。
     TranslationMissing,
+    /// 该块朱批与人工送审或定稿时不同。
+    ZhupiChanged,
 }
 
 impl StaleReason {
@@ -41,6 +43,7 @@ impl StaleReason {
             }
             Self::TranslationEdited => "磁盘上的译稿与已准奏或已定稿的不同".into(),
             Self::TranslationMissing => "已准奏的译稿不见了".into(),
+            Self::ZhupiChanged => "朱批已变".into(),
         }
     }
 }
@@ -69,6 +72,18 @@ pub enum BlockState {
         task: u64,
         reasons: Vec<StaleReason>,
     },
+    /// 人工准奏：准奏事实已入簿且译稿已落盘，可人工定稿。
+    HumanApproved { operation_id: String },
+    /// 人工定稿：定稿事实已入簿，磁盘译稿与准奏目标一致，可导出成品。
+    HumanFinalized {
+        translation_hash: String,
+        operation_id: String,
+    },
+    /// 版本失效（人工）：人工准奏或定稿所据的原文、上下文或朱批已变，须重新送审。
+    HumanStale {
+        operation_id: String,
+        reasons: Vec<StaleReason>,
+    },
     /// 不确定：须先对账，不猜。
     Uncertain { reason: String },
 }
@@ -91,7 +106,9 @@ impl BlockState {
             Self::Finalized { .. } => "已定稿",
             Self::Failed { .. } => "失败",
             Self::Cancelled { .. } => "已撤销",
-            Self::Stale { .. } => "版本失效",
+            Self::Stale { .. } | Self::HumanStale { .. } => "版本失效",
+            Self::HumanApproved { .. } => "已人工准奏",
+            Self::HumanFinalized { .. } => "已人工定稿",
             Self::Uncertain { .. } => "不确定",
         }
     }
@@ -268,6 +285,39 @@ fn one_block(
     {
         return status(BlockState::AwaitingApproval { task: w.edict.id.0 }, None);
     }
+    // Only a block with a human approval on record can have a human current source;
+    // skipping the replay elsewhere keeps status linear in the history length.
+    let has_human = history.iter().any(|e| {
+        matches!(e, CourtEvent::HumanTranslationApproved { approval }
+            if approval.request.project == project && approval.request.block == facts.block)
+    });
+    if has_human {
+        match super::resolve_translation_source(history, project, &facts.block) {
+            Err(e) => {
+                return status(
+                    BlockState::Uncertain {
+                        reason: format!("无法判定本块当前的准奏来源（{e}），须先核对"),
+                    },
+                    None,
+                );
+            }
+            Ok(resolved) => {
+                if let TranslationSource::Human {
+                    operation_id,
+                    event,
+                } = resolved.source
+                {
+                    let after = resolved.translation_hash.unwrap_or_default();
+                    let human = HumanRound {
+                        operation_id,
+                        approval_index: event.index,
+                        after,
+                    };
+                    return human_block(court, history, project, facts, context, human, status);
+                }
+            }
+        }
+    }
     let applied = writers
         .iter()
         .rev()
@@ -309,20 +359,7 @@ fn one_block(
     let applied_hash = sha256_hex(applied_bytes.as_bytes());
     let signoff = signoff_after(history, project, &facts.block, applied.edict.id);
 
-    let mut reasons = Vec::new();
-    if facts.source_hash != link.source_hash {
-        reasons.push(StaleReason::SourceChanged);
-    }
-    if context.current != link.context_version {
-        reasons.push(StaleReason::ContextChanged {
-            used: link.context_version,
-            current: context.current,
-        });
-        let chapters = summary_changes(context, link.context_version, &facts.chapter);
-        if !chapters.is_empty() {
-            reasons.push(StaleReason::SummaryChanged { chapters });
-        }
-    }
+    let mut reasons = basis_reasons(facts, context, &link.source_hash, link.context_version);
     let expected = match &signoff {
         Some(Signoff::Finalized {
             translation_hash, ..
@@ -354,7 +391,8 @@ fn one_block(
                 next: NextStep::Revise,
             }
         }
-        None if link.kind == TranslationKind::Revise => {
+        // `signoff_after` only yields model signoffs; a human one never applies here.
+        None | Some(Signoff::HumanFinalized { .. }) if link.kind == TranslationKind::Revise => {
             if facts.zhupi_hash != link.zhupi_hash {
                 note = Some(match note {
                     Some(n) => format!("朱批自下诏后有变，御览前须再下修订；{n}"),
@@ -363,7 +401,7 @@ fn one_block(
             }
             BlockState::AwaitingYulan { task: id }
         }
-        None => {
+        None | Some(Signoff::HumanFinalized { .. }) => {
             let reviewed = |k: TranslationKind| {
                 tasks.iter().any(|t| {
                     t.edict.id > applied.edict.id
@@ -382,6 +420,191 @@ fn one_block(
         }
     };
     status(state, note)
+}
+
+/// 原文与上下文相对某一基准的失效理由；模型与人工两条分支共用。
+fn basis_reasons(
+    facts: &BlockFacts,
+    context: &ContextFacts,
+    source_hash: &str,
+    context_version: u32,
+) -> Vec<StaleReason> {
+    let mut reasons = Vec::new();
+    if facts.source_hash != source_hash {
+        reasons.push(StaleReason::SourceChanged);
+    }
+    if context.current != context_version {
+        reasons.push(StaleReason::ContextChanged {
+            used: context_version,
+            current: context.current,
+        });
+        let chapters = summary_changes(context, context_version, &facts.chapter);
+        if !chapters.is_empty() {
+            reasons.push(StaleReason::SummaryChanged { chapters });
+        }
+    }
+    reasons
+}
+
+/// 人工轮次的材料基准（原文、上下文版本、朱批）相对现状的失效理由。
+pub(crate) fn human_basis_reasons(
+    facts: &BlockFacts,
+    context: &ContextFacts,
+    source_hash: &str,
+    context_version: u32,
+    zhupi_hash: &str,
+) -> Vec<StaleReason> {
+    let mut reasons = basis_reasons(facts, context, source_hash, context_version);
+    if facts.zhupi_hash != zhupi_hash {
+        reasons.push(StaleReason::ZhupiChanged);
+    }
+    reasons
+}
+
+/// 当前来源：一次人工准奏，及其在事件簿中的位置与目标摘要。
+struct HumanRound {
+    operation_id: String,
+    approval_index: u64,
+    after: String,
+}
+
+/// 当前来源为人工准奏 `operation_id` 的块：只认这次准奏自己的人工定稿，
+/// 模型签押与更早一轮的人工定稿都不算数；磁盘须正是这次准奏的目标，
+/// 原文、上下文与朱批须仍是送审（准奏）或定稿时记下的那一份。
+fn human_block(
+    court: &Court,
+    history: &[CourtEvent],
+    project: &str,
+    facts: &BlockFacts,
+    context: &ContextFacts,
+    human: HumanRound,
+    status: impl Fn(BlockState, Option<String>) -> BlockStatus,
+) -> BlockStatus {
+    let HumanRound {
+        operation_id,
+        approval_index,
+        after,
+    } = human;
+    let after = after.as_str();
+    let resubmit = format!(
+        "重新保存人工草稿后运行 ziyuan text human submit {project} {}，再准奏、定稿",
+        facts.block
+    );
+    if facts.disk_hash.as_deref() != Some(after) {
+        let reason = if facts.disk_hash.is_none() {
+            "人工准奏的译稿 zh.json 不见了，须先核对"
+        } else {
+            "磁盘译稿与人工准奏的目标不同，须先核对"
+        };
+        return status(
+            BlockState::Uncertain {
+                reason: format!(
+                    "{reason}；请核对 {}，或重新保存人工草稿后运行 ziyuan text human submit {project} {}",
+                    super::output_rel(project, &facts.block),
+                    facts.block
+                ),
+            },
+            None,
+        );
+    }
+    let uncertain = |reason: &str| {
+        status(
+            BlockState::Uncertain {
+                reason: reason.into(),
+            },
+            None,
+        )
+    };
+    match court.translation_signoff(project, &facts.block) {
+        Some(Signoff::HumanFinalized {
+            translation_hash,
+            operation_id: signed,
+            ..
+        }) if *signed == operation_id => {
+            if translation_hash != after {
+                return uncertain("人工定稿的签押与人工准奏的目标不同，须先核对");
+            }
+            let Some(finalization) = history.iter().rev().find_map(|e| match e {
+                CourtEvent::HumanTranslationFinalized { finalization }
+                    if finalization.project == project
+                        && finalization.block == facts.block
+                        && finalization.approval_operation_id == operation_id =>
+                {
+                    Some(finalization)
+                }
+                _ => None,
+            }) else {
+                return uncertain("人工定稿签押找不到对应的定稿事件，须先核对");
+            };
+            let reasons = human_basis_reasons(
+                facts,
+                context,
+                &finalization.source_hash,
+                finalization.context_version,
+                &finalization.zhupi_hash,
+            );
+            if !reasons.is_empty() {
+                return status(
+                    BlockState::HumanStale {
+                        operation_id,
+                        reasons,
+                    },
+                    Some(format!(
+                        "人工定稿后材料有变，须重新定稿；下一步：{resubmit}"
+                    )),
+                );
+            }
+            status(
+                BlockState::HumanFinalized {
+                    translation_hash: translation_hash.clone(),
+                    operation_id,
+                },
+                Some(format!(
+                    "人工定稿已入簿，可导出成品；下一步：ziyuan text export-finished {project}（译稿带注音等标记时加 --format md）"
+                )),
+            )
+        }
+        _ => {
+            let binding = usize::try_from(approval_index)
+                .ok()
+                .and_then(|i| history.get(i))
+                .and_then(|e| match e {
+                    CourtEvent::HumanTranslationApproved { approval } => court
+                        .human_submission_binding(
+                            project,
+                            &facts.block,
+                            &approval.request.submission_id,
+                        ),
+                    _ => None,
+                });
+            let Some(binding) = binding else {
+                return uncertain("人工准奏找不到对应的送审绑定，须先核对");
+            };
+            let basis = &binding.request.basis;
+            let reasons = human_basis_reasons(
+                facts,
+                context,
+                &basis.source_hash,
+                basis.context_version,
+                &basis.zhupi_hash,
+            );
+            if !reasons.is_empty() {
+                return status(
+                    BlockState::HumanStale {
+                        operation_id,
+                        reasons,
+                    },
+                    Some(format!(
+                        "人工送审后材料有变，这次准奏不能再定稿；下一步：{resubmit}"
+                    )),
+                );
+            }
+            status(
+                BlockState::HumanApproved { operation_id },
+                Some("人工准奏已入簿并落盘；可人工定稿".into()),
+            )
+        }
+    }
 }
 
 /// 各块状态，与 `blocks` 同序。`history` 为事件簿全部事件（用于判定御览与准奏的先后）。
@@ -418,4 +641,275 @@ pub fn resume_plan(statuses: &[BlockStatus], options: ResumeOptions) -> Vec<Stri
         })
         .map(|s| s.block.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ziyuan_core::{
+        DraftBasis, EventReference, GovernanceMode, HumanActor, HumanApproval,
+        HumanApprovalRequest, HumanApprovalTarget, HumanBindingRequest, HumanSubmissionBinding,
+    };
+    use ziyuan_governance::{human_approval_request_hash, human_binding_request_hash};
+
+    const PROJECT: &str = "0123456789abcdef0123456789abcdef";
+    const BLOCK: &str = "c0001-b0001";
+
+    fn history_and_facts(disk: Option<String>) -> (Vec<CourtEvent>, BlockFacts) {
+        let previous = TranslationSource::None {};
+        let binding_request = HumanBindingRequest {
+            project: PROJECT.into(),
+            block: BLOCK.into(),
+            request_id: "bind-1".into(),
+            actor: HumanActor::Local,
+            submission_id: "submit-1".into(),
+            revision: "d".repeat(32),
+            basis: DraftBasis {
+                project_hash: "a".repeat(64),
+                source_hash: "b".repeat(64),
+                context_version: 0,
+                zhupi_hash: "c".repeat(64),
+                translation_hash: None,
+            },
+            candidate: "{}\n".into(),
+            candidate_hash: crate::translation::sha256_hex(b"{}\n"),
+            previous: previous.clone(),
+        };
+        let binding = HumanSubmissionBinding {
+            request_hash: human_binding_request_hash(&binding_request),
+            request: binding_request,
+        };
+        let approval_request = HumanApprovalRequest {
+            project: PROJECT.into(),
+            block: BLOCK.into(),
+            request_id: "approve-1".into(),
+            actor: HumanActor::Local,
+            submission_id: "bind-1".into(),
+            binding: EventReference {
+                index: 1,
+                hash: "e".repeat(64),
+            },
+            previous,
+            target: HumanApprovalTarget {
+                format: "zh-json/1".into(),
+                path: format!("translations/{PROJECT}/{BLOCK}/zh.json"),
+                before: None,
+                after: "f".repeat(64),
+            },
+        };
+        let approval = HumanApproval {
+            request_hash: human_approval_request_hash(&approval_request),
+            request: approval_request,
+            operation_id: "1".repeat(32),
+        };
+        let history = vec![
+            CourtEvent::Founded(GovernanceMode::Chancellor),
+            CourtEvent::HumanSubmissionBound {
+                binding: Box::new(binding),
+            },
+            CourtEvent::HumanTranslationApproved {
+                approval: Box::new(approval),
+            },
+        ];
+        let facts = BlockFacts {
+            block: BLOCK.into(),
+            chapter: "c0001".into(),
+            source_hash: "b".repeat(64),
+            disk_hash: disk,
+            zhupi_hash: "c".repeat(64),
+        };
+        (history, facts)
+    }
+
+    #[test]
+    fn human_approval_is_shown_read_only_and_never_finalized() {
+        let (history, facts) = history_and_facts(Some("f".repeat(64)));
+        let court = Court::replay(&history).unwrap();
+        let states = block_states(
+            &court,
+            &history,
+            PROJECT,
+            std::slice::from_ref(&facts),
+            &ContextFacts::default(),
+        );
+        assert_eq!(
+            states[0].state,
+            BlockState::HumanApproved {
+                operation_id: "1".repeat(32)
+            }
+        );
+        assert!(
+            states[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("可人工定稿")),
+            "note: {:?}",
+            states[0].note
+        );
+        assert_eq!(states[0].tasks, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn human_approval_with_changed_disk_is_uncertain() {
+        let (history, facts) = history_and_facts(Some("a".repeat(64)));
+        let court = Court::replay(&history).unwrap();
+        let states = block_states(
+            &court,
+            &history,
+            PROJECT,
+            std::slice::from_ref(&facts),
+            &ContextFacts::default(),
+        );
+        assert!(matches!(states[0].state, BlockState::Uncertain { .. }));
+    }
+
+    #[test]
+    fn human_finalization_is_shown_read_only() {
+        use ziyuan_core::HumanFinalization;
+        let (mut history, facts) = history_and_facts(Some("f".repeat(64)));
+        let court = Court::replay(&history).unwrap();
+        let finalization = HumanFinalization {
+            project: PROJECT.into(),
+            block: BLOCK.into(),
+            approval_request_id: "approve-1".into(),
+            approval_operation_id: "1".repeat(32),
+            approval_event: EventReference {
+                index: 2,
+                hash: "e".repeat(64),
+            },
+            submission_id: "bind-1".into(),
+            candidate_hash: "c".repeat(64),
+            source_hash: "b".repeat(64),
+            context_version: 0,
+            zhupi_hash: "c".repeat(64),
+            target_format: "zh-json/1".into(),
+            target_hash: "f".repeat(64),
+        };
+        history.push(
+            court
+                .propose_human_translation_finalized(finalization)
+                .unwrap(),
+        );
+        let court = Court::replay(&history).unwrap();
+        let states = block_states(
+            &court,
+            &history,
+            PROJECT,
+            std::slice::from_ref(&facts),
+            &ContextFacts::default(),
+        );
+        assert!(matches!(states[0].state, BlockState::HumanFinalized { .. }));
+        assert!(
+            states[0]
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("ziyuan text export-finished")
+        );
+    }
+
+    #[test]
+    fn human_finalization_must_sign_the_approved_target() {
+        use ziyuan_core::HumanFinalization;
+        let (mut history, facts) = history_and_facts(Some("f".repeat(64)));
+        let court = Court::replay(&history).unwrap();
+        let finalization = HumanFinalization {
+            project: PROJECT.into(),
+            block: BLOCK.into(),
+            approval_request_id: "approve-1".into(),
+            approval_operation_id: "1".repeat(32),
+            approval_event: EventReference {
+                index: 2,
+                hash: "e".repeat(64),
+            },
+            submission_id: "bind-1".into(),
+            candidate_hash: "c".repeat(64),
+            source_hash: "b".repeat(64),
+            context_version: 0,
+            zhupi_hash: "c".repeat(64),
+            target_format: "zh-json/1".into(),
+            target_hash: "9".repeat(64),
+        };
+        history.push(
+            court
+                .propose_human_translation_finalized(finalization)
+                .unwrap(),
+        );
+        let court = Court::replay(&history).unwrap();
+        let states = block_states(
+            &court,
+            &history,
+            PROJECT,
+            std::slice::from_ref(&facts),
+            &ContextFacts::default(),
+        );
+        assert!(
+            matches!(&states[0].state, BlockState::Uncertain { reason } if reason.contains("签押")),
+            "{:?}",
+            states[0]
+        );
+    }
+    #[test]
+    fn human_rounds_go_stale_when_the_source_changes() {
+        use ziyuan_core::HumanFinalization;
+        let (mut history, mut facts) = history_and_facts(Some("f".repeat(64)));
+        facts.source_hash = "0".repeat(64);
+        let states = |history: &[CourtEvent], facts: &BlockFacts| {
+            let court = Court::replay(history).unwrap();
+            block_states(
+                &court,
+                history,
+                PROJECT,
+                std::slice::from_ref(facts),
+                &ContextFacts::default(),
+            )
+            .remove(0)
+        };
+        let approved = states(&history, &facts);
+        assert_eq!(
+            approved.state,
+            BlockState::HumanStale {
+                operation_id: "1".repeat(32),
+                reasons: vec![StaleReason::SourceChanged],
+            }
+        );
+        assert!(approved.note.unwrap().contains("ziyuan text human submit"));
+
+        let court = Court::replay(&history).unwrap();
+        history.push(
+            court
+                .propose_human_translation_finalized(HumanFinalization {
+                    project: PROJECT.into(),
+                    block: BLOCK.into(),
+                    approval_request_id: "approve-1".into(),
+                    approval_operation_id: "1".repeat(32),
+                    approval_event: EventReference {
+                        index: 2,
+                        hash: "e".repeat(64),
+                    },
+                    submission_id: "bind-1".into(),
+                    candidate_hash: "c".repeat(64),
+                    source_hash: "b".repeat(64),
+                    context_version: 0,
+                    zhupi_hash: "c".repeat(64),
+                    target_format: "zh-json/1".into(),
+                    target_hash: "f".repeat(64),
+                })
+                .unwrap(),
+        );
+        let finalized = states(&history, &facts);
+        assert_eq!(
+            finalized.state,
+            BlockState::HumanStale {
+                operation_id: "1".repeat(32),
+                reasons: vec![StaleReason::SourceChanged],
+            }
+        );
+        assert!(finalized.note.unwrap().contains("须重新定稿"));
+        facts.source_hash = "b".repeat(64);
+        assert!(matches!(
+            states(&history, &facts).state,
+            BlockState::HumanFinalized { .. }
+        ));
+    }
 }

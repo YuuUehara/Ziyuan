@@ -94,47 +94,89 @@ pub(crate) fn reference_material(records: &serde_json::Value, nonce: &str) -> St
     )
 }
 
-// Decode the wide header first: a version above u32::MAX is a version error,
-// not an accidentally truncated supported version.
-#[derive(Deserialize)]
-struct Header {
-    schema_version: u64,
-}
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Candidate {
+struct StrictCandidate {
     schema_version: u64,
     block_id: String,
-    paragraphs: Vec<CandidateParagraph>,
+    paragraphs: Vec<StrictParagraph>,
 }
-#[derive(Deserialize)]
+
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CandidateParagraph {
+struct StrictParagraph {
     id: String,
     text: String,
 }
 
-fn candidate(bytes: &[u8]) -> Result<PromptBlockView, String> {
-    let header: Header = serde_json::from_slice(bytes).map_err(|_| "invalid_json".to_owned())?;
-    if header.schema_version != 1 {
-        return Err(format!(
-            "unsupported_schema_version {}",
-            header.schema_version
+fn candidate(bytes: &[u8], block: &str) -> Result<(PromptBlockView, &'static str), String> {
+    let header: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "invalid_json".to_owned())?;
+    let version = header
+        .get("schema_version")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    if version != 1 && version != 2 {
+        return Err(format!("unsupported_schema_version {version}"));
+    }
+    if version == 1 {
+        let value: StrictCandidate =
+            serde_json::from_slice(bytes).map_err(|_| "invalid_json".to_owned())?;
+        if value.schema_version != 1 {
+            return Err(format!(
+                "unsupported_schema_version {}",
+                value.schema_version
+            ));
+        }
+        return Ok((
+            PromptBlockView {
+                schema_version: 1,
+                block_id: value.block_id,
+                paragraphs: value
+                    .paragraphs
+                    .into_iter()
+                    .map(|p| ParaPairInput {
+                        id: p.id,
+                        text: p.text,
+                    })
+                    .collect(),
+            },
+            "zh-json/1",
         ));
     }
-    let value: Candidate = serde_json::from_slice(bytes).map_err(|_| "invalid_json".to_owned())?;
-    Ok(PromptBlockView {
-        schema_version: value.schema_version as u32,
-        block_id: value.block_id,
-        paragraphs: value
-            .paragraphs
-            .into_iter()
-            .map(|p| ParaPairInput {
-                id: p.id,
-                text: p.text,
-            })
-            .collect(),
-    })
+    match crate::translation::read_approved_target(bytes, block) {
+        Ok(crate::translation::ApprovedTarget::Plain(block)) => Ok((
+            PromptBlockView {
+                schema_version: 1,
+                block_id: block.block_id,
+                paragraphs: block
+                    .paragraphs
+                    .into_iter()
+                    .map(|p| ParaPairInput {
+                        id: p.id,
+                        text: p.text,
+                    })
+                    .collect(),
+            },
+            "zh-json/1",
+        )),
+        Ok(crate::translation::ApprovedTarget::Marked(candidate)) => Ok((
+            PromptBlockView {
+                schema_version: 1,
+                block_id: candidate.block_id,
+                paragraphs: candidate
+                    .paragraphs
+                    .into_iter()
+                    .map(|p| ParaPairInput {
+                        id: p.id,
+                        text: p.text,
+                    })
+                    .collect(),
+            },
+            "zh-json/2",
+        )),
+        Err(_) => Err("translation_unreadable".into()),
+    }
 }
 
 fn failure(error: impl std::fmt::Display) -> AppError {
@@ -219,6 +261,9 @@ impl<S: EventStore> Session<S> {
             let translation_hash = match &status.state {
                 BlockState::Finalized {
                     translation_hash, ..
+                }
+                | BlockState::HumanFinalized {
+                    translation_hash, ..
                 } => translation_hash,
                 BlockState::NotStarted
                 | BlockState::Running { .. }
@@ -228,6 +273,8 @@ impl<S: EventStore> Session<S> {
                 | BlockState::Failed { .. }
                 | BlockState::Cancelled { .. }
                 | BlockState::Stale { .. }
+                | BlockState::HumanStale { .. }
+                | BlockState::HumanApproved { .. }
                 | BlockState::Uncertain { .. } => {
                     result.skipped.push(SkippedBlock {
                         project: project.into(),
@@ -251,7 +298,7 @@ impl<S: EventStore> Session<S> {
                 if sha256_hex(&bytes) != *translation_hash {
                     return Err("translation_edited".into());
                 }
-                let view = candidate(&bytes)?;
+                let (view, target_format) = candidate(&bytes, &status.block)?;
                 let source = PromptBlockView {
                     schema_version: prompt.schema_version,
                     block_id: prompt.block_id.clone(),
@@ -268,25 +315,44 @@ impl<S: EventStore> Session<S> {
                     pair_paragraphs(&source, &view).map_err(|problems| format!("{problems:?}"))?;
                 let mut finalized_events = Vec::new();
                 let mut versions = None;
+                let mut human = None;
                 for (i, event) in self
                     .history()
                     .map_err(|_| "history_unreadable")?
                     .iter()
                     .enumerate()
                 {
-                    if let CourtEvent::TranslationFinalized {
-                        project: ep,
-                        block,
-                        translation_hash: hash,
-                        context_version,
-                        zhupi_version,
-                    } = event
-                        && ep == project
-                        && block == &status.block
-                        && hash == translation_hash
-                    {
-                        finalized_events.push(i);
-                        versions = Some((*context_version, *zhupi_version));
+                    match event {
+                        CourtEvent::TranslationFinalized {
+                            project: ep,
+                            block,
+                            translation_hash: hash,
+                            context_version,
+                            zhupi_version,
+                        } if ep == project
+                            && block == &status.block
+                            && hash == translation_hash =>
+                        {
+                            finalized_events.push(i);
+                            versions = Some((*context_version, *zhupi_version));
+                        }
+                        CourtEvent::HumanTranslationFinalized { finalization }
+                            if finalization.project == project
+                                && finalization.block == status.block
+                                && finalization.target_hash == *translation_hash =>
+                        {
+                            finalized_events.push(i);
+                            human = Some(ziyuan_memory::HumanOrigin {
+                                operation_id: finalization.approval_operation_id.clone(),
+                                approval_event: usize::try_from(finalization.approval_event.index)
+                                    .map_err(|_| "approval_event_out_of_range")?,
+                                target_format: target_format.into(),
+                                context_version: finalization.context_version,
+                                zhupi_hash: finalization.zhupi_hash.clone(),
+                            });
+                            versions = Some((finalization.context_version, 0));
+                        }
+                        _ => {}
                     }
                 }
                 let (context_version, zhupi_version) = versions.ok_or("finalization_missing")?;
@@ -295,6 +361,7 @@ impl<S: EventStore> Session<S> {
                     translation_hash: translation_hash.clone(),
                     context_version,
                     zhupi_version,
+                    human,
                 };
                 let digests = Digests {
                     block_source_sha256: sha256_hex(

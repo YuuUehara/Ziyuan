@@ -1407,6 +1407,159 @@ fn human_bindings_check_integrity_scope_and_replay_without_approval() {
 }
 
 #[test]
+fn human_approvals_record_receipts_without_writing_or_signoff() {
+    use ziyuan_core::{
+        DraftBasis, EventReference, HumanActor, HumanApproval, HumanApprovalRequest,
+        HumanApprovalTarget, HumanBindingRequest, HumanSubmissionBinding, TranslationSource,
+    };
+    let previous = TranslationSource::Human {
+        operation_id: "0123456789abcdef0123456789abcdef".into(),
+        event: EventReference {
+            index: 1,
+            hash: "a".repeat(64),
+        },
+    };
+    let binding_request = HumanBindingRequest {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        request_id: "bind-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "submit-7".into(),
+        revision: "d".repeat(32),
+        basis: DraftBasis {
+            project_hash: "a".repeat(64),
+            source_hash: "b".repeat(64),
+            context_version: 3,
+            zhupi_hash: "c".repeat(64),
+            translation_hash: None,
+        },
+        candidate: "{}\n".into(),
+        candidate_hash: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356".into(),
+        previous: previous.clone(),
+    };
+    let binding = HumanSubmissionBinding {
+        request_hash: human_binding_request_hash(&binding_request),
+        request: binding_request,
+    };
+    let out = format!("translations/{PROJECT}/{BLOCK}/zh.json");
+    let request = HumanApprovalRequest {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        request_id: "approve-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "bind-1".into(),
+        binding: EventReference {
+            index: 3,
+            hash: "b".repeat(64),
+        },
+        previous,
+        target: HumanApprovalTarget {
+            format: "zh-json/1".into(),
+            path: out,
+            before: None,
+            after: "f".repeat(64),
+        },
+    };
+    // Independently calculated from the ordered domain/version/request JSON.
+    assert_eq!(
+        human_approval_request_hash(&request),
+        "28209133f97d3a919693b4c36242e643b72428ec5c4c9c83bf71e24d76d69acd"
+    );
+    let make = |request: HumanApprovalRequest| HumanApproval {
+        request_hash: human_approval_request_hash(&request),
+        request,
+        operation_id: "1".repeat(32),
+    };
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    assert!(
+        court
+            .propose_human_translation_approved(make(request.clone()))
+            .is_err(),
+        "approval cannot invent frozen material without a binding"
+    );
+    let bind = court.propose_human_submission_binding(binding).unwrap();
+    court.apply(&bind).unwrap();
+    let expected = make(request.clone());
+    let event = court
+        .propose_human_translation_approved(expected.clone())
+        .unwrap();
+    court.apply(&event).unwrap();
+    assert_eq!(
+        court.human_approval(PROJECT, BLOCK, "approve-1"),
+        Some(&expected)
+    );
+    assert_eq!(court.human_approvals(PROJECT, BLOCK).count(), 1);
+    assert!(court.translation_signoff(PROJECT, BLOCK).is_none());
+    assert!(court.translation_tasks(PROJECT, BLOCK).next().is_none());
+    assert!(
+        court.apply(&event).is_err(),
+        "duplicate log events must not create two receipts"
+    );
+    assert!(
+        court
+            .propose_human_translation_approved(expected.clone())
+            .is_err(),
+        "same scoped request cannot be published twice"
+    );
+
+    let restored: Court = serde_json::from_slice(&serde_json::to_vec(&court).unwrap()).unwrap();
+    assert_eq!(
+        restored.human_approval(PROJECT, BLOCK, "approve-1"),
+        Some(&expected)
+    );
+
+    // 负例放在只有送审绑定、尚无任何批准的朝廷上，避免被“同请求已入簿”的守卫掩盖。
+    let mut fresh = Court::replay(&founding_events(1)).unwrap();
+    fresh.apply(&bind).unwrap();
+    let rejected =
+        |approval: HumanApproval| match fresh.propose_human_translation_approved(approval) {
+            Err(GovernanceError::Translation(reason)) => reason,
+            other => panic!("应为 Translation 错误，却是 {other:?}"),
+        };
+    type Edit = fn(&mut HumanApprovalRequest);
+    let edits: [(&str, Edit); 5] = [
+        (
+            "人工准奏目标路径须为 translations/0123456789abcdef0123456789abcdef/c0001-b0001/zh.json",
+            |r| r.target.path = "translations/other/zh.json".into(),
+        ),
+        (
+            "人工准奏目标格式须为 1–64 位字母、数字或 . - / _",
+            |r| r.target.format = "zh json".into(),
+        ),
+        (
+            "准奏前目标摘要须为 SHA-256（64 位小写十六进制）：\"abc\"",
+            |r| r.target.before = Some("abc".into()),
+        ),
+        (
+            "人工准奏的前一来源与送审绑定时不一致",
+            |r| r.previous = TranslationSource::None {},
+        ),
+        ("人工准奏须引用本块已入簿的送审绑定", |r| {
+            r.submission_id = "bind-9".into()
+        }),
+    ];
+    for (reason, edit) in edits {
+        let mut changed = request.clone();
+        edit(&mut changed);
+        assert_eq!(rejected(make(changed)), reason);
+    }
+    let mut forged = make(request.clone());
+    forged.request_hash = "0".repeat(64);
+    assert_eq!(rejected(forged), "人工准奏请求摘要不符");
+    let mut bad_operation = make(request.clone());
+    bad_operation.operation_id = "x".repeat(32);
+    assert_eq!(
+        rejected(bad_operation),
+        "人工准奏操作须为 32 位小写十六进制"
+    );
+    // 同一朝廷上未改动的请求仍可通过：上面每个拒绝都只由所改的那一处触发。
+    assert!(
+        fresh
+            .propose_human_translation_approved(make(request))
+            .is_ok()
+    );
+}
+#[test]
 fn translation_references_validate_proposals_and_replay() {
     use ziyuan_core::ReferenceBinding;
     let mut court = Court::replay(&founding_events(1)).unwrap();
@@ -1846,4 +1999,124 @@ fn translation_signoff_follows_the_last_finalize_or_reopen() {
         }),
         Err(GovernanceError::Translation(_))
     ));
+}
+
+#[test]
+fn human_finalization_references_an_approval_receipt_and_replays() {
+    use ziyuan_core::{
+        DraftBasis, EventReference, HumanActor, HumanApproval, HumanApprovalRequest,
+        HumanApprovalTarget, HumanBindingRequest, HumanFinalization, HumanSubmissionBinding,
+        TranslationSource,
+    };
+    let previous = TranslationSource::None {};
+    let binding_request = HumanBindingRequest {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        request_id: "bind-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "submit-7".into(),
+        revision: "d".repeat(32),
+        basis: DraftBasis {
+            project_hash: "a".repeat(64),
+            source_hash: "b".repeat(64),
+            context_version: 1,
+            zhupi_hash: "c".repeat(64),
+            translation_hash: None,
+        },
+        candidate: "{}\n".into(),
+        candidate_hash: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356".into(),
+        previous: previous.clone(),
+    };
+    let binding = HumanSubmissionBinding {
+        request_hash: human_binding_request_hash(&binding_request),
+        request: binding_request,
+    };
+    let approval_request = HumanApprovalRequest {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        request_id: "approve-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "bind-1".into(),
+        binding: EventReference {
+            index: 1,
+            hash: "e".repeat(64),
+        },
+        previous,
+        target: HumanApprovalTarget {
+            format: "zh-json/1".into(),
+            path: format!("translations/{PROJECT}/{BLOCK}/zh.json"),
+            before: None,
+            after: "f".repeat(64),
+        },
+    };
+    let approval = HumanApproval {
+        request_hash: human_approval_request_hash(&approval_request),
+        request: approval_request,
+        operation_id: "1".repeat(32),
+    };
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    court
+        .apply(&court.propose_human_submission_binding(binding).unwrap())
+        .unwrap();
+    let unapproved = court.clone();
+    court
+        .apply(&court.propose_human_translation_approved(approval).unwrap())
+        .unwrap();
+    let finalization = HumanFinalization {
+        project: PROJECT.into(),
+        block: BLOCK.into(),
+        approval_request_id: "approve-1".into(),
+        approval_operation_id: "1".repeat(32),
+        approval_event: EventReference {
+            index: 2,
+            hash: "e".repeat(64),
+        },
+        submission_id: "bind-1".into(),
+        candidate_hash: "c".repeat(64),
+        source_hash: "b".repeat(64),
+        context_version: 1,
+        zhupi_hash: "d".repeat(64),
+        target_format: "zh-json/1".into(),
+        target_hash: "f".repeat(64),
+    };
+    let event = court
+        .propose_human_translation_finalized(finalization.clone())
+        .unwrap();
+    court.apply(&event).unwrap();
+    assert_eq!(
+        court.translation_signoff(PROJECT, BLOCK),
+        Some(&Signoff::HumanFinalized {
+            translation_hash: "f".repeat(64),
+            context_version: 1,
+            zhupi_hash: "d".repeat(64),
+            operation_id: "1".repeat(32),
+        })
+    );
+    let rejected = |court: &Court, finalization: HumanFinalization| match court
+        .propose_human_translation_finalized(finalization)
+    {
+        Err(GovernanceError::Translation(reason)) => reason,
+        other => panic!("应为 Translation 错误，却是 {other:?}"),
+    };
+    // 只有送审绑定、没有准奏回执：定稿不能凭空引用批准。
+    assert_eq!(
+        rejected(&unapproved, finalization.clone()),
+        "人工定稿须引用本块已入簿的准奏回执"
+    );
+    assert!(unapproved.translation_signoff(PROJECT, BLOCK).is_none());
+    let mut foreign_request = finalization.clone();
+    foreign_request.approval_request_id = "approve-9".into();
+    assert_eq!(
+        rejected(&court, foreign_request),
+        "人工定稿须引用本块已入簿的准奏回执"
+    );
+    let mut wrong_submission = finalization.clone();
+    wrong_submission.submission_id = "bind-9".into();
+    assert_eq!(
+        rejected(&court, wrong_submission),
+        "人工定稿引用的准奏回执不符"
+    );
+    let mut wrong = finalization;
+    wrong.approval_operation_id = "2".repeat(32);
+    assert_eq!(rejected(&court, wrong), "人工定稿引用的准奏回执不符");
 }

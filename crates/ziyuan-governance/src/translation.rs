@@ -3,8 +3,9 @@
 use crate::{Court, GovernanceError, Task, TaskStatus};
 use serde::{Deserialize, Serialize};
 use ziyuan_core::{
-    Capability, CourtEvent, Department, HumanBindingRequest, HumanSubmissionBinding,
-    ReferenceBinding, TaskId, TranslationLink, TranslationSource,
+    Capability, CourtEvent, Department, HumanApproval, HumanApprovalRequest, HumanBindingRequest,
+    HumanFinalization, HumanSubmissionBinding, ReferenceBinding, TaskId, TranslationLink,
+    TranslationSource,
 };
 
 /// Domain, representation version, then declaration-order request fields.
@@ -12,6 +13,14 @@ use ziyuan_core::{
 pub fn human_binding_request_hash(request: &HumanBindingRequest) -> String {
     let bytes = serde_json::to_vec(&("ziyuan/human-submission-bind", 1, request))
         .expect("binding request contains only JSON-serializable fields");
+    sha256(&bytes)
+}
+
+/// Domain, representation version, then declaration-order request fields.
+/// The request carries no operation identity, which belongs to the write itself.
+pub fn human_approval_request_hash(request: &HumanApprovalRequest) -> String {
+    let bytes = serde_json::to_vec(&("ziyuan/human-approval", 1, request))
+        .expect("approval request contains only JSON-serializable fields");
     sha256(&bytes)
 }
 
@@ -39,10 +48,101 @@ pub enum Signoff {
     Reopened {
         reason: String,
     },
+    /// 人工定稿：来源可辨，未运行模型双审。
+    HumanFinalized {
+        translation_hash: String,
+        context_version: u32,
+        zhupi_hash: String,
+        operation_id: String,
+    },
 }
 
 fn invalid(why: impl Into<String>) -> GovernanceError {
     GovernanceError::Translation(why.into())
+}
+
+fn check_target_format(format: &str) -> Result<(), GovernanceError> {
+    let ok = (1..=64).contains(&format.len())
+        && format
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'/' | b'_'));
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid("目标格式须为 1–64 位字母、数字或 . - / _"))
+    }
+}
+
+fn check_translation_source(source: &TranslationSource) -> Result<(), GovernanceError> {
+    let event = match source {
+        TranslationSource::None {} => None,
+        TranslationSource::Model {
+            task,
+            changes_version,
+            event,
+        } => {
+            if task.0 == 0 {
+                return Err(invalid("模型来源须为真实诏令，不得借用零号"));
+            }
+            check_hash(
+                "模型改动版本",
+                changes_version
+                    .strip_prefix("sha256:")
+                    .ok_or_else(|| invalid("模型改动版本须沿用 sha256: 前缀"))?,
+            )?;
+            Some(event)
+        }
+        TranslationSource::Human {
+            operation_id,
+            event,
+        } => {
+            if !is_lower_hex(operation_id, 32) {
+                return Err(invalid("人工准奏操作须为 32 位小写十六进制"));
+            }
+            Some(event)
+        }
+    };
+    if let Some(event) = event {
+        check_hash("来源事件摘要", &event.hash)?;
+    }
+    Ok(())
+}
+
+fn check_request_id(what: &str, id: &str) -> Result<(), GovernanceError> {
+    if (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "{what}须为 1–128 位字母、数字、短横线或下划线"
+        )))
+    }
+}
+
+/// One logical target, inside this project and block. The application owns the
+/// lossless conversion; governance only fixes the shape recorded by the fact.
+fn check_approval_target(r: &HumanApprovalRequest) -> Result<(), GovernanceError> {
+    let target = &r.target;
+    let format_ok = (1..=64).contains(&target.format.len())
+        && target
+            .format
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'/' | b'_'));
+    if !format_ok {
+        return Err(invalid("人工准奏目标格式须为 1–64 位字母、数字或 . - / _"));
+    }
+    let expected = format!("translations/{}/{}/zh.json", r.project, r.block);
+    if target.path != expected {
+        return Err(invalid(format!("人工准奏目标路径须为 {expected}")));
+    }
+    if let Some(before) = &target.before {
+        check_hash("准奏前目标摘要", before)?;
+    }
+    check_hash("准奏后目标摘要", &target.after)?;
+    Ok(())
 }
 
 fn is_lower_hex(text: &str, len: usize) -> bool {
@@ -143,39 +243,7 @@ impl Court {
         if let Some(hash) = &r.basis.translation_hash {
             check_hash("原译稿摘要", hash)?;
         }
-        {
-            let event = match &r.previous {
-                TranslationSource::None {} => None,
-                TranslationSource::Model {
-                    task,
-                    changes_version,
-                    event,
-                } => {
-                    if task.0 == 0 {
-                        return Err(invalid("模型来源须为真实诏令，不得借用零号"));
-                    }
-                    check_hash(
-                        "模型改动版本",
-                        changes_version
-                            .strip_prefix("sha256:")
-                            .ok_or_else(|| invalid("模型改动版本须沿用 sha256: 前缀"))?,
-                    )?;
-                    Some(event)
-                }
-                TranslationSource::Human {
-                    operation_id,
-                    event,
-                } => {
-                    if !is_lower_hex(operation_id, 32) {
-                        return Err(invalid("人工准奏操作须为 32 位小写十六进制"));
-                    }
-                    Some(event)
-                }
-            };
-            if let Some(event) = event {
-                check_hash("来源事件摘要", &event.hash)?;
-            }
-        }
+        check_translation_source(&r.previous)?;
         if r.candidate.is_empty()
             || sha256(r.candidate.as_bytes()) != r.candidate_hash
             || human_binding_request_hash(r) != binding.request_hash
@@ -209,6 +277,78 @@ impl Court {
             .get(project)?
             .get(block)?
             .get(request_id)
+    }
+
+    /// Durable approval fact. The binding must already be in this court; the
+    /// fact records what was approved, not that the target was written.
+    /// Log position and canonical line digest still require the write-time
+    /// admission check; replay here only fixes the frozen material.
+    pub fn propose_human_translation_approved(
+        &self,
+        approval: HumanApproval,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let r = &approval.request;
+        check_project(&r.project)?;
+        check_block(&r.block)?;
+        check_request_id("人工准奏请求标识", &r.request_id)?;
+        check_request_id("人工送审请求标识", &r.submission_id)?;
+        if !is_lower_hex(&approval.operation_id, 32) {
+            return Err(invalid("人工准奏操作须为 32 位小写十六进制"));
+        }
+        check_hash("人工准奏请求摘要", &approval.request_hash)?;
+        check_hash("送审绑定事件摘要", &r.binding.hash)?;
+        check_translation_source(&r.previous)?;
+        check_approval_target(r)?;
+        if human_approval_request_hash(r) != approval.request_hash {
+            return Err(invalid("人工准奏请求摘要不符"));
+        }
+        let binding = self
+            .human_submission_binding(&r.project, &r.block, &r.submission_id)
+            .ok_or_else(|| invalid("人工准奏须引用本块已入簿的送审绑定"))?;
+        if binding.request.previous != r.previous {
+            return Err(invalid("人工准奏的前一来源与送审绑定时不一致"));
+        }
+        // Bound the actual hex-encoded event, including JSON escaping, not text length.
+        let json = serde_json::to_vec(&approval).expect("approval is JSON-serializable");
+        if json.len() > (8 * 1024 * 1024 - "v1\tHUMANAPPROVED\t".len()) / 2 {
+            return Err(invalid("人工准奏事件超过 8 MiB"));
+        }
+        if self
+            .human_approval(&r.project, &r.block, &r.request_id)
+            .is_some()
+        {
+            return Err(invalid("人工准奏请求已入簿，不得重复发布"));
+        }
+        Ok(CourtEvent::HumanTranslationApproved {
+            approval: Box::new(approval),
+        })
+    }
+
+    /// Approval receipt by its own request scope. The same candidate bytes may
+    /// be approved again under a new request and must not reuse this identity.
+    pub fn human_approval(
+        &self,
+        project: &str,
+        block: &str,
+        request_id: &str,
+    ) -> Option<&HumanApproval> {
+        self.human_approvals
+            .get(project)?
+            .get(block)?
+            .get(request_id)
+    }
+
+    /// Approval receipts for one block, ordered by request ID, not by time.
+    pub fn human_approvals<'a>(
+        &'a self,
+        project: &'a str,
+        block: &'a str,
+    ) -> impl Iterator<Item = &'a HumanApproval> + 'a {
+        self.human_approvals
+            .get(project)
+            .and_then(|blocks| blocks.get(block))
+            .into_iter()
+            .flat_map(|requests| requests.values())
     }
 
     /// Bind selected references once, before the linked writer starts execution.
@@ -335,6 +475,42 @@ impl Court {
             }
         }
         Ok(())
+    }
+
+    /// 人工定稿：必须引用本块已入簿的准奏回执；不改写当前来源，也不伪造模型任务。
+    pub fn propose_human_translation_finalized(
+        &self,
+        finalization: HumanFinalization,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let f = &finalization;
+        check_project(&f.project)?;
+        check_block(&f.block)?;
+        check_request_id("人工送审请求标识", &f.submission_id)?;
+        check_request_id("人工准奏请求标识", &f.approval_request_id)?;
+        if !is_lower_hex(&f.approval_operation_id, 32) {
+            return Err(invalid("人工准奏操作须为 32 位小写十六进制"));
+        }
+        check_hash("人工准奏事件摘要", &f.approval_event.hash)?;
+        for (what, hash) in [
+            ("候选摘要", &f.candidate_hash),
+            ("原文摘要", &f.source_hash),
+            ("朱批摘要", &f.zhupi_hash),
+            ("目标摘要", &f.target_hash),
+        ] {
+            check_hash(what, hash)?;
+        }
+        check_target_format(&f.target_format)?;
+        let approval = self
+            .human_approval(&f.project, &f.block, &f.approval_request_id)
+            .ok_or_else(|| invalid("人工定稿须引用本块已入簿的准奏回执"))?;
+        if approval.operation_id != f.approval_operation_id
+            || approval.request.submission_id != f.submission_id
+        {
+            return Err(invalid("人工定稿引用的准奏回执不符"));
+        }
+        Ok(CourtEvent::HumanTranslationFinalized {
+            finalization: Box::new(finalization),
+        })
     }
 
     /// 御览定稿：签署一块的译稿。

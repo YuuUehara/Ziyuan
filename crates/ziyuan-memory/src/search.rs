@@ -324,6 +324,7 @@ mod tests {
                 translation_hash: sha256_hex(b"target"),
                 context_version: 1,
                 zhupi_version: 1,
+                human: None,
             },
             embedding: EmbeddingSignature {
                 provider: signature.provider,

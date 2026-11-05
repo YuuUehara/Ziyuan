@@ -109,6 +109,7 @@ impl Court {
             art_names: BTreeMap::new(),
             translation_signoffs: BTreeMap::new(),
             human_bindings: BTreeMap::new(),
+            human_approvals: BTreeMap::new(),
         };
         for event in events {
             court.apply(event)?;
@@ -719,6 +720,30 @@ impl Court {
                     .entry(r.block.clone())
                     .or_default()
                     .insert(r.request_id.clone(), (**binding).clone());
+            }
+            CourtEvent::HumanTranslationApproved { approval } => {
+                self.propose_human_translation_approved((**approval).clone())?;
+                let r = &approval.request;
+                self.human_approvals
+                    .entry(r.project.clone())
+                    .or_default()
+                    .entry(r.block.clone())
+                    .or_default()
+                    .insert(r.request_id.clone(), (**approval).clone());
+            }
+            CourtEvent::HumanTranslationFinalized { finalization } => {
+                self.propose_human_translation_finalized((**finalization).clone())?;
+                let f = &finalization;
+                self.record_signoff(
+                    &f.project,
+                    &f.block,
+                    Signoff::HumanFinalized {
+                        translation_hash: f.target_hash.clone(),
+                        context_version: f.context_version,
+                        zhupi_hash: f.zhupi_hash.clone(),
+                        operation_id: f.approval_operation_id.clone(),
+                    },
+                );
             }
             CourtEvent::TranslationFinalized {
                 project,

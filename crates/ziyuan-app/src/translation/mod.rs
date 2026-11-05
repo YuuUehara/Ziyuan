@@ -19,6 +19,7 @@ mod references;
 mod session;
 mod source;
 mod status;
+mod target;
 mod usage;
 mod verification;
 mod zhupi;
@@ -33,6 +34,7 @@ pub use context::{
 pub use draft::{
     DraftBasis, DraftParagraph, DraftReceipt, DraftSave, DraftSubmit, DraftView, HumanDraft,
     HumanSubmission, ReviewCandidate, ReviewFormat, ReviewFormatCheck, UnsupportedTargetMark,
+    human_approve_request_id, human_submit_request_id,
 };
 pub use export::Exported;
 pub use finished::{ExportBundle, ExportFile, ExportFormat, ExportLayout, ExportOptions};
@@ -47,6 +49,7 @@ pub use status::{
     BlockFacts, BlockState, BlockStatus, ContextFacts, NextStep, ResumeOptions, StaleReason,
     block_states, resume_plan,
 };
+pub use target::{ApprovedTarget, TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN, read_approved_target};
 pub use usage::{
     StageUsage, TranslationTaskUsage, TranslationUsage, UsageCharge, UsageRate, UsageTotals,
     translation_usage,

@@ -1,6 +1,6 @@
 //! Read-only exports: immutable bytes, not paths to reread while streaming a download.
 use super::{BlockState, Result, Translations, invalid, read_plain_opt, sha256_hex};
-use crate::text_project::{Chapter, Inline, Project, PromptBlock, SourceFormat};
+use crate::text_project::{Chapter, Inline, Project, SourceFormat};
 use crate::{AppError, Session};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -183,76 +183,126 @@ impl<S: EventStore> Session<S> {
                     .find(|s| s.block == b.block_id)
                     .ok_or_else(|| invalid("缺少块状态"))?
                     .state;
-                let BlockState::Finalized {
-                    task,
-                    translation_hash,
-                } = state
-                else {
-                    let detail = match state {
-                        BlockState::Stale { reasons, .. } => reasons
-                            .iter()
-                            .map(|r| r.describe())
-                            .collect::<Vec<_>>()
-                            .join("；"),
-                        BlockState::Failed { reason, .. } | BlockState::Uncertain { reason } => {
-                            reason.clone()
+                let (translation_hash, record) = match state {
+                    BlockState::Finalized {
+                        task,
+                        translation_hash,
+                    } => {
+                        let writer = self
+                            .court()
+                            .task(TaskId(*task))
+                            .ok_or_else(|| invalid("定稿来源诏令不存在"))?;
+                        let link = writer
+                            .translation
+                            .as_ref()
+                            .ok_or_else(|| invalid("定稿来源缺少译书关联"))?;
+                        let zhupi_hash = t.block_zhupi_hash(&p, &b.block_id)?;
+                        if link.zhupi_hash != zhupi_hash {
+                            failures.push(format!(
+                                "{} / {}：朱批自下诏后有变，须重修定稿",
+                                c.id, b.block_id
+                            ));
+                            continue;
                         }
-                        _ => String::new(),
-                    };
-                    failures.push(format!(
-                        "{} / {}：{}{}",
-                        c.id,
-                        b.block_id,
-                        state.label(),
-                        if detail.is_empty() {
-                            String::new()
-                        } else {
-                            format!("（{detail}）")
-                        }
-                    ));
-                    continue;
+                        (
+                            translation_hash,
+                            json!({"block":b.block_id,"task":task,"source_sha256":link.source_hash,
+                            "translation_sha256":translation_hash,"context_version":link.context_version,
+                            "zhupi_sha256":zhupi_hash,"signoff":self.court().translation_signoff(id,&b.block_id)}),
+                        )
+                    }
+                    // Status already tied disk, signoff and the current human approval together.
+                    BlockState::HumanFinalized {
+                        translation_hash,
+                        operation_id,
+                    } => (
+                        translation_hash,
+                        json!({"block":b.block_id,"source":"human","operation_id":operation_id,
+                        "translation_sha256":translation_hash,
+                        "signoff":self.court().translation_signoff(id,&b.block_id)}),
+                    ),
+                    _ => {
+                        let detail = match state {
+                            BlockState::Stale { reasons, .. }
+                            | BlockState::HumanStale { reasons, .. } => reasons
+                                .iter()
+                                .map(|r| r.describe())
+                                .collect::<Vec<_>>()
+                                .join("；"),
+                            BlockState::Failed { reason, .. }
+                            | BlockState::Uncertain { reason } => reason.clone(),
+                            _ => String::new(),
+                        };
+                        failures.push(format!(
+                            "{} / {}：{}{}",
+                            c.id,
+                            b.block_id,
+                            state.label(),
+                            if detail.is_empty() {
+                                String::new()
+                            } else {
+                                format!("（{detail}）")
+                            }
+                        ));
+                        continue;
+                    }
                 };
-                let writer = self
-                    .court()
-                    .task(TaskId(*task))
-                    .ok_or_else(|| invalid("定稿来源诏令不存在"))?;
-                let link = writer
-                    .translation
-                    .as_ref()
-                    .ok_or_else(|| invalid("定稿来源缺少译书关联"))?;
-                let zhupi_hash = t.block_zhupi_hash(&p, &b.block_id)?;
-                if link.zhupi_hash != zhupi_hash {
-                    failures.push(format!(
-                        "{} / {}：朱批自下诏后有变，须重修定稿",
-                        c.id, b.block_id
-                    ));
-                    continue;
-                }
                 let bytes = t
                     .read_translation(id, &b.block_id)?
                     .ok_or_else(|| invalid("定稿译文不存在"))?;
                 if sha256_hex(&bytes) != *translation_hash {
                     return Err(invalid("定稿译文在读取期间有变").into());
                 }
+                let target = super::read_approved_target(&bytes, &b.block_id)?;
+                // Paragraph membership is checked on the plain structure, as approval does.
+                let structure = match &target {
+                    super::ApprovedTarget::Plain(_) => bytes.clone(),
+                    super::ApprovedTarget::Marked(candidate) => candidate
+                        .text_structure()
+                        .serialized()
+                        .map_err(super::TranslationError::from)?,
+                };
                 let report = t
                     .texts()
-                    .check(id, &b.block_id, &bytes)
+                    .check(id, &b.block_id, &structure)
                     .map_err(super::TranslationError::from)?;
                 if !report.valid {
                     failures.push(format!("{} / {}：译文结构无效", c.id, b.block_id));
                     continue;
                 }
-                let candidate: PromptBlock =
-                    serde_json::from_slice(&bytes).map_err(super::TranslationError::from)?;
-                for para in candidate.paragraphs {
-                    texts.insert(
-                        para.id,
-                        translated_text(&para.text, &para.inlines, options.format)?,
-                    );
+                match target {
+                    super::ApprovedTarget::Plain(block) => {
+                        for para in block.paragraphs {
+                            texts.insert(
+                                para.id,
+                                translated_text(&para.text, &para.inlines, options.format)?,
+                            );
+                        }
+                    }
+                    super::ApprovedTarget::Marked(candidate) => {
+                        if options.format != ExportFormat::Markdown {
+                            failures.push(format!(
+                                "{} / {}：译稿带注音、粗体、斜体或着重点等标记，TXT 不能无损表达；请改用 Markdown 导出（命令行加 --format md）",
+                                c.id, b.block_id
+                            ));
+                            continue;
+                        }
+                        let check = candidate.check_format(super::ReviewFormat::MarkdownHtml)?;
+                        if !check.lossless {
+                            failures.push(format!(
+                                "{} / {}：译稿有 {} 处标记（着重点，或同一范围叠加的标记）Markdown 也不能无损表达；请在人工草稿中改去这些标记，重新送审、准奏、定稿后再导出",
+                                c.id,
+                                b.block_id,
+                                check.unsupported_marks.len()
+                            ));
+                            continue;
+                        }
+                        for para in &candidate.paragraphs {
+                            texts.insert(para.id.clone(), marked_text(para)?);
+                        }
+                    }
                 }
-                blocks.push(json!({"block":b.block_id,"task":task,"source_sha256":link.source_hash,
-                    "translation_sha256":translation_hash,"context_version":link.context_version,
-                    "zhupi_sha256":zhupi_hash,"signoff":self.court().translation_signoff(id,&b.block_id)}));
+                blocks.push(record);
             }
             if c.paragraphs.iter().any(|p| !texts.contains_key(&p.id)) {
                 continue;
@@ -403,6 +453,35 @@ fn translated_text(text: &str, inlines: &[Inline], format: ExportFormat) -> Resu
             }
         }
     }
+    Ok(out)
+}
+
+/// Markdown（受限 HTML）无损渲染第二版目标；调用前已由能力诊断确认。
+pub(crate) fn marked_text(paragraph: &super::DraftParagraph) -> Result<String> {
+    let mut marks: Vec<&super::TargetMark> = paragraph.marks.iter().collect();
+    marks.sort_by_key(|mark| (mark.start, mark.end));
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for mark in marks {
+        if mark.start < cursor {
+            return Err(invalid("译稿标记重叠，不能无损导出"));
+        }
+        out.push_str(&markdown_text(&paragraph.text[cursor..mark.start]));
+        let inner = html_text(&paragraph.text[mark.start..mark.end]);
+        match &mark.kind {
+            super::TargetMarkKind::Ruby { reading } => out.push_str(&format!(
+                "<ruby>{inner}<rt>{}</rt></ruby>",
+                html_text(reading)
+            )),
+            super::TargetMarkKind::Strong {} => out.push_str(&format!("<strong>{inner}</strong>")),
+            super::TargetMarkKind::Emphasis {} => out.push_str(&format!("<em>{inner}</em>")),
+            super::TargetMarkKind::EmphasisDots {} => {
+                return Err(invalid("着重点没有无损 Markdown 表示"));
+            }
+        }
+        cursor = mark.end;
+    }
+    out.push_str(&markdown_text(&paragraph.text[cursor..]));
     Ok(out)
 }
 

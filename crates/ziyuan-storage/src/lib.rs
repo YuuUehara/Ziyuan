@@ -175,6 +175,11 @@ pub fn event_reference(index: u64, event: &CourtEvent) -> ziyuan_core::EventRefe
 }
 
 /// 恢复记录里目标摘要的格式：64 位小写十六进制（不带 `sha256:` 前缀）。
+/// Decode one event line (without the trailing newline) for recovery callers.
+pub fn decode_event_line(line: &str) -> Result<CourtEvent, String> {
+    crate::codec::decode_event(line).map_err(|_| "事件行无法解码".to_owned())
+}
+
 pub fn content_sha256(bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     let mut out = String::with_capacity(64);
@@ -584,7 +589,7 @@ impl EventStore for EventLog {
     }
 
     fn append(&mut self, expected: usize, events: &[CourtEvent]) -> Result<(), StorageError> {
-        self.append_checked(expected, None, events)
+        never_refused(self.append_checked(expected, None, events, || Ok(()))?)
     }
 }
 
@@ -597,15 +602,29 @@ impl EventLog {
         expected: &[CourtEvent],
         events: &[CourtEvent],
     ) -> Result<(), StorageError> {
-        self.append_checked(expected.len(), Some(expected), events)
+        never_refused(self.append_checked(expected.len(), Some(expected), events, || Ok(()))?)
     }
 
-    fn append_checked(
+    /// Like [`Self::append_if_unchanged`], but runs `ready` while still holding the
+    /// exclusive lock, after the count and prefix checks passed and before any byte
+    /// is written. If `ready` refuses, nothing is appended and its error is returned
+    /// in the inner result; a failed check never reaches `ready`.
+    pub fn append_if_unchanged_then<E>(
+        &mut self,
+        expected: &[CourtEvent],
+        events: &[CourtEvent],
+        ready: impl FnOnce() -> Result<(), E>,
+    ) -> Result<Result<(), E>, StorageError> {
+        self.append_checked(expected.len(), Some(expected), events, ready)
+    }
+
+    fn append_checked<E>(
         &mut self,
         expected: usize,
         prefix: Option<&[CourtEvent]>,
         events: &[CourtEvent],
-    ) -> Result<(), StorageError> {
+        ready: impl FnOnce() -> Result<(), E>,
+    ) -> Result<Result<(), E>, StorageError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -638,6 +657,9 @@ impl EventLog {
         if changed {
             return Err(StorageError::PrefixChanged);
         }
+        if let Err(refused) = ready() {
+            return Ok(Err(refused));
+        }
         if tail.torn {
             file.set_len(committed)?;
         }
@@ -654,7 +676,14 @@ impl EventLog {
             bytes: committed + content.len() as u64,
             file: start.file,
         });
-        Ok(())
+        Ok(Ok(()))
+    }
+}
+
+fn never_refused(result: Result<(), std::convert::Infallible>) -> Result<(), StorageError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(never) => match never {},
     }
 }
 
@@ -720,7 +749,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 24] = [
+pub const RELEASES: [&str; 26] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -745,8 +774,10 @@ pub const RELEASES: [&str; 24] = [
     "1.3.0",
     "1.4.0",
     "1.4.1",
-    // Reserved development reader floor; not a published release or package bump.
+    // Reserved development reader floors; not published releases or package bumps.
     "1.5.0-dev.1",
+    "1.5.0-dev.2",
+    "1.5.0-dev.3",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。
@@ -905,6 +936,41 @@ mod tests {
         ));
         b.append(1, &[reform(GovernanceMode::Cabinet)]).unwrap();
         assert_eq!(a.load().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ready_runs_only_after_checks_and_its_refusal_writes_nothing() {
+        let root = temp_root("append-ready");
+        let mut log = EventLog::new(&root);
+        log.append(0, &[CourtEvent::Founded(GovernanceMode::Chancellor)])
+            .unwrap();
+        let expected = log.load().unwrap();
+        let event = reform(GovernanceMode::Cabinet);
+        let path = root.join(".ziyuan/court.log");
+        let before = fs::read(&path).unwrap();
+
+        let mut called = false;
+        let stale: &[CourtEvent] = &[];
+        let result = log.append_if_unchanged_then(stale, std::slice::from_ref(&event), || {
+            called = true;
+            Ok::<(), ()>(())
+        });
+        assert!(matches!(result, Err(StorageError::Conflict { .. })));
+        assert!(!called, "条数核对失败时不得调用 ready");
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let refused =
+            log.append_if_unchanged_then(&expected, std::slice::from_ref(&event), || Err("拒绝"));
+        assert!(matches!(refused, Ok(Err("拒绝"))));
+        assert_eq!(fs::read(&path).unwrap(), before, "ready 拒绝时不得追加");
+
+        let accepted =
+            log.append_if_unchanged_then(&expected, std::slice::from_ref(&event), || {
+                Ok::<(), ()>(())
+            });
+        assert!(matches!(accepted, Ok(Ok(()))));
+        assert_eq!(log.load().unwrap(), [expected[0].clone(), event]);
         fs::remove_dir_all(root).unwrap();
     }
 

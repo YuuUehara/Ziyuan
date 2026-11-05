@@ -31,6 +31,17 @@ const NIBBLES: [u8; 256] = {
     table
 };
 
+/// 人工事件整行（含类型与 hex 字段）的字节上限，与写入方的容量检查同一口径。
+const HUMAN_EVENT_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// 先按整行实际字节核对上限，再解 hex 与 JSON：不让超限行在解码中放大内存。
+fn human_json<T: serde::de::DeserializeOwned>(line: &str, hex: &str) -> Result<T, String> {
+    if line.len() > HUMAN_EVENT_LINE_BYTES {
+        return Err(format!("人工事件行超过 {HUMAN_EVENT_LINE_BYTES} 字节上限"));
+    }
+    serde_json::from_str(&from_hex(hex)?).map_err(|e| e.to_string())
+}
+
 fn from_hex(s: &str) -> Result<String, String> {
     if !s.len().is_multiple_of(2) {
         return Err("hex 长度不合法".into());
@@ -410,6 +421,16 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         HumanSubmissionBound { binding } => format!(
             "v1\tHUMANBOUND\t{}",
             to_hex(&serde_json::to_string(binding).expect("binding is JSON-serializable"))
+        ),
+        HumanTranslationApproved { approval } => format!(
+            "v1\tHUMANAPPROVED\t{}",
+            to_hex(&serde_json::to_string(approval).expect("approval is JSON-serializable"))
+        ),
+        HumanTranslationFinalized { finalization } => format!(
+            "v1\tHUMANFINAL\t{}",
+            to_hex(
+                &serde_json::to_string(finalization).expect("finalization is JSON-serializable")
+            )
         ),
         TranslationFinalized {
             project,
@@ -1055,7 +1076,13 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             },
         },
         "HUMANBOUND" => HumanSubmissionBound {
-            binding: serde_json::from_str(&from_hex(field(2)?)?).map_err(|e| e.to_string())?,
+            binding: human_json(line, field(2)?)?,
+        },
+        "HUMANAPPROVED" => HumanTranslationApproved {
+            approval: human_json(line, field(2)?)?,
+        },
+        "HUMANFINAL" => HumanTranslationFinalized {
+            finalization: human_json(line, field(2)?)?,
         },
         "TRANSFINAL" => TranslationFinalized {
             project: from_hex(field(2)?)?,
@@ -1122,7 +1149,9 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         ToolInvoked { .. } | SuspicionRaised { .. } => 6,
         TranslationLinked { .. } => 10,
         TranslationReferencesBound { .. } => 6,
-        HumanSubmissionBound { .. } => 3,
+        HumanSubmissionBound { .. }
+        | HumanTranslationApproved { .. }
+        | HumanTranslationFinalized { .. } => 3,
         TranslationFinalized { .. } => 7,
         TranslationReopened { .. } => 5,
     };
@@ -1185,6 +1214,8 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         TranslationLinked { .. } => "TRANSLINK",
         TranslationReferencesBound { .. } => "TRANSREFS",
         HumanSubmissionBound { .. } => "HUMANBOUND",
+        HumanTranslationApproved { .. } => "HUMANAPPROVED",
+        HumanTranslationFinalized { .. } => "HUMANFINAL",
         TranslationFinalized { .. } => "TRANSFINAL",
         TranslationReopened { .. } => "TRANSREOPEN",
     }
@@ -1269,12 +1300,107 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         TranslationLinked { .. } | TranslationFinalized { .. } | TranslationReopened { .. } => 17,
         TranslationReferencesBound { .. } => 22,
         HumanSubmissionBound { .. } => 24,
+        HumanTranslationApproved { .. } => 25,
+        HumanTranslationFinalized { .. } => 26,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn human_approval_has_strict_target_and_preserves_canonical_bytes() {
+        let row = include_str!("compat.tsv")
+            .lines()
+            .find(|r| r.starts_with("1.5.0-dev.2\t"))
+            .unwrap();
+        let (_, line) = row.split_once('\t').unwrap();
+        let event = decode_event(line).unwrap();
+        assert_eq!(encode_event(&event), line);
+        assert_eq!(readable_since(line).unwrap(), 25);
+        assert_eq!(crate::release_name(25), "1.5.0-dev.2");
+        assert_eq!(kind_of(&event), "HUMANAPPROVED");
+        assert!(decode_event(&format!("{line}\textra")).is_err());
+        assert!(decode_event("v1\tHUMANAPPROVED").is_err());
+        let CourtEvent::HumanTranslationApproved { approval } = event else {
+            panic!()
+        };
+        assert_eq!(approval.request.target.format, "zh-json/1");
+        assert_eq!(approval.request.target.before, None);
+        assert_eq!(approval.operation_id, "1".repeat(32));
+        let original = serde_json::to_value(&approval).unwrap();
+        let decode_json = |v: &serde_json::Value| {
+            decode_event(&format!("v1\tHUMANAPPROVED\t{}", to_hex(&v.to_string())))
+        };
+        for (field, bad) in [
+            ("actor", serde_json::json!("remote")),
+            ("binding", serde_json::json!({"index": 3})),
+            (
+                "target",
+                serde_json::json!({"format": "zh-json/1", "path": "x"}),
+            ),
+        ] {
+            let mut value = original.clone();
+            value["request"][field] = bad;
+            assert!(decode_json(&value).is_err(), "{field} must be strict");
+        }
+        let mut unknown = original;
+        unknown["request"]["target"]["foreign"] = true.into();
+        assert!(decode_json(&unknown).is_err());
+    }
+
+    fn compat_line(release: &str) -> &'static str {
+        let row = include_str!("compat.tsv")
+            .lines()
+            .find(|r| r.starts_with(&format!("{release}\t")))
+            .unwrap();
+        row.split_once('\t').unwrap().1
+    }
+
+    /// 在 JSON 第一个 `{` 之后插入空白，使整行恰为 `total` 字节；空白在 JSON 内部合法。
+    fn padded_line(line: &str, total: usize) -> String {
+        let (head, hex) = line.rsplit_once('\t').unwrap();
+        let json = from_hex(hex).unwrap();
+        let pad = (total - head.len() - 1) / 2 - json.len();
+        let padded = format!("{{{}{}", " ".repeat(pad), &json[1..]);
+        format!("{head}\t{}", to_hex(&padded))
+    }
+
+    fn rejected_for_size(line: &str) -> bool {
+        matches!(decode_event(line), Err(DecodeError::Malformed(reason)) if reason.contains("字节上限"))
+    }
+
+    #[test]
+    fn human_event_lines_are_bounded_by_actual_bytes() {
+        let limit = HUMAN_EVENT_LINE_BYTES;
+        // HUMANFINAL 的前缀为偶数字节，可以恰好落在上限上。
+        let final_line = compat_line("1.5.0-dev.3");
+        let at_limit = padded_line(final_line, limit);
+        assert_eq!(at_limit.len(), limit);
+        assert!(decode_event(&at_limit).is_ok(), "恰好上限应可读");
+        assert!(
+            rejected_for_size(&format!("{at_limit}0")),
+            "超 1 字节须先按上限拒绝"
+        );
+        let over = padded_line(final_line, limit + 2);
+        assert_eq!(over.len(), limit + 2);
+        assert!(rejected_for_size(&over), "JSON 内空白膨胀超限也要拒绝");
+
+        // HUMANAPPROVED 前缀为奇数字节，合法行最长为上限减 1。
+        let approved = compat_line("1.5.0-dev.2");
+        let largest = padded_line(approved, limit - 1);
+        assert_eq!(largest.len(), limit - 1);
+        assert!(decode_event(&largest).is_ok());
+        let over = padded_line(approved, limit + 1);
+        assert_eq!(over.len(), limit + 1);
+        assert!(rejected_for_size(&over));
+
+        let bound = compat_line("1.5.0-dev.1");
+        assert!(rejected_for_size(&padded_line(bound, limit + 2)));
+        for line in [final_line, approved, bound] {
+            assert!(decode_event(line).is_ok(), "紧凑行照常可读");
+        }
+    }
     #[test]
     fn human_binding_has_strict_sources_and_preserves_canonical_bytes() {
         let row = include_str!("compat.tsv")
@@ -1391,7 +1517,7 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 50, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 52, "每种事件类型至少一条样本");
         assert_eq!(crate::release_name(17), "1.2.0");
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");

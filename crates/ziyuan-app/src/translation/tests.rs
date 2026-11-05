@@ -2562,3 +2562,679 @@ fn verification_rejects_forged_links_and_stale_forms_and_limits_glossary_hints_t
         );
     }
 }
+
+#[test]
+fn human_approval_event_resolves_as_current_source() {
+    use ziyuan_core::{
+        DraftBasis, EventReference, GovernanceMode, HumanActor, HumanApproval,
+        HumanApprovalRequest, HumanApprovalTarget, HumanBindingRequest, HumanSubmissionBinding,
+        TranslationSource,
+    };
+    let project = "0123456789abcdef0123456789abcdef";
+    let previous = TranslationSource::None {};
+    let binding_request = HumanBindingRequest {
+        project: project.into(),
+        block: B1.into(),
+        request_id: "bind-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "submit-1".into(),
+        revision: "d".repeat(32),
+        basis: DraftBasis {
+            project_hash: "a".repeat(64),
+            source_hash: "b".repeat(64),
+            context_version: 1,
+            zhupi_hash: "c".repeat(64),
+            translation_hash: None,
+        },
+        candidate: "{}\n".into(),
+        candidate_hash: sha256_hex(b"{}\n"),
+        previous: previous.clone(),
+    };
+    let binding = HumanSubmissionBinding {
+        request_hash: ziyuan_governance::human_binding_request_hash(&binding_request),
+        request: binding_request,
+    };
+    let approval_request = HumanApprovalRequest {
+        project: project.into(),
+        block: B1.into(),
+        request_id: "approve-1".into(),
+        actor: HumanActor::Local,
+        submission_id: "bind-1".into(),
+        binding: EventReference {
+            index: 1,
+            hash: "e".repeat(64),
+        },
+        previous,
+        target: HumanApprovalTarget {
+            format: "zh-json/1".into(),
+            path: format!("translations/{project}/{B1}/zh.json"),
+            before: None,
+            after: "f".repeat(64),
+        },
+    };
+    let approval = HumanApproval {
+        request_hash: ziyuan_governance::human_approval_request_hash(&approval_request),
+        request: approval_request,
+        operation_id: "1".repeat(32),
+    };
+    let history = vec![
+        CourtEvent::Founded(GovernanceMode::Chancellor),
+        CourtEvent::HumanSubmissionBound {
+            binding: Box::new(binding),
+        },
+        CourtEvent::HumanTranslationApproved {
+            approval: Box::new(approval),
+        },
+    ];
+    let resolved = resolve_translation_source(&history, project, B1).unwrap();
+    assert_eq!(
+        resolved.source,
+        TranslationSource::Human {
+            operation_id: "1".repeat(32),
+            event: ziyuan_storage::event_reference(2, &history[2]),
+        }
+    );
+    assert_eq!(resolved.translation_hash, Some("f".repeat(64)));
+}
+
+#[test]
+fn human_finalization_appends_fact_without_touching_translation() {
+    use ziyuan_core::{HumanActor, HumanApproval, HumanApprovalRequest, HumanApprovalTarget};
+    use ziyuan_storage::{LockScope, Workspace};
+    let fx = Fx::new("human-finalize");
+    let t = fx.t();
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let before = fs::read(fx.zh_path(B1)).unwrap();
+
+    let draft = DraftSave {
+        request_id: "save".into(),
+        expected_revision: None,
+        basis: t.human_draft(&fx.project, B1).unwrap().basis,
+        paragraphs: fx
+            .block(B1)
+            .paragraphs
+            .into_iter()
+            .map(|p| DraftParagraph {
+                id: p.id,
+                text: format!("人工：{}", p.text),
+                marks: vec![],
+            })
+            .collect(),
+    };
+    let saved = t.save_human_draft(&fx.project, B1, &draft).unwrap();
+    let submission = t
+        .submit_human_draft(
+            &fx.project,
+            B1,
+            &DraftSubmit {
+                request_id: "submit".into(),
+                expected_revision: saved.revision,
+            },
+        )
+        .unwrap();
+    let current = resolve_translation_source(s.history().unwrap(), &fx.project, B1).unwrap();
+    let binding = submission
+        .prepare_binding("bind".into(), HumanActor::Local, current.source.clone())
+        .unwrap();
+    let candidate = binding.request.candidate.clone();
+    let after = sha256_hex(candidate.as_bytes());
+
+    let workspace = Workspace::open(&fx.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    t.texts()
+        .upgrade_project_protocol(&fx.project, &guard)
+        .unwrap();
+    assert!(t.publish_human_binding(&guard, &binding).unwrap());
+    drop(guard);
+    // 绑定由另一会话写入；重新打开后再提议批准，避免用旧的内存朝廷。
+    let mut s = fx.session();
+
+    let approval_request = HumanApprovalRequest {
+        project: fx.project.clone(),
+        block: B1.into(),
+        request_id: "approve-1".into(),
+        actor: HumanActor::Local,
+        submission_id: binding.request.request_id.clone(),
+        binding: ziyuan_core::EventReference {
+            index: 0,
+            hash: "e".repeat(64),
+        },
+        previous: current.source,
+        target: HumanApprovalTarget {
+            format: "zh-json/1".into(),
+            path: output_rel(&fx.project, B1),
+            before: Some(sha256_hex(&before)),
+            after: after.clone(),
+        },
+    };
+    let approval = HumanApproval {
+        request_hash: ziyuan_governance::human_approval_request_hash(&approval_request),
+        request: approval_request,
+        operation_id: "1".repeat(32),
+    };
+    s.commit(|court| {
+        Ok(vec![
+            court.propose_human_translation_approved(approval.clone())?,
+        ])
+    })
+    .unwrap_or_else(|error| panic!("commit: {error:?}"));
+
+    fs::write(fx.zh_path(B1), candidate.as_bytes()).unwrap();
+    let guard = workspace.lock(LockScope::Workspace).unwrap();
+    assert!(
+        t.finalize_human_translation(&guard, &fx.project, B1)
+            .unwrap()
+    );
+    drop(guard);
+
+    assert_eq!(fs::read(fx.zh_path(B1)).unwrap(), candidate.as_bytes());
+    let reopened = fx.session();
+    let court = ziyuan_governance::Court::replay(reopened.history().unwrap()).unwrap();
+    assert!(matches!(
+        court.translation_signoff(&fx.project, B1),
+        Some(ziyuan_governance::Signoff::HumanFinalized { .. })
+    ));
+    let report = reopened.memory_pairs(&fx.root, &fx.project).unwrap();
+    assert!(
+        !report.pairs.is_empty(),
+        "人工定稿应进入记忆；skipped: {:?}",
+        report.skipped
+    );
+    assert!(
+        report.pairs[0].origin.human.is_some(),
+        "记忆来源须标出人工定稿"
+    );
+}
+
+#[test]
+fn marked_markdown_renders_ruby_and_styles() {
+    use super::finished::marked_text;
+    let para = DraftParagraph {
+        id: "p1".into(),
+        text: "夜が明ける。".into(),
+        marks: vec![
+            TargetMark {
+                start: 0,
+                end: 3,
+                kind: TargetMarkKind::Ruby {
+                    reading: "よ".into(),
+                },
+            },
+            TargetMark {
+                start: 6,
+                end: 9,
+                kind: TargetMarkKind::Strong {},
+            },
+        ],
+    };
+    let out = marked_text(&para).unwrap();
+    assert!(out.contains("<ruby>夜<rt>よ</rt></ruby>"), "{out}");
+    assert!(out.contains("<strong>明</strong>"), "{out}");
+    assert!(out.ends_with('。'), "{out}");
+
+    let dotted = DraftParagraph {
+        id: "p1".into(),
+        text: "夜".into(),
+        marks: vec![TargetMark {
+            start: 0,
+            end: 3,
+            kind: TargetMarkKind::EmphasisDots {},
+        }],
+    };
+    assert!(marked_text(&dotted).is_err());
+}
+
+#[test]
+fn peek_human_draft_reads_without_writing() {
+    let fx = Fx::new("peek-draft");
+    let t = fx.t();
+    let draft = DraftSave {
+        request_id: "save".into(),
+        expected_revision: None,
+        basis: t.human_draft(&fx.project, B1).unwrap().basis,
+        paragraphs: fx
+            .block(B1)
+            .paragraphs
+            .into_iter()
+            .map(|p| DraftParagraph {
+                id: p.id,
+                text: format!("人工：{}", p.text),
+                marks: vec![],
+            })
+            .collect(),
+    };
+    let saved = t.save_human_draft(&fx.project, B1, &draft).unwrap();
+    let before = fs::read(fx.root.join(".ziyuan/write.generation")).ok();
+    let view = t.peek_human_draft(&fx.project, B1).unwrap();
+    assert_eq!(view.draft.unwrap().revision, saved.revision);
+    assert_eq!(
+        fs::read(fx.root.join(".ziyuan/write.generation")).ok(),
+        before
+    );
+}
+
+/// 人工一轮：保存草稿、送审、准奏（准奏即落盘），可选人工定稿；全走 CLI 所用的公开接口。
+fn human_round(fx: &Fx, block: &str, paragraphs: Vec<DraftParagraph>, finalize: bool) {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let t = fx.t();
+    let view = t.human_draft(&fx.project, block).unwrap();
+    let saved = t
+        .save_human_draft(
+            &fx.project,
+            block,
+            &DraftSave {
+                request_id: format!("save-{}", N.fetch_add(1, Ordering::Relaxed)),
+                expected_revision: view.draft.map(|d| d.revision),
+                basis: view.basis,
+                paragraphs,
+            },
+        )
+        .unwrap();
+    let id = human_submit_request_id(&saved.revision);
+    let binding = t
+        .prepare_human_submission(&fx.project, block, &id, &id, &saved.revision)
+        .unwrap();
+    let workspace = ziyuan_storage::Workspace::open(&fx.root).unwrap();
+    let mut guard = workspace
+        .lock(ziyuan_storage::LockScope::Workspace)
+        .unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    t.texts()
+        .upgrade_project_protocol(&fx.project, &guard)
+        .unwrap();
+    assert!(t.publish_human_binding(&guard, &binding).unwrap());
+    assert!(
+        t.approve_human_submission(&mut guard, &fx.project, block)
+            .unwrap()
+    );
+    if finalize {
+        assert!(
+            t.finalize_human_translation(&guard, &fx.project, block)
+                .unwrap()
+        );
+    }
+}
+
+fn human_finalize(fx: &Fx, block: &str) {
+    let workspace = ziyuan_storage::Workspace::open(&fx.root).unwrap();
+    let guard = workspace
+        .lock(ziyuan_storage::LockScope::Workspace)
+        .unwrap();
+    assert!(
+        fx.t()
+            .finalize_human_translation(&guard, &fx.project, block)
+            .unwrap()
+    );
+}
+
+/// 每段译作「人工：原文」，不带标记。
+fn human_paragraphs(fx: &Fx, block: &str) -> Vec<DraftParagraph> {
+    fx.block(block)
+        .paragraphs
+        .into_iter()
+        .map(|p| DraftParagraph {
+            id: p.id,
+            text: format!("人工：{}", p.text),
+            marks: vec![],
+        })
+        .collect()
+}
+
+#[test]
+fn finished_export_accepts_human_finalized_blocks_alongside_model_ones() {
+    let fx = Fx::new("human-export");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+    human_round(&fx, B3, human_paragraphs(&fx, B3), true);
+    let mut marked = human_paragraphs(&fx, B2);
+    assert_eq!(marked[0].text, "人工：二章一。");
+    assert_eq!(marked[1].text, "人工：二章二。");
+    marked[0].marks = vec![TargetMark {
+        start: 0,
+        end: 6,
+        kind: TargetMarkKind::Ruby {
+            reading: "じんこう".into(),
+        },
+    }];
+    marked[1].marks = vec![
+        TargetMark {
+            start: 9,
+            end: 18,
+            kind: TargetMarkKind::Strong {},
+        },
+        TargetMark {
+            start: 0,
+            end: 6,
+            kind: TargetMarkKind::Emphasis {},
+        },
+    ];
+    human_round(&fx, B2, marked, true);
+
+    let mut s = fx.session();
+    for block in [B2, B3] {
+        assert!(
+            matches!(
+                fx.status(&s, block).state,
+                BlockState::HumanFinalized { .. }
+            ),
+            "{block}: {:?}",
+            fx.status(&s, block)
+        );
+    }
+    let markdown = ExportOptions {
+        format: ExportFormat::Markdown,
+        ..Default::default()
+    };
+    let md = s.export_finished(&fx.root, &fx.project, &markdown).unwrap();
+    assert_eq!(
+        md.files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        ["c0001.md", "c0002.md", "c0003.md"]
+    );
+    assert_eq!(
+        String::from_utf8(md.files[1].bytes.clone()).unwrap(),
+        "# c2\\.txt\n\n<ruby>人工<rt>じんこう</rt></ruby>：二章一。\n\n<em>人工</em>：<strong>二章二</strong>。\n\n"
+    );
+    assert_eq!(
+        String::from_utf8(md.files[2].bytes.clone()).unwrap(),
+        "# c3\\.txt\n\n人工：三章。\n\n"
+    );
+    let chapters = &md.manifest["chapters"];
+    assert_eq!(chapters[0]["blocks"][0]["task"], task.0);
+    assert_eq!(chapters[1]["blocks"][0]["source"], "human");
+    assert_eq!(chapters[2]["blocks"][0]["source"], "human");
+    assert_eq!(
+        chapters[2]["blocks"][0]["translation_sha256"],
+        sha256_hex(&fs::read(fx.zh_path(B3)).unwrap())
+    );
+
+    // TXT cannot carry the marks: the whole batch is refused and names only the marked block.
+    let err = s
+        .export_finished(&fx.root, &fx.project, &ExportOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("整批未导出")
+            && err.contains(B2)
+            && err.contains("--format md")
+            && !err.contains(B1)
+            && !err.contains(B3),
+        "{err}"
+    );
+    // A plain human finalization exports to TXT in the same shape as a model one.
+    let txt = s
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                chapters: vec!["c0001".into(), "c0003".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(txt.files[1].bytes.clone()).unwrap(),
+        "c3.txt\n\n人工：三章。\n\n"
+    );
+
+    // Disk drift after human finalization is not exportable.
+    let good = fs::read(fx.zh_path(B3)).unwrap();
+    fs::write(fx.zh_path(B3), fx.candidate(B3, |_| {})).unwrap();
+    let err = s
+        .export_finished(&fx.root, &fx.project, &markdown)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(B3) && err.contains("不确定"), "{err}");
+    fs::write(fx.zh_path(B3), good).unwrap();
+
+    // Emphasis dots have no lossless Markdown form either.
+    let mut dotted = human_paragraphs(&fx, B2);
+    dotted[0].marks = vec![TargetMark {
+        start: 0,
+        end: 6,
+        kind: TargetMarkKind::EmphasisDots {},
+    }];
+    human_round(&fx, B2, dotted, true);
+    let mut s = fx.session();
+    let err = s
+        .export_finished(&fx.root, &fx.project, &markdown)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("整批未导出") && err.contains(B2) && err.contains("着重点"),
+        "{err}"
+    );
+}
+
+#[test]
+fn status_follows_the_latest_approval_source_in_event_order() {
+    let fx = Fx::new("source-order");
+    // Model, then human.
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    assert!(matches!(
+        fx.status(&s, B1).state,
+        BlockState::Applied { .. }
+    ));
+    human_round(&fx, B1, human_paragraphs(&fx, B1), false);
+    let s = fx.session();
+    assert!(
+        matches!(fx.status(&s, B1).state, BlockState::HumanApproved { .. }),
+        "{:?}",
+        fx.status(&s, B1)
+    );
+    human_finalize(&fx, B1);
+    let s = fx.session();
+    let status = fx.status(&s, B1);
+    assert!(
+        matches!(status.state, BlockState::HumanFinalized { .. }),
+        "{status:?}"
+    );
+    assert!(
+        status
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("ziyuan text export-finished")),
+        "{status:?}"
+    );
+
+    // Human, then model: the human signoff no longer applies.
+    human_round(&fx, B3, human_paragraphs(&fx, B3), true);
+    let mut s = fx.session();
+    assert!(matches!(
+        fx.status(&s, B3).state,
+        BlockState::HumanFinalized { .. }
+    ));
+    let task = translated(&fx, &mut s, B3);
+    assert_eq!(
+        fx.status(&s, B3).state,
+        BlockState::AwaitingApproval { task: task.0 }
+    );
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    assert_eq!(
+        fx.status(&s, B3).state,
+        BlockState::Applied {
+            task: task.0,
+            next: NextStep::Review
+        },
+        "{:?}",
+        fx.status(&s, B3)
+    );
+    s.finalize_translation(&fx.root, &fx.project, B3).unwrap();
+    assert!(matches!(
+        fx.status(&s, B3).state,
+        BlockState::Finalized { task: t, .. } if t == task.0
+    ));
+}
+
+#[test]
+fn model_signoffs_give_way_to_a_current_human_approval() {
+    let fx = Fx::new("human-over-model");
+    let mut s = fx.session();
+    let task = translated(&fx, &mut s, B1);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
+    let task = translated(&fx, &mut s, B3);
+    s.apply_changes(task, &fx.root, vec![]).unwrap();
+    s.finalize_translation(&fx.root, &fx.project, B3).unwrap();
+    s.reopen_translation(&fx.root, &fx.project, B3, "重审")
+        .unwrap();
+
+    // Model finalized, then human: the human round finalizes over it.
+    human_round(&fx, B1, human_paragraphs(&fx, B1), true);
+    // Model reopened, then human: likewise.
+    human_round(&fx, B3, human_paragraphs(&fx, B3), true);
+    let mut s = fx.session();
+    for block in [B1, B3] {
+        assert!(
+            matches!(
+                fx.status(&s, block).state,
+                BlockState::HumanFinalized { .. }
+            ),
+            "{block}: {:?}",
+            fx.status(&s, block)
+        );
+    }
+    // Idempotent for this approval's own finalization.
+    let workspace = ziyuan_storage::Workspace::open(&fx.root).unwrap();
+    let guard = workspace
+        .lock(ziyuan_storage::LockScope::Workspace)
+        .unwrap();
+    assert!(
+        !fx.t()
+            .finalize_human_translation(&guard, &fx.project, B1)
+            .unwrap()
+    );
+    drop(guard);
+    let txt = s
+        .export_finished(
+            &fx.root,
+            &fx.project,
+            &ExportOptions {
+                chapters: vec!["c0001".into(), "c0003".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(txt.files[0].bytes.clone()).unwrap(),
+        "c1.txt\n\n人工：第1段の文。\n\n人工：第2段の文。\n\n人工：第3段の文。\n\n人工：第4段の文。\n\n人工：第5段の文。\n\n人工：第6段の文。\n\n"
+    );
+    assert_eq!(
+        String::from_utf8(txt.files[1].bytes.clone()).unwrap(),
+        "c3.txt\n\n人工：三章。\n\n"
+    );
+    assert_eq!(txt.manifest["chapters"][0]["blocks"][0]["source"], "human");
+}
+
+#[test]
+fn human_rounds_go_stale_when_zhupi_or_context_change() {
+    let fx = Fx::new("human-stale");
+    human_round(&fx, B1, human_paragraphs(&fx, B1), true);
+    let mut s = fx.session();
+    let c1 = ExportOptions {
+        chapters: vec!["c0001".into()],
+        ..Default::default()
+    };
+    assert!(s.export_finished(&fx.root, &fx.project, &c1).is_ok());
+
+    // Zhupi added after finalization.
+    fx.t()
+        .set_zhupi(&fx.project, B1, "c0001-p0001", "新要求")
+        .unwrap();
+    let status = fx.status(&s, B1);
+    let BlockState::HumanStale { reasons, .. } = &status.state else {
+        panic!("应失效：{status:?}")
+    };
+    assert_eq!(reasons, &[StaleReason::ZhupiChanged]);
+    assert_eq!(status.state.label(), "版本失效");
+    assert!(
+        status
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("须重新定稿") && n.contains("ziyuan text human submit")),
+        "{status:?}"
+    );
+    let err = s
+        .export_finished(&fx.root, &fx.project, &c1)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(B1) && err.contains("版本失效") && err.contains("朱批已变"),
+        "{err}"
+    );
+    fx.t().clear_zhupi(&fx.project, B1, "c0001-p0001").unwrap();
+    assert!(matches!(
+        fx.status(&s, B1).state,
+        BlockState::HumanFinalized { .. }
+    ));
+
+    // A newly approved context after finalization.
+    fx.write_summary("c0001", "前情甲");
+    assert_eq!(fx.t().approve_context(&fx.project).unwrap(), 1);
+    assert_eq!(
+        fx.status(&s, B1).state,
+        BlockState::HumanStale {
+            operation_id: match fx.status(&s, B1).state {
+                BlockState::HumanStale { operation_id, .. } => operation_id,
+                other => panic!("应失效：{other:?}"),
+            },
+            reasons: vec![StaleReason::ContextChanged {
+                used: 0,
+                current: 1
+            }],
+        }
+    );
+    assert!(s.export_finished(&fx.root, &fx.project, &c1).is_err());
+
+    // An approval whose submission basis no longer holds cannot be finalized.
+    human_round(&fx, B3, human_paragraphs(&fx, B3), false);
+    let s = fx.session();
+    assert!(matches!(
+        fx.status(&s, B3).state,
+        BlockState::HumanApproved { .. }
+    ));
+    fx.t()
+        .set_zhupi(&fx.project, B3, "c0003-p0001", "再斟酌")
+        .unwrap();
+    let status = fx.status(&s, B3);
+    assert!(
+        matches!(&status.state, BlockState::HumanStale { reasons, .. } if reasons == &[StaleReason::ZhupiChanged]),
+        "{status:?}"
+    );
+    assert!(
+        status
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("不能再定稿") && n.contains("ziyuan text human submit")),
+        "{status:?}"
+    );
+    let log = fs::read(fx.root.join(".ziyuan/court.log")).unwrap();
+    let workspace = ziyuan_storage::Workspace::open(&fx.root).unwrap();
+    let guard = workspace
+        .lock(ziyuan_storage::LockScope::Workspace)
+        .unwrap();
+    let err = fx
+        .t()
+        .finalize_human_translation(&guard, &fx.project, B3)
+        .unwrap_err()
+        .to_string();
+    drop(guard);
+    assert!(
+        err.contains("送审后材料有变") && err.contains("朱批已变") && err.contains("human submit"),
+        "{err}"
+    );
+    assert_eq!(fs::read(fx.root.join(".ziyuan/court.log")).unwrap(), log);
+    fx.t().clear_zhupi(&fx.project, B3, "c0003-p0001").unwrap();
+    human_finalize(&fx, B3);
+    let s = fx.session();
+    assert!(matches!(
+        fx.status(&s, B3).state,
+        BlockState::HumanFinalized { .. }
+    ));
+}

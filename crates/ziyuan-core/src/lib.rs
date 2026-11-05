@@ -16,7 +16,8 @@ pub use event::{
     TranslationKind, TranslationLink,
 };
 pub use human_translation::{
-    DraftBasis, EventReference, HumanActor, HumanBindingRequest, HumanSubmissionBinding,
+    DraftBasis, EventReference, HumanActor, HumanApproval, HumanApprovalRequest,
+    HumanApprovalTarget, HumanBindingRequest, HumanFinalization, HumanSubmissionBinding,
     TranslationSource,
 };
 pub use office::{BudgetScope, Department, GovernanceMode, Office};
