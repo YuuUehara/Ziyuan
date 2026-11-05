@@ -148,9 +148,9 @@
 
 ## 开发中：人工译稿流程（未发布）
 
-本批新增事件 `HumanTranslationApproved`（编码 `HUMANAPPROVED`），最低读取版本为预留的 `1.5.0-dev.2`（`RELEASES` 序号 25），会典标签随之为 `human-approvals-v1`。包版本仍为 1.4.1，该读本尚未发布；旧版打开含此事件的事件簿会拒绝并提示升级，`ziyuan migrate` 会指出首个要求新读本的事件。人工译稿入口只在命令行开放，Web／TUI 未开。详见 [N0 第 22.2 节](novel-workbench-n0.md#222-本批-n1a-2c-1人工准奏事实内部契约)。
+本批新增事件 `HumanTranslationApproved`（编码 `HUMANAPPROVED`），最低读取版本为预留的 `1.5.0-dev.2`（`RELEASES` 序号 25），会典标签随之为 `human-approvals-v1`。包版本仍为 1.4.1，该读本尚未发布；旧版打开含此事件的事件簿会拒绝并提示升级，`ziyuan migrate` 会指出首个要求新读本的事件。人工译稿入口当时只在命令行开放（Web 已于 N0 第 22.31 节开放，TUI 未开）。详见 [N0 第 22.2 节](novel-workbench-n0.md#222-本批-n1a-2c-1人工准奏事实内部契约)。
 
-应用层来源解析与状态页已能识别人工准奏；人工定稿事件已入簿并回放到签押，应用层持锁定稿 API 也已接通；Markdown 已能无损写出 ruby／粗体／斜体；着重点与同范围叠加仍拒绝。人工定稿可显示只读状态并进入本地记忆（来源标为人工，索引格式升第二版）；1.4.1 旧二进制对新事件与第二版恢复记录实测拒绝并提示升级。CLI 六个命令（`text human show`／`save`／`submit`／`approve`／`finalize`／`apply`）已开：`approve` 即准奏并落盘，自带第二版恢复记录，`apply` 只作只读核对。Web／TUI 入口未接；网页只读显示 `human_approved`／`human_finalized`／`human_stale` 三种人工状态、按事实禁用按钮并显示失效理由。开放 Web／TUI 入口前仍须完成停写确认清单。
+应用层来源解析与状态页已能识别人工准奏；人工定稿事件已入簿并回放到签押，应用层持锁定稿 API 也已接通；Markdown 已能无损写出 ruby／粗体／斜体；着重点与同范围叠加仍拒绝。人工定稿可显示只读状态并进入本地记忆（来源标为人工，索引格式升第二版）；1.4.1 旧二进制对新事件与第二版恢复记录实测拒绝并提示升级。CLI 六个命令（`text human show`／`save`／`submit`／`approve`／`finalize`／`apply`）已开：`approve` 即准奏并落盘，自带第二版恢复记录，`apply` 只作只读核对。网页除显示 `human_approved`／`human_finalized`／`human_stale` 三种人工状态外，已开人工入口：`/api/text/{项目}/blocks/{块}/human`（查看）与 `…/human/draft｜submit｜approve｜finalize`（写），以及 `/api/text/{项目}/human/progress`；接口形状与静态模块 `/assets/editor-core.mjs`、`/assets/human-editor.mjs` 都属开发中，1.5.0 发布前可改。观政只读（四个写接口 403）是已冻结的安全约束。两份模块即界面与 `node --test` 共用的源码，改动须同时跑 Node 单测。TUI 入口未接，开放前仍须完成停写确认清单。详见 [N0 第 22.31 节](novel-workbench-n0.md#2231-本批web-人工译稿接口与标记编辑器)。
 
 同批固定了译稿第二版（`zh-json/2`）的只读表示：含注音／着重等标记的译稿不再按纯文本读取，纯文本第一版字节不变；带标记稿已可按 `--format md` 无损导出，着重点与同范围叠加仍整批拒绝，详见 [N0 第 22.3 节](novel-workbench-n0.md#223-本批-n1a-2c-2批准目标表示内部契约)。
 
