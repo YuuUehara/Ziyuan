@@ -1,9 +1,12 @@
 /target/
+# 跨目标编译检查的产物目录，不随仓库发布。
+/target-linuxcheck/
 /.worktrees/
 # 本地开发用的设计与计划草稿，不随仓库发布。
 /docs/superpowers/
 /.ziyuan/
 **/*.rs.bk
+__pycache__/
 .DS_Store
 .amp/portals/*
 /.amp/in/
