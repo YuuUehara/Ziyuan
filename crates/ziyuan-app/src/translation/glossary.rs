@@ -1,12 +1,11 @@
 //! Typed v2 glossary: parsing does not enable approval or legacy consumption.
-use super::context::{MAX_ALLOWED, MAX_ENTRIES, MAX_NOTE, MAX_TERM, check_text};
+use super::context::{MAX_ALLOWED, MAX_ENTRIES, MAX_NOTE, MAX_TERM, check_text, check_text_limits};
+use super::strict_json::parse_strict_json;
 use super::{GlossaryEntry, Result, invalid};
 use crate::text_project::Project;
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
@@ -140,27 +139,15 @@ pub struct GlossaryEvidence {
 
 impl Glossary {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let value = StrictValue("glossary.json".into())
-            .deserialize(&mut deserializer)
-            .map_err(|e| invalid(format!("glossary.json 格式不对：{e}")))?;
-        deserializer
-            .end()
-            .map_err(|e| invalid(format!("glossary.json 格式不对：{e}")))?;
+        let value = parse_strict_json(bytes, "glossary.json", None)?;
         if value.is_array() {
             return super::context::parse_legacy_glossary(bytes).map(Self::Legacy);
         }
         if !value.is_object() {
             return Err(invalid("glossary.json 格式不对：须为数组或对象"));
         }
-        match value.get("format") {
-            Some(Value::Number(n)) if n.as_u64() == Some(2) => {}
-            Some(Value::Number(n)) if n.as_f64().is_some_and(|v| v > 2.0) => {
-                return Err(invalid("glossary.json.format 须升级程序才能读取"));
-            }
-            _ => return Err(invalid("glossary.json.format 格式不对：只接受整数 2")),
-        }
-        shape(&value, Node::Root, "glossary.json")?;
+        check_format(&value)?;
+        shape(&value, Node::Root, "glossary.json", ShapeMode::Strict)?;
         let structured: StructuredGlossary = serde_json::from_value(value)
             .map_err(|e| invalid(format!("glossary.json 格式不对：{e}")))?;
         structured.validate_references()?;
@@ -205,6 +192,23 @@ impl Glossary {
 }
 
 impl StructuredGlossary {
+    /// Parse an unfinished v2 material, without references or project validation.
+    #[allow(dead_code)] // Used by the local-materials boundary in the next task.
+    pub(crate) fn parse_editable(bytes: &[u8]) -> Result<Self> {
+        let value = parse_strict_json(bytes, "glossary.json", Some(32))?;
+        check_format(&value)?;
+        shape(&value, Node::Root, "glossary.json", ShapeMode::Editable)?;
+        serde_json::from_value(value).map_err(|e| invalid(format!("glossary.json 格式不对：{e}")))
+    }
+
+    /// Apply the same save boundary to directly constructed Rust values.
+    #[allow(dead_code)] // Used by the local-materials boundary in the next task.
+    pub(crate) fn validate_editable_shape(&self) -> Result<()> {
+        let value = serde_json::to_value(self)?;
+        check_format(&value)?;
+        shape(&value, Node::Root, "glossary.json", ShapeMode::Editable)
+    }
+
     fn validate_references(&self) -> Result<()> {
         fn ids<'a>(items: impl Iterator<Item = &'a str>, at: &str) -> Result<HashSet<&'a str>> {
             let mut ids = HashSet::new();
@@ -239,6 +243,24 @@ impl StructuredGlossary {
         }
         Ok(())
     }
+}
+
+fn check_format(value: &Value) -> Result<()> {
+    match value.get("format") {
+        Some(Value::Number(n)) if n.as_u64() == Some(2) => {}
+        Some(Value::Number(n)) if n.as_f64().is_some_and(|v| v > 2.0) => {
+            return Err(invalid("glossary.json.format 须升级程序才能读取"));
+        }
+        _ => return Err(invalid("glossary.json.format 格式不对：只接受整数 2")),
+    }
+    Ok(())
+}
+
+/// Editable accepts unfinished semantics, never weaker resource/type bounds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShapeMode {
+    Strict,
+    Editable,
 }
 
 /// Preflight provides precise Chinese field/index errors before typed deserialization.
@@ -277,19 +299,26 @@ fn object<'a>(
     Ok(obj)
 }
 
-fn text(v: &Value, at: &str, max: usize) -> Result<()> {
-    check_text(
-        at,
-        v.as_str()
-            .ok_or_else(|| invalid(format!("{at} 须为文本")))?,
-        max,
-    )
+fn text(v: &Value, at: &str, max: usize, mode: ShapeMode) -> Result<()> {
+    let s = v
+        .as_str()
+        .ok_or_else(|| invalid(format!("{at} 须为文本")))?;
+    match mode {
+        ShapeMode::Strict => check_text(at, s, max),
+        ShapeMode::Editable => check_text_limits(at, s, max),
+    }
 }
 
-fn id(v: &Value, at: &str) -> Result<()> {
+fn id(v: &Value, at: &str, mode: ShapeMode) -> Result<()> {
     let s = v
         .as_str()
         .ok_or_else(|| invalid(format!("{at} ID 须为文本")))?;
+    if mode == ShapeMode::Editable {
+        if s.len() > 64 {
+            return Err(invalid(format!("{at} ID 至多 64 UTF-8 字节")));
+        }
+        return check_text_limits(at, s, 64);
+    }
     if s.is_empty()
         || s.len() > 64
         || !s
@@ -318,7 +347,8 @@ fn array(
     v: &Value,
     at: &str,
     max: usize,
-    mut item: impl FnMut(&Value, &str) -> Result<()>,
+    mode: ShapeMode,
+    mut item: impl FnMut(&Value, &str, ShapeMode) -> Result<()>,
 ) -> Result<()> {
     let items = v
         .as_array()
@@ -327,12 +357,12 @@ fn array(
         return Err(invalid(format!("{at} 至多 {max} 条")));
     }
     for (i, value) in items.iter().enumerate() {
-        item(value, &format!("{at}.{i}"))?;
+        item(value, &format!("{at}.{i}"), mode)?;
     }
     Ok(())
 }
 
-fn shape(v: &Value, node: Node, at: &str) -> Result<()> {
+fn shape(v: &Value, node: Node, at: &str, mode: ShapeMode) -> Result<()> {
     use Node::*;
     let (required, optional): (&[&str], &[&str]) = match node {
         Root => (&["format", "terms", "persons"], &[]),
@@ -400,10 +430,10 @@ fn shape(v: &Value, node: Node, at: &str) -> Result<()> {
         match key.as_str() {
             "format" | "kind" => {}
             "term_id" | "person_id" | "target" | "term" | "chapter" | "paragraph" => {
-                id(value, &path)?
+                id(value, &path, mode)?
             }
-            "source" | "name" | "reading" | "quote" => text(value, &path, MAX_TERM)?,
-            "note" | "description" | "explanation" => text(value, &path, MAX_NOTE)?,
+            "source" | "name" | "reading" | "quote" => text(value, &path, MAX_TERM, mode)?,
+            "note" | "description" | "explanation" => text(value, &path, MAX_NOTE, mode)?,
             "category" => choice(
                 value,
                 &path,
@@ -423,20 +453,33 @@ fn shape(v: &Value, node: Node, at: &str) -> Result<()> {
                 &["project_fact", "character_belief", "narration"],
             )?,
             "allowed" | "aliases" | "examples" => {
-                array(value, &path, MAX_ALLOWED, |v, p| text(v, p, MAX_TERM))?;
-                if key == "allowed" && value.as_array().is_some_and(Vec::is_empty) {
+                array(value, &path, MAX_ALLOWED, mode, |v, p, m| {
+                    text(v, p, MAX_TERM, m)
+                })?;
+                if mode == ShapeMode::Strict
+                    && key == "allowed"
+                    && value.as_array().is_some_and(Vec::is_empty)
+                {
                     return Err(invalid(format!("{path} 须为 1–{MAX_ALLOWED} 种")));
                 }
             }
-            "terms" if matches!(node, Person) => array(value, &path, MAX_ENTRIES, id)?,
-            "terms" => array(value, &path, MAX_ENTRIES, |v, p| shape(v, Term, p))?,
-            "persons" => array(value, &path, MAX_ENTRIES, |v, p| shape(v, Person, p))?,
-            "address_rules" => array(value, &path, MAX_ENTRIES, |v, p| shape(v, Rule, p))?,
-            "evidence" => array(value, &path, MAX_ENTRIES, |v, p| shape(v, Evidence, p))?,
-            "scope" => shape(value, Scope, &path)?,
-            "available_from" | "from" | "to" => shape(value, Position, &path)?,
-            "speaker" => shape(value, Speaker, &path)?,
-            "voice" => shape(value, Voice, &path)?,
+            "terms" if matches!(node, Person) => array(value, &path, MAX_ENTRIES, mode, id)?,
+            "terms" => array(value, &path, MAX_ENTRIES, mode, |v, p, m| {
+                shape(v, Term, p, m)
+            })?,
+            "persons" => array(value, &path, MAX_ENTRIES, mode, |v, p, m| {
+                shape(v, Person, p, m)
+            })?,
+            "address_rules" => array(value, &path, MAX_ENTRIES, mode, |v, p, m| {
+                shape(v, Rule, p, m)
+            })?,
+            "evidence" => array(value, &path, MAX_ENTRIES, mode, |v, p, m| {
+                shape(v, Evidence, p, m)
+            })?,
+            "scope" => shape(value, Scope, &path, mode)?,
+            "available_from" | "from" | "to" => shape(value, Position, &path, mode)?,
+            "speaker" => shape(value, Speaker, &path, mode)?,
+            "voice" => shape(value, Voice, &path, mode)?,
             _ => unreachable!("object fields were checked"),
         }
     }
@@ -511,67 +554,6 @@ impl<'a> ProjectIndex<'a> {
             }
         }
         Ok(())
-    }
-}
-
-/// Deserialize a JSON value without losing duplicate keys (including tagged objects).
-struct StrictValue(String);
-impl<'de> DeserializeSeed<'de> for StrictValue {
-    type Value = Value;
-    fn deserialize<D: de::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> std::result::Result<Value, D::Error> {
-        deserializer.deserialize_any(self)
-    }
-}
-impl<'de> Visitor<'de> for StrictValue {
-    type Value = Value;
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("JSON 值")
-    }
-    fn visit_bool<E: de::Error>(self, v: bool) -> std::result::Result<Value, E> {
-        Ok(v.into())
-    }
-    fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<Value, E> {
-        Ok(v.into())
-    }
-    fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<Value, E> {
-        Ok(v.into())
-    }
-    fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<Value, E> {
-        serde_json::Number::from_f64(v)
-            .map(Value::Number)
-            .ok_or_else(|| E::custom("无效数字"))
-    }
-    fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Value, E> {
-        Ok(v.into())
-    }
-    fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Value, E> {
-        Ok(v.into())
-    }
-    fn visit_unit<E: de::Error>(self) -> std::result::Result<Value, E> {
-        Ok(Value::Null)
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Value, A::Error> {
-        let mut values = Vec::new();
-        while let Some(v) =
-            seq.next_element_seed(StrictValue(format!("{}.{}", self.0, values.len())))?
-        {
-            values.push(v);
-        }
-        Ok(Value::Array(values))
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Value, A::Error> {
-        let mut values = serde_json::Map::new();
-        while let Some(key) = map.next_key::<String>()? {
-            let path = format!("{}.{key}", self.0);
-            if values.contains_key(&key) {
-                return Err(de::Error::custom(format!("{path} 字段重复")));
-            }
-            values.insert(key, map.next_value_seed(StrictValue(path))?);
-        }
-        Ok(Value::Object(values))
     }
 }
 

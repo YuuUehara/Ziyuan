@@ -87,6 +87,11 @@ pub(super) fn check_text(what: &str, text: &str, max: usize) -> Result<()> {
     if text.trim().is_empty() {
         return Err(invalid(format!("{what}不能为空")));
     }
+    check_text_limits(what, text, max)
+}
+
+/// Resource bounds shared by strict production text and unfinished editor text.
+pub(super) fn check_text_limits(what: &str, text: &str, max: usize) -> Result<()> {
     if text.chars().count() > max {
         return Err(invalid(format!("{what}至多 {max} 字")));
     }

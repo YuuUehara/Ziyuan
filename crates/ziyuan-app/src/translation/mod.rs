@@ -20,6 +20,7 @@ mod references;
 mod session;
 mod source;
 mod status;
+mod strict_json;
 mod target;
 mod usage;
 mod verification;

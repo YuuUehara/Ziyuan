@@ -446,3 +446,320 @@ fn person_availability_roundtrips_and_validates_without_changing_omission() {
         rejects(&v, "available_from");
     }
 }
+
+fn editable(value: &Value) -> Result<StructuredGlossary> {
+    StructuredGlossary::parse_editable(&serde_json::to_vec(value).unwrap())
+}
+
+#[test]
+fn editable_shape_accepts_empty_but_strict_parse_still_refuses() {
+    let mut v = sample();
+    for pointer in [
+        "/terms/0/term_id",
+        "/terms/0/source",
+        "/terms/0/note",
+        "/terms/0/scope/from/chapter",
+        "/terms/0/scope/from/paragraph",
+        "/terms/0/available_from/chapter",
+        "/terms/0/evidence/0/paragraph",
+        "/terms/0/evidence/0/quote",
+        "/terms/0/evidence/0/explanation",
+        "/persons/0/person_id",
+        "/persons/0/name",
+        "/persons/0/reading",
+        "/persons/0/aliases/0",
+        "/persons/0/terms/0",
+        "/persons/0/voice/description",
+        "/persons/0/voice/examples/0",
+        "/persons/0/address_rules/0/target",
+        "/persons/0/address_rules/0/term",
+        "/persons/0/address_rules/0/speaker/person_id",
+        "/persons/0/address_rules/0/note",
+    ] {
+        let mut single = sample();
+        *single.pointer_mut(pointer).unwrap() = json!("");
+        assert!(parse(&single).is_err(), "{pointer}");
+        assert_eq!(
+            serde_json::to_value(editable(&single).unwrap()).unwrap(),
+            single
+        );
+        *v.pointer_mut(pointer).unwrap() = json!("");
+    }
+    v["terms"][0]["allowed"] = json!([]);
+    let saved = editable(&v).unwrap();
+    saved.validate_editable_shape().unwrap();
+    assert_eq!(serde_json::to_value(saved).unwrap(), v);
+    assert!(parse(&v).is_err());
+}
+
+#[test]
+fn editable_shape_keeps_invalid_ids_and_references() {
+    for pointer in [
+        "/terms/0/term_id",
+        "/persons/0/person_id",
+        "/persons/0/terms/0",
+        "/persons/0/address_rules/0/target",
+        "/persons/0/address_rules/0/term",
+        "/persons/0/address_rules/0/speaker/person_id",
+        "/terms/0/scope/from/chapter",
+        "/terms/0/evidence/0/paragraph",
+    ] {
+        for id in ["中文 ID", "missing"] {
+            let mut v = sample();
+            *v.pointer_mut(pointer).unwrap() = json!(id);
+            assert_eq!(serde_json::to_value(editable(&v).unwrap()).unwrap(), v);
+        }
+    }
+    for array in ["terms", "persons"] {
+        let mut v = sample();
+        let duplicate = v[array][0].clone();
+        v[array].as_array_mut().unwrap().push(duplicate);
+        editable(&v).unwrap();
+        assert!(parse(&v).is_err());
+    }
+    for (pointer, value) in [
+        ("/persons/0/terms/0", json!("missing")),
+        (
+            "/terms/0/scope",
+            json!({"kind":"range","from":{"chapter":"a"},"to":{"chapter":"z"}}),
+        ),
+        ("/terms/0/evidence/0/quote", json!("不存在")),
+    ] {
+        let mut v = sample();
+        *v.pointer_mut(pointer).unwrap() = value;
+        editable(&v).unwrap();
+        assert!(
+            parse(&v)
+                .and_then(|g| g.validate_project(&project()))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn editable_shape_rejects_unknown_duplicate_and_overlong_fields() {
+    for (pointer, bad) in [
+        ("/persons/0/name", json!("字".repeat(201))),
+        ("/persons/0/voice/description", json!("字".repeat(501))),
+        ("/persons/0/person_id", json!("字".repeat(22))),
+        ("/persons/0/name", json!("a\u{0}b")),
+        ("/persons/0/person_id", json!("a\u{0}b")),
+        ("/terms/0/allowed", json!(vec![""; 17])),
+        ("/terms/0/category", json!("invalid")),
+        ("/persons/0/voice", json!([])),
+        ("/format", json!(2.0)),
+        ("/format", json!(3)),
+    ] {
+        let mut v = sample();
+        *v.pointer_mut(pointer).unwrap() = bad;
+        assert!(editable(&v).is_err(), "{pointer}");
+    }
+    let mut v = sample();
+    v["persons"][0]["voice"]["unknown"] = json!("");
+    assert!(
+        editable(&v)
+            .unwrap_err()
+            .to_string()
+            .contains("persons.0.voice.unknown")
+    );
+    let duplicate = sample()
+        .to_string()
+        .replace(r#""kind":"person""#, r#""kind":"person","kind":"person""#);
+    assert!(
+        StructuredGlossary::parse_editable(duplicate.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("persons.0.address_rules.0.speaker.kind 字段重复")
+    );
+    let mut direct: StructuredGlossary = serde_json::from_value(sample()).unwrap();
+    direct.persons[0].name = "x".repeat(201);
+    assert!(direct.validate_editable_shape().is_err());
+    direct.persons[0].name.clear();
+    direct.format = 3;
+    assert!(direct.validate_editable_shape().is_err());
+}
+
+#[test]
+fn production_errors_and_legacy_serialization_stay_fixed() {
+    for (bytes, message) in [
+        (
+            r#"{"format":2,"format":2}"#,
+            "glossary.json 格式不对：glossary.json.format 字段重复 at line 1 column 20",
+        ),
+        (
+            r#"{"format":2,"terms":[],"persons":[],"z":1}"#,
+            "glossary.json.z 为未知字段",
+        ),
+        (
+            r#"{"format":2.0,"terms":[],"persons":[]}"#,
+            "glossary.json.format 格式不对：只接受整数 2",
+        ),
+        (
+            r#"[{"source":"","allowed":[]}]"#,
+            "术语表第 1 条的原文不能为空",
+        ),
+    ] {
+        assert_eq!(
+            Glossary::parse(bytes.as_bytes()).unwrap_err().to_string(),
+            message
+        );
+    }
+    let bytes = br#"[{"source":"a","allowed":["b"],"scope":"legacy","note":"note"}]"#;
+    assert_eq!(
+        serde_json::to_vec(&Glossary::parse(bytes).unwrap()).unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn strict_json_bounds_container_depth_without_changing_production_boundary() {
+    use super::super::strict_json::parse_strict_json;
+    for object in [false, true] {
+        for layers in [32, 33] {
+            let (open, close) = if object {
+                (r#"{"x":"#, "}")
+            } else {
+                ("[", "]")
+            };
+            let bytes = format!("{}null{}", open.repeat(layers), close.repeat(layers));
+            let result = parse_strict_json(bytes.as_bytes(), "资料", Some(32));
+            if layers == 32 {
+                result.unwrap();
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("JSON 嵌套至多 32 层")
+                );
+            }
+            parse_strict_json(bytes.as_bytes(), "glossary.json", None).unwrap();
+        }
+    }
+    let bytes = format!("{}null{}", "[".repeat(128), "]".repeat(128));
+    assert!(
+        parse_strict_json(bytes.as_bytes(), "glossary.json", None)
+            .unwrap_err()
+            .to_string()
+            .contains("recursion limit exceeded")
+    );
+    for bytes in ["null null", r#"{"x":[{"a":1,"a":2}]}"#] {
+        assert!(parse_strict_json(bytes.as_bytes(), "资料", Some(32)).is_err());
+    }
+    // Production must report the existing unknown-field error, not the new 32-layer bound.
+    let nested = format!("{}null{}", "[".repeat(33), "]".repeat(33));
+    let bytes = format!(r#"{{"format":2,"terms":[],"persons":[],"extra":{nested}}}"#);
+    assert_eq!(
+        Glossary::parse(bytes.as_bytes()).unwrap_err().to_string(),
+        "glossary.json.extra 为未知字段"
+    );
+    assert!(
+        StructuredGlossary::parse_editable(bytes.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("JSON 嵌套至多 32 层")
+    );
+}
+
+#[test]
+fn deepest_material_and_association_shapes_parse_but_invalid_nodes_never_panic() {
+    use super::super::strict_json::parse_strict_json;
+    let mut v = sample();
+    v["persons"][0]["available_from"] = json!({"chapter":"z","paragraph":"pz"});
+    v["persons"][0]["address_rules"][0]["scope"] = v["terms"][0]["scope"].clone();
+    let bytes = serde_json::to_vec(&v).unwrap();
+    let parsed = editable(&v).unwrap();
+    parsed.validate_editable_shape().unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), v);
+    // Deepest supported material path: root/persons/person/rules/rule/evidence/item.
+    parse_strict_json(&bytes, "资料", Some(7)).unwrap();
+    assert!(parse_strict_json(&bytes, "资料", Some(6)).is_err());
+    let associations = json!([{
+        "paragraph":"pz","persons":["p_1"],
+        "speaker":{"kind":"person","person_id":"p_1"}
+    }]);
+    let bytes = serde_json::to_vec(&associations).unwrap();
+    assert_eq!(
+        parse_strict_json(&bytes, "关联", Some(32)).unwrap(),
+        associations
+    );
+    let duplicate = br#"[{"speaker":{"kind":"person","person_id":"a","person_id":"b"}}]"#;
+    assert!(
+        parse_strict_json(duplicate, "关联", Some(32))
+            .unwrap_err()
+            .to_string()
+            .contains("关联.0.speaker.person_id 字段重复")
+    );
+    for pointer in [
+        "",
+        "/terms/0",
+        "/terms/0/scope",
+        "/terms/0/scope/from",
+        "/terms/0/evidence/0",
+        "/persons/0",
+        "/persons/0/voice",
+        "/persons/0/address_rules/0",
+        "/persons/0/address_rules/0/speaker",
+    ] {
+        for bad in [json!(null), json!([]), json!(3), json!(""), json!({})] {
+            let mut invalid = v.clone();
+            *invalid.pointer_mut(pointer).unwrap() = bad;
+            assert!(editable(&invalid).is_err(), "{pointer}");
+        }
+        let mut unknown = v.clone();
+        unknown
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), json!(true));
+        assert!(editable(&unknown).is_err(), "{pointer}");
+    }
+}
+
+#[test]
+fn editable_resource_bounds_are_inclusive_and_apply_to_nested_arrays() {
+    for (pointer, max) in [
+        ("/terms/0/source", 200),
+        ("/terms/0/allowed/0", 200),
+        ("/persons/0/voice/examples/0", 200),
+        ("/persons/0/address_rules/0/evidence/0/explanation", 500),
+    ] {
+        let mut v = sample();
+        *v.pointer_mut(pointer).unwrap() = json!("字".repeat(max));
+        editable(&v).unwrap().validate_editable_shape().unwrap();
+        *v.pointer_mut(pointer).unwrap() = json!("字".repeat(max + 1));
+        assert!(editable(&v).is_err(), "{pointer}");
+    }
+    let mut v = sample();
+    v["persons"][0]["person_id"] = json!(format!("{}x", "字".repeat(21)));
+    v["persons"][0]["name"] = json!(" \n\t");
+    editable(&v).unwrap();
+    v["persons"][0]["person_id"] = json!(format!("{}xx", "字".repeat(21)));
+    assert!(editable(&v).is_err());
+    for (pointer, max) in [
+        ("/terms/0/allowed", 16),
+        ("/persons/0/aliases", 16),
+        ("/persons/0/voice/examples", 16),
+        ("/terms", 5000),
+        ("/persons", 5000),
+        ("/terms/0/evidence", 5000),
+        ("/persons/0/terms", 5000),
+        ("/persons/0/address_rules", 5000),
+        ("/persons/0/evidence", 5000),
+        ("/persons/0/address_rules/0/evidence", 5000),
+    ] {
+        let mut v = sample();
+        let item = v.pointer(pointer).unwrap()[0].clone();
+        *v.pointer_mut(pointer).unwrap() = Value::Array(vec![item.clone(); max]);
+        editable(&v).unwrap().validate_editable_shape().unwrap();
+        v.pointer_mut(pointer)
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(item);
+        assert!(editable(&v).is_err(), "{pointer}");
+        let direct: StructuredGlossary = serde_json::from_value(v).unwrap();
+        assert!(direct.validate_editable_shape().is_err(), "{pointer}");
+    }
+}
