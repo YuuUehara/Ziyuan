@@ -16,6 +16,7 @@ mod finished;
 mod gate;
 mod glossary;
 mod markup;
+pub mod materials;
 mod references;
 mod session;
 mod source;
@@ -46,6 +47,11 @@ pub use glossary::{
     GlossaryStance, GlossaryStatus, Person, PersonVoice, StructuredGlossary, Term, TermCategory,
 };
 pub use markup::{TargetMark, TargetMarkKind};
+pub use materials::{
+    MAX_MATERIAL_BYTES, MaterialDraft, MaterialError, MaterialIssue, MaterialIssueCode,
+    MaterialPathSegment, MaterialReceipt, MaterialSave, MaterialValidation,
+    check_material_editable, validate_material,
+};
 pub use references::{
     MAX_REFERENCE_BYTES, MAX_REFERENCES, ReferencePreview, ReferenceRequest, ReferenceSelection,
     ReferenceSubmission, ReferenceTaskView,
