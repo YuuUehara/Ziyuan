@@ -379,6 +379,17 @@ fn envelope_limit_is_inclusive_and_receipts_are_never_pruned() {
     assert!(tree(&f.root) == before, "超限保存不得覆盖旧草稿");
     assert_eq!(save_with(&f, "seed", None, unfinished()).unwrap(), seed);
     assert!(tree(&f.root) == before, "超限后旧请求重试只返回历史回执");
+    // A user may have removed the lock; the size preflight must refuse before `update`
+    // would create it.
+    fs::remove_file(f.root.join(f.lock_path())).unwrap();
+    let unlocked = tree(&f.root);
+    assert_too_large(save_with(
+        &f,
+        "next",
+        Some(seed.revision.clone()),
+        unfinished(),
+    ));
+    assert!(tree(&f.root) == unlocked, "超限预查不得新建锁文件");
 
     let exact = pad_to_next_save(&stored, "next", MAX_ENVELOPE_BYTES);
     fs::write(&file, encode(&exact)).unwrap();

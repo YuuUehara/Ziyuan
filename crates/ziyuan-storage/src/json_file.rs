@@ -117,6 +117,10 @@ enum Fault {
     CreateTemp,
     WriteTemp,
     Replace,
+    /// Exit the process once the temporary file is written and synced, before the rename.
+    ExitBeforeRename,
+    /// Exit the process right after the rename, before the caller sees success.
+    ExitAfterRename,
 }
 
 impl<T> JsonFile<T> {
@@ -197,6 +201,11 @@ impl<T> JsonFile<T> {
     #[cfg(test)]
     fn inject(&self, at: Fault) -> io::Result<()> {
         match self.fault {
+            Some(fault @ (Fault::ExitBeforeRename | Fault::ExitAfterRename)) if fault == at => {
+                println!("JSON_FILE_EXIT:{at:?}");
+                let _ = io::stdout().flush();
+                std::process::exit(86)
+            }
             Some(fault) if fault == at => Err(io::Error::other(format!("注入故障 {at:?}"))),
             _ => Ok(()),
         }
@@ -236,6 +245,8 @@ impl<T> JsonFile<T> {
         drop(file);
         let replaced = written.and_then(|()| {
             #[cfg(test)]
+            self.inject(Fault::ExitBeforeRename)?;
+            #[cfg(test)]
             self.inject(Fault::Replace)?;
             // std 在 Windows 上以覆盖方式改名（MOVEFILE_REPLACE_EXISTING / POSIX 语义），不先删目标。
             fs::rename(&tmp, &self.path)
@@ -244,6 +255,8 @@ impl<T> JsonFile<T> {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
         }
+        #[cfg(test)]
+        self.inject(Fault::ExitAfterRename)?;
         sync_dir(dir);
         Ok(())
     }
@@ -349,6 +362,12 @@ impl<T: Serialize + DeserializeOwned> JsonFile<T> {
             },
             out,
         ))
+    }
+
+    /// 只读预查：按 [`JsonFile::update`] 将以 `revision` 发布 `value` 时的同一编码核对字节上限，
+    /// 编码结果随即丢弃。不建目录、锁或临时文件；`update` 发布时仍会重新核对。
+    pub fn check_size(&self, revision: u64, value: &T) -> Result<(), JsonFileError> {
+        self.encode(revision, value).map(drop)
     }
 
     fn read_locked(&self) -> Result<Option<Stored<T>>, JsonFileError> {
@@ -693,6 +712,136 @@ mod tests {
         file.fault = None;
         assert_eq!(bump(&file).unwrap().revision, 2);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn size_preflight_matches_update_without_touching_disk() {
+        const MIB8: u64 = 8 * 1024 * 1024;
+        let dir = temp_dir("preflight");
+        let probe = counter_file(&dir);
+        set_note(&probe, "").unwrap();
+        let base = fs::metadata(probe.path()).unwrap().len();
+        let file: JsonFile<Counter> = JsonFile::new(probe.path(), 1, MIB8);
+        let exact = Counter {
+            n: 0,
+            note: "x".repeat((MIB8 - base) as usize),
+        };
+        let mut over = exact.clone();
+        over.note.push('x');
+        let before = fs::read(file.path()).unwrap();
+        let next = file.load().unwrap().unwrap().revision + 1;
+        file.check_size(next, &exact).unwrap();
+        let err = file.check_size(next, &over).unwrap_err();
+        assert!(
+            matches!(err, JsonFileError::TooLarge { limit } if limit == MIB8),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(file.path()).unwrap(), before, "预查不得写盘");
+        let err = set_note(&file, &over.note).unwrap_err();
+        assert!(
+            matches!(err, JsonFileError::TooLarge { limit } if limit == MIB8),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(file.path()).unwrap(), before);
+        let saved = set_note(&file, &exact.note).unwrap();
+        assert_eq!(saved.revision, next);
+        assert_eq!(fs::metadata(file.path()).unwrap().len(), MIB8);
+        fs::remove_dir_all(&dir).unwrap();
+
+        let fresh = temp_dir("preflight-fresh");
+        let file = counter_file(&fresh);
+        file.check_size(1, &Counter::default()).unwrap();
+        assert!(matches!(
+            file.check_size(
+                1,
+                &Counter {
+                    n: 0,
+                    note: "x".repeat(LIMIT as usize)
+                }
+            ),
+            Err(JsonFileError::TooLarge { .. })
+        ),);
+        assert!(!fresh.exists(), "预查不得建目录或锁");
+    }
+
+    const ABORT_DIR_ENV: &str = "ZIYUAN_JSON_FILE_ABORT_DIR";
+    const ABORT_AT_ENV: &str = "ZIYUAN_JSON_FILE_ABORT_AT";
+    const ABORT_CODE: i32 = 86;
+    const OLD_NOTE: &str = "旧正文与旧回执";
+    const NEW_NOTE: &str = "新正文与新回执";
+
+    /// Run by [`process_exit_around_rename_leaves_old_or_new_whole`]; does nothing directly.
+    #[test]
+    fn child_exits_during_publication() {
+        let Some(dir) = std::env::var_os(ABORT_DIR_ENV) else {
+            return;
+        };
+        let mut file = counter_file(Path::new(&dir));
+        file.fault = Some(match std::env::var(ABORT_AT_ENV).unwrap().as_str() {
+            "before" => Fault::ExitBeforeRename,
+            "after" => Fault::ExitAfterRename,
+            other => panic!("unknown abort point {other}"),
+        });
+        let _ = set_note(&file, NEW_NOTE);
+        panic!("子进程未命中中断点");
+    }
+
+    fn exit_child(dir: &Path, at: &str) -> std::process::Output {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "json_file::tests::child_exits_during_publication",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ABORT_DIR_ENV, dir)
+            .env(ABORT_AT_ENV, at)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            output.status.code(),
+            Some(ABORT_CODE),
+            "{at}: {stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let marker = if at == "before" {
+            "JSON_FILE_EXIT:ExitBeforeRename"
+        } else {
+            "JSON_FILE_EXIT:ExitAfterRename"
+        };
+        assert!(stdout.contains(marker), "{at}: {stdout}");
+        output
+    }
+
+    #[test]
+    fn process_exit_around_rename_leaves_old_or_new_whole() {
+        let dir = temp_dir("exit-before");
+        let file = counter_file(&dir);
+        let old = set_note(&file, OLD_NOTE).unwrap();
+        exit_child(&dir, "before");
+        assert_eq!(counter_file(&dir).load().unwrap(), Some(old.clone()));
+        let orphans = leftovers(&dir);
+        assert_eq!(orphans.len(), 1, "{orphans:?}");
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(&orphans[0])).unwrap()).unwrap();
+        assert_eq!(
+            written["data"]["note"], NEW_NOTE,
+            "子进程须在临时文件写完后中断"
+        );
+        let next = set_note(&counter_file(&dir), "之后").unwrap();
+        assert_eq!(next.revision, old.revision + 1);
+        fs::remove_dir_all(&dir).unwrap();
+
+        let dir = temp_dir("exit-after");
+        let file = counter_file(&dir);
+        let old = set_note(&file, OLD_NOTE).unwrap();
+        exit_child(&dir, "after");
+        let reopened = counter_file(&dir).load().unwrap().unwrap();
+        assert_eq!(reopened.revision, old.revision + 1);
+        assert_eq!(reopened.value.note, NEW_NOTE);
+        assert!(leftovers(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

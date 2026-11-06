@@ -189,6 +189,35 @@ fn damaged_drafts_are_errors_and_never_reset() {
     assert_eq!(current(&f).revision, seed.revision);
 }
 
+#[test]
+fn duplicate_receipt_keys_are_corrupt_not_last_wins() {
+    let f = Fixture::new();
+    let seed = save_with(&f, "seed", None, unfinished()).unwrap();
+    let file = f.root.join(f.draft_path());
+    let text = String::from_utf8(draft_bytes(&f)).unwrap();
+    let earlier = json!({"hash": "1".repeat(64), "receipt": {
+        "revision": "2".repeat(32), "content_hash": "3".repeat(64)}});
+    let marker = "\"requests\": {";
+    assert_eq!(text.matches(marker).count(), 1);
+    let raw = text.replacen(marker, &format!("{marker}\"seed\": {earlier},"), 1);
+    fs::write(&file, &raw).unwrap();
+    let before = tree(&f.root);
+    assert_eq!(
+        damage(f.service().material_draft(&f.project)),
+        Damage::Corrupt
+    );
+    assert_eq!(
+        damage(save_with(&f, "seed", None, unfinished())),
+        Damage::Corrupt
+    );
+    assert_eq!(
+        damage(save_with(&f, "next", Some(seed.revision), variant("B"))),
+        Damage::Corrupt
+    );
+    assert!(tree(&f.root) == before, "重复回执键不得被重置或覆盖");
+    assert_eq!(fs::read_to_string(&file).unwrap(), raw);
+}
+
 fn root_text(f: &Fixture) -> String {
     f.root.display().to_string()
 }
@@ -373,12 +402,13 @@ fn assert_published_together(f: &Fixture, request: &str, receipt: &MaterialRecei
 }
 
 #[test]
-fn interrupted_publication_keeps_the_complete_old_draft() {
+fn orphaned_temp_file_is_neither_consumed_nor_cleaned() {
     let f = Fixture::new();
     fs::create_dir_all(f.root.join("translations/empty-dir")).unwrap();
     let seed = save_with(&f, "seed", None, unfinished()).unwrap();
     let old = draft_bytes(&f);
-    // What a writer killed after part of its temporary file but before the rename leaves.
+    // Only the leftover a crashed writer can leave; real exits before and after the rename
+    // are covered in `ziyuan-storage` (`process_exit_around_rename_leaves_old_or_new_whole`).
     let stray = f
         .root
         .join(f.draft_path())

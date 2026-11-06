@@ -13,7 +13,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::{fs, io};
-use ziyuan_storage::{JsonFile, JsonFileError, LockScope, Workspace};
+use ziyuan_storage::{JsonFile, JsonFileError, LockScope, Stored, Workspace};
 
 const DRAFT_FILE: &str = "material-draft.json";
 const SCHEMA_VERSION: u32 = 1;
@@ -30,7 +30,40 @@ struct SavedMaterialRequest {
 #[serde(deny_unknown_fields)]
 struct MaterialBook {
     draft: MaterialDraft,
+    #[serde(deserialize_with = "unique_requests")]
     requests: BTreeMap<String, SavedMaterialRequest>,
+}
+
+/// A plain map would let a later duplicate key silently replace an earlier receipt.
+fn unique_requests<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, SavedMaterialRequest>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = BTreeMap<String, SavedMaterialRequest>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("资料草稿请求回执表")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((id, saved)) = map.next_entry::<String, SavedMaterialRequest>()? {
+                if out.contains_key(&id) {
+                    return Err(serde::de::Error::custom(format!(
+                        "资料草稿请求回执重复：{id}"
+                    )));
+                }
+                out.insert(id, saved);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_map(Unique)
 }
 
 fn corrupt(message: impl Into<String>) -> MaterialError {
@@ -167,11 +200,11 @@ impl Translations {
         &self,
         file: &JsonFile<MaterialBook>,
         project: &str,
-    ) -> Result<Option<MaterialBook>, MaterialError> {
+    ) -> Result<Option<Stored<MaterialBook>>, MaterialError> {
         file.load()?
             .map(|stored| {
                 stored.value.check(project)?;
-                Ok(stored.value)
+                Ok(stored)
             })
             .transpose()
     }
@@ -182,7 +215,7 @@ impl Translations {
         let file = self.material_file(project, false)?;
         Ok(self
             .load_material_book(&file, project)?
-            .map(|book| book.draft))
+            .map(|stored| stored.value.draft))
     }
 
     /// Save type-valid (possibly semantically unfinished) material. Lock order is always
@@ -206,7 +239,7 @@ impl Translations {
         // Must return before `update`, which always publishes a new file.
         if let Some(saved) = current
             .as_ref()
-            .and_then(|book| book.requests.get(&request.request_id))
+            .and_then(|stored| stored.value.requests.get(&request.request_id))
         {
             return if saved.hash == hash {
                 Ok(saved.receipt.clone())
@@ -214,7 +247,14 @@ impl Translations {
                 Err(MaterialError::RequestConflict)
             };
         }
-        let revision = current.as_ref().map(|book| book.draft.revision.clone());
+        let revision = current
+            .as_ref()
+            .map(|stored| stored.value.draft.revision.clone());
+        // The storage counter `update` will publish under (not the random draft revision).
+        let publish = current
+            .as_ref()
+            .map_or(Some(1), |stored| stored.revision.checked_add(1))
+            .ok_or_else(|| corrupt("资料草稿发布计数已到上限"))?;
         if request.expected_revision != revision {
             return Err(MaterialError::Conflict { current: revision });
         }
@@ -227,7 +267,9 @@ impl Translations {
             revision: draft.revision.clone(),
             content_hash: content_hash(&draft.material)?,
         };
-        let mut requests = current.map(|book| book.requests).unwrap_or_default();
+        let mut requests = current
+            .map(|stored| stored.value.requests)
+            .unwrap_or_default();
         requests.insert(
             request.request_id.clone(),
             SavedMaterialRequest {
@@ -238,6 +280,9 @@ impl Translations {
         let book = MaterialBook { draft, requests };
         // A book that would fail its own load check must never be published.
         book.check(project)?;
+        // Refuse an oversized envelope before `update` could create a missing lock file;
+        // `update` re-checks with the same encoder when it publishes.
+        file.check_size(publish, &book)?;
         file.update::<_, MaterialError>(|stored| {
             let now = stored.map(|s| s.value.draft.revision);
             if now != revision {
