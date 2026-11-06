@@ -7,8 +7,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use ziyuan_app::text_project::{NewProject, Provenance, TextProjects};
 use ziyuan_app::translation::{
-    MaterialDraft, MaterialSave, StructuredGlossary, Translations, validate_material,
+    MaterialDraft, MaterialError, MaterialIssueCode, MaterialPathSegment, MaterialReceipt,
+    MaterialSave, StructuredGlossary, Translations, validate_material,
 };
+use ziyuan_storage::JsonFileError;
 
 const ROOT_ENV: &str = "ZIYUAN_TEST_MATERIAL_ROOT";
 const PROJECT_ENV: &str = "ZIYUAN_TEST_MATERIAL_PROJECT";
@@ -232,4 +234,89 @@ fn save_does_not_touch_context_or_events() {
     assert!(changes.contains(&draft), "{changes:?}");
     assert!(changes.is_subset(&allowed), "{changes:?}");
     assert!(before.keys().all(|path| after.contains_key(path)));
+}
+
+fn save(
+    f: &Fixture,
+    request_id: &str,
+    expected_revision: Option<String>,
+) -> Result<MaterialReceipt, MaterialError> {
+    f.service().save_material_draft(
+        &f.project,
+        &MaterialSave {
+            request_id: request_id.into(),
+            expected_revision,
+            material: unfinished(),
+        },
+    )
+}
+
+const INVALID_REQUEST_IDS: &[&str] = &[
+    "", "资料", "a/b", "..", "a\\b", "a b", "a\u{0}b", "a\nb", "a.b",
+];
+
+fn assert_request_id_issue(result: Result<MaterialReceipt, MaterialError>) {
+    let MaterialError::Issue(issue) = result.unwrap_err() else {
+        panic!("无效请求身份应报可定位问题，而非写后损坏")
+    };
+    assert_eq!(
+        issue.path,
+        vec![MaterialPathSegment::Field("request_id".into())]
+    );
+    assert_eq!(issue.code, MaterialIssueCode::Id);
+}
+
+#[test]
+fn invalid_request_ids_are_rejected_before_publication() {
+    let f = Fixture::new();
+    let long = "a".repeat(129);
+    let before = tree(&f.root);
+    for id in INVALID_REQUEST_IDS.iter().copied().chain([long.as_str()]) {
+        assert_request_id_issue(save(&f, id, None));
+        assert!(tree(&f.root) == before, "无效请求身份 {id:?} 不得改动盘面");
+    }
+    assert_eq!(f.service().material_draft(&f.project).unwrap(), None);
+
+    let mut revision = None;
+    for id in ["a", "A-z_9", &"b".repeat(128)] {
+        revision = Some(save(&f, id, revision).unwrap().revision);
+    }
+    let saved = tree(&f.root);
+    for id in INVALID_REQUEST_IDS.iter().copied().chain([long.as_str()]) {
+        assert_request_id_issue(save(&f, id, revision.clone()));
+        assert!(
+            tree(&f.root) == saved,
+            "已有草稿时无效请求身份 {id:?} 不得改动盘面"
+        );
+    }
+    assert_eq!(
+        f.service()
+            .material_draft(&f.project)
+            .unwrap()
+            .unwrap()
+            .revision,
+        revision.unwrap()
+    );
+}
+
+#[test]
+fn stored_invalid_request_id_stays_corrupt_without_reset() {
+    let f = Fixture::new();
+    let receipt = save(&f, "valid", None).unwrap();
+    let path = f.root.join(f.draft_path());
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let requests = stored["data"]["requests"].as_object_mut().unwrap();
+    let saved = requests.remove("valid").unwrap();
+    requests.insert("bad id".into(), saved);
+    fs::write(&path, serde_json::to_vec_pretty(&stored).unwrap()).unwrap();
+    let before = tree(&f.root);
+    assert!(matches!(
+        f.service().material_draft(&f.project).unwrap_err(),
+        MaterialError::Storage(JsonFileError::Corrupt(_))
+    ));
+    assert!(matches!(
+        save(&f, "next", Some(receipt.revision)).unwrap_err(),
+        MaterialError::Storage(JsonFileError::Corrupt(_))
+    ));
+    assert!(tree(&f.root) == before, "损坏的旧回执不得被清除或覆盖");
 }

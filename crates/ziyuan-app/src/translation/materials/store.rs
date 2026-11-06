@@ -1,7 +1,10 @@
 //! Independent unapproved material draft: `.ziyuan/text-projects/<project>/material-draft.json`.
 //! Text and request receipts publish together through one `JsonFile` replacement; saving is
 //! never approval and emits no events, snapshots or context changes.
-use super::{MaterialDraft, MaterialError, MaterialReceipt, MaterialSave, check_material_editable};
+use super::{
+    MaterialDraft, MaterialError, MaterialIssue, MaterialIssueCode, MaterialPathSegment,
+    MaterialReceipt, MaterialSave, check_material_editable,
+};
 use crate::translation::{StructuredGlossary, Translations, check_plain_dirs, sha256_hex};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,26 @@ fn is_lower_hex(text: &str, len: usize) -> bool {
 
 fn is_revision(text: &str) -> bool {
     is_lower_hex(text, 32)
+}
+
+/// Same rule as human draft request IDs; also the only accepted receipt-map keys.
+fn is_request_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn check_request_id(id: &str) -> Result<(), MaterialError> {
+    if is_request_id(id) {
+        return Ok(());
+    }
+    Err(MaterialIssue {
+        path: vec![MaterialPathSegment::Field("request_id".into())],
+        code: MaterialIssueCode::Id,
+        message: "资料草稿请求身份须为 1–128 位 ASCII 字母数字、- 或 _".into(),
+    }
+    .into())
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, MaterialError> {
@@ -81,7 +104,7 @@ impl MaterialBook {
             Err(error) => return Err(error),
         }
         for (id, saved) in &self.requests {
-            if id.is_empty()
+            if !is_request_id(id)
                 || !is_lower_hex(&saved.hash, 64)
                 || !is_revision(&saved.receipt.revision)
                 || !is_lower_hex(&saved.receipt.content_hash, 64)
@@ -152,7 +175,9 @@ impl Translations {
         project: &str,
         request: &MaterialSave,
     ) -> Result<MaterialReceipt, MaterialError> {
+        check_request_id(&request.request_id)?;
         check_material_editable(&request.material)?;
+        // Verified before locking so a missing project never gets workspace control files.
         self.project(project)?;
         let workspace = Workspace::open(self.root())?;
         let _guard = workspace.lock(LockScope::Workspace)?;
@@ -192,12 +217,15 @@ impl Translations {
                 receipt: receipt.clone(),
             },
         );
+        let book = MaterialBook { draft, requests };
+        // A book that would fail its own load check must never be published.
+        book.check(project)?;
         file.update::<_, MaterialError>(|stored| {
             let now = stored.map(|s| s.value.draft.revision);
             if now != revision {
                 return Err(MaterialError::Conflict { current: now });
             }
-            Ok((MaterialBook { draft, requests }, ()))
+            Ok((book, ()))
         })?;
         Ok(receipt)
     }

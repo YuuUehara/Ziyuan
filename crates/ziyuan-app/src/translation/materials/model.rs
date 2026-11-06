@@ -27,7 +27,8 @@ pub struct MaterialReceipt {
     pub content_hash: String,
 }
 
-/// A field name or array index relative to the material root (not a parsed error message).
+/// A field name or array index relative to the material root (not a parsed error message);
+/// save-request fields such as `request_id` appear as a single top-level field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MaterialPathSegment {
