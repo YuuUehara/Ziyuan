@@ -1,5 +1,5 @@
 use crate::text_project::TextProjectError;
-use crate::translation::StructuredGlossary;
+use crate::translation::{StructuredGlossary, TranslationError};
 use serde::{Deserialize, Serialize};
 use std::{fmt, io};
 use ziyuan_storage::{JsonFileError, WorkspaceError};
@@ -73,8 +73,8 @@ pub struct MaterialValidation {
     pub project_hash: String,
 }
 
-/// Separate from human translation draft errors. Storage/preview variants reserve
-/// their shared protocol vocabulary without implementing either operation.
+/// Separate from human translation draft errors. Preview variants reserve their
+/// shared protocol vocabulary without implementing the operation.
 #[derive(Debug)]
 pub enum MaterialError {
     Issue(MaterialIssue),
@@ -123,6 +123,21 @@ impl From<JsonFileError> for MaterialError {
 impl From<WorkspaceError> for MaterialError {
     fn from(error: WorkspaceError) -> Self {
         Self::Workspace(error)
+    }
+}
+/// Shared path helpers report plain-path refusals as `Invalid`; those surface as
+/// `InvalidInput` I/O errors rather than being mistaken for material issues.
+impl From<TranslationError> for MaterialError {
+    fn from(error: TranslationError) -> Self {
+        match error {
+            TranslationError::Text(error) => Self::Project(error),
+            TranslationError::Io(error) => Self::Io(error),
+            TranslationError::Storage(error) => Self::Storage(error),
+            other => Self::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                other.to_string(),
+            )),
+        }
     }
 }
 impl From<TextProjectError> for MaterialError {

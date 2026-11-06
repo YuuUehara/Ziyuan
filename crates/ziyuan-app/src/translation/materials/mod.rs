@@ -1,5 +1,7 @@
-//! Unapproved local material DTOs and pure validation; no storage or production promotion.
+//! Unapproved local material DTOs, pure validation and independent draft storage;
+//! no production promotion.
 mod model;
+mod store;
 mod validation;
 
 pub use model::*;
