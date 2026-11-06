@@ -23,6 +23,7 @@ mod status;
 mod target;
 mod usage;
 mod verification;
+mod visibility;
 mod zhupi;
 
 #[cfg(test)]
@@ -64,6 +65,11 @@ pub use verification::{
     ParagraphVerification, Resolution, ReviewAdvice, SemanticCategory, SemanticCheck,
     TranslationChange, VerificationInput, VerificationRecord, VerificationRecordView,
     VerificationSnapshot, VerificationView,
+};
+pub use visibility::{
+    ParagraphAssociations, VisibilityDiagnostic, VisibilityIdentity, VisibilityKind,
+    VisibilityPerson, VisibilityReason, VisibilityReport, VisibilityRule, VisibilitySelection,
+    VisibilityTerm, evaluate_context_visibility,
 };
 pub use zhupi::{BlockZhupi, ZhupiNote};
 

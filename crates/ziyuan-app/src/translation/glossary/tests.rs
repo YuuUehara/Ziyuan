@@ -423,3 +423,26 @@ fn structured_compatibility_facade_refuses_with_feature_message() {
         crate::translation::parse_glossary(br#"{"format":2,"terms":[],"persons":[]}"#).unwrap_err();
     assert_eq!(err.to_string(), "人物／术语资料尚未开放");
 }
+
+#[test]
+fn person_availability_roundtrips_and_validates_without_changing_omission() {
+    let old = sample();
+    assert_eq!(serde_json::to_value(parse(&old).unwrap()).unwrap(), old);
+    let mut v = old;
+    v["persons"][0]["available_from"] = json!({"chapter":"z","paragraph":"pb"});
+    let parsed = parse(&v).unwrap();
+    parsed.validate_project(&project()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), v);
+    for position in [
+        json!({"chapter":"missing"}),
+        json!({"chapter":"z","paragraph":"pa"}),
+    ] {
+        v["persons"][0]["available_from"] = position;
+        let err = parse(&v).unwrap().validate_project(&project()).unwrap_err();
+        assert!(err.to_string().contains("persons.0.available_from"));
+    }
+    for bad in [json!(null), json!({"chapter":"z","extra":1})] {
+        v["persons"][0]["available_from"] = bad;
+        rejects(&v, "available_from");
+    }
+}

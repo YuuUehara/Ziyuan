@@ -69,6 +69,8 @@ pub enum GlossaryStance {
 #[serde(deny_unknown_fields)]
 pub struct Person {
     pub person_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_from: Option<GlossaryPosition>,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading: Option<String>,
@@ -181,6 +183,9 @@ impl Glossary {
         }
         for (i, person) in data.persons.iter().enumerate() {
             let at = format!("persons.{i}");
+            if let Some(position) = &person.available_from {
+                index.position(position, false, &format!("{at}.available_from"))?;
+            }
             index.evidence(&person.evidence, &format!("{at}.evidence"))?;
             for (j, rule) in person.address_rules.iter().enumerate() {
                 let at = format!("{at}.address_rules.{j}");
@@ -348,7 +353,7 @@ fn shape(v: &Value, node: Node, at: &str) -> Result<()> {
                 "evidence",
                 "status",
             ],
-            &["reading"],
+            &["reading", "available_from"],
         ),
         Rule => (
             &["target", "speaker", "scope", "term", "evidence"],

@@ -1,6 +1,7 @@
 """Offline old/new CLI comparison for N0 section 23.
 
-Build the old CLI from commit 8284a1fb, then pass --old and --new absolute paths.
+Pass --old and --new absolute paths. For the 9f9c44dc foundation CLI,
+also pass --old-supports-v2; the default old reader is commit 8284a1fb.
 Only generated fixture data is read or written. No model command is executed.
 """
 
@@ -15,6 +16,14 @@ import tempfile
 
 
 V2 = b'{"format":2,"terms":[],"persons":[]}\n'
+V2_PERSON = (json.dumps({
+    "format": 2, "terms": [], "persons": [{
+        "person_id": "person-one", "name": "人工姓名", "aliases": ["人工别名"],
+        "terms": [], "address_rules": [], "voice": {"description": "语气平实"},
+        "evidence": [], "status": "tentative",
+        "available_from": {"chapter": "c0001", "paragraph": "c0001-p0001"},
+    }],
+}, ensure_ascii=False) + "\n").encode()
 LEGACY = (
     '[ { "source": "勇者", "allowed": ["勇士"], '
     '"scope": "第二章以后；先人工核对", "note": "统一" } ]\n'
@@ -53,6 +62,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--old", required=True, type=Path)
     parser.add_argument("--new", required=True, type=Path)
+    parser.add_argument("--old-supports-v2", action="store_true")
     args = parser.parse_args()
     old, new = args.old.resolve(strict=True), args.new.resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="ziyuan-context-v2-compat-") as temp:
@@ -114,46 +124,47 @@ def main():
         print("PASS: legacy draft/snapshot/export bytes, free-text scope hints, note promotion and replay")
 
         for name, binary in [("old", old), ("new", new)]:
-            work = root / f"{name}-v2-draft"
-            shutil.copytree(seed, work)
-            draft = work / draft_rel
-            draft.mkdir(parents=True)
-            (draft / "glossary.json").write_bytes(V2)
-            before = tree(work)
-            error = run(binary, work, "text", "context", "approve", project, fail=True)
-            assert not (work / snapshot_rel).exists()
-            if name == "old":
-                assert "格式不对" in error, error
-            else:
-                assert "人物／术语资料尚未开放" in error, error
-                assert tree(work) == before
-            # Read a hash-correct, manually introduced second-version snapshot.
-            work = root / f"{name}-v2-snapshot"
-            shutil.copytree(roots[0], work)
-            snapshot = work / snapshot_rel / "v1"
-            (snapshot / "glossary.json").write_bytes(V2)
-            manifest_file = snapshot / "manifest.json"
-            manifest = json.loads(manifest_file.read_bytes())
-            for entry in manifest["files"]:
-                if entry["path"] == "glossary.json":
-                    entry["sha256"] = hashlib.sha256(V2).hexdigest()
-                    entry["bytes"] = len(V2)
-            manifest_file.write_bytes(json.dumps(manifest, ensure_ascii=False).encode())
-            before = tree(work)
-            error = run(binary, work, "text", "verification", "show", project, BLOCK, fail=True)
-            expected = "格式不对" if name == "old" else "人物／术语资料尚未开放"
-            assert expected in error, error
-            assert tree(work) == before
-            assert sorted(p.name for p in (work / snapshot_rel).iterdir()) == ["v1"]
-            if name == "new":
+            for shape, payload in [("minimal", V2), ("person-availability", V2_PERSON)]:
+                expected = "人物／术语资料尚未开放"
+                if name == "old" and (shape == "person-availability" or not args.old_supports_v2):
+                    expected = "未知字段" if args.old_supports_v2 else "格式不对"
+                work = root / f"{name}-{shape}-draft"
+                shutil.copytree(seed, work)
                 draft = work / draft_rel
-                (draft / "style.md").unlink()
-                (draft / "summaries").rmdir()
+                draft.mkdir(parents=True)
+                (draft / "glossary.json").write_bytes(payload)
                 before = tree(work)
                 error = run(binary, work, "text", "context", "approve", project, fail=True)
-                assert "人物／术语资料尚未开放" in error, error
+                assert expected in error, (name, shape, error)
+                assert not (work / snapshot_rel).exists()
+                if name == "new":
+                    assert tree(work) == before
+                # Read a hash-correct, manually introduced second-version snapshot.
+                work = root / f"{name}-{shape}-snapshot"
+                shutil.copytree(roots[0], work)
+                snapshot = work / snapshot_rel / "v1"
+                (snapshot / "glossary.json").write_bytes(payload)
+                manifest_file = snapshot / "manifest.json"
+                manifest = json.loads(manifest_file.read_bytes())
+                for entry in manifest["files"]:
+                    if entry["path"] == "glossary.json":
+                        entry["sha256"] = hashlib.sha256(payload).hexdigest()
+                        entry["bytes"] = len(payload)
+                manifest_file.write_bytes(json.dumps(manifest, ensure_ascii=False).encode())
+                before = tree(work)
+                error = run(binary, work, "text", "verification", "show", project, BLOCK, fail=True)
+                assert expected in error, (name, shape, error)
                 assert tree(work) == before
-        print("PASS: old/new CLI refuse v2 approval and snapshot reads; new CLI leaves disk unchanged")
+                assert sorted(p.name for p in (work / snapshot_rel).iterdir()) == ["v1"]
+                if name == "new":
+                    draft = work / draft_rel
+                    (draft / "style.md").unlink()
+                    (draft / "summaries").rmdir()
+                    before = tree(work)
+                    error = run(binary, work, "text", "context", "approve", project, fail=True)
+                    assert "人物／术语资料尚未开放" in error, error
+                    assert tree(work) == before
+        print("PASS: minimal v2 and Person.available_from approval/snapshot refusal; new CLI leaves disk unchanged")
 
 
 if __name__ == "__main__":
