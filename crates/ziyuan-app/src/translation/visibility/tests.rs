@@ -129,6 +129,97 @@ fn independent_terms_use_actual_order_and_block_start_not_matching_paragraph() {
 }
 
 #[test]
+fn whole_chapter_availability_starts_before_its_paragraphs() {
+    let mut current = term("current_chapter");
+    current.available_from = Some(GlossaryPosition {
+        chapter: "z".into(),
+        paragraph: None,
+    });
+    let mut later = term("later_chapter");
+    later.available_from = Some(GlossaryPosition {
+        chapter: "a".into(),
+        paragraph: None,
+    });
+    let r = eval(&glossary(vec![current, later], vec![]), &[]);
+    assert_eq!(r.applicable.terms.len(), 2);
+    assert_eq!(
+        r.automatic
+            .terms
+            .iter()
+            .map(|t| t.term_id.as_str())
+            .collect::<Vec<_>>(),
+        ["current_chapter"]
+    );
+    assert!(r.diagnostics.iter().any(|d| {
+        d.identity.id == "later_chapter" && d.reason == VisibilityReason::AfterBlockStart
+    }));
+}
+
+#[test]
+fn repeated_rule_paragraph_diagnostics_are_grouped_and_missing_annotations_are_locatable() {
+    let mut owner = person("owner");
+    owner.address_rules = vec![rule("target", "conditional", GlossarySpeaker::Unknown)];
+    let r = eval(
+        &glossary(vec![term("conditional")], vec![owner, person("target")]),
+        &[],
+    );
+    let identity = identity(VisibilityKind::AddressRule, "owner", Some(0));
+    let missing: Vec<_> = r
+        .diagnostics
+        .iter()
+        .filter(|d| d.identity == identity && d.reason == VisibilityReason::UnassociatedPerson)
+        .collect();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].paragraphs, ["pm", "pb"]);
+}
+
+#[test]
+fn an_unassociated_target_is_accepted_but_diagnosed() {
+    let mut owner = person("owner");
+    owner.address_rules = vec![rule("target", "conditional", GlossarySpeaker::Unknown)];
+    let g = glossary(
+        vec![term("conditional")],
+        vec![owner, person("target"), person("speaker")],
+    );
+    let mut a = associations();
+    for annotation in &mut a {
+        annotation.persons.retain(|id| id != "target");
+    }
+    let r = eval(&g, &a);
+    assert!(r.diagnostics.iter().any(|d| {
+        d.identity.kind == VisibilityKind::AddressRule
+            && d.reason == VisibilityReason::UnassociatedTarget
+            && d.paragraphs == ["pm", "pb"]
+    }));
+    assert!(r.applicable.address_rules.is_empty());
+}
+
+#[test]
+fn exact_person_speaker_match_does_not_require_membership_in_associated_persons() {
+    let mut owner = person("owner");
+    owner.address_rules = vec![rule(
+        "target",
+        "conditional",
+        GlossarySpeaker::Person {
+            person_id: "speaker".into(),
+        },
+    )];
+    let g = glossary(
+        vec![term("conditional")],
+        vec![owner, person("target"), person("speaker")],
+    );
+    let mut a = associations();
+    for annotation in &mut a {
+        annotation.speaker = Some(GlossarySpeaker::Person {
+            person_id: "speaker".into(),
+        });
+    }
+    let r = eval(&g, &a);
+    assert_eq!(r.applicable.address_rules.len(), 1);
+    assert_eq!(r.automatic.address_rules.len(), 1);
+}
+
+#[test]
 fn empty_glossary_produces_an_identity_only_local_report() {
     let r = eval(&glossary(vec![], vec![]), &[]);
     assert_eq!(r.project, "book");

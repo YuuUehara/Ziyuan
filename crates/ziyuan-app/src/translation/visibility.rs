@@ -54,7 +54,7 @@ pub struct VisibilityRule {
     pub paragraphs: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisibilityKind {
     Term,
@@ -62,7 +62,7 @@ pub enum VisibilityKind {
     AddressRule,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct VisibilityIdentity {
     pub kind: VisibilityKind,
     /// For an address rule, the owning person's ID.
@@ -70,7 +70,7 @@ pub struct VisibilityIdentity {
     pub rule_index: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisibilityReason {
     MissingFrom,
@@ -91,6 +91,51 @@ pub struct VisibilityDiagnostic {
     pub reason: VisibilityReason,
     pub dependency: Option<VisibilityIdentity>,
     pub paragraphs: Vec<String>,
+}
+
+#[derive(Default)]
+struct Diagnostics {
+    entries: Vec<VisibilityDiagnostic>,
+    indices: HashMap<
+        (
+            VisibilityIdentity,
+            VisibilityReason,
+            Option<VisibilityIdentity>,
+        ),
+        usize,
+    >,
+    paragraphs: Vec<HashSet<String>>,
+}
+
+impl Diagnostics {
+    fn push(
+        &mut self,
+        identity: VisibilityIdentity,
+        reason: VisibilityReason,
+        dependency: Option<VisibilityIdentity>,
+        paragraphs: Vec<String>,
+    ) {
+        let key = (identity.clone(), reason.clone(), dependency.clone());
+        let index = if let Some(index) = self.indices.get(&key) {
+            *index
+        } else {
+            let index = self.entries.len();
+            self.indices.insert(key, index);
+            self.entries.push(VisibilityDiagnostic {
+                identity,
+                reason,
+                dependency,
+                paragraphs: vec![],
+            });
+            self.paragraphs.push(HashSet::new());
+            index
+        };
+        for paragraph in paragraphs {
+            if self.paragraphs[index].insert(paragraph.clone()) {
+                self.entries[index].paragraphs.push(paragraph);
+            }
+        }
+    }
 }
 
 /// Pure local analysis; does not read provenance files, approve, or export material.
@@ -130,6 +175,7 @@ pub fn evaluate_context_visibility(
         .map(|(i, p)| (p.person_id.as_str(), i))
         .collect();
     let annotations = validate_associations(target, associations, &persons)?;
+    let mut diagnostics = Diagnostics::default();
     let mut report = VisibilityReport {
         project: project.id.clone(),
         block: block.into(),
@@ -146,7 +192,7 @@ pub fn evaluate_context_visibility(
             term.evidence.iter(),
             &identity(VisibilityKind::Term, &term.term_id, None),
             &paragraphs,
-            &mut report.diagnostics,
+            &mut diagnostics,
         ));
     }
     let mut person_visible = Vec::with_capacity(data.persons.len());
@@ -164,7 +210,7 @@ pub fn evaluate_context_visibility(
                 .chain(person.address_rules.iter().flat_map(|r| &r.evidence)),
             &id,
             &paragraphs,
-            &mut report.diagnostics,
+            &mut diagnostics,
         );
         let mut seen_terms = HashSet::new();
         for term in person
@@ -175,7 +221,7 @@ pub fn evaluate_context_visibility(
             if seen_terms.insert(term.as_str()) && !term_visible[terms[term.as_str()]] {
                 gate = false;
                 diagnose(
-                    &mut report.diagnostics,
+                    &mut diagnostics,
                     &id,
                     VisibilityReason::InvisibleDependency,
                     Some(identity(VisibilityKind::Term, term, None)),
@@ -220,7 +266,7 @@ pub fn evaluate_context_visibility(
         for &d in &dependencies[i] {
             if !person_visible[d] {
                 diagnose(
-                    &mut report.diagnostics,
+                    &mut diagnostics,
                     &id,
                     VisibilityReason::InvisibleDependency,
                     Some(identity(
@@ -252,7 +298,7 @@ pub fn evaluate_context_visibility(
             .collect();
         if !absent.is_empty() {
             diagnose(
-                &mut report.diagnostics,
+                &mut diagnostics,
                 &id,
                 VisibilityReason::UnassociatedPerson,
                 None,
@@ -305,13 +351,7 @@ pub fn evaluate_context_visibility(
                     }
                 };
                 if let Some(reason) = reason {
-                    diagnose(
-                        &mut report.diagnostics,
-                        &id,
-                        reason,
-                        None,
-                        vec![paragraph.clone()],
-                    );
+                    diagnose(&mut diagnostics, &id, reason, None, vec![paragraph.clone()]);
                 } else {
                     coverage.push(paragraph.clone());
                     term_applicable[ti][pi] = true;
@@ -334,7 +374,7 @@ pub fn evaluate_context_visibility(
                     report.automatic.address_rules.push(item);
                 } else {
                     diagnose(
-                        &mut report.diagnostics,
+                        &mut diagnostics,
                         &id,
                         VisibilityReason::InvisibleDependency,
                         Some(identity(VisibilityKind::Person, &person.person_id, None)),
@@ -353,7 +393,7 @@ pub fn evaluate_context_visibility(
                     term_automatic[ti][pi] = term_visible[ti];
                 } else {
                     diagnose(
-                        &mut report.diagnostics,
+                        &mut diagnostics,
                         &id,
                         VisibilityReason::OutsideScope,
                         None,
@@ -365,7 +405,7 @@ pub fn evaluate_context_visibility(
         let coverage = selected_paragraphs(&paragraphs, &term_applicable[ti]);
         if conditional[ti] && coverage.is_empty() {
             diagnose(
-                &mut report.diagnostics,
+                &mut diagnostics,
                 &id,
                 VisibilityReason::UnmatchedConditional,
                 None,
@@ -388,6 +428,7 @@ pub fn evaluate_context_visibility(
             });
         }
     }
+    report.diagnostics = diagnostics.entries;
     Ok(report)
 }
 
@@ -408,18 +449,13 @@ fn identity(kind: VisibilityKind, id: &str, rule_index: Option<usize>) -> Visibi
 }
 
 fn diagnose(
-    diagnostics: &mut Vec<VisibilityDiagnostic>,
+    diagnostics: &mut Diagnostics,
     identity: &VisibilityIdentity,
     reason: VisibilityReason,
     dependency: Option<VisibilityIdentity>,
     paragraphs: Vec<String>,
 ) {
-    diagnostics.push(VisibilityDiagnostic {
-        identity: identity.clone(),
-        reason,
-        dependency,
-        paragraphs,
-    });
+    diagnostics.push(identity.clone(), reason, dependency, paragraphs);
 }
 
 fn visible<'a>(
@@ -429,7 +465,7 @@ fn visible<'a>(
     evidence: impl Iterator<Item = &'a GlossaryEvidence>,
     id: &VisibilityIdentity,
     paragraphs: &[String],
-    diagnostics: &mut Vec<VisibilityDiagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> bool {
     let mut ok = true;
     let reason = match from {
