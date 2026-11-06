@@ -696,6 +696,38 @@ mod tests {
     }
 
     #[test]
+    fn faults_keep_the_complete_old_value_or_no_file() {
+        let dir = temp_dir("faults-whole");
+        let mut file = counter_file(&dir);
+        for fault in [Fault::CreateTemp, Fault::WriteTemp, Fault::Replace] {
+            file.fault = Some(fault);
+            assert!(matches!(bump(&file).unwrap_err(), JsonFileError::Io(_)));
+            assert!(
+                !file.path().exists(),
+                "{fault:?}: 首次发布失败不得留下半个状态文件"
+            );
+            file.fault = None;
+            assert_eq!(file.load().unwrap(), None, "{fault:?}");
+            assert!(leftovers(&dir).is_empty(), "{fault:?}");
+        }
+        let old = set_note(&file, "正文与回执").unwrap();
+        for fault in [Fault::CreateTemp, Fault::WriteTemp, Fault::Replace] {
+            file.fault = Some(fault);
+            assert!(matches!(
+                set_note(&file, &"新".repeat(1000)).unwrap_err(),
+                JsonFileError::Io(_)
+            ));
+            file.fault = None;
+            assert_eq!(file.load().unwrap(), Some(old.clone()), "{fault:?}");
+            assert!(leftovers(&dir).is_empty(), "{fault:?}");
+        }
+        let new = set_note(&file, "新").unwrap();
+        assert_eq!(new.revision, old.revision + 1);
+        assert_eq!(file.load().unwrap(), Some(new));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn load_never_creates_a_missing_lock_file() {
         let dir = temp_dir("load-no-lock");
         let file = counter_file(&dir);

@@ -5,7 +5,10 @@ use super::{
     MaterialDraft, MaterialError, MaterialIssue, MaterialIssueCode, MaterialPathSegment,
     MaterialReceipt, MaterialSave, check_material_editable,
 };
-use crate::translation::{StructuredGlossary, Translations, check_plain_dirs, sha256_hex};
+use crate::translation::{
+    StructuredGlossary, TranslationError, Translations, check_plain_dirs, ensure_plain_dirs,
+    sha256_hex,
+};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -123,21 +126,35 @@ impl MaterialBook {
 }
 
 impl Translations {
-    /// Requires an already verified project; checks existing ancestors, target and lock
-    /// without creating any directory, lock or draft.
-    fn material_file(&self, project: &str) -> Result<JsonFile<MaterialBook>, MaterialError> {
+    /// Requires an already verified project; checks ancestors, target and lock. Reads use
+    /// `check_plain_dirs` and never create a directory, lock or draft.
+    fn material_file(
+        &self,
+        project: &str,
+        write: bool,
+    ) -> Result<JsonFile<MaterialBook>, MaterialError> {
         self.project(project)?;
-        let dir = check_plain_dirs(self.root(), &[".ziyuan", "text-projects", project])?;
+        let parts = [".ziyuan", "text-projects", project];
+        let dir = if write {
+            ensure_plain_dirs(self.root(), &parts)
+        } else {
+            check_plain_dirs(self.root(), &parts)
+        }
+        .map_err(|error| match error {
+            TranslationError::Invalid(_) => MaterialError::Path(format!(
+                "资料草稿目录 .ziyuan/text-projects/{project} 含符号链接或非普通目录，已拒绝"
+            )),
+            other => other.into(),
+        })?;
         let file = JsonFile::new(dir.join(DRAFT_FILE), SCHEMA_VERSION, MAX_BOOK_BYTES);
         for path in [file.path(), file.lock_path()] {
             match fs::symlink_metadata(path) {
                 Ok(m) if m.is_file() && !m.file_type().is_symlink() => {}
                 Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("{} 不是普通文件（拒绝符号链接）", path.display()),
-                    )
-                    .into());
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    return Err(MaterialError::Path(format!(
+                        "资料草稿路径 .ziyuan/text-projects/{project}/{name} 不是普通文件，已拒绝（含符号链接）"
+                    )));
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
@@ -162,7 +179,7 @@ impl Translations {
     /// Current unapproved material draft, or `None` before the first explicit save.
     /// Read-only: never takes the workspace lock or creates files.
     pub fn material_draft(&self, project: &str) -> Result<Option<MaterialDraft>, MaterialError> {
-        let file = self.material_file(project)?;
+        let file = self.material_file(project, false)?;
         Ok(self
             .load_material_book(&file, project)?
             .map(|book| book.draft))
@@ -177,12 +194,13 @@ impl Translations {
     ) -> Result<MaterialReceipt, MaterialError> {
         check_request_id(&request.request_id)?;
         check_material_editable(&request.material)?;
-        // Verified before locking so a missing project never gets workspace control files.
-        self.project(project)?;
+        // Project and path refusals happen before locking so they never create workspace
+        // control files; the checks are repeated under the lock.
+        self.material_file(project, false)?;
         let workspace = Workspace::open(self.root())?;
         let _guard = workspace.lock(LockScope::Workspace)?;
         workspace.ensure_writable()?;
-        let file = self.material_file(project)?;
+        let file = self.material_file(project, true)?;
         let current = self.load_material_book(&file, project)?;
         let hash = request_hash(project, request)?;
         // Must return before `update`, which always publishes a new file.

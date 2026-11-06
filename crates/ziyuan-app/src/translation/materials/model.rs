@@ -83,7 +83,12 @@ pub enum MaterialError {
     Storage(JsonFileError),
     Workspace(WorkspaceError),
     Project(TextProjectError),
-    Conflict { current: Option<String> },
+    /// Draft directory, file or lock is not a plain entry (e.g. a symlink). The message
+    /// names only the workspace-relative path, never the absolute root.
+    Path(String),
+    Conflict {
+        current: Option<String>,
+    },
     RequestConflict,
     ProjectChanged,
 }
@@ -96,6 +101,7 @@ impl fmt::Display for MaterialError {
             Self::Storage(error) => error.fmt(f),
             Self::Workspace(error) => error.fmt(f),
             Self::Project(error) => error.fmt(f),
+            Self::Path(message) => f.write_str(message),
             Self::Conflict { current } => write!(
                 f,
                 "资料草稿修订冲突，现行修订为 {current:?}；请保留输入并重新读取"
@@ -126,8 +132,8 @@ impl From<WorkspaceError> for MaterialError {
         Self::Workspace(error)
     }
 }
-/// Shared path helpers report plain-path refusals as `Invalid`; those surface as
-/// `InvalidInput` I/O errors rather than being mistaken for material issues.
+/// Draft path refusals are mapped to `Path` where the helpers are called; any other
+/// `Invalid` surfaces as an `InvalidInput` I/O error rather than a material issue.
 impl From<TranslationError> for MaterialError {
     fn from(error: TranslationError) -> Self {
         match error {
