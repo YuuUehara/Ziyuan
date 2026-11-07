@@ -1,5 +1,5 @@
-use crate::text_project::TextProjectError;
-use crate::translation::{StructuredGlossary, TranslationError};
+use crate::text_project::{Project, TextProjectError};
+use crate::translation::{StructuredGlossary, TranslationError, VisibilityReport};
 use serde::{Deserialize, Serialize};
 use std::{fmt, io};
 use ziyuan_storage::{JsonFileError, WorkspaceError};
@@ -74,8 +74,31 @@ pub struct MaterialValidation {
     pub project_hash: String,
 }
 
-/// Separate from human translation draft errors. Preview variants reserve their
-/// shared protocol vocabulary without implementing the operation.
+/// 编辑者视图可展示原文；不是可外发上下文，也不授予草稿批准资格。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MaterialView {
+    pub project: Project,
+    pub project_hash: String,
+    pub draft: Option<MaterialDraft>,
+}
+
+/// 四项摘要均来自服务端已核验项目或本次类型化输入，不采信客户端项目值。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MaterialBinding {
+    pub content_hash: String,
+    pub project_hash: String,
+    pub block_hash: String,
+    pub associations_hash: String,
+}
+
+/// 仅身份判定，不含姓名、译法、证据正文或提示词。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MaterialPreview {
+    pub binding: MaterialBinding,
+    pub report: VisibilityReport,
+}
+
+/// 与人工译稿错误独立；只读预览不发布生产资料。
 #[derive(Debug)]
 pub enum MaterialError {
     Issue(MaterialIssue),
@@ -83,6 +106,8 @@ pub enum MaterialError {
     Storage(JsonFileError),
     Workspace(WorkspaceError),
     Project(TextProjectError),
+    /// 目标块及临时关联直接使用现有可见性判定的中文诊断。
+    Visibility(TranslationError),
     /// Draft directory, file or lock is not a plain entry (e.g. a symlink). The message
     /// names only the workspace-relative path, never the absolute root.
     Path(String),
@@ -101,6 +126,7 @@ impl fmt::Display for MaterialError {
             Self::Storage(error) => error.fmt(f),
             Self::Workspace(error) => error.fmt(f),
             Self::Project(error) => error.fmt(f),
+            Self::Visibility(error) => error.fmt(f),
             Self::Path(message) => f.write_str(message),
             Self::Conflict { current } => write!(
                 f,

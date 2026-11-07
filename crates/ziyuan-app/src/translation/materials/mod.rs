@@ -1,6 +1,7 @@
 //! Unapproved local material DTOs, pure validation and independent draft storage;
 //! no production promotion.
 mod model;
+mod preview;
 mod store;
 mod validation;
 

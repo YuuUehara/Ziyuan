@@ -6,6 +6,8 @@ mod editing;
 mod fault;
 #[path = "materials/limits.rs"]
 mod limits;
+#[path = "materials/preview.rs"]
+mod preview;
 #[path = "materials/storage.rs"]
 mod storage;
 #[path = "materials/support.rs"]
