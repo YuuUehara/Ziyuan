@@ -572,3 +572,129 @@ test("successful save clears mirror and duplicate receipts do not invalidate new
   assert.equal(state.material.terms[0].source, "后续");
   assert.equal(state.needsRefresh, false);
 });
+
+test("server field order and an added optional field still reconcile the just-saved content", () => {
+  let refreshes = 0;
+  const state = model({ refresh: () => refreshes++ });
+  state.receive(view());
+  state.edit(["terms", 0, "available_from"], { chapter: "chapter1" });
+  state.edit(["persons", 0, "available_from"], { chapter: "chapter1", paragraph: "p1" });
+  const request = state.prepareSave();
+  const local = request.material;
+  const { term_id, source, category, allowed, note, scope, available_from, evidence, status } =
+    local.terms[0];
+  const person = local.persons[0];
+  const serverOrder = view("先生", revision("2"));
+  serverOrder.draft.material = {
+    format: 2,
+    terms: [{ term_id, source, category, allowed, note, scope, available_from, evidence, status }],
+    persons: [{
+      person_id: person.person_id, available_from: person.available_from, name: person.name,
+      reading: person.reading, aliases: person.aliases, terms: person.terms,
+      address_rules: person.address_rules, voice: person.voice,
+      evidence: person.evidence, status: person.status,
+    }],
+  };
+  assert.notEqual(JSON.stringify(serverOrder.draft.material), JSON.stringify(local));
+  state.receive(serverOrder);
+  assert.equal(state.conflict, false);
+  assert.equal(state.dirty, false);
+  assert.equal(state.pendingSave, null);
+  assert.equal(state.acceptSave(receipt(revision("2")), request), true);
+  assert.equal(refreshes, 0);
+  state.edit(["terms", 0, "note"], "后续");
+  assert.equal(state.prepareSave().expected_revision, revision("2"));
+});
+
+test("a baseline rebased by GET is persisted so reload restores it without a false conflict", () => {
+  const session = storage();
+  const state = model({ storage: session });
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "X");
+  state.prepareSave();
+  state.edit(["terms", 0, "source"], "Y");
+  state.prepareSave();
+  state.receive(view("X", revision("2")));
+  assert.equal(state.conflict, false);
+  let id = 0;
+  const next = model({ storage: session, requestId: () => `reload-${++id}` });
+  next.receive(view("X", revision("2")));
+  assert.equal(next.restore(), true);
+  assert.equal(next.conflict, false);
+  assert.equal(next.savedSnapshot.terms[0].source, "X");
+  assert.equal(next.material.terms[0].source, "Y");
+  assert.equal(next.dirty, true);
+  const retry = next.prepareSave();
+  assert.equal(retry.expected_revision, revision("2"));
+  assert.equal(retry.material.terms[0].source, "Y");
+});
+
+test("a GET rebase does not overwrite an unresolved recovery mirror", () => {
+  const session = storage();
+  const original = model({ storage: session });
+  original.receive(view());
+  original.edit(["terms", 0, "source"], "待恢复");
+  const savedMirror = session.values.get(original.mirrorKey);
+  const next = model({ storage: session });
+  next.receive(view());
+  next.edit(["terms", 0, "source"], "刚输入");
+  next.prepareSave();
+  next.receive(view("刚输入", revision("2")));
+  assert.equal(next.conflict, false);
+  assert.equal(session.values.get(next.mirrorKey), savedMirror);
+  assert.equal(next.restore(), true);
+  assert.equal(next.material.terms[0].source, "待恢复");
+});
+
+test("a GET begun before a successful save cannot roll the acknowledged state back", () => {
+  let refreshes = 0;
+  const state = model({ refresh: () => refreshes++ });
+  assert.notEqual(state.receive(view(), state.beginReceive()), false);
+  state.edit(["terms", 0, "source"], "X");
+  const request = state.prepareSave();
+  const stale = state.beginReceive();
+  assert.equal(state.acceptSave(receipt(revision("2")), request), true);
+  assert.equal(state.receive(view(), stale), false);
+  assert.equal(state.material.terms[0].source, "X");
+  assert.equal(state.savedSnapshot.terms[0].source, "X");
+  assert.equal(state.remoteRevision, revision("2"));
+  assert.equal(state.dirty, false);
+  assert.equal(state.needsRefresh, true);
+  assert.equal(refreshes, 1);
+  assert.notEqual(state.receive(view("X", revision("2")), state.beginReceive()), false);
+  assert.equal(state.needsRefresh, false);
+  assert.equal(state.material.terms[0].source, "X");
+});
+
+test("out-of-order GET responses keep the newest applied view", () => {
+  const state = model();
+  state.receive(view());
+  const older = state.beginReceive();
+  const newer = state.beginReceive();
+  assert.notEqual(state.receive(view("最新", revision("3")), newer), false);
+  assert.equal(state.receive(view("先生", revision("1")), older), false);
+  assert.equal(state.material.terms[0].source, "最新");
+  assert.equal(state.remoteRevision, revision("3"));
+  const first = state.beginReceive();
+  const second = state.beginReceive();
+  assert.notEqual(state.receive(view("最新", revision("3")), first), false);
+  assert.notEqual(state.receive(view("更新", revision("4")), second), false);
+  assert.equal(state.remoteRevision, revision("4"));
+});
+
+test("tickets from another workspace, generation or model are rejected", () => {
+  const state = model();
+  state.receive(view());
+  const fromA = state.beginReceive();
+  state.receive(view("先生", revision("1"), "b".repeat(64)));
+  assert.equal(state.receive(view(), fromA), false);
+  assert.equal(state.workspaceId, "b".repeat(64));
+  const beforeDiscard = state.beginReceive();
+  state.discardLocalConfirmed();
+  assert.equal(state.receive(view("先生", revision("1"), "b".repeat(64)), beforeDiscard), false);
+  const other = model();
+  assert.equal(state.receive(view("先生", revision("1"), "b".repeat(64)), other.beginReceive()), false);
+  assert.equal(state.receive(view("先生", revision("1"), "b".repeat(64)),
+    { ...state.beginReceive() }), false);
+  assert.equal(state.workspaceId, "b".repeat(64));
+});

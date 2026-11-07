@@ -1,6 +1,16 @@
 // Form state only: no DOM, network client, or temporary preview associations.
 const clone = (value) => JSON.parse(JSON.stringify(value));
-const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+// JSON-semantic equality: the server serializes fields in its own declaration order.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => [key, canonical(value[key])]));
+  }
+  return value;
+}
+const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 const emptyMaterial = () => ({ format: 2, terms: [], persons: [] });
 const isMaterial = (value) => value?.format === 2
   && Array.isArray(value.terms) && Array.isArray(value.persons);
@@ -25,6 +35,10 @@ function freeze(value) {
  * prepareSave() returns an immutable, directly POST-able request. Keep that
  * request for acceptSave(); failed transports need no state transition.
  * needsRefresh/refresh notify the caller that a receipt is not a current view.
+ * Network callers must take beginReceive() before issuing each GET and pass the
+ * ticket to receive(view, ticket): revisions are opaque, so only the ticket can
+ * reveal that a response was overtaken by a later GET or save acknowledgement.
+ * receive(view) without a ticket is for synchronous use and is applied as newest.
  */
 export class MaterialModel {
   constructor({
@@ -57,6 +71,9 @@ export class MaterialModel {
     this._keys = new WeakMap();
     this._usedKeys = new Set();
     this._nextKey = 0;
+    this._tickets = new WeakSet();
+    this._ticketSequence = 0;
+    this._receiveWatermark = 0;
     if (storage === undefined) {
       try { storage = globalThis.sessionStorage; } catch {
         this.mirrorError = "Session storage is unavailable; input remains in memory.";
@@ -97,7 +114,23 @@ export class MaterialModel {
     };
   }
 
-  receive(view) {
+  beginReceive() {
+    const ticket = Object.freeze({
+      sequence: ++this._ticketSequence, generation: this._generation,
+      workspace_id: this.workspaceId,
+    });
+    this._tickets.add(ticket);
+    return ticket;
+  }
+
+  receive(view, ticket) {
+    if (ticket !== undefined && (!this._tickets.has(ticket)
+      || ticket.generation !== this._generation || ticket.workspace_id !== this.workspaceId
+      || ticket.sequence < this._receiveWatermark)) {
+      this.needsRefresh = true;
+      this.refresh();
+      return false;
+    }
     if (typeof view.workspace_id !== "string" || !view.workspace_id
       || view.project?.id !== this.project
       || (view.draft && (view.draft.project !== this.project
@@ -116,6 +149,8 @@ export class MaterialModel {
       this.recoveryChoice = null;
       this.mirrorError = null;
     }
+    this._receiveWatermark = ticket === undefined
+      ? this._ticketSequence + 1 : Math.max(this._receiveWatermark, ticket.sequence + 1);
     this.workspaceId = view.workspace_id;
     this.remoteRevision = view.draft?.revision ?? null;
     this._remoteMaterial = clone(view.draft?.material ?? emptyMaterial());
@@ -127,8 +162,8 @@ export class MaterialModel {
       this.savedSnapshot = clone(this._remoteMaterial);
       this._baselineRevision = this.remoteRevision;
       this.localEpoch++;
-    } else {
-      this._reconcile();
+    } else if (this._reconcile()) {
+      this._writeMirror();
     }
     this.validation = null;
     this.invalidatePreview();
@@ -196,6 +231,8 @@ export class MaterialModel {
       this.refresh();
       return false;
     }
+    // Every GET already in flight was issued before this commit was known.
+    this._receiveWatermark = this._ticketSequence + 1;
     this.remoteRevision = receipt.revision;
     this._baselineRevision = receipt.revision;
     this.savedSnapshot = clone(request.material);
@@ -258,17 +295,18 @@ export class MaterialModel {
   // example a commit whose receipt is late or lost), rebase onto it instead of
   // reporting a conflict that only a discard could clear.
   _reconcile() {
-    if (this._baselineRevision === this.remoteRevision) return;
+    if (this._baselineRevision === this.remoteRevision) return false;
     const remote = this._remoteMaterial;
     const submitted = [this.pendingSave, ...[...this._requests.values()]
       .filter((sent) => sent.generation === this._generation
         && !this._acknowledged.has(sent.request.request_id))
       .map((sent) => sent.request)];
     if (!same(this.material, remote)
-      && !submitted.some((request) => request && same(request.material, remote))) return;
+      && !submitted.some((request) => request && same(request.material, remote))) return false;
     this.savedSnapshot = clone(remote);
     this._baselineRevision = this.remoteRevision;
     if (this.pendingSave && same(this.pendingSave.material, remote)) this.pendingSave = null;
+    return true;
   }
 
   _retainKeys(original, copied) {
