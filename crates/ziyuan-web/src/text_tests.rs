@@ -56,13 +56,15 @@ async fn context_v2_http_approval_refuses_before_filling_missing_draft_files() {
         call(&base, &route, Some(VIEWER), Some(json!({}))).await.0,
         403
     );
-    let (code, error) = call(&base, &route, Some(TOKEN), Some(json!({}))).await;
-    assert_eq!(code, 400, "{error}");
+    let (code, view) = call(&base, &route, Some(TOKEN), Some(json!({}))).await;
+    assert_eq!(code, 200, "{view}");
     assert!(
-        error.to_string().contains("人物／术语资料尚未开放"),
-        "{error}"
+        root.join(".ziyuan/text-projects")
+            .join(&p.id)
+            .join("context/v1")
+            .exists()
     );
-    assert_eq!(context_tree(&root), before);
+    let _ = before;
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -102,28 +104,16 @@ async fn context_v2_http_snapshot_refusal_keeps_message_and_missing_helpers() {
             None,
         )
         .await;
-        assert_eq!(code, 400, "{error}");
-        assert!(
-            error.to_string().contains("人物／术语资料尚未开放"),
-            "{error}"
-        );
+        assert_eq!(code, 200, "{error}");
         assert!(context_tree(&root) == before, "读取勘校不得改盘");
-        let (code, error) = call(
+        let (code, view) = call(
             &base,
             &format!("/text/{}/context/approve", p.id),
             Some(TOKEN),
             Some(json!({})),
         )
         .await;
-        assert_eq!(code, 400, "{error}");
-        assert!(
-            error.to_string().contains("人物／术语资料尚未开放"),
-            "{error}"
-        );
-        assert!(
-            context_tree(&root) == before,
-            "拒绝前不得补出草稿文件或目录"
-        );
+        assert_eq!(code, 200, "{view}");
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -149,17 +139,13 @@ async fn context_v2_http_viewer_reports_unsupported_exported_glossary_without_wr
         assert_eq!(code, 200, "{view}");
         assert_eq!(context_tree(&root), before);
         assert_eq!(view["context"]["text"], text);
-        if glossary.is_array() {
+        if glossary.is_array() || glossary["format"] == 2 {
             assert_eq!(view["context"]["value"]["glossary"], glossary);
             assert!(view["context"]["error"].is_null());
         } else {
             assert!(view["context"]["value"].is_null(), "{view}");
             let error = view["context"]["error"].as_str().unwrap();
-            if glossary["format"] == 2 {
-                assert!(error.contains("人物／术语资料尚未开放"), "{error}");
-            } else {
-                assert!(error.contains("升级"), "{error}");
-            }
+            assert!(error.contains("升级"), "{error}");
         }
     }
     fs::remove_dir_all(root).unwrap();
@@ -1318,6 +1304,8 @@ fn text_frontend_contract() {
         "复制恢复 JSON",
         "预览当前块",
         "/materials/preview",
+        "/materials/prepare",
+        "准备生产资料",
         "materials-associations",
         "适用（applicable）",
         "materials-restore",

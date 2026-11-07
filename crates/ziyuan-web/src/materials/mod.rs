@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use ziyuan_app::translation::Translations;
 use ziyuan_app::translation::materials::{MaterialError, MaterialIssue};
-use ziyuan_storage::{JsonFileError, WorkspaceError};
+use ziyuan_storage::{JsonFileError, LockScope, Workspace, WorkspaceError};
 
 use crate::state::AppState;
 use wire::{Bound, PreviewBody, SaveBody, ValidateBody};
@@ -32,6 +32,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/text/{project}/materials/draft", post(save))
         .route("/text/{project}/materials/validate", post(validate))
         .route("/text/{project}/materials/preview", post(preview))
+        .route("/text/{project}/materials/prepare", post(prepare))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
@@ -110,6 +111,36 @@ pub(crate) async fn preview(
             &request.block,
             &associations,
         )
+    })
+    .await
+}
+
+pub(crate) async fn prepare(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let root = app.0.config.root.clone();
+    run(id, move || {
+        let workspace = Workspace::open(&root).map_err(MaterialError::Workspace)?;
+        let mut guard = workspace
+            .lock(LockScope::Workspace)
+            .map_err(MaterialError::Workspace)?;
+        guard
+            .upgrade_write_protocol()
+            .map_err(MaterialError::Workspace)?;
+        let translations = Translations::new(&root);
+        translations
+            .texts()
+            .upgrade_project_protocol(&project, &guard)
+            .map_err(MaterialError::Project)?;
+        translations
+            .prepare_material_production(&guard, &project)
+            .map_err(MaterialError::Visibility)
+            .map(|bytes| json!({ "prepared": true, "bytes": bytes }))
     })
     .await
 }

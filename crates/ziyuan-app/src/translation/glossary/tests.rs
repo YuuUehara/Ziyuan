@@ -418,10 +418,13 @@ fn rejects_unknown_or_foreign_positions_and_mismatching_evidence_everywhere() {
 }
 
 #[test]
-fn structured_compatibility_facade_refuses_with_feature_message() {
-    let err =
-        crate::translation::parse_glossary(br#"{"format":2,"terms":[],"persons":[]}"#).unwrap_err();
-    assert_eq!(err.to_string(), "人物／术语资料尚未开放");
+fn structured_compatibility_facade_accepts_v2() {
+    let parsed =
+        crate::translation::parse_glossary(br#"{"format":2,"terms":[],"persons":[]}"#).unwrap();
+    assert!(matches!(
+        parsed,
+        crate::translation::Glossary::Structured(_)
+    ));
 }
 
 #[test]

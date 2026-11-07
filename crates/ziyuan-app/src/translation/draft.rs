@@ -1476,3 +1476,35 @@ impl Translations {
         Ok(())
     }
 }
+
+impl Translations {
+    /// Copy the current validated local materials draft into the production context draft.
+    /// This only prepares the file; approval stays with `text context approve`.
+    pub fn prepare_material_production(&self, guard: &WriteGuard, project: &str) -> Result<usize> {
+        let workspace = guard.workspace();
+        if fs::canonicalize(&self.root)? != fs::canonicalize(workspace.root())? {
+            return Err(invalid("准备生产资料与所持写锁不属同一工作区"));
+        }
+        workspace
+            .ensure_writable()
+            .map_err(|e| invalid(e.to_string()))?;
+        if workspace
+            .pending_record_any()
+            .map_err(|e| invalid(e.to_string()))?
+            .is_some()
+        {
+            return Err(invalid("准备生产资料前须先收尾全部恢复记录"));
+        }
+        let draft = self
+            .material_draft(project)
+            .map_err(|e| invalid(e.to_string()))?
+            .ok_or_else(|| invalid("尚无本地资料草稿，请先在本地资料编辑器保存"))?;
+        let project_file = self.project(project)?;
+        let glossary = super::Glossary::Structured(draft.material);
+        glossary.validate_project(&project_file)?;
+        let bytes = super::pretty_json(&glossary)?;
+        let dir = super::ensure_plain_dirs(&self.root, &["translations", project, "context"])?;
+        super::write_plain(&dir.join("glossary.json"), &bytes)?;
+        Ok(bytes.len())
+    }
+}

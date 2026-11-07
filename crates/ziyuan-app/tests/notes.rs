@@ -194,7 +194,7 @@ fn promote_merges_into_drafts_once() {
     assert!(!again.added, "重复并入不重复写");
     let glossary = fs::read(fx.0.join(&first.path)).unwrap();
     assert_eq!(
-        parse_glossary(&glossary).unwrap(),
+        parse_glossary(&glossary).unwrap().into_legacy().unwrap(),
         [GlossaryEntry {
             source: "魔王".into(),
             allowed: vec!["魔王".into()],

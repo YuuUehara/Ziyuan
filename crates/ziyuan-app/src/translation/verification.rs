@@ -441,12 +441,32 @@ impl Translations {
         let mut hints = Vec::new();
         if let (Some(context), Some(target)) = (&material.context, &material.translation) {
             for (source, target) in material.source.paragraphs.iter().zip(&target.paragraphs) {
-                for entry in &context.glossary {
-                    if source.text.contains(&entry.source)
-                        && !entry.allowed.iter().any(|a| target.text.contains(a))
-                    {
-                        hints.push(GlossaryHint { paragraph: source.id.clone(), source: entry.source.clone(), allowed: entry.allowed.clone(), scope: entry.scope.clone(), note: entry.note.clone(),
-                            message: if entry.scope.is_some() { "原文命中词条而译文未见允许译法；作用范围为自由文本，先人工核对是否适用" } else { "原文命中词条而译文未见允许译法；仅字面提示，不是语义错译判决" }.into() });
+                match &context.glossary {
+                    crate::translation::Glossary::Legacy(entries) => {
+                        for entry in entries {
+                            if source.text.contains(&entry.source)
+                                && !entry.allowed.iter().any(|a| target.text.contains(a))
+                            {
+                                hints.push(GlossaryHint { paragraph: source.id.clone(), source: entry.source.clone(), allowed: entry.allowed.clone(), scope: entry.scope.clone(), note: entry.note.clone(),
+                                    message: if entry.scope.is_some() { "原文命中词条而译文未见允许译法；作用范围为自由文本，先人工核对是否适用" } else { "原文命中词条而译文未见允许译法；仅字面提示，不是语义错译判决" }.into() });
+                            }
+                        }
+                    }
+                    crate::translation::Glossary::Structured(data) => {
+                        for term in &data.terms {
+                            if source.text.contains(&term.source)
+                                && !term.allowed.iter().any(|a| target.text.contains(a))
+                            {
+                                hints.push(GlossaryHint {
+                                    paragraph: source.id.clone(),
+                                    source: term.source.clone(),
+                                    allowed: term.allowed.clone(),
+                                    scope: None,
+                                    note: term.note.clone(),
+                                    message: "第二版术语：原文命中而译文未见允许译法；作用范围与可用起点尚未并入勘校，先人工核对".into(),
+                                });
+                            }
+                        }
                     }
                 }
             }

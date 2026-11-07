@@ -80,6 +80,7 @@ impl Drop for Fx {
 }
 
 /// 目录也纳入对照，避免只比较已有文件而漏掉空目录。
+#[allow(dead_code)]
 fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     fn visit(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -98,6 +99,7 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     out
 }
 
+#[allow(dead_code)]
 fn refused<T: std::fmt::Debug>(result: Result<T, impl std::fmt::Display>) {
     let error = result.expect_err("第二版不得进入生产消费");
     assert!(
@@ -119,10 +121,12 @@ fn legacy_context_bytes_scope_hints_and_note_promotion_stay_unchanged() {
         LEGACY.as_bytes()
     );
     let snapshot = t.context_snapshot(&f.project.id, 1).unwrap();
-    assert_eq!(
-        snapshot.glossary[0].scope.as_deref(),
-        Some("第二章以后；先人工核对")
-    );
+    match &snapshot.glossary {
+        ziyuan_app::translation::Glossary::Legacy(entries) => {
+            assert_eq!(entries[0].scope.as_deref(), Some("第二章以后；先人工核对"))
+        }
+        ziyuan_app::translation::Glossary::Structured(_) => panic!("应为旧数组资料"),
+    }
     t.export(&f.project.id, f.block()).unwrap();
     let dir = t.block_dir(&f.project.id, f.block());
     let exported = fs::read(dir.join("context.json")).unwrap();
@@ -168,41 +172,55 @@ fn legacy_context_bytes_scope_hints_and_note_promotion_stay_unchanged() {
 }
 
 #[test]
-fn structured_draft_is_refused_before_ensure_or_approval_changes_disk() {
+fn structured_draft_prepares_and_approves_v2_snapshot() {
     for ensure in [false, true] {
         let f = Fx::new();
         f.write_glossary_only(V2);
-        let before = tree(&f.root);
+        let t = f.t();
         if ensure {
-            refused(f.t().ensure_context_draft(&f.project.id));
-        } else {
-            refused(f.t().approve_context(&f.project.id));
+            t.ensure_context_draft(&f.project.id).unwrap();
         }
-        assert_eq!(tree(&f.root), before);
-        assert!(!f.snapshot_dir().exists());
+        assert_eq!(t.approve_context(&f.project.id).unwrap(), 1);
+        assert_eq!(
+            fs::read(f.snapshot_dir().join("glossary.json")).unwrap(),
+            V2.as_bytes()
+        );
+        assert!(matches!(
+            t.context_snapshot(&f.project.id, 1).unwrap().glossary,
+            ziyuan_app::translation::Glossary::Structured(_)
+        ));
     }
 }
 
 #[test]
-fn both_note_kinds_refuse_structured_draft_before_creating_files_or_locks() {
+fn structured_draft_still_refuses_note_promotion_without_changing_glossary() {
     for kind in [NoteKind::Word, NoteKind::Passage] {
         let f = Fx::new();
         f.write_glossary_only(V2);
         let id = f.note(kind);
-        let before = tree(&f.root);
-        refused(Notes::new(&f.root).promote(&id, &f.project.id));
-        assert_eq!(tree(&f.root), before);
-        assert!(!f.draft().join(".lock").exists());
+        let result = Notes::new(&f.root).promote(&id, &f.project.id);
+        if kind == NoteKind::Word {
+            let error = result.expect_err("第二版资料仍不支持术语札记并入");
+            assert!(
+                error.to_string().contains("第二版资料暂不支持札记并入"),
+                "{error}"
+            );
+        } else {
+            assert!(result.unwrap().added, "文体札记仍可并入");
+        }
+        assert_eq!(
+            fs::read(f.draft().join("glossary.json")).unwrap(),
+            V2.as_bytes()
+        );
     }
 }
 
 #[test]
-fn structured_snapshot_refuses_read_export_verification_and_approval_without_writes() {
+fn structured_snapshot_is_read_exported_verified_and_approvable() {
     let f = Fx::new();
     let t = f.t();
     t.ensure_context_draft(&f.project.id).unwrap();
     t.approve_context(&f.project.id).unwrap();
-    // 手工快照保持清单哈希正确，否则只会测到哈希检查。
     fs::write(f.snapshot_dir().join("glossary.json"), V2).unwrap();
     let path = f.snapshot_dir().join("manifest.json");
     let mut manifest: serde_json::Value =
@@ -216,19 +234,11 @@ fn structured_snapshot_refuses_read_export_verification_and_approval_without_wri
         }
     }
     fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
-    let before = tree(&f.root);
-    refused(t.context_snapshot(&f.project.id, 1));
-    assert_eq!(tree(&f.root), before);
-    refused(t.export(&f.project.id, f.block()));
-    assert_eq!(tree(&f.root), before);
-    refused(t.verification(None, &f.project.id, f.block()));
-    assert_eq!(tree(&f.root), before);
-    refused(t.approve_context(&f.project.id));
-    assert_eq!(tree(&f.root), before);
-    // CLI／Web 先 ensure 再 approve；旧草稿不能掩盖现行第二版快照。
-    fs::remove_file(f.draft().join("style.md")).unwrap();
-    fs::remove_dir(f.draft().join("summaries")).unwrap();
-    let before = tree(&f.root);
-    refused(t.ensure_context_draft(&f.project.id));
-    assert_eq!(tree(&f.root), before);
+    assert!(matches!(
+        t.context_snapshot(&f.project.id, 1).unwrap().glossary,
+        ziyuan_app::translation::Glossary::Structured(_)
+    ));
+    t.export(&f.project.id, f.block()).unwrap();
+    t.verification(None, &f.project.id, f.block()).unwrap();
+    assert!(t.approve_context(&f.project.id).unwrap() >= 2);
 }

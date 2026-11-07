@@ -348,7 +348,14 @@ impl Notes {
         match note.kind {
             NoteKind::Word => {
                 let path = dir.join(GLOSSARY_FILE);
-                let mut entries = entries;
+                let mut entries = match entries {
+                    crate::translation::Glossary::Legacy(entries) => entries,
+                    crate::translation::Glossary::Structured(_) => {
+                        return Err(invalid(
+                            "第二版资料暂不支持札记并入；请在本地资料编辑器中处理",
+                        ));
+                    }
+                };
                 let exists = entries
                     .iter()
                     .any(|e| e.source == note.source && e.allowed.contains(&note.zh));

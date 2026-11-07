@@ -474,16 +474,16 @@ fn context_snapshots_are_versioned_validated_and_verified() {
     fx.write_glossary(r#"[{"source":"勇者","allowed":["勇者"],"note":"统一"}]"#);
     assert_eq!(t.approve_context(&fx.project).unwrap(), 2);
     assert_eq!(t.context_versions(&fx.project).unwrap(), [1, 2]);
-    assert!(
-        t.context_snapshot(&fx.project, 1)
-            .unwrap()
-            .glossary
-            .is_empty()
-    );
-    assert_eq!(
-        t.current_context(&fx.project).unwrap().unwrap().glossary[0].allowed,
-        ["勇者"]
-    );
+    assert!(matches!(
+        t.context_snapshot(&fx.project, 1).unwrap().glossary,
+        crate::translation::Glossary::Legacy(ref entries) if entries.is_empty()
+    ));
+    match t.current_context(&fx.project).unwrap().unwrap().glossary {
+        crate::translation::Glossary::Legacy(entries) => {
+            assert_eq!(entries[0].allowed, ["勇者"])
+        }
+        crate::translation::Glossary::Structured(_) => panic!("应为旧数组资料"),
+    }
 
     for bad in [
         "不是 JSON",

@@ -118,6 +118,9 @@ try {
   await waitJs("document.querySelector('#materials-status').textContent.includes('预览只表示') || document.querySelector('#materials-status').textContent.includes('预览失败')", 20000, "预览结果");
   const previewStatus = await evaluate("document.querySelector('#materials-status').textContent");
   const report = await evaluate("document.querySelector('#materials-preview').innerText.slice(0, 500)");
+  await evaluate("document.querySelector('#materials-prepare').click()");
+  await waitJs("document.querySelector('#materials-status').textContent.includes('已准备生产资料') || document.querySelector('#materials-status').textContent.includes('准备失败')", 20000, "准备生产资料");
+  const prepareStatus = await evaluate("document.querySelector('#materials-status').textContent");
   await evaluate("renderTextNow()");
   await waitJs("document.querySelector('#text-n2b-hints').textContent.includes('术语：') || document.querySelector('#text-n2b-hints').textContent.includes('没有适用')", 20000, "段旁提示结果");
   const n2bHints = await evaluate("document.querySelector('#text-n2b-hints').textContent");
@@ -174,7 +177,7 @@ try {
   const narrow = await evaluate("JSON.stringify({ overflow: document.documentElement.scrollWidth > window.innerWidth + 1, saveVisible: !!document.querySelector('#materials-save')?.getBoundingClientRect().width, editor: !!document.querySelector('#text-materials-editor .materials-editor'), listWidth: document.querySelector('#materials-associations')?.getBoundingClientRect().width || 0 })");
   const narrowShot = await send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(out.replace(/\.png$/, "-narrow.png"), Buffer.from(narrowShot.data, "base64"));
-  console.log(JSON.stringify({ ok: true, project, status, validateStatus, saveStatus, previewStatus, report, n2bHints, focusKept, states, restoreVisible, recovered, recoveredContains, narrow, externalSave, conflictStatus, conflictKept, discardVisible, afterDiscard, editor, screenshot: out }, null, 2));
+  console.log(JSON.stringify({ ok: true, project, status, validateStatus, saveStatus, prepareStatus, previewStatus, report, n2bHints, focusKept, states, restoreVisible, recovered, recoveredContains, narrow, externalSave, conflictStatus, conflictKept, discardVisible, afterDiscard, editor, screenshot: out }, null, 2));
 } catch (error) {
   console.error("浏览器烟测失败：" + error.message);
   if (serverErr) console.error(serverErr.slice(-2000));

@@ -1,4 +1,5 @@
 //! 上下文草稿（`translations/<项目>/context/`）与已批准快照（`.ziyuan/text-projects/<项目>/context/v<N>/`）。
+use super::glossary::Glossary;
 use super::{
     Result, Translations, context_dir_rel, ensure_plain_dirs, invalid, pretty_json, read_plain_opt,
     read_text_opt, sha256_hex,
@@ -55,7 +56,7 @@ pub struct ContextManifest {
 pub struct ContextSnapshot {
     pub version: u32,
     pub created: u64,
-    pub glossary: Vec<GlossaryEntry>,
+    pub glossary: Glossary,
     pub style: String,
     /// 章 ID → 前情摘要。
     pub summaries: BTreeMap<String, String>,
@@ -105,8 +106,8 @@ pub(super) fn check_text_limits(what: &str, text: &str, max: usize) -> Result<()
 }
 
 /// 校验术语表 JSON：数组，每条原文与各允许译法非空、有长度上限，不得有未知字段。
-pub fn parse_glossary(bytes: &[u8]) -> Result<Vec<GlossaryEntry>> {
-    super::glossary::Glossary::parse(bytes)?.into_legacy()
+pub fn parse_glossary(bytes: &[u8]) -> Result<crate::translation::Glossary> {
+    crate::translation::Glossary::parse(bytes)
 }
 
 pub(crate) fn parse_legacy_glossary(bytes: &[u8]) -> Result<Vec<GlossaryEntry>> {
@@ -143,13 +144,10 @@ struct DraftFile {
     bytes: Vec<u8>,
 }
 
-fn checked_legacy_glossary(
-    bytes: &[u8],
-    project: &crate::text_project::Project,
-) -> Result<Vec<GlossaryEntry>> {
-    let glossary = super::glossary::Glossary::parse(bytes)?;
+fn checked_glossary(bytes: &[u8], project: &crate::text_project::Project) -> Result<Glossary> {
+    let glossary = Glossary::parse(bytes)?;
     glossary.validate_project(project)?;
-    glossary.into_legacy()
+    Ok(glossary)
 }
 
 fn version_of(name: &str) -> Option<u32> {
@@ -184,7 +182,7 @@ impl Translations {
         if let Some(text) =
             read_text_opt(&existing.join(GLOSSARY_FILE), GLOSSARY_FILE, GLOSSARY_BYTES)?
         {
-            checked_legacy_glossary(text.as_bytes(), &p)?;
+            checked_glossary(text.as_bytes(), &p)?;
         }
         self.current_context(project)?;
         let dir = ensure_plain_dirs(&self.root, &["translations", project, "context"])?;
@@ -213,7 +211,7 @@ impl Translations {
         let mut files = Vec::new();
         let glossary = read_text_opt(&dir.join(GLOSSARY_FILE), GLOSSARY_FILE, GLOSSARY_BYTES)?
             .unwrap_or_else(|| "[]\n".into());
-        checked_legacy_glossary(glossary.as_bytes(), project)?;
+        checked_glossary(glossary.as_bytes(), project)?;
         files.push(DraftFile {
             path: GLOSSARY_FILE.into(),
             bytes: glossary.into_bytes(),
@@ -374,7 +372,7 @@ impl Translations {
         let mut snapshot = ContextSnapshot {
             version,
             created: manifest.created,
-            glossary: Vec::new(),
+            glossary: Glossary::Legacy(Vec::new()),
             style: String::new(),
             summaries: BTreeMap::new(),
             files: manifest.files.clone(),
@@ -403,8 +401,7 @@ impl Translations {
             let text = String::from_utf8(bytes)
                 .map_err(|_| invalid(format!("上下文 v{version} 的 {} 不是 UTF-8", file.path)))?;
             if file.path == GLOSSARY_FILE {
-                snapshot.glossary =
-                    checked_legacy_glossary(text.as_bytes(), &self.project(project)?)?;
+                snapshot.glossary = checked_glossary(text.as_bytes(), &self.project(project)?)?;
             } else if file.path == STYLE_FILE {
                 snapshot.style = text;
             } else if let Some(chapter) = file

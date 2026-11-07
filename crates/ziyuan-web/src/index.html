@@ -870,6 +870,7 @@
                 <button class="small" id="materials-save" type="button">保存草稿</button>
                 <button class="small" id="materials-validate" type="button">校验</button>
                 <button class="small" id="materials-copy" type="button">复制恢复 JSON</button>
+                <button class="small" id="materials-prepare" type="button">准备生产资料</button>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
               </div>
               <p class="hint" id="materials-states" aria-live="polite">
@@ -1517,6 +1518,19 @@ $("materials-validate")?.addEventListener("click", async () => {
       : "校验通过；通过仍不是批准，保存也不授予批准。";
   } catch (e) {
     $("materials-status").textContent = "校验失败：" + (e.body?.error || e.message);
+  }
+});
+$("materials-prepare")?.addEventListener("click", async () => {
+  if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  if (!state || state.viewer) { $("materials-status").textContent = "观政不能准备生产资料。"; return; }
+  setMaterialState("save", "服务器：准备中…");
+  try {
+    const result = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/prepare", {});
+    setMaterialState("save", "服务器：已准备（未批准）");
+    $("materials-status").textContent = "已准备生产资料（" + result.bytes + " 字节）；尚未批准。下一步：ziyuan text context approve " + textProjectId;
+  } catch (e) {
+    setMaterialState("save", "服务器：准备失败");
+    $("materials-status").textContent = "准备失败：" + (e.body?.error || e.message);
   }
 });
 $("materials-copy")?.addEventListener("click", async () => {

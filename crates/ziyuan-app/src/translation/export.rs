@@ -77,7 +77,9 @@ impl Translations {
         let context_json = json!({
             "version": version,
             "note": "已批准的上下文快照（只读）：术语表 glossary 的 allowed 为允许译法；summaries 为此前各章的前情摘要。",
-            "glossary": context.map(|c| c.glossary.clone()).unwrap_or_default(),
+            "glossary": context
+                .map(|c| c.glossary.clone())
+                .unwrap_or_else(|| crate::translation::Glossary::Legacy(Vec::new())),
             "style": context.map(|c| c.style.as_str()).unwrap_or(""),
             "summaries": prior_summaries(context, chapter),
         });

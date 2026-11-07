@@ -5,10 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use ziyuan_app::translation::{
-    MaterialDraft, MaterialError, MaterialIssueCode, MaterialPathSegment, MaterialReceipt,
-    MaterialSave, Translations, validate_material,
+    Glossary, MaterialDraft, MaterialError, MaterialIssueCode, MaterialPathSegment,
+    MaterialReceipt, MaterialSave, Translations, validate_material,
 };
-use ziyuan_storage::JsonFileError;
+use ziyuan_storage::{JsonFileError, LockScope, Workspace};
 
 const ROOT_ENV: &str = "ZIYUAN_TEST_MATERIAL_ROOT";
 
@@ -223,4 +223,52 @@ fn stored_invalid_request_id_stays_corrupt_without_reset() {
         MaterialError::Storage(JsonFileError::Corrupt(_))
     ));
     assert!(tree(&f.root) == before, "损坏的旧回执不得被清除或覆盖");
+}
+
+#[test]
+fn prepare_material_production_writes_v2_and_approve_succeeds() {
+    let f = Fixture::new();
+    let t = f.service();
+    let material = serde_json::from_value(json!({
+        "format": 2,
+        "terms": [{
+            "term_id": "t-1", "source": "先生", "category": "common",
+            "allowed": ["先生"], "scope": {"kind": "project"},
+            "evidence": [], "status": "tentative"
+        }],
+        "persons": []
+    }))
+    .unwrap();
+    t.save_material_draft(
+        &f.project,
+        &MaterialSave {
+            request_id: "prepare-1".into(),
+            expected_revision: None,
+            material,
+        },
+    )
+    .unwrap();
+    t.ensure_context_draft(&f.project).unwrap();
+    let workspace = Workspace::open(&f.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    t.texts()
+        .upgrade_project_protocol(&f.project, &guard)
+        .unwrap();
+    let bytes = t.prepare_material_production(&guard, &f.project).unwrap();
+    assert!(bytes > 0);
+    let path = f
+        .root
+        .join("translations")
+        .join(&f.project)
+        .join("context/glossary.json");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"format\": 2"), "{text}");
+    assert!(text.contains("\"term_id\": \"t-1\""), "{text}");
+    drop(guard);
+    assert_eq!(t.approve_context(&f.project).unwrap(), 1);
+    match t.context_snapshot(&f.project, 1).unwrap().glossary {
+        Glossary::Structured(data) => assert_eq!(data.terms[0].term_id, "t-1"),
+        Glossary::Legacy(_) => panic!("应为第二版资料快照"),
+    }
 }
