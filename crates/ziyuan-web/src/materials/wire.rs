@@ -16,77 +16,104 @@ pub(crate) trait Bound {
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     let message = |e: serde_json::Error| format!("资料请求格式不对：{e}");
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    Shape { depth: 0 }
+    Shape::new(0)
         .deserialize(&mut deserializer)
-        .and_then(|()| deserializer.end())
+        .and_then(|_| deserializer.end())
         .map_err(message)?;
     serde_json::from_slice(bytes).map_err(message)
 }
 
-/// Structure-only pass: rejects duplicate keys and excessive depth before typed decoding.
+/// Tags of internally tagged variants without fields (`GlossaryScope::Project`,
+/// `GlossarySpeaker::{Narration, Unknown}`). serde ignores extra keys on such unit
+/// variants even under `deny_unknown_fields`, so they are refused here instead. Every
+/// object carrying `kind` in these request bodies is one of those tagged enums.
+const TAG_ONLY_KINDS: &[&str] = &["project", "narration", "unknown"];
+
+/// Structure-only pass: rejects duplicate keys, excessive depth and extra keys on
+/// tag-only variants before typed decoding. Only `kind` values are captured.
 struct Shape {
     depth: usize,
+    capture: bool,
 }
 
 impl Shape {
-    fn child<E: de::Error>(&self) -> Result<Self, E> {
+    fn new(depth: usize) -> Self {
+        Self {
+            depth,
+            capture: false,
+        }
+    }
+
+    fn child<E: de::Error>(&self) -> Result<usize, E> {
         if self.depth >= MAX_DEPTH {
             return Err(E::custom(format!("JSON 嵌套至多 {MAX_DEPTH} 层")));
         }
-        Ok(Self {
-            depth: self.depth + 1,
-        })
+        Ok(self.depth + 1)
     }
 }
 
 impl<'de> DeserializeSeed<'de> for Shape {
-    type Value = ();
-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+    type Value = Option<String>;
+    fn deserialize<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
         deserializer.deserialize_any(self)
     }
 }
 
 impl<'de> Visitor<'de> for Shape {
-    type Value = ();
+    type Value = Option<String>;
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("JSON 值")
     }
-    fn visit_bool<E: de::Error>(self, _: bool) -> Result<(), E> {
-        Ok(())
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(None)
     }
-    fn visit_i64<E: de::Error>(self, _: i64) -> Result<(), E> {
-        Ok(())
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(None)
     }
-    fn visit_u64<E: de::Error>(self, _: u64) -> Result<(), E> {
-        Ok(())
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(None)
     }
-    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> {
-        Ok(())
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(None)
     }
-    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> {
-        Ok(())
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(self.capture.then(|| v.to_owned()))
     }
-    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
-        Ok(())
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
     }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        let child = self.child::<A::Error>()?;
-        while seq
-            .next_element_seed(Shape { depth: child.depth })?
-            .is_some()
-        {}
-        Ok(())
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let depth = self.child::<A::Error>()?;
+        while seq.next_element_seed(Shape::new(depth))?.is_some() {}
+        Ok(None)
     }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        let child = self.child::<A::Error>()?;
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let depth = self.child::<A::Error>()?;
         let mut keys = HashSet::new();
+        let mut kind = None;
         while let Some(key) = map.next_key::<String>()? {
-            if !keys.insert(key.clone()) {
+            if keys.contains(&key) {
                 return Err(de::Error::custom(format!("字段 `{key}` 重复")));
             }
-            map.next_value_seed(Shape { depth: child.depth })?;
+            let capture = key == "kind";
+            let value = map.next_value_seed(Shape { depth, capture })?;
+            if capture {
+                kind = value;
+            }
+            keys.insert(key);
         }
-        Ok(())
+        if let Some(kind) = kind
+            && TAG_ONLY_KINDS.contains(&kind.as_str())
+            && keys.len() > 1
+        {
+            return Err(de::Error::custom(format!(
+                "`kind` 为 `{kind}` 的对象不能有其他字段"
+            )));
+        }
+        Ok(None)
     }
 }
 

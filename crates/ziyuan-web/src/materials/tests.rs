@@ -475,3 +475,68 @@ fn workspace_identity_is_keyed_and_uses_lossless_native_path_bytes() {
     };
     assert_ne!(derive(Path::new(&raw), "k"), derive(Path::new(&lossy), "k"));
 }
+
+/// Raw text, not `json!`: extra keys on tag-only variants must reach the server verbatim.
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_validate_rejects_extra_keys_on_tagged_variants() {
+    let f = Fixture::new();
+    let s = start(&f.root, TOKEN).await;
+    let id = identity(&s, &f).await;
+    let before = tree(&f.root);
+    let body = |scope: &str, speaker: &str| {
+        format!(
+            r#"{{"workspace_id":"{}","material":{{"format":2,"terms":[{{"term_id":"t","source":"s","category":"common","allowed":["a"],"scope":{scope},"evidence":[],"status":"tentative"}}],"persons":[{{"person_id":"p","name":"n","aliases":[],"terms":["t"],"address_rules":[{{"target":"p","speaker":{speaker},"scope":{{"kind":"project"}},"term":"t","evidence":[]}}],"voice":{{"description":""}},"evidence":[],"status":"tentative"}}]}}}}"#,
+            id.as_str().unwrap()
+        )
+    };
+    let plain_scope = r#"{"kind":"project"}"#;
+    let plain_speaker = r#"{"kind":"unknown"}"#;
+    let route = f.route() + "/validate";
+    let (code, ok) = call(
+        &s,
+        &route,
+        Some(TOKEN),
+        Some(body(plain_scope, plain_speaker)),
+    )
+    .await;
+    assert_eq!(code, 200, "control body must decode: {ok}");
+    let mut accepted = Vec::new();
+    for (case, scope, speaker) in [
+        (
+            "project scope",
+            r#"{"kind":"project","extra":true}"#,
+            plain_speaker,
+        ),
+        (
+            "project scope, extra key first",
+            r#"{"extra":true,"kind":"project"}"#,
+            plain_speaker,
+        ),
+        (
+            "unknown speaker",
+            plain_scope,
+            r#"{"kind":"unknown","extra":true}"#,
+        ),
+        (
+            "narration speaker",
+            plain_scope,
+            r#"{"kind":"narration","extra":true}"#,
+        ),
+        (
+            "person speaker",
+            plain_scope,
+            r#"{"kind":"person","person_id":"p","extra":true}"#,
+        ),
+    ] {
+        let (code, error) = call(&s, &route, Some(TOKEN), Some(body(scope, speaker))).await;
+        let rejected = code == 400
+            && error["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("资料请求格式不对"));
+        if !rejected {
+            accepted.push(format!("{case}: {code} {error}"));
+        }
+    }
+    assert!(accepted.is_empty(), "accepted: {accepted:#?}");
+    assert_eq!(tree(&f.root), before);
+}
