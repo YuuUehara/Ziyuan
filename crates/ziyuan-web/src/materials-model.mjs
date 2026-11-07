@@ -125,6 +125,8 @@ export class MaterialModel {
       this.savedSnapshot = clone(this._remoteMaterial);
       this._baselineRevision = this.remoteRevision;
       this.localEpoch++;
+    } else {
+      this._reconcile();
     }
     this.validation = null;
     this.invalidatePreview();
@@ -157,7 +159,9 @@ export class MaterialModel {
 
   prepareSave() {
     if (!this.canSave) throw new Error("Load a materials view before saving.");
-    if (this.pendingSave && same(this.pendingSave.material, this.material)) {
+    // A request built on a superseded baseline would only earn a permanent 409.
+    if (this.pendingSave && same(this.pendingSave.material, this.material)
+      && this.pendingSave.expected_revision === this._baselineRevision) {
       return this.pendingSave;
     }
     const request = freeze({
@@ -180,8 +184,11 @@ export class MaterialModel {
     if (this.pendingSave?.request_id === request.request_id) this.pendingSave = null;
     // Revisions are opaque, not sortable. Only a receipt against the still-current
     // server baseline can advance it. Historical idempotency receipts require GET.
+    // A GET may already have observed the revision this receipt produced.
+    const observed = receipt.revision === this.remoteRevision
+      && same(request.material, this._remoteMaterial);
     if (sent.generation !== this._generation
-      || request.expected_revision !== this.remoteRevision) {
+      || (request.expected_revision !== this.remoteRevision && !observed)) {
       this.needsRefresh = true;
       this._writeMirror();
       this.refresh();
@@ -212,6 +219,7 @@ export class MaterialModel {
       this._requests.set(request.request_id, { request, generation: this._generation });
     }
     this.recoveryChoice = null;
+    this._reconcile();
     this.localEpoch++;
     this.validation = null;
     this.invalidatePreview();
@@ -234,6 +242,23 @@ export class MaterialModel {
   }
 
   invalidatePreview() { this.preview = null; }
+
+  // When the server already holds the current input or a submitted snapshot (for
+  // example a commit whose receipt is late or lost), rebase onto it instead of
+  // reporting a conflict that only a discard could clear.
+  _reconcile() {
+    if (this._baselineRevision === this.remoteRevision) return;
+    const remote = this._remoteMaterial;
+    const submitted = [this.pendingSave, ...[...this._requests.values()]
+      .filter((sent) => sent.generation === this._generation
+        && !this._acknowledged.has(sent.request.request_id))
+      .map((sent) => sent.request)];
+    if (!same(this.material, remote)
+      && !submitted.some((request) => request && same(request.material, remote))) return;
+    this.savedSnapshot = clone(remote);
+    this._baselineRevision = this.remoteRevision;
+    if (this.pendingSave && same(this.pendingSave.material, remote)) this.pendingSave = null;
+  }
 
   _retainKeys(original, copied) {
     if (!original || typeof original !== "object") return;
@@ -303,7 +328,12 @@ export class MaterialModel {
       }
       this.mirrorError = null;
     } catch {
-      this.mirrorError = "Session mirror could not be saved; complete input remains in memory.";
+      // An older mirror left behind would later be offered as if it were current.
+      let removed = false;
+      try { this.storage?.removeItem(this.mirrorKey); removed = !!this.storage; } catch {}
+      this.mirrorError = removed
+        ? "Session mirror could not be saved; complete input remains in memory."
+        : "Session mirror could not be saved and an older copy may remain; complete input remains in memory.";
     }
   }
 }

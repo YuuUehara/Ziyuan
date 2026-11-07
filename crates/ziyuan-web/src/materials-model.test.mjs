@@ -47,10 +47,10 @@ function view(source = "先生", rev = revision("1"), workspace = WORKSPACE) {
 function storage() {
   const values = new Map();
   return {
-    values, reads: [], fail: false,
+    values, reads: [], fail: false, quota: false,
     getItem(key) { this.reads.push(key); return values.get(key) ?? null; },
     setItem(key, value) {
-      if (this.fail) throw new Error("QuotaExceededError");
+      if (this.fail || this.quota) throw new Error("QuotaExceededError");
       values.set(key, value);
     },
     removeItem(key) {
@@ -360,7 +360,7 @@ test("reordering and removing entries retains independent keys, including across
   assert.deepEqual(state.entryKeys, keys);
 });
 
-test("recovery retains a pending request against an older revision after another save succeeds", () => {
+test("recovered newer input whose pending request targets a superseded revision is rebuilt", () => {
   const session = storage();
   const state = model({ storage: session });
   state.receive(view());
@@ -369,12 +369,118 @@ test("recovery retains a pending request against an older revision after another
   state.edit(["terms", 0, "source"], "新输入");
   const newer = state.prepareSave();
   state.acceptSave(receipt(), older);
-  const next = model({ storage: session });
+  let id = 0;
+  const next = model({ storage: session, requestId: () => `reload-${++id}` });
   next.receive(view("旧输入", revision("2")));
   assert.equal(next.restore(), true);
   assert.equal(next.material.terms[0].source, "新输入");
-  assert.deepEqual(next.prepareSave(), newer);
   assert.equal(next.dirty, true);
+  assert.equal(next.conflict, false);
+  const retry = next.prepareSave();
+  assert.notEqual(retry.request_id, newer.request_id);
+  assert.equal(retry.expected_revision, revision("2"));
+  assert.equal(retry.material.terms[0].source, "新输入");
+  assert.deepEqual(next.prepareSave(), retry);
+});
+
+test("an unchanged pending request is rebuilt against the baseline an older receipt committed", () => {
+  const state = model();
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "旧输入");
+  const older = state.prepareSave();
+  state.edit(["terms", 0, "source"], "新输入");
+  const newer = state.prepareSave();
+  assert.equal(state.acceptSave(receipt(revision("2")), older), true);
+  const retry = state.prepareSave();
+  assert.notEqual(retry.request_id, newer.request_id);
+  assert.equal(retry.expected_revision, revision("2"));
+  assert.equal(retry.material.terms[0].source, "新输入");
+  assert.deepEqual(state.prepareSave(), retry);
+  assert.equal(state.acceptSave(receipt(revision("3")), retry), true);
+  assert.equal(state.dirty, false);
+  assert.equal(state.remoteRevision, revision("3"));
+});
+
+test("a GET of the just-submitted material before its receipt adopts the newer baseline", () => {
+  let refreshes = 0;
+  const state = model({ refresh: () => refreshes++ });
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "已提交");
+  const request = state.prepareSave();
+  state.receive(view("已提交", revision("3")));
+  assert.equal(state.conflict, false);
+  assert.equal(state.dirty, false);
+  assert.equal(state.pendingSave, null);
+  assert.equal(state.acceptSave(receipt(revision("3")), request), true);
+  assert.equal(state.remoteRevision, revision("3"));
+  assert.equal(state.needsRefresh, false);
+  assert.equal(refreshes, 0);
+});
+
+test("a GET of the submitted snapshot keeps later typing dirty without endless conflict or refresh", () => {
+  let refreshes = 0;
+  const state = model({ refresh: () => refreshes++ });
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "已提交");
+  const request = state.prepareSave();
+  state.edit(["terms", 0, "source"], "提交后");
+  for (let poll = 0; poll < 2; poll++) {
+    state.receive(view("已提交", revision("3")));
+    assert.equal(state.material.terms[0].source, "提交后");
+    assert.equal(state.savedSnapshot.terms[0].source, "已提交");
+    assert.equal(state.remoteRevision, revision("3"));
+    assert.equal(state.conflict, false);
+    assert.equal(state.dirty, true);
+  }
+  assert.equal(state.acceptSave(receipt(revision("3")), request), true);
+  assert.equal(state.needsRefresh, false);
+  assert.equal(refreshes, 0);
+  assert.equal(state.material.terms[0].source, "提交后");
+  const next = state.prepareSave();
+  assert.equal(next.expected_revision, revision("3"));
+  assert.equal(next.material.terms[0].source, "提交后");
+});
+
+test("restoring a pending request whose commit succeeded but receipt was lost needs no discard", () => {
+  for (const typedAfter of [false, true]) {
+    const session = storage();
+    const state = model({ storage: session });
+    state.receive(view());
+    state.edit(["terms", 0, "source"], "已提交");
+    state.prepareSave();
+    if (typedAfter) state.edit(["terms", 0, "source"], "提交后");
+    let id = 0;
+    const next = model({ storage: session, requestId: () => `reload-${++id}` });
+    next.receive(view("已提交", revision("2")));
+    assert.equal(next.restore(), true);
+    assert.equal(next.conflict, false);
+    assert.equal(next.remoteRevision, revision("2"));
+    assert.equal(next.savedSnapshot.terms[0].source, "已提交");
+    assert.equal(next.pendingSave, null);
+    assert.equal(next.dirty, typedAfter);
+    assert.equal(next.material.terms[0].source, typedAfter ? "提交后" : "已提交");
+    if (typedAfter) assert.equal(next.prepareSave().expected_revision, revision("2"));
+  }
+});
+
+test("a failed later mirror write removes the stale mirror so reload does not offer it", () => {
+  for (const failure of ["quota", "oversize"]) {
+    const session = storage();
+    const state = model({ storage: session, maxMirrorBytes: 20_000 });
+    state.receive(view());
+    state.edit(["terms", 0, "source"], "较早输入");
+    assert.ok(session.values.has(state.mirrorKey));
+    if (failure === "quota") session.quota = true;
+    const source = failure === "quota" ? "配额失败" : "长输入".repeat(5000);
+    state.edit(["terms", 0, "source"], source);
+    assert.equal(state.material.terms[0].source, source);
+    assert.ok(state.mirrorError);
+    assert.equal(session.values.has(state.mirrorKey), false);
+    const next = model({ storage: session });
+    next.receive(view());
+    assert.equal(next.recoveryChoice, null);
+    assert.equal(next.restore(), false);
+  }
 });
 
 test("an unresolved recovery mirror is not overwritten by new typing or save preparation", () => {
