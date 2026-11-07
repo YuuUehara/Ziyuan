@@ -60,7 +60,10 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   let model = null;
   let tab = "terms";
   let composing = null;
-  let deferred = null;
+  // Updates arriving during an IME composition queue in arrival order; a single
+  // slot would let an older response overwrite a newer one before the model's
+  // ticket watermark ever saw it.
+  let deferred = [];
   let form = null;
   let message = "";
   const selected = { terms: null, persons: null };
@@ -135,10 +138,10 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   }
 
   function applyDeferred() {
-    if (!deferred || composing) return;
-    const { view, ticket } = deferred;
-    deferred = null;
-    update(view, ticket);
+    if (!deferred.length || composing) return;
+    const pending = deferred;
+    deferred = [];
+    for (const { view, ticket } of pending) update(view, ticket);
   }
 
   // Dropping an optional entry field replaces the entry object, which gives it a new model key.
@@ -663,7 +666,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   function update(view, ticket) {
     if (disposed) return false;
     if (composing) {
-      deferred = { view, ticket };
+      deferred.push({ view, ticket });
       return false;
     }
     const project = view?.project?.id;
@@ -678,6 +681,11 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
       }
     }
     const result = model.receive(view, ticket);
+    // A clean changed GET replaces entry objects and their keys; memory keyed by
+    // keys that no longer exist can never be reached again. Local edits keep keys
+    // (follow/shiftMemory), so their memory survives this prune.
+    const live = new Set([...keys("terms"), ...keys("persons")]);
+    for (const key of entryState.keys()) if (!live.has(key)) entryState.delete(key);
     render();
     return result;
   }
@@ -718,6 +726,13 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   return {
     update,
     focusField,
+    // Task 12 polling helpers: tickets for GETs must come from the same model
+    // that receives their responses, or the watermark cannot reject stale ones.
+    // beginReceive() returns undefined until the first update creates the model.
+    beginReceive: () => model?.beginReceive(),
+    needsRefresh: () => !!model?.needsRefresh,
+    // Test-only inspection: entryState is pruned against live keys after each receive.
+    _entryStateSize: () => entryState.size,
     hasDirty: () => !disposed && (!!composing || !!model?.dirty),
     flushMirror() {
       if (disposed || !model?.canSave) return;
@@ -727,7 +742,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     dispose() {
       disposed = true;
       composing = null;
-      deferred = null;
+      deferred = [];
       form = null;
       listItems = new Map();
       host.replaceChildren();

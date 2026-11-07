@@ -773,3 +773,70 @@ test("removing an earlier item reindexes later memory without collisions in any 
     { kind: "person", person_id: "p-2" }, { kind: "person", person_id: "p-1" },
   ]);
 });
+
+test("GET updates during composition replay in arrival order and stale tickets lose", () => {
+  const { host, editor } = setup();
+  const source = field(host, "source");
+  const ticket1 = editor.beginReceive();
+  const ticket2 = editor.beginReceive();
+  assert.ok(ticket1 && ticket2 && ticket1 !== ticket2, "tickets come from the real model");
+  const newer = fullMaterial(); newer.terms[0].source = "新";
+  const older = fullMaterial(); older.terms[0].source = "旧";
+  source.focus();
+  source.dispatch("compositionstart");
+  assert.equal(editor.update(view(newer, revision("2")), ticket2), false);
+  assert.equal(editor.update(view(older, revision("1")), ticket1), false);
+  assert.equal(source.value, "先生", "nothing is applied mid-composition");
+  assert.equal(field(host, "source"), source, "the form node survives the deferral");
+  source.dispatch("compositionend");
+  assert.equal(field(host, "source").value, "新", "the newest valid GET wins");
+  assert.equal(editor.needsRefresh(), true, "the stale ticket is rejected by the model");
+});
+
+test("synchronous updates during composition keep arrival order and local input survives", () => {
+  const { host, editor } = setup();
+  const source = field(host, "source");
+  const first = fullMaterial(); first.terms[0].source = "甲";
+  const second = fullMaterial(); second.terms[0].source = "乙";
+  source.dispatch("compositionstart");
+  editor.update(view(first, revision("2")));
+  editor.update(view(second, revision("3")));
+  assert.equal(source.value, "先生");
+  source.dispatch("compositionend");
+  assert.equal(field(host, "source").value, "乙", "the last synchronous view wins");
+
+  const source2 = field(host, "source");
+  source2.dispatch("compositionstart");
+  source2.value = "本地";
+  source2.dispatch("input", { isComposing: true });
+  const remote = fullMaterial(); remote.terms[0].source = "远端";
+  editor.update(view(remote, revision("4")));
+  source2.dispatch("compositionend");
+  assert.equal(field(host, "source").value, "本地", "composition input is never overwritten");
+  assert.equal(editor.hasDirty(), true);
+});
+
+test("clean remote replacement prunes stale entry memory while survivors keep theirs", () => {
+  const { host, editor } = setup();
+  click(tab(host, "persons"));
+  check(toggle(host, "reading"), false);
+  check(toggle(host, "reading"), true);
+  assert.equal(field(host, "reading").value, "えりん");
+  assert.equal(editor.hasDirty(), false, "off-then-on restores the saved value");
+
+  editor.update(view(fullMaterial()));
+  check(toggle(host, "reading"), false);
+  check(toggle(host, "reading"), true);
+  assert.equal(field(host, "reading").value, "えりん", "an unchanged update keeps entry memory");
+
+  const sizes = [];
+  for (const digit of ["2", "3", "4"]) {
+    const changed = fullMaterial();
+    changed.persons[0].name = `名${digit}`;
+    editor.update(view(changed, revision(digit)));
+    assert.equal(field(host, "name").value, `名${digit}`);
+    sizes.push(editor._entryStateSize());
+  }
+  assert.deepEqual(sizes, [sizes[0], sizes[0], sizes[0]], "replaced entries leave no stale memory");
+  assert.ok(sizes[0] <= 2, `only live entries hold state, got ${sizes[0]}`);
+});
