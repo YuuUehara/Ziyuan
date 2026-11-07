@@ -123,8 +123,8 @@ try {
   const prepareStatus = await evaluate("document.querySelector('#materials-status').textContent");
   await evaluate("renderTextNow()");
   await waitJs("document.querySelector('#text-n2b-hints').textContent.includes('术语：') || document.querySelector('#text-n2b-hints').textContent.includes('没有适用')", 20000, "段旁提示结果");
-  await evaluate("document.querySelector('#n2b-associations').value = '[]'; document.querySelector('#n2b-apply').click()");
-  await waitJs("document.querySelector('#n2b-assoc-state').textContent.includes('已应用')", 10000, "段旁关联应用");
+  await evaluate("document.querySelector('#n2b-refresh').click()");
+  await waitJs("document.querySelector('#n2b-assoc-state').textContent.includes('已刷新')", 10000, "段旁提示刷新");
   const assocStatus = await evaluate("document.querySelector('#n2b-assoc-state').textContent");
   const n2bHints = await evaluate("document.querySelector('#text-n2b-hints').textContent");
   // 焦点保持：在临时关联输入后刷新，稳定 DOM 不应重建该行或抢走焦点。
