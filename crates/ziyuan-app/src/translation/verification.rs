@@ -365,6 +365,17 @@ impl Translations {
         project: &str,
         block: &str,
     ) -> Result<VerificationView> {
+        self.verification_with_associations(court, project, block, &[])
+    }
+
+    /// Same read-only view, with explicit paragraph associations for v2 address rules.
+    pub fn verification_with_associations(
+        &self,
+        court: Option<&Court>,
+        project: &str,
+        block: &str,
+        associations: &[crate::translation::visibility::ParagraphAssociations],
+    ) -> Result<VerificationView> {
         let material = self.verification_materials(court, project, block)?;
         let book = self
             .verification_file(project)?
@@ -440,6 +451,25 @@ impl Translations {
             .collect();
         let mut hints = Vec::new();
         if let (Some(context), Some(target)) = (&material.context, &material.translation) {
+            let applicable_rules = if associations.is_empty() {
+                None
+            } else {
+                let project_file = self.project(project)?;
+                let report = crate::translation::visibility::evaluate_context_visibility(
+                    &project_file,
+                    &context.glossary,
+                    block,
+                    associations,
+                )?;
+                Some(
+                    report
+                        .applicable
+                        .address_rules
+                        .into_iter()
+                        .map(|r| (r.person_id, r.rule_index))
+                        .collect::<std::collections::HashSet<_>>(),
+                )
+            };
             for (source, target) in material.source.paragraphs.iter().zip(&target.paragraphs) {
                 match &context.glossary {
                     crate::translation::Glossary::Legacy(entries) => {
@@ -485,7 +515,12 @@ impl Translations {
                             }
                         }
                         for person in &data.persons {
-                            for rule in &person.address_rules {
+                            for (rule_index, rule) in person.address_rules.iter().enumerate() {
+                                if let Some(set) = &applicable_rules
+                                    && !set.contains(&(person.person_id.clone(), rule_index))
+                                {
+                                    continue;
+                                }
                                 let Some(term) = data.terms.iter().find(|t| t.term_id == rule.term)
                                 else {
                                     continue;

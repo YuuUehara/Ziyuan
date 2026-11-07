@@ -2,7 +2,9 @@
 use std::{error::Error, io::Read, path::PathBuf};
 use ziyuan_app::{
     AppError, Session,
-    translation::{EvidenceInput, Translations, VerificationInput},
+    translation::{
+        EvidenceInput, Translations, VerificationInput, visibility::ParagraphAssociations,
+    },
 };
 use ziyuan_storage::EventLog;
 
@@ -29,7 +31,7 @@ pub(crate) const HELP: &str = r#"词证与逐段勘校（离线；均支持 --js
 
 pub(crate) enum Action {
     Evidence(String, String, PathBuf),
-    Show(String, String),
+    Show(String, String, Option<PathBuf>),
     Record(String, String, PathBuf),
 }
 
@@ -43,7 +45,12 @@ pub(crate) fn parse(args: &[String]) -> Result<Action, Box<dyn Error>> {
             Ok(Action::Evidence((*p).into(), (*b).into(), (*f).into()))
         }
         ["verification", "show", p, b] if positional(p) && positional(b) => {
-            Ok(Action::Show((*p).into(), (*b).into()))
+            Ok(Action::Show((*p).into(), (*b).into(), None))
+        }
+        ["verification", "show", p, b, "--associations", f]
+            if positional(p) && positional(b) && positional(f) =>
+        {
+            Ok(Action::Show((*p).into(), (*b).into(), Some((*f).into())))
         }
         ["verification", "record", p, b, "--file", f]
             if positional(p) && positional(b) && positional(f) =>
@@ -90,8 +97,19 @@ pub(crate) fn run(action: Action, json: bool) -> Result<(), Box<dyn Error>> {
     };
     let court = session.as_ref().map(Session::court);
     match action {
-        Action::Show(project, block) => {
-            let view = translations.verification(court, &project, &block)?;
+        Action::Show(project, block, associations) => {
+            let view = if let Some(path) = associations {
+                let associations: Vec<ParagraphAssociations> =
+                    serde_json::from_slice(&read_request(&path)?)?;
+                translations.verification_with_associations(
+                    court,
+                    &project,
+                    &block,
+                    &associations,
+                )?
+            } else {
+                translations.verification(court, &project, &block)?
+            };
             if !json {
                 println!("逐段勘校：言行归属、事理正反、数目分寸、前后次第、称谓名分、谐趣留白。");
                 let structural = match view.structure.as_ref() {

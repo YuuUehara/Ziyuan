@@ -4,10 +4,10 @@ use super::{
     Result, invalid,
 };
 use crate::text_project::{Project, PromptBlock};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParagraphAssociations {
     pub paragraph: String,
     pub persons: Vec<String>,

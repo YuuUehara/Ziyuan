@@ -123,6 +123,9 @@ try {
   const prepareStatus = await evaluate("document.querySelector('#materials-status').textContent");
   await evaluate("renderTextNow()");
   await waitJs("document.querySelector('#text-n2b-hints').textContent.includes('术语：') || document.querySelector('#text-n2b-hints').textContent.includes('没有适用')", 20000, "段旁提示结果");
+  await evaluate("document.querySelector('#n2b-associations').value = '[]'; document.querySelector('#n2b-apply').click()");
+  await waitJs("document.querySelector('#n2b-assoc-state').textContent.includes('已应用')", 10000, "段旁关联应用");
+  const assocStatus = await evaluate("document.querySelector('#n2b-assoc-state').textContent");
   const n2bHints = await evaluate("document.querySelector('#text-n2b-hints').textContent");
   // 焦点保持：在临时关联输入后刷新，稳定 DOM 不应重建该行或抢走焦点。
   await evaluate("(() => { const input = document.querySelector('#materials-associations input[data-field=\"persons\"]'); input.focus(); input.value = 'p1'; input.dispatchEvent(new Event('input', { bubbles: true })); })()");
@@ -177,7 +180,7 @@ try {
   const narrow = await evaluate("JSON.stringify({ overflow: document.documentElement.scrollWidth > window.innerWidth + 1, saveVisible: !!document.querySelector('#materials-save')?.getBoundingClientRect().width, editor: !!document.querySelector('#text-materials-editor .materials-editor'), listWidth: document.querySelector('#materials-associations')?.getBoundingClientRect().width || 0 })");
   const narrowShot = await send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(out.replace(/\.png$/, "-narrow.png"), Buffer.from(narrowShot.data, "base64"));
-  console.log(JSON.stringify({ ok: true, project, status, validateStatus, saveStatus, prepareStatus, previewStatus, report, n2bHints, focusKept, states, restoreVisible, recovered, recoveredContains, narrow, externalSave, conflictStatus, conflictKept, discardVisible, afterDiscard, editor, screenshot: out }, null, 2));
+  console.log(JSON.stringify({ ok: true, project, status, validateStatus, saveStatus, prepareStatus, assocStatus, previewStatus, report, n2bHints, focusKept, states, restoreVisible, recovered, recoveredContains, narrow, externalSave, conflictStatus, conflictKept, discardVisible, afterDiscard, editor, screenshot: out }, null, 2));
 } catch (error) {
   console.error("浏览器烟测失败：" + error.message);
   if (serverErr) console.error(serverErr.slice(-2000));

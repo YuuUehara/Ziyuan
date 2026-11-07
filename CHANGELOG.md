@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.5.2 — 2026-11-08
 
-- 第二版资料复核：`context.json` 导出形状加测试；称谓提示展示说话人/对象/范围条件，无关联输入时不自动判定。
+- 第二版资料复核：`context.json` 导出形状加测试；`verification_with_associations` 与 CLI `--associations` 按段落关联过滤称谓规则；段旁提示支持关联 JSON 输入。
 
 ## 1.5.1 — 2026-11-08
 

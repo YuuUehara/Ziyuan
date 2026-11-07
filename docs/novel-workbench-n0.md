@@ -1454,4 +1454,6 @@ CLI 人工流程已通；Web／TUI 入口未开，包版本未升，未发版。
 - 生产读取已放开 v2：快照读取、`export` 的 context.json（对象形状）、勘校术语提示与 `context approve` 均可处理 v2；札记的术语并入仍拒绝 v2（文体札记不受影响）。
 - 验收：`materials` 38 项（含 prepare→approve v2）、Web 68 项、`context_v2` 4 项通过；真实浏览器保存草稿→准备生产资料得到 305 字节与下一步命令；`text context approve` 后 `text translate` 成功，导出的 `context.json` 的 glossary 为 v2 对象；全量 `cargo test` 退出码 0（`temp_lease_probe` 预期噪声）。
 - v2 勘校已含人物姓名／别名与称谓规则关联术语的提示；称谓的说话人／目标条件只提示“尚未核”，不做语义判定。旧版 `v1.5.0` 二进制复验：对同一 v2 草稿执行 `text context approve` 报“人物／术语资料尚未开放”并退出 1。
-- 模型提示材料：`export` 的 `context.json` 已加 v2 形状断言（`glossary.format=2`、`terms` 数组）；复核提示的称谓规则现在展示说话人、对象与范围条件，无关联输入时仍不自动判定（复核 API 尚无关联入口），作为安全边界。
+- 模型提示材料：`export` 的 `context.json` 已加 v2 形状断言（`glossary.format=2`、`terms` 数组）。
+- 复核关联：新增 `verification_with_associations` 与 CLI `text verification show <项目> <块> --associations <文件>`；提供段落关联时，称谓规则经 `evaluate_context_visibility` 过滤后才提示，未提供时保留条件展示。
+- 段旁提示：译书页新增关联 JSON 输入与“应用关联”，传给 `/materials/preview` 的 `associations`；空关联仍只显示术语/人物。

@@ -25,7 +25,7 @@ mod strict_json;
 mod target;
 mod usage;
 mod verification;
-mod visibility;
+pub mod visibility;
 mod zhupi;
 
 #[cfg(test)]

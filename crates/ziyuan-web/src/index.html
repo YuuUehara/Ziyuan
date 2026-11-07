@@ -860,6 +860,12 @@
             </div>
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
+            <section class="text-materials" id="text-n2b-assoc" aria-label="段旁关联输入">
+              <label for="n2b-associations">段旁关联 JSON（可选；供称谓判定）</label>
+              <textarea id="n2b-associations" rows="2" spellcheck="false" placeholder='[{"paragraph":"c0001-p0001","persons":["p_1"],"targets":["p_1"],"speaker":{"kind":"person","person_id":"p_1"}}]'></textarea>
+              <button class="small" id="n2b-apply" type="button">应用关联</button>
+              <span id="n2b-assoc-state"></span>
+            </section>
             <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
@@ -1603,7 +1609,22 @@ function associationRow(paragraph) {
   row.append(label, persons, targets, speaker);
   return row;
 }
+$("n2b-apply")?.addEventListener("click", () => {
+  const raw = $("n2b-associations")?.value?.trim() || "[]";
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("须为数组");
+    n2bAssociations = parsed;
+    $("n2b-assoc-state").textContent = "已应用 " + parsed.length + " 条关联";
+    const host = $("text-n2b-hints");
+    if (host) host.dataset.key = "";
+    renderN2bHints();
+  } catch (e) {
+    $("n2b-assoc-state").textContent = "关联 JSON 无效：" + e.message;
+  }
+});
 let n2bKey = null;
+let n2bAssociations = [];
 async function renderN2bHints() {
   const host = $("text-n2b-hints");
   if (!host) return;
@@ -1618,7 +1639,7 @@ async function renderN2bHints() {
     const view = await api("/text/" + encodeURIComponent(textProjectId) + "/materials");
     if (n2bKey !== epoch) return;
     const draft = view.draft;
-    const key = textProjectId + "/" + textBlockId + "/" + (draft?.revision || "none");
+    const key = textProjectId + "/" + textBlockId + "/" + (draft?.revision || "none") + "/" + JSON.stringify(n2bAssociations);
     if (host.dataset.key === key) return;
     host.dataset.key = key;
     host.replaceChildren();
@@ -1633,7 +1654,7 @@ async function renderN2bHints() {
       workspace_id: view.workspace_id,
       material: draft.material,
       block: textBlockId,
-      associations: [],
+      associations: n2bAssociations,
     });
     if (n2bKey !== epoch) return;
     const applicable = result.report?.applicable || {};
