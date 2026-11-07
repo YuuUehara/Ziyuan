@@ -787,3 +787,65 @@ test("range scope endpoints with null paragraphs reconcile with a GET that omits
     assert.equal(next.material.terms[0].source, "提交后", location);
   }
 });
+
+test("a clean GET at a new baseline clears a superseded pending request and its mirror", () => {
+  const session = storage();
+  const state = model({ storage: session });
+  state.receive(view());
+  state.prepareSave();
+  assert.ok(session.values.has(state.mirrorKey));
+  state.receive(view("他处修改", revision("3")));
+  assert.equal(state.material.terms[0].source, "他处修改");
+  assert.equal(state.dirty, false);
+  assert.equal(state.pendingSave, null);
+  assert.equal(session.values.has(state.mirrorKey), false);
+  const next = model({ storage: session });
+  next.receive(view("他处修改", revision("3")));
+  assert.equal(next.recoveryChoice, null);
+  assert.equal(next.restore(), false);
+  assert.equal(next.conflict, false);
+  assert.equal(next.material.terms[0].source, "他处修改");
+});
+
+test("a clean GET at the same baseline keeps a still-valid pending retry", () => {
+  const session = storage();
+  const state = model({ storage: session });
+  state.receive(view());
+  const request = state.prepareSave();
+  state.receive(view());
+  assert.deepEqual(state.pendingSave, request);
+  assert.deepEqual(state.prepareSave(), request);
+  assert.equal(JSON.parse(session.values.get(state.mirrorKey)).pendingSave.request_id,
+    request.request_id);
+});
+
+test("a clean GET does not overwrite an unresolved recovery mirror", () => {
+  const session = storage();
+  const original = model({ storage: session });
+  original.receive(view());
+  original.edit(["terms", 0, "source"], "待恢复");
+  const savedMirror = session.values.get(original.mirrorKey);
+  const next = model({ storage: session });
+  next.receive(view());
+  next.receive(view("他处修改", revision("3")));
+  assert.equal(session.values.get(next.mirrorKey), savedMirror);
+  assert.equal(next.restore(), true);
+  assert.equal(next.material.terms[0].source, "待恢复");
+});
+
+test("reverting to a rebased baseline lets a later clean GET adopt server state", () => {
+  const session = storage();
+  const state = model({ storage: session });
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "X");
+  state.prepareSave();
+  state.edit(["terms", 0, "source"], "Y");
+  state.receive(view("X", revision("2")));
+  state.edit(["terms", 0, "source"], "X");
+  assert.equal(state.dirty, false);
+  state.receive(view("Z", revision("3")));
+  assert.equal(state.material.terms[0].source, "Z");
+  assert.equal(state.conflict, false);
+  assert.equal(state.pendingSave, null);
+  assert.equal(session.values.has(state.mirrorKey), false);
+});

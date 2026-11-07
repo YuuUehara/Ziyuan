@@ -192,6 +192,11 @@ export class MaterialModel {
       this.savedSnapshot = clone(this._remoteMaterial);
       this._baselineRevision = this.remoteRevision;
       this.localEpoch++;
+      if (this.pendingSave && this.pendingSave.expected_revision !== this._baselineRevision) {
+        this.pendingSave = null;
+      }
+      // A new workspace's mirror is read below and must not be overwritten first.
+      if (!changedWorkspace) this._writeMirror();
     } else if (this._reconcile()) {
       this._writeMirror();
     }
