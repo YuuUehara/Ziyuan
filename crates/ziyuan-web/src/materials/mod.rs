@@ -7,11 +7,12 @@ mod wire;
 
 pub(crate) use identity::workspace_identity;
 
-use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, State, rejection::BytesRejection};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -21,6 +22,18 @@ use ziyuan_storage::{JsonFileError, WorkspaceError};
 
 use crate::state::AppState;
 use wire::{Bound, PreviewBody, SaveBody, ValidateBody};
+
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+
+/// Deliberately scoped to materials, not the rest of the API.
+pub(crate) fn router() -> Router<AppState> {
+    Router::new()
+        .route("/text/{project}/materials", get(view))
+        .route("/text/{project}/materials/draft", post(save))
+        .route("/text/{project}/materials/validate", post(validate))
+        .route("/text/{project}/materials/preview", post(preview))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+}
 
 #[derive(Serialize)]
 struct WithWorkspace<'a, T> {
@@ -45,9 +58,9 @@ pub(crate) async fn save(
     State(app): State<AppState>,
     UrlPath(project): UrlPath<String>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (id, request) = match accept::<SaveBody>(&app, &headers, &body) {
+    let (id, request) = match accept::<SaveBody>(&app, &headers, body) {
         Ok(accepted) => accepted,
         Err(response) => return *response,
     };
@@ -62,9 +75,9 @@ pub(crate) async fn validate(
     State(app): State<AppState>,
     UrlPath(project): UrlPath<String>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (id, request) = match accept::<ValidateBody>(&app, &headers, &body) {
+    let (id, request) = match accept::<ValidateBody>(&app, &headers, body) {
         Ok(accepted) => accepted,
         Err(response) => return *response,
     };
@@ -79,9 +92,9 @@ pub(crate) async fn preview(
     State(app): State<AppState>,
     UrlPath(project): UrlPath<String>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let (id, mut request) = match accept::<PreviewBody>(&app, &headers, &body) {
+    let (id, mut request) = match accept::<PreviewBody>(&app, &headers, body) {
         Ok(accepted) => accepted,
         Err(response) => return *response,
     };
@@ -116,9 +129,20 @@ fn workspace(app: &AppState) -> Result<String, Box<Response>> {
 fn accept<T: DeserializeOwned + Bound>(
     app: &AppState,
     headers: &HeaderMap,
-    body: &[u8],
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<(String, T), Box<Response>> {
     let id = workspace(app)?;
+    let body = body.map_err(|rejection| {
+        let (status, message) = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "资料请求至多 2 MiB；请保留输入并缩减资料",
+            )
+        } else {
+            (StatusCode::BAD_REQUEST, "资料请求正文读取失败，请重试")
+        };
+        Box::new(reply(&id, status, message.into(), None))
+    })?;
     if !is_json(headers) {
         return Err(Box::new(reply(
             &id,
@@ -127,7 +151,7 @@ fn accept<T: DeserializeOwned + Bound>(
             None,
         )));
     }
-    let request: T = wire::decode(body)
+    let request: T = wire::decode(&body)
         .map_err(|message| Box::new(reply(&id, StatusCode::BAD_REQUEST, message, None)))?;
     if request.workspace_id() != id {
         return Err(Box::new(reply(
@@ -179,38 +203,94 @@ fn reply(id: &str, status: StatusCode, error: String, extra: Option<(&str, Value
     (status, Json(body)).into_response()
 }
 
-/// Lock and workspace-safety diagnostics can name absolute paths, so those get fixed text.
+/// Never expose internal Display diagnostics: they may include paths or stored input.
 fn failure(id: &str, error: MaterialError) -> Response {
     use MaterialError as E;
-    let message = error.to_string();
-    let (status, extra) = match &error {
-        E::Issue(issue) => (StatusCode::BAD_REQUEST, Some(("issue", json!(issue)))),
-        E::Project(_) | E::Visibility(_) => (StatusCode::BAD_REQUEST, None),
-        E::Conflict { current } => (StatusCode::CONFLICT, Some(("current", json!(current)))),
-        E::RequestConflict | E::ProjectChanged => (StatusCode::CONFLICT, None),
-        E::Storage(JsonFileError::LockTimeout { .. }) => {
+    let (status, message, extra) = match &error {
+        E::Issue(issue) => {
+            use ziyuan_app::translation::materials::MaterialIssueCode as C;
+            // Keep the structured location and code, but not values quoted by
+            // application diagnostics (e.g. an unknown chapter or reference ID).
+            let message = match issue.code {
+                C::Shape => "资料字段格式不对，请检查类型及格式版本",
+                C::Required => "资料缺少必填字段，请补全后重试",
+                C::Id => "资料身份不合规或重复，请检查标识",
+                C::Reference => "资料引用不存在，请检查关联标识",
+                C::Position => "资料章段位置不合规，请检查范围",
+                C::Evidence => "资料证据不合规，请核对原文及引用",
+                C::Limit => "资料超过编辑限制，请保留输入并缩减资料",
+            };
+            let mut issue = issue.clone();
+            issue.message = message.into();
             return reply(
                 id,
-                StatusCode::CONFLICT,
-                "资料草稿文件正被其他进程使用，请稍后重试".into(),
-                None,
+                StatusCode::BAD_REQUEST,
+                message.into(),
+                Some(("issue", json!(issue))),
             );
         }
-        E::Storage(JsonFileError::TooLarge { .. }) => (StatusCode::CONFLICT, None),
+        E::Project(_) => (
+            StatusCode::BAD_REQUEST,
+            "资料所依据的项目不可用，请检查项目后重试",
+            None,
+        ),
+        E::Visibility(_) => (
+            StatusCode::BAD_REQUEST,
+            "资料预览的目标块或段落关联不合规，请检查选择及关联",
+            None,
+        ),
+        E::Conflict { current } => (
+            StatusCode::CONFLICT,
+            "资料草稿修订冲突；请保留输入并重新读取",
+            Some(("current", json!(current))),
+        ),
+        E::RequestConflict => (
+            StatusCode::CONFLICT,
+            "资料草稿请求身份已被不同内容使用",
+            None,
+        ),
+        E::ProjectChanged => (
+            StatusCode::CONFLICT,
+            "资料所依据的项目已变化，请重新读取并核对",
+            None,
+        ),
+        E::Storage(JsonFileError::LockTimeout { .. }) => (
+            StatusCode::CONFLICT,
+            "资料草稿文件正被其他进程使用，请稍后重试",
+            None,
+        ),
+        E::Storage(JsonFileError::TooLarge { .. }) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "资料草稿文件超过大小上限；请保留输入并检查草稿",
+            None,
+        ),
+        E::Storage(JsonFileError::Newer { .. }) => (
+            StatusCode::CONFLICT,
+            "资料草稿由更新版本写入，请升级紫垣后再打开",
+            None,
+        ),
         E::Workspace(
-            WorkspaceError::Io(_) | WorkspaceError::Unsafe(_) | WorkspaceError::Corrupt(_),
-        ) => {
-            return reply(
-                id,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "工作区受管写入状态不可用，请先用命令行检查工作区后重试".into(),
-                None,
-            );
-        }
-        E::Workspace(_) => (StatusCode::CONFLICT, None),
-        E::Storage(_) | E::Io(_) | E::Path(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
+            WorkspaceError::Io(_)
+            | WorkspaceError::Unsafe(_)
+            | WorkspaceError::Corrupt(_)
+            | WorkspaceError::Recovery(_),
+        ) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "工作区受管写入状态不可用，请先用命令行检查工作区后重试",
+            None,
+        ),
+        E::Workspace(_) => (
+            StatusCode::CONFLICT,
+            "工作区受管写入尚不可用，请先用命令行检查工作区后重试",
+            None,
+        ),
+        E::Storage(_) | E::Io(_) | E::Path(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "资料草稿读写失败或文件已损坏，请检查草稿后重试",
+            None,
+        ),
     };
-    reply(id, status, message, extra)
+    reply(id, status, message.into(), extra)
 }
 
 #[cfg(test)]

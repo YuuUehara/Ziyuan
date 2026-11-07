@@ -14,7 +14,15 @@ pub(crate) trait Bound {
 }
 
 pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    let message = |e: serde_json::Error| format!("资料请求格式不对：{e}");
+    // serde diagnostics can quote arbitrary input keys, strings and enum tags.
+    // Keep only location metadata, never the diagnostic itself.
+    let message = |e: serde_json::Error| {
+        format!(
+            "资料请求格式不对（第 {} 行、第 {} 列）；请检查字段、类型及嵌套层数",
+            e.line(),
+            e.column()
+        )
+    };
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     Shape::new(0)
         .deserialize(&mut deserializer)

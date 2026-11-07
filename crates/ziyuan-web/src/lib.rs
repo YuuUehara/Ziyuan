@@ -257,16 +257,7 @@ fn router_for(app: AppState) -> Router {
             "/text/{project}/blocks/{block}/finalize",
             post(text::finalize),
         )
-        .route("/text/{project}/materials", get(materials::view))
-        .route("/text/{project}/materials/draft", post(materials::save))
-        .route(
-            "/text/{project}/materials/validate",
-            post(materials::validate),
-        )
-        .route(
-            "/text/{project}/materials/preview",
-            post(materials::preview),
-        )
+        .merge(materials::router())
         .route("/text/{project}/human/progress", get(text::human_progress))
         .route(
             "/text/{project}/blocks/{block}/human",

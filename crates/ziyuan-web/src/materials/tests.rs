@@ -1,4 +1,6 @@
 //! Independent HTTP fixtures: no dependency on text_tests' private helpers.
+#[path = "limits_tests.rs"]
+mod limits_tests;
 use crate::tests::{TOKEN, VIEWER};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -59,13 +61,20 @@ impl Drop for Server {
     }
 }
 async fn start(root: &Path, token: &str) -> Server {
+    start_with_backend(root, token, Arc::new(DemoBackend)).await
+}
+async fn start_with_backend(
+    root: &Path,
+    token: &str,
+    backend: Arc<dyn ziyuan_runtime::WorkerBackend>,
+) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let router = crate::router(crate::Config {
         root: root.to_owned(),
         token: token.into(),
         viewer_token: Some(VIEWER.into()),
-        backend: Arc::new(DemoBackend),
+        backend,
         limits: Limits {
             max_concurrent: 2,
             timeout: std::time::Duration::from_secs(10),
