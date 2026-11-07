@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use ziyuan_app::translation::Translations;
-use ziyuan_app::translation::materials::MaterialError;
+use ziyuan_app::translation::materials::{MaterialError, MaterialIssue};
 use ziyuan_storage::{JsonFileError, WorkspaceError};
 
 use crate::state::AppState;
@@ -83,7 +83,10 @@ pub(crate) async fn validate(
     };
     let root = app.0.config.root.clone();
     run(id, move || {
-        Translations::new(&root).validate_material_input(&project, &request.material)
+        let mut validation =
+            Translations::new(&root).validate_material_input(&project, &request.material)?;
+        validation.issues.iter_mut().for_each(sanitize_issue);
+        Ok(validation)
     })
     .await
 }
@@ -203,29 +206,33 @@ fn reply(id: &str, status: StatusCode, error: String, extra: Option<(&str, Value
     (status, Json(body)).into_response()
 }
 
+/// Keeps the structured location and code, but replaces the message: application
+/// diagnostics quote input values such as an unknown chapter or reference ID.
+fn sanitize_issue(issue: &mut MaterialIssue) {
+    use ziyuan_app::translation::materials::MaterialIssueCode as C;
+    issue.message = match issue.code {
+        C::Shape => "资料字段格式不对，请检查类型及格式版本",
+        C::Required => "资料缺少必填字段，请补全后重试",
+        C::Id => "资料身份不合规或重复，请检查标识",
+        C::Reference => "资料引用不存在，请检查关联标识",
+        C::Position => "资料章段位置不合规，请检查范围",
+        C::Evidence => "资料证据不合规，请核对原文及引用",
+        C::Limit => "资料超过编辑限制，请保留输入并缩减资料",
+    }
+    .into();
+}
+
 /// Never expose internal Display diagnostics: they may include paths or stored input.
 fn failure(id: &str, error: MaterialError) -> Response {
     use MaterialError as E;
     let (status, message, extra) = match &error {
         E::Issue(issue) => {
-            use ziyuan_app::translation::materials::MaterialIssueCode as C;
-            // Keep the structured location and code, but not values quoted by
-            // application diagnostics (e.g. an unknown chapter or reference ID).
-            let message = match issue.code {
-                C::Shape => "资料字段格式不对，请检查类型及格式版本",
-                C::Required => "资料缺少必填字段，请补全后重试",
-                C::Id => "资料身份不合规或重复，请检查标识",
-                C::Reference => "资料引用不存在，请检查关联标识",
-                C::Position => "资料章段位置不合规，请检查范围",
-                C::Evidence => "资料证据不合规，请核对原文及引用",
-                C::Limit => "资料超过编辑限制，请保留输入并缩减资料",
-            };
             let mut issue = issue.clone();
-            issue.message = message.into();
+            sanitize_issue(&mut issue);
             return reply(
                 id,
                 StatusCode::BAD_REQUEST,
-                message.into(),
+                issue.message.clone(),
                 Some(("issue", json!(issue))),
             );
         }

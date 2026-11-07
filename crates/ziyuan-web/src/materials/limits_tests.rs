@@ -140,6 +140,38 @@ async fn preview_semantic_errors_preserve_structured_issue_without_input_values(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn validate_semantic_issues_keep_code_and_path_without_input_values() {
+    let f = Fixture::new();
+    let s = start(&f.root, TOKEN).await;
+    let id = identity(&s, &f).await;
+    let before = tree(&f.root);
+    let marker = "zz-input-marker-7Q";
+    let material = format!(
+        r#"{{"format":2,"terms":[{{"term_id":"t","source":"s","category":"common","allowed":["a"],"scope":{{"kind":"range","from":{{"chapter":"{marker}"}},"to":{{"chapter":"{marker}"}}}},"evidence":[],"status":"tentative"}}],"persons":[]}}"#
+    );
+    let (code, result) = call(
+        &s,
+        &(f.route() + "/validate"),
+        Some(TOKEN),
+        Some(raw(&id, &material, "/validate", &f)),
+    )
+    .await;
+    assert_eq!(code, 200, "{result}");
+    assert_eq!(result["valid"], false);
+    assert_eq!(result["workspace_id"], id);
+    let issue = &result["issues"][0];
+    assert_eq!(issue["code"], "position", "{result}");
+    assert_eq!(issue["path"][0], "terms", "{result}");
+    assert_eq!(issue["path"][1], 0, "{result}");
+    assert!(issue["message"].as_str().is_some_and(|m| !m.is_empty()));
+    assert!(result.get("report").is_none());
+    let text = result.to_string();
+    assert!(!text.contains(marker), "validate echoed input: {text}");
+    assert!(!text.contains(TOKEN));
+    assert_eq!(tree(&f.root), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn raw_revision_conflict_preserves_current_and_state() {
     let f = Fixture::new();
     let s = start(&f.root, TOKEN).await;
