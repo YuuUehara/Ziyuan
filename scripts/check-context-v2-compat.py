@@ -38,7 +38,10 @@ def run(binary, root, *args, fail=False):
         [str(binary), *args, *(["--json"] if json_mode else [])], cwd=root, env=env,
         capture_output=True, timeout=30,
     )
-    message = result.stderr.decode("utf-8", errors="replace")
+    try:
+        message = result.stderr.decode("utf-8")
+    except UnicodeDecodeError:
+        message = result.stderr.decode("gbk", errors="replace")
     assert (result.returncode != 0) == fail, (args, result.returncode, message)
     if fail:
         return message
@@ -135,6 +138,8 @@ def main():
                 (draft / "glossary.json").write_bytes(payload)
                 before = tree(work)
                 error = run(binary, work, "text", "context", "approve", project, fail=True)
+                if expected not in error:
+                    print("DEBUG", name, shape, expected.encode("unicode_escape"), error.encode("unicode_escape"))
                 assert expected in error, (name, shape, error)
                 assert not (work / snapshot_rel).exists()
                 if name == "new":

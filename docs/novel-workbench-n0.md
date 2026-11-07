@@ -1331,3 +1331,44 @@ CLI 人工流程已通；Web／TUI 入口未开，包版本未升，未发版。
 - 旧底座 CLI 从已推送 `9f9c44dc` 独立源码编译；`python scripts/check-context-v2-compat.py --old <旧底座CLI绝对路径> --new <新CLI绝对路径> --old-supports-v2` 通过。第一版草稿／快照／导出逐字节与提示／札记重试一致（清单独立创建时间的固定方式同第 23 节）；含人物可用起点的新第二版草稿与哈希正确快照，旧底座报未知字段拒绝、不新增快照，新 CLI 仍报“人物／术语资料尚未开放”且盘面不变。脚本默认仍支持以 `8284a1fb` 数组旧读器作原第 23 节对照。
 - 最终本机 Windows：`cargo test --workspace` 顶层 **851 项通过**，Node 编辑器 **34 项通过**；fmt 检查、Windows 全目标 clippy、Linux GNU／macOS ARM64 全目标交叉 clippy（`-D warnings`）通过；文档链接 **39 文件、488 条相对链接**通过。预期失败的租约探针子进程不计作顶层失败；交叉检查不替代原生 CI。
 - 本批没有模型请求捕获，因为实际外发入口仍未开放；不能宣称全文防剧透、完整 N2a、人物资料 UI 或称谓语义正确。资料录入者声明错误的别名／口吻起点不能由本地规则识别；前批 IME、长文与导出边界不变。不升版本、不发版、不执行 `cargo-deny`。
+### 24.8 本批（部分）：本地资料编辑入口接入工作台
+
+本批把已有的本地资料编辑器接进 Web 工作台，只完成只读加载与保存草稿；校验与预览入口仍未接。
+
+- `/assets/` 新增 `materials-model.mjs`、`materials-editor.mjs`、`materials-preview.mjs`，与既有脚本一样经过身份保护、JS MIME 与 `no-cache`；新增测试逐一核对内容与响应头。
+- 译书工作台新增“本地资料”面板：选择项目后读取 `GET /text/<项目>/materials`，把视图交给编辑器；观政只读，不能保存。
+- “保存草稿”按 `POST /text/<项目>/materials/draft` 发送 `workspace_id`、`request_id`、`expected_revision` 与当前完整资料；保存后重新读取，显式说明“已保存不代表批准”。
+- 已接：校验、复制恢复 JSON、预览与临时段落关联、报告卡片；会话暂存检测与显式选择；409 保留输入与放弃本地；**三态状态栏**（服务器保存／会话暂存／校验各自独立）；**焦点保持**：关联输入改为稳定 DOM，已存在的行不再移动或重建，刷新后输入与焦点保留。
+- 观政已验：`viewer: true`、新增按钮隐藏、输入只读、点击保存提示“观政不能保存本地资料”。本批浏览器覆盖皇帝与观政两种角色。
+- **真实浏览器已验**：新增 `scripts/browser-smoke.mjs`，启动 `ziyuan serve` 与本机 Chrome（CDP，无 npm 依赖），登录后切到武英殿、读取本地资料、挂载编辑器并点“校验”；结果 `ok: true`，状态“校验通过；通过仍不是批准”，截图 1440×1000。
+- 本轮进一步验证：新增一条术语（原文／允许译法）→ 保存草稿成功 → 校验通过 → 预览当前块，报告卡片显示 applicable 术语与 `missing_from` 诊断。
+- 本轮再验 409：页面外保存空资料推进 revision 后，页面保存本地术语失败，显示“修订冲突…当前输入仍在编辑器中”，术语 `browser-smoke-term-2` 保留，“放弃本地，载入服务器”可用；点击后本地术语消失。
+- 本轮又验焦点与三态：在临时关联输入后程序化刷新，`focusKept: true`（焦点与值保留）；三态文本分别为“服务器：已载入／会话暂存：无／校验：未校验”。
+- 会话恢复：新增未保存术语 `browser-smoke-recover` → 整页刷新 → 恢复按钮出现 → 点击恢复，`recoveredContains: true`（未保存术语回到编辑器）。
+- 窄屏 390×844：`overflow: false`、保存按钮可见、编辑器挂载、关联区宽 316；窄屏截图另存 `target/browser-smoke-narrow.png`。
+- 覆盖边界：本批已验恢复按钮、窄屏、焦点与观政；仍未引入 @agent-browser，也未做跨平台（Linux/macOS）浏览器验证。
+- 测试：Web 单元 68 项通过；三份 Node 模块测试 79 项通过。本机 Windows，不冒充原生 CI。
+### 24.9 本批：CI 覆盖本地资料前端测试
+
+- `.github/workflows/ci.yml` 的 Node 步骤新增 `materials-model.test.mjs`、`materials-editor.test.mjs`、`materials-preview.test.mjs`，与既有两份并列。
+- 本机逐份跑五份 Node 测试：editor-core 15、human-editor 19、materials-model 46、materials-editor 22、materials-preview 11，共 113 项通过。
+- 未把 `browser-smoke.mjs`／`browser-viewer-smoke.mjs` 放进 CI：它们依赖本机 Chrome 与真实服务，本轮仍作为本地验收脚本；CI 实际执行要等推送后确认。
+### 24.10 本批：双页面同基线保存竞争
+
+- 新增 `scripts/browser-race-smoke.mjs`：同一 Chrome profile 开两个页面，A、B 都读取同一空草稿（同一 revision）。
+- A 新增术语 `race-a` 并保存，成功；B 新增 `race-b` 后以旧 revision 保存，得到“修订冲突”，输入 `race-b` 保留。
+- A 刷新后只有 `race-a`，不含 `race-b`；服务器没有被 B 的旧基线覆盖。
+- 仍不做的：并发屏障下的精确时序竞态、历史请求重试不回滚、性能与旧 CLI 兼容；这些属于 Task 13 后续。
+### 24.11 本批：Task 13 对抗、性能与兼容
+
+- 并发/历史/限额：`cargo test -p ziyuan-app --test materials` 37 项通过，含 `create_race_has_one_winner`、`old_retry_never_rolls_back_newer_save`、`retry_after_restart_returns_same_receipt_without_write` 与 1 MiB／5000 条上限测试；浏览器双页面同基线保存仅一个成功（§24.10）。
+- 性能烟测（本机 Windows，单次、非基准）：5000 条术语、760,035 字节资料；view 4 ms、save 390 ms、validate 268 ms、preview 478 ms。数字只用于发现数量级问题，不作为跨平台承诺。
+- 旧 CLI 兼容：从 `9f9c44dc` 独立构建旧底座，运行 `check-context-v2-compat.py --old-supports-v2` 通过；老读器拒绝 `Person.available_from` 未知字段，新 CLI 拒绝生产第二版且盘面不变。另用 `cb71d2f2` 构建：对含 `available_from` 的资料报“人物／术语资料尚未开放”，不写盘；这是 N2a 前的生产门禁，未使完整脚本的“未知字段”分支可达。
+- 未做：Unix 符号链接（需 Linux 原生 CI）、真机中文 IME、macOS/Linux 浏览器。
+
+### 24.12 本批：Task 14 收尾
+
+- CI：Node 步骤已含五份前端测试；本地逐份 113 项通过。
+- 最终验证：`cargo test --workspace` 退出码 0（`temp_lease_probe` 子进程的预期失败噪声仍存在，父进程通过）；`materials` 37 项、Web 68 项、编辑器 Node 22 项、Clippy、fmt 通过。
+- 浏览器：三份脚本覆盖皇帝/观政、保存、校验、预览、409、会话恢复、焦点、三态、窄屏与双页面竞争；未引入 @agent-browser。
+- 交付边界：本地资料编辑/预览入口已完成并实测；生产批准、外发、模型调用仍关闭；未推送。

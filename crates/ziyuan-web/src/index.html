@@ -860,6 +860,32 @@
             </div>
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
+            <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
+              <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
+              <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
+              <div class="actions">
+                <button class="small" id="materials-load" type="button">读取本地资料</button>
+                <button class="small" id="materials-refresh" type="button">刷新</button>
+                <button class="small" id="materials-save" type="button">保存草稿</button>
+                <button class="small" id="materials-validate" type="button">校验</button>
+                <button class="small" id="materials-copy" type="button">复制恢复 JSON</button>
+                <button class="small" id="materials-preview-run" type="button">预览当前块</button>
+              </div>
+              <p class="hint" id="materials-states" aria-live="polite">
+                <span id="materials-save-state">服务器：未载入</span> ·
+                <span id="materials-session-state">会话暂存：—</span> ·
+                <span id="materials-validate-state">校验：未校验</span>
+              </p>
+              <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
+              <div class="actions">
+                <button class="small" id="materials-restore" type="button" hidden>恢复会话暂存</button>
+                <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
+              </div>
+              <ul class="text-problems" id="materials-issues" aria-live="polite"></ul>
+              <div id="materials-associations" aria-label="当前块的临时段落关联"></div>
+              <div id="materials-preview" class="materials-report" aria-live="polite"></div>
+              <section id="text-materials-editor" aria-label="本地资料编辑器"></section>
+            </section>
             <div class="text-materials" id="text-materials"></div>
             <div class="actions" id="text-actions"></div>
             <p class="hint" id="text-action-result" role="status" aria-live="polite"></p>
@@ -1412,6 +1438,7 @@ function loadHumanEditor() {
       },
     });
     renderHumanEditor();
+    renderMaterialsAssociations();
   }, (e) => {
     $("text-human-editor").textContent = "人工编辑器加载失败（" + e.message + "）；刷新页面或重新选块后重试。";
   }).finally(() => { humanEditorLoading = null; });
@@ -1424,6 +1451,278 @@ function renderHumanEditor() {
   if (humanEditor) humanEditor.update(context);
   else if (context) loadHumanEditor();
 }
+let materialsEditor = null, materialsEditorLoading = null, materialsEditorAttempt = 0;
+function loadMaterialsEditor() {
+  if (materialsEditor || materialsEditorLoading) return;
+  const attempt = materialsEditorAttempt++;
+  materialsEditorLoading = import(`/assets/materials-editor.mjs${attempt ? `?retry=${attempt}` : ""}`).then((m) => {
+    materialsEditor = m.mountMaterialEditor($("text-materials-editor"), {
+      storage: window.sessionStorage,
+      confirm: (message) => window.confirm(message),
+      viewer: () => !state || !!state.viewer,
+    });
+    loadMaterialsView();
+  }, (e) => {
+    $("materials-status").textContent = "本地资料编辑器加载失败（" + e.message + "）；刷新页面后重试。";
+  }).finally(() => { materialsEditorLoading = null; });
+}
+async function loadMaterialsView() {
+  if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  if (!materialsEditor) { loadMaterialsEditor(); return; }
+  $("materials-status").textContent = "正在读取本地资料…";
+  try {
+    const ticket = materialsEditor.beginReceive();
+    const view = await api("/text/" + encodeURIComponent(textProjectId) + "/materials");
+    materialsEditor.update(view, ticket);
+    renderMaterialsAssociations();
+    renderMaterialsState();
+    setMaterialState("save", view.draft ? "服务器：已载入" : "服务器：无草稿");
+    setMaterialState("session", materialsEditor.recovery() ? "会话暂存：有" : "会话暂存：无");
+    setMaterialState("validate", "校验：未校验");
+    if (materialsEditor.recovery()) {
+      $("materials-restore").hidden = false;
+      $("materials-discard").hidden = false;
+    } else {
+      hideMaterialsRecovery();
+    }
+    if (!view.draft) $("materials-status").textContent = "尚无服务器草稿；编辑后可保存第一版（未批准）。";
+  } catch (e) {
+    $("materials-status").textContent = "读取本地资料失败：" + (e.body?.error || e.message);
+  }
+}
+$("materials-load")?.addEventListener("click", loadMaterialsView);
+$("materials-refresh")?.addEventListener("click", loadMaterialsView);
+$("materials-validate")?.addEventListener("click", async () => {
+  if (!materialsEditor) { loadMaterialsEditor(); return; }
+  const snapshot = materialsEditor.previewState();
+  if (!snapshot) { $("materials-status").textContent = "资料尚未载入或项目已变，请先刷新。"; return; }
+  setMaterialState("validate", "校验：校验中…");
+  $("materials-status").textContent = "正在校验本地资料…";
+  $("materials-issues").replaceChildren();
+  try {
+    const result = await api("/text/" + encodeURIComponent(snapshot.project_id) + "/materials/validate", {
+      workspace_id: snapshot.workspace_id,
+      material: snapshot.material,
+    });
+    const issues = Array.isArray(result.issues) ? result.issues : [];
+    for (const issue of issues) {
+      const item = document.createElement("li");
+      item.textContent = (Array.isArray(issue.path) ? issue.path.join(".") + "：" : "") + (issue.message || issue.code || "问题");
+      $("materials-issues").append(item);
+    }
+    setMaterialState("validate", issues.length ? "校验：未通过（" + issues.length + " 处）" : "校验：通过（非批准）");
+    $("materials-status").textContent = issues.length
+      ? "校验未通过（" + issues.length + " 处）；未通过不是批准，也不会自动修改资料。"
+      : "校验通过；通过仍不是批准，保存也不授予批准。";
+  } catch (e) {
+    $("materials-status").textContent = "校验失败：" + (e.body?.error || e.message);
+  }
+});
+$("materials-copy")?.addEventListener("click", async () => {
+  const snapshot = materialsEditor?.previewState();
+  if (!snapshot) { $("materials-status").textContent = "资料尚未载入，无法复制。"; return; }
+  const text = JSON.stringify({
+    workspace_id: snapshot.workspace_id,
+    project: snapshot.project_id,
+    revision: snapshot.revision,
+    material: snapshot.material,
+  }, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    $("materials-status").textContent = "已复制当前资料恢复 JSON（未批准草稿；可留作人工恢复）。";
+  } catch {
+    $("materials-status").textContent = "浏览器不允许写剪贴板；请手动复制当前资料内容。";
+  }
+});
+function hideMaterialsRecovery() {
+  $("materials-restore").hidden = true;
+  $("materials-discard").hidden = true;
+}
+function renderMaterialsState() {
+  const state = materialsEditor?.modelState?.();
+  if (!state) return;
+  const bits = [];
+  bits.push("服务器修订：" + (state.revision ? state.revision.slice(0, 12) + "…" : "无草稿"));
+  bits.push("本地未保存：" + (state.dirty ? "是" : "否"));
+  if (state.mirrorError) bits.push("会话暂存不可用");
+  const recovery = materialsEditor?.recovery?.();
+  if (recovery) bits.push("有会话暂存可恢复");
+  $("materials-status").textContent = bits.join("｜");
+}
+$("materials-restore")?.addEventListener("click", () => {
+  if (!materialsEditor?.restoreRecovery()) { $("materials-status").textContent = "没有可恢复的会话暂存。"; return; }
+  hideMaterialsRecovery();
+  renderMaterialsState();
+  setMaterialState("session", "会话暂存：已恢复");
+  $("materials-status").textContent = "已恢复会话暂存（未保存、未批准）；请核对后保存。";
+});
+$("materials-discard")?.addEventListener("click", async () => {
+  if (!materialsEditor) return;
+  materialsEditor.discardLocal();
+  hideMaterialsRecovery();
+  await loadMaterialsView();
+  setMaterialState("session", "会话暂存：已放弃本地");
+  $("materials-status").textContent = "已放弃本地改动并载入服务器版本（未批准）；如仍需旧输入，请从复制恢复 JSON 取回。";
+});
+let materialsAssoc = new Map();
+let materialsAssocProject = null;
+function associationRow(paragraph) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.dataset.assocId = paragraph.id;
+  const label = document.createElement("label");
+  label.textContent = paragraph.id;
+  const make = (placeholder) => {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = placeholder;
+    input.addEventListener("input", () => {
+      const saved = materialsAssoc.get(paragraph.id) || { persons: "", targets: "", speaker: "" };
+      materialsAssoc.set(paragraph.id, { ...saved, [input.dataset.field]: input.value });
+    });
+    return input;
+  };
+  const persons = make("人物 ID"); persons.dataset.field = "persons";
+  const targets = make("称呼对象 ID"); targets.dataset.field = "targets";
+  const speaker = make("speaker"); speaker.dataset.field = "speaker";
+  row.append(label, persons, targets, speaker);
+  return row;
+}
+function renderMaterialsAssociations() {
+  const host = $("materials-associations");
+  if (textProjectId !== materialsAssocProject) {
+    materialsAssocProject = textProjectId;
+    materialsAssoc.clear();
+    host.replaceChildren();
+  }
+  const paragraphs = textBlock?.source?.paragraphs;
+  if (!Array.isArray(paragraphs) || !paragraphs.length) { host.replaceChildren(); return; }
+  let title = host.querySelector('[data-role="assoc-title"]');
+  if (!title) {
+    title = document.createElement("p");
+    title.className = "hint";
+    title.dataset.role = "assoc-title";
+    title.textContent = "临时关联（只用于本次预览，不保存）：人物与称呼对象填 ID，多个用逗号分隔；说话人填 narration／unknown／人物 ID。";
+    host.prepend(title);
+  }
+  const wanted = new Set(paragraphs.map((p) => p.id));
+  const existing = new Map();
+  for (const row of [...host.querySelectorAll("[data-assoc-id]")]) {
+    if (!wanted.has(row.dataset.assocId)) row.remove();
+    else existing.set(row.dataset.assocId, row);
+  }
+  for (const paragraph of paragraphs) {
+    const saved = materialsAssoc.get(paragraph.id) || { persons: "", targets: "", speaker: "" };
+    let row = existing.get(paragraph.id);
+    if (!row) {
+      row = associationRow(paragraph);
+      host.append(row);
+    }
+    const inputs = row.querySelectorAll("input");
+    if (inputs[0].value !== saved.persons) inputs[0].value = saved.persons;
+    if (inputs[1].value !== saved.targets) inputs[1].value = saved.targets;
+    if (inputs[2].value !== saved.speaker) inputs[2].value = saved.speaker;
+  }
+}
+function setMaterialState(kind, text) {
+  const id = kind === "save" ? "materials-save-state"
+    : kind === "session" ? "materials-session-state" : "materials-validate-state";
+  const node = $(id);
+  if (node) node.textContent = text;
+}
+function readMaterialsAssociations() {
+  const out = [];
+  for (const [paragraph, value] of materialsAssoc) {
+    const persons = value.persons.split(",").map((s) => s.trim()).filter(Boolean);
+    const targets = value.targets.split(",").map((s) => s.trim()).filter(Boolean);
+    const speakerText = value.speaker.trim();
+    let speaker;
+    if (speakerText === "narration") speaker = { kind: "narration" };
+    else if (speakerText === "unknown") speaker = { kind: "unknown" };
+    else if (speakerText) speaker = { kind: "person", person_id: speakerText };
+    if (persons.length || targets.length || speaker) out.push({ paragraph, persons, targets, speaker });
+  }
+  return out;
+}
+function renderMaterialsReport(result) {
+  const host = $("materials-preview");
+  host.replaceChildren();
+  const report = result?.report;
+  if (!report) { host.textContent = "报告为空。"; return; }
+  const add = (title, items) => {
+    const box = document.createElement("div");
+    box.className = "text-material";
+    const h = document.createElement("b");
+    h.textContent = title;
+    box.append(h);
+    const list = document.createElement("ul");
+    list.className = "text-problems";
+    for (const item of items) {
+      const li = document.createElement("li");
+      li.textContent = item;
+      list.append(li);
+    }
+    box.append(list);
+    host.append(box);
+  };
+  const sel = (selection) => {
+    const items = [];
+    for (const term of selection?.terms || []) items.push("术语 " + term.term_id + "（" + term.status + "）：" + (term.paragraphs || []).join("、"));
+    for (const person of selection?.persons || []) items.push("人物 " + person.person_id + "（" + person.status + "）：" + (person.paragraphs || []).join("、"));
+    for (const rule of selection?.address_rules || []) items.push("称呼 " + rule.person_id + "#" + rule.rule_index + "：段 " + (rule.paragraphs || []).join("、"));
+    return items;
+  };
+  add("适用（applicable）", sel(report.applicable));
+  add("自动候选（automatic）", sel(report.automatic));
+  add("诊断（diagnostics）", (report.diagnostics || []).map((d) =>
+    (d.identity?.kind || "") + " " + (d.identity?.id || "") + " — " + (d.reason || "") + "：段 " + (d.paragraphs || []).join("、")));
+}
+$("materials-preview-run")?.addEventListener("click", async () => {
+  const snapshot = materialsEditor?.previewState();
+  if (!snapshot) { $("materials-status").textContent = "资料尚未载入或项目已变，请先刷新。"; return; }
+  if (!textBlockId) { $("materials-status").textContent = "请先在左侧选一个块，再预览身份可见性。"; return; }
+  $("materials-status").textContent = "正在计算当前块的本地可见性…";
+  $("materials-preview").textContent = "";
+  try {
+    const result = await api("/text/" + encodeURIComponent(snapshot.project_id) + "/materials/preview", {
+      workspace_id: snapshot.workspace_id,
+      material: snapshot.material,
+      block: textBlockId,
+      associations: readMaterialsAssociations(),
+    });
+    renderMaterialsReport(result);
+    $("materials-status").textContent = "预览只表示当前本地资料的身份判定；未标注段落按 unknown 处理，不是批准，也不外发。";
+  } catch (e) {
+    $("materials-status").textContent = "预览失败：" + (e.body?.error || e.message);
+  }
+});
+let materialsSaveRequest = null;
+$("materials-save")?.addEventListener("click", async () => {
+  if (!materialsEditor) { loadMaterialsEditor(); return; }
+  if (!state || state.viewer) { $("materials-status").textContent = "观政不能保存本地资料。"; return; }
+  const snapshot = materialsEditor.previewState();
+  if (!snapshot) { $("materials-status").textContent = "资料尚未载入或项目已变，请先刷新。"; return; }
+  materialsSaveRequest ||= "web-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  setMaterialState("save", "服务器：保存中…");
+  $("materials-status").textContent = "正在保存本地资料草稿…";
+  try {
+    await api("/text/" + encodeURIComponent(snapshot.project_id) + "/materials/draft", {
+      workspace_id: snapshot.workspace_id,
+      request_id: materialsSaveRequest,
+      expected_revision: snapshot.revision,
+      material: snapshot.material,
+    });
+    materialsSaveRequest = null;
+    await loadMaterialsView();
+    setMaterialState("save", "服务器：已保存");
+    setMaterialState("validate", "校验：未校验");
+    $("materials-status").textContent = "已保存本地资料草稿（未批准；不会自动生效）。";
+  } catch (e) {
+    setMaterialState("save", "服务器：保存失败");
+    $("materials-status").textContent = "保存失败：" + (e.body?.error || e.message) + "；当前输入仍在编辑器中，未自动覆盖远端。可先“复制恢复 JSON”留档，再“放弃本地，载入服务器”核对。";
+    $("materials-discard").hidden = false;
+  }
+});
 window.addEventListener("beforeunload", (event) => {
   if (humanEditor && humanEditor.hasDirty()) { event.preventDefault(); event.returnValue = ""; }
 });

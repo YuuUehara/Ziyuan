@@ -693,6 +693,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     const live = new Set([...keys("terms"), ...keys("persons")]);
     for (const key of entryState.keys()) if (!live.has(key)) entryState.delete(key);
     render();
+    applyEditable();
     return result;
   }
 
@@ -736,6 +737,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     // outside MaterialModel and its recoverable session mirror.
     previewState: () => model?.canSave && currentView ? {
       view: clone(currentView), workspace_id: model.workspaceId,
+      revision: model.remoteRevision,
       project_id: model.project, project_hash: model.projectHash,
       local_epoch: model.localEpoch, material: clone(model.material),
     } : null,
@@ -749,6 +751,23 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     // beginReceive() returns undefined until the first update creates the model.
     beginReceive: () => model?.beginReceive(),
     needsRefresh: () => !!model?.needsRefresh,
+    modelState: () => model ? {
+      revision: model.remoteRevision, canSave: model.canSave,
+      dirty: model.dirty, mirrorError: model.mirrorError,
+    } : null,
+    recovery: () => model?.recoveryChoice ? {
+      revision: model.recoveryChoice.baseRevision,
+      material: clone(model.recoveryChoice.material),
+    } : null,
+    restoreRecovery: () => {
+      const restored = !!model?.restore();
+      if (restored) render();
+      return restored;
+    },
+    discardLocal: () => {
+      model?.discardLocalConfirmed();
+      render();
+    },
     // Test-only inspection: entryState is pruned against live keys after each receive.
     _entryStateSize: () => entryState.size,
     hasDirty: () => !disposed && (!!composing || !!model?.dirty),

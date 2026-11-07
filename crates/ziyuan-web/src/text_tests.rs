@@ -1308,6 +1308,22 @@ fn text_frontend_contract() {
         "已人工准奏并落盘；请在上方人工编辑器核对后人工御览定稿",
         "import(`/assets/human-editor.mjs",
         "id=\"text-human-editor\"",
+        "import(`/assets/materials-editor.mjs",
+        "id=\"text-materials-panel\"",
+        "读取本地资料",
+        "保存草稿",
+        "/materials/draft",
+        "校验",
+        "/materials/validate",
+        "复制恢复 JSON",
+        "预览当前块",
+        "/materials/preview",
+        "materials-associations",
+        "适用（applicable）",
+        "materials-restore",
+        "放弃本地，载入服务器",
+        "materials-save-state",
+        "materials-validate-state",
         "人工版本失效：原文、上下文或朱批已变",
         "case \"zhupi_changed\": return \"朱批已变\";",
         "b.status.state.state === \"human_stale\"",
@@ -2363,4 +2379,49 @@ async fn viewer_cannot_post_human_endpoints_and_disk_is_untouched() {
         200
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn materials_modules_are_served_as_javascript_without_stale_cache() {
+    let (base, _root) = start("materials-assets", false).await;
+    for (name, expected) in [
+        ("materials-model.mjs", crate::MATERIALS_MODEL),
+        ("materials-editor.mjs", crate::MATERIALS_EDITOR),
+        ("materials-preview.mjs", crate::MATERIALS_PREVIEW),
+    ] {
+        let url = format!("{base}/assets/{name}");
+        let token = format!("Bearer {TOKEN}");
+        let (status, content_type, cache, body) = tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut response = agent
+                .get(&url)
+                .header("Authorization", token)
+                .call()
+                .expect("GET assets");
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let cache = response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let body = response.body_mut().read_to_vec().expect("read assets");
+            (status, content_type, cache, body)
+        })
+        .await
+        .unwrap();
+        assert_eq!(status, 200, "{name}");
+        assert_eq!(content_type, "text/javascript; charset=utf-8", "{name}");
+        assert_eq!(cache, "no-cache", "{name}");
+        assert_eq!(body, expected.as_bytes(), "{name}");
+    }
 }

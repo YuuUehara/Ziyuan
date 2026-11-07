@@ -54,6 +54,10 @@ const INDEX_HTML: &str = include_str!("index.html");
 const EDITOR_CORE: &str = include_str!("editor-core.mjs");
 /// 人工译稿编辑器界面（`human-editor.mjs`），同样由 `node --test` 直接读源码测试。
 const HUMAN_EDITOR: &str = include_str!("human-editor.mjs");
+/// 本地资料编辑器及其纯逻辑／预览模块；同样由 node --test 直接读源码测试。
+const MATERIALS_MODEL: &str = include_str!("materials-model.mjs");
+const MATERIALS_EDITOR: &str = include_str!("materials-editor.mjs");
+const MATERIALS_PREVIEW: &str = include_str!("materials-preview.mjs");
 
 /// 随界面内置的字体（JetBrains Mono，SIL OFL 1.1，许可证见 `fonts/JetBrainsMono-OFL.txt`）。
 /// 中文与日文字体不内置，见 docs/guide.md。
@@ -105,6 +109,9 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
     let body = match name.as_str() {
         "editor-core.mjs" => EDITOR_CORE,
         "human-editor.mjs" => HUMAN_EDITOR,
+        "materials-model.mjs" => MATERIALS_MODEL,
+        "materials-editor.mjs" => MATERIALS_EDITOR,
+        "materials-preview.mjs" => MATERIALS_PREVIEW,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (
