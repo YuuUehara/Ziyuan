@@ -602,3 +602,35 @@ test("dispose detaches the editor and later events are ignored", () => {
   assert.equal(editor.update(view(fullMaterial())), false);
   assert.equal(store.values.size, 0);
 });
+
+test("every nested item removal asks confirm and cancelling leaves the material unchanged", () => {
+  const ctx = setup();
+  const { host, editor, confirms } = ctx;
+  const removals = {
+    terms: ["allowed.1", "evidence.0"],
+    persons: ["aliases.0", "terms.1", "address_rules.1", "address_rules.0.evidence.0",
+      "voice.examples.0", "evidence.0"],
+  };
+  for (const [group, paths] of Object.entries(removals)) {
+    click(tab(host, group));
+    for (const path of paths) {
+      const before = confirms.length;
+      click(control(host, "remove", path));
+      assert.equal(confirms.length, before + 1, `removing ${path} asks first`);
+      assert.match(confirms.at(-1), new RegExp(`${group}\\[0\\]\\.${path.replace(/\.(\d+)/g, "\\[$1\\]")}`));
+      assert.ok(control(host, "remove", path), `${path} is still rendered`);
+    }
+  }
+  assert.equal(editor.hasDirty(), false, "cancelled removals change nothing");
+
+  ctx.answer = true;
+  click(control(host, "remove", "address_rules.1"));
+  click(control(host, "remove", "voice.examples.0"));
+  click(tab(host, "terms"));
+  click(control(host, "remove", "allowed.0"));
+  const expected = fullMaterial();
+  expected.persons[0].address_rules.splice(1, 1);
+  expected.persons[0].voice.examples = [];
+  expected.terms[0].allowed.splice(0, 1);
+  assert.deepEqual(ctx.mirror(), expected);
+});

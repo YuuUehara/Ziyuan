@@ -181,6 +181,11 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     return true;
   }
 
+  function location(rel) {
+    const path = [form.group, indexOf(form.group, form.key), ...rel];
+    return path.map((part, i) => (typeof part === "number" ? `[${part}]` : i ? `.${part}` : part)).join("");
+  }
+
   function register(node, kind, rel) {
     const id = rel.join(".");
     node.dataset[kind] = id;
@@ -345,7 +350,15 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
       buildItem(row, [...rel, index], index);
       const remove = register(button("移除"), "remove", [...rel, index]);
       on(remove, "click", () => {
+        if (!editable() || !form) return;
+        finishComposition();
         const latest = valueAt(current(), rel);
+        if (!Array.isArray(latest) || index >= latest.length) return;
+        const item = latest[index];
+        const prompt = [`移除 ${location([...rel, index])}？`,
+          typeof item === "string" ? `内容：${display(item)}` : "",
+          "其他条目中的引用不会随之修改。"].filter(Boolean).join("\n");
+        if (typeof confirm !== "function" || !confirm(prompt)) return;
         if (write(rel, latest.filter((_, i) => i !== index))) rebuildForm();
       });
       row.append(remove);
