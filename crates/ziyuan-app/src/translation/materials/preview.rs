@@ -90,7 +90,9 @@ impl Translations {
                     binding: MaterialBinding {
                         content_hash: validation.content_hash,
                         project_hash: hash.into(),
-                        block_hash: digest(target)?,
+                        block_hash: sha256_hex(
+                            &target.serialized().map_err(MaterialError::Project)?,
+                        ),
                         associations_hash: digest(associations)?,
                     },
                     report,

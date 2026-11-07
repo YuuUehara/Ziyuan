@@ -5,7 +5,7 @@ use std::fs;
 use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects};
 use ziyuan_app::translation::{
     GlossarySpeaker, MaterialError, MaterialSave, ParagraphAssociations, StructuredGlossary,
-    Translations,
+    Translations, block_source_hash,
 };
 
 type SampleParagraph = (&'static str, &'static str, &'static str);
@@ -358,7 +358,7 @@ fn preview_matches_n0_identity_only_expectations() {
     assert_eq!(revealed.binding.project_hash, digest(&f.project));
     assert_eq!(
         revealed.binding.block_hash,
-        digest(&f.project.chapters[2].blocks[0])
+        block_source_hash(&f.project, &f.block("p07")).unwrap()
     );
     assert_eq!(revealed.binding.associations_hash, digest(&links));
 }

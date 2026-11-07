@@ -87,6 +87,7 @@ pub struct MaterialView {
 pub struct MaterialBinding {
     pub content_hash: String,
     pub project_hash: String,
+    /// Same bytes and digest as `block_source_hash` for the current verified target block.
     pub block_hash: String,
     pub associations_hash: String,
 }
