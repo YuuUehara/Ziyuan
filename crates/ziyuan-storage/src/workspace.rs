@@ -781,25 +781,39 @@ fn read_control(path: &Path) -> Result<Option<Vec<u8>>, WorkspaceError> {
 /// Read the record with bounded reading: one byte past the codec limit is enough for
 /// [`decode_record`] to report `TooLarge` without the caller buffering more.
 fn read_record(path: &Path) -> Result<Option<RecoveryRecord>, WorkspaceError> {
-    if !check_path(path, false)? {
+    let Some(file) = open_checked_record(path, |path| File::open(path))? else {
         return Ok(None);
-    }
+    };
     let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_RECORD_BYTES as u64 + 1)
+    file.take(MAX_RECORD_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     decode_record(&bytes).map(Some).map_err(Into::into)
 }
 
 fn read_record_any(path: &Path) -> Result<Option<DecodedRecovery>, WorkspaceError> {
+    let Some(file) = open_checked_record(path, |path| File::open(path))? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    decode_record_any(&bytes).map(Some).map_err(Into::into)
+}
+
+/// Open a previously checked regular control file. A recovery record may be removed
+/// by a finisher between metadata validation and opening it; that normal race is absence.
+fn open_checked_record(
+    path: &Path,
+    open: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<Option<File>, WorkspaceError> {
     if !check_path(path, false)? {
         return Ok(None);
     }
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_RECORD_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    decode_record_any(&bytes).map(Some).map_err(Into::into)
+    match open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The record codec accepts only `/` or `X:\` leading bytes, while a canonical
@@ -1627,6 +1641,26 @@ mod tests {
         guard.finish().unwrap();
         assert!(ws.pending_record().unwrap().is_none());
         assert!(!record_path(&root).exists());
+    }
+
+    #[test]
+    fn record_removed_after_plain_path_check_is_treated_as_absent() {
+        let root = Temp::new();
+        let ws = workspace(&root);
+        let path = record_path(&root);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, record_bytes(&ws, RecordState::Completed)).unwrap();
+
+        let mut open_error = None;
+        let result = open_checked_record(&path, |checked_path| {
+            fs::remove_file(checked_path).unwrap();
+            let result = File::open(checked_path);
+            open_error = result.as_ref().err().map(io::Error::kind);
+            result
+        });
+
+        assert_eq!(open_error, Some(io::ErrorKind::NotFound));
+        assert!(matches!(result, Ok(None)), "{result:?}");
     }
 
     #[test]
