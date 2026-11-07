@@ -860,6 +860,7 @@
             </div>
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
+            <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
               <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
@@ -1472,7 +1473,7 @@ async function loadMaterialsView() {
   $("materials-status").textContent = "正在读取本地资料…";
   try {
     const ticket = materialsEditor.beginReceive();
-    const view = await api("/text/" + encodeURIComponent(textProjectId) + "/materials");
+    const view = await api("/text/" + encodeURIComponent(textProjectId) + "/materials?t=" + Date.now());
     materialsEditor.update(view, ticket);
     renderMaterialsAssociations();
     renderMaterialsState();
@@ -1587,6 +1588,57 @@ function associationRow(paragraph) {
   const speaker = make("speaker"); speaker.dataset.field = "speaker";
   row.append(label, persons, targets, speaker);
   return row;
+}
+let n2bKey = null;
+async function renderN2bHints() {
+  const host = $("text-n2b-hints");
+  if (!host) return;
+  if (!textProjectId || !textBlockId) {
+    host.replaceChildren();
+    host.dataset.key = "";
+    return;
+  }
+  const epoch = {};
+  n2bKey = epoch;
+  try {
+    const view = await api("/text/" + encodeURIComponent(textProjectId) + "/materials");
+    if (n2bKey !== epoch) return;
+    const draft = view.draft;
+    const key = textProjectId + "/" + textBlockId + "/" + (draft?.revision || "none");
+    if (host.dataset.key === key) return;
+    host.dataset.key = key;
+    host.replaceChildren();
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    if (!draft) {
+      hint.textContent = "段旁提示：尚无本地资料草稿（只读；不影响生产）。";
+      host.append(hint);
+      return;
+    }
+    const result = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/preview", {
+      workspace_id: view.workspace_id,
+      material: draft.material,
+      block: textBlockId,
+      associations: [],
+    });
+    if (n2bKey !== epoch) return;
+    const applicable = result.report?.applicable || {};
+    const terms = applicable.terms || [];
+    const persons = applicable.persons || [];
+    const parts = [];
+    if (terms.length) parts.push("术语：" + terms.map((t) => t.term_id + "（" + (t.paragraphs || []).join("、") + "）").join("；"));
+    if (persons.length) parts.push("人物：" + persons.map((t) => t.person_id + "（" + (t.paragraphs || []).join("、") + "）").join("；"));
+    hint.textContent = parts.length
+      ? "段旁提示（只读，未批准，不外发）：" + parts.join("｜")
+      : "段旁提示：当前块没有适用的本地术语或人物（只读）。";
+    host.append(hint);
+  } catch (e) {
+    if (n2bKey !== epoch) return;
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "段旁提示暂不可用：" + (e.body?.error || e.message);
+    host.replaceChildren(hint);
+  }
 }
 function renderMaterialsAssociations() {
   const host = $("materials-associations");
@@ -2260,6 +2312,7 @@ function updateNoteLink() {
 }
 function renderTextNow() {
   renderHumanEditor();
+  renderN2bHints();
   renderImport();
   renderExport();
   const projects = textProjects || [];

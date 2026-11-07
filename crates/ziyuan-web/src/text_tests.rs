@@ -1323,6 +1323,8 @@ fn text_frontend_contract() {
         "materials-restore",
         "放弃本地，载入服务器",
         "materials-save-state",
+        "text-n2b-hints",
+        "renderN2bHints",
         "materials-validate-state",
         "人工版本失效：原文、上下文或朱批已变",
         "case \"zhupi_changed\": return \"朱批已变\";",
