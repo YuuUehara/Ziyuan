@@ -738,3 +738,38 @@ test("persons with the same name and different IDs are selected and edited indep
   assert.equal(field(host, "name").value, "同名");
   assert.deepEqual(mirror().persons.map((p) => [p.person_id, p.name]), [["p-a", "同名"], ["p-b", "同名乙"]]);
 });
+
+test("removing an earlier item reindexes later memory without collisions in any insertion order", () => {
+  const material = ruleMaterial();
+  const rules = material.persons[0].address_rules;
+  rules[1].note = "noteB";
+  rules[1].speaker = { kind: "person", person_id: "p-2" };
+  rules[2].speaker = { kind: "person", person_id: "p-1" };
+  rules[2].evidence = rules[1].evidence.map((item, i) => ({ ...item, quote: `c${i}` }));
+  const ctx = setup(material, { answer: true });
+  const { host } = ctx;
+  click(tab(host, "persons"));
+  // Remember C before B so that C's entries come first in insertion order.
+  check(toggle(host, "address_rules.2.note"), false);
+  check(toggle(host, "address_rules.1.note"), false);
+  choose(field(host, "address_rules.2.speaker.kind"), "unknown");
+  choose(field(host, "address_rules.1.speaker.kind"), "unknown");
+  click(control(host, "next", "address_rules.2.evidence"));
+  click(control(host, "next", "address_rules.1.evidence"));
+
+  click(control(host, "remove", "address_rules.0"));
+  assert.equal(field(host, "address_rules.0.evidence.10.quote").value, "b10");
+  assert.equal(field(host, "address_rules.1.evidence.10.quote").value, "c10");
+  check(toggle(host, "address_rules.0.note"), true);
+  check(toggle(host, "address_rules.1.note"), true);
+  choose(field(host, "address_rules.0.speaker.kind"), "person");
+  choose(field(host, "address_rules.1.speaker.kind"), "person");
+  assert.equal(field(host, "address_rules.0.note").value, "noteB");
+  assert.equal(field(host, "address_rules.1.note").value, "noteC");
+
+  const saved = ctx.mirror().persons[0].address_rules;
+  assert.deepEqual(saved.map((rule) => rule.note), ["noteB", "noteC"]);
+  assert.deepEqual(saved.map((rule) => rule.speaker), [
+    { kind: "person", person_id: "p-2" }, { kind: "person", person_id: "p-1" },
+  ]);
+});

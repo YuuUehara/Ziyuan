@@ -185,14 +185,17 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   function shiftMemory(rel, removed) {
     const prefix = `${rel.join(".")}.`;
     for (const memory of Object.values(state())) {
-      for (const [id, value] of [...memory]) {
+      // Collect first: renaming in place would overwrite a later index not yet visited.
+      const moved = [];
+      for (const [id, value] of memory) {
         if (!id.startsWith(prefix)) continue;
         const [head, ...rest] = id.slice(prefix.length).split(".");
         const index = Number(head);
         if (!Number.isInteger(index) || index < removed) continue;
-        memory.delete(id);
-        if (index > removed) memory.set([prefix + (index - 1), ...rest].join("."), value);
+        moved.push([id, index > removed ? [prefix + (index - 1), ...rest].join(".") : null, value]);
       }
+      for (const [id] of moved) memory.delete(id);
+      for (const [, id, value] of moved) if (id !== null) memory.set(id, value);
     }
   }
 
