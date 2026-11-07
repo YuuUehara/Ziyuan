@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- 第二版资料复核：`context.json` 导出形状加测试；称谓提示展示说话人/对象/范围条件，无关联输入时不自动判定。
+
 ## 1.5.1 — 2026-11-08
 
 - 生产批准第二版资料（N2c）：`ContextSnapshot.glossary` 改为 `Glossary`（旧数组／第二版对象分派），生产快照、导出、勘校与批准可读 v2；新增 `ziyuan text context prepare` 与 Web“准备生产资料”，只写 `context/glossary.json`、不批准；v2 勘校覆盖术语、人物姓名/别名与称谓规则术语；旧版 1.5.0 二进制复验仍拒绝 v2。札记术语并入仍拒绝 v2。见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料)。

@@ -241,6 +241,12 @@ fn structured_snapshot_is_read_exported_verified_and_approvable() {
         ziyuan_app::translation::Glossary::Structured(_)
     ));
     t.export(&f.project.id, f.block()).unwrap();
+    let exported: serde_json::Value = serde_json::from_slice(
+        &fs::read(t.block_dir(&f.project.id, f.block()).join("context.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(exported["glossary"]["format"], 2);
+    assert_eq!(exported["glossary"]["terms"], serde_json::json!([]));
     t.verification(None, &f.project.id, f.block()).unwrap();
     assert!(t.approve_context(&f.project.id).unwrap() >= 2);
 }

@@ -499,7 +499,7 @@ impl Translations {
                                         allowed: term.allowed.clone(),
                                         scope: None,
                                         note: rule.note.clone(),
-                                        message: "第二版称谓：原文命中称谓术语而译文未见允许译法；说话人／称呼对象条件尚未核，先人工核对".into(),
+                                        message: format!("第二版称谓：原文命中称谓术语而译文未见允许译法；条件（说话人 {:?}，对象 {}）尚未核，先人工核对", rule.speaker, rule.target),
                                     });
                                 }
                             }
