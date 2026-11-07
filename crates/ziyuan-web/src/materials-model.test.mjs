@@ -849,3 +849,45 @@ test("reverting to a rebased baseline lets a later clean GET adopt server state"
   assert.equal(state.pendingSave, null);
   assert.equal(session.values.has(state.mirrorKey), false);
 });
+
+test("a duplicate GET preserves the result epoch, validation and preview", () => {
+  for (const dirty of [false, true]) {
+    const state = model();
+    state.receive(view());
+    if (dirty) state.edit(["terms", 0, "source"], "本地");
+    const validation = { valid: true, issues: [] };
+    const preview = { report: "current" };
+    state.validation = validation;
+    state.preview = preview;
+    const epoch = state.localEpoch;
+    state.receive(view());
+    state.receive(view(), state.beginReceive());
+    assert.equal(state.localEpoch, epoch, `dirty=${dirty}`);
+    assert.equal(state.validation, validation, `dirty=${dirty}`);
+    assert.equal(state.preview, preview, `dirty=${dirty}`);
+    assert.equal(state.dirty, dirty);
+  }
+});
+
+test("a relevant GET change advances the epoch and invalidates results", () => {
+  const variants = {
+    revision: () => view("先生", revision("2")),
+    material: () => view("他处修改", revision("1")),
+    project_hash: () => ({ ...view(), project_hash: revision("e") }),
+    workspace: () => view("先生", revision("1"), "b".repeat(64)),
+  };
+  for (const [name, next] of Object.entries(variants)) {
+    for (const dirty of [false, true]) {
+      const state = model();
+      state.receive(view());
+      if (dirty) state.edit(["terms", 0, "source"], "本地");
+      state.validation = { valid: true, issues: [] };
+      state.preview = { report: "stale" };
+      const epoch = state.localEpoch;
+      state.receive(next());
+      assert.ok(state.localEpoch > epoch, `${name} dirty=${dirty}`);
+      assert.equal(state.validation, null, `${name} dirty=${dirty}`);
+      assert.equal(state.preview, null, `${name} dirty=${dirty}`);
+    }
+  }
+});

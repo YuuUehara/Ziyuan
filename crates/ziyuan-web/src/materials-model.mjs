@@ -88,6 +88,7 @@ export class MaterialModel {
     this.savedSnapshot = null;
     this.pendingSave = null;
     this.localEpoch = 0;
+    this.projectHash = null;
     this.validation = null;
     this.preview = null;
     this.mirrorError = null;
@@ -167,6 +168,7 @@ export class MaterialModel {
         || typeof view.draft.revision !== "string" || !isMaterial(view.draft.material)))) {
       throw new Error("The materials view has missing or mismatched identity.");
     }
+    const before = this._resultInputs();
     const changedWorkspace = this.workspaceId !== view.workspace_id;
     // An unconfirmed submission may be what this GET shows; a clean-looking local
     // state (e.g. an edit reverted after submit) must not be overwritten by it.
@@ -182,6 +184,7 @@ export class MaterialModel {
     this._receiveWatermark = ticket === undefined
       ? this._ticketSequence + 1 : Math.max(this._receiveWatermark, ticket.sequence + 1);
     this.workspaceId = view.workspace_id;
+    this.projectHash = view.project_hash ?? null;
     this.remoteRevision = view.draft?.revision ?? null;
     this._remoteMaterial = clone(view.draft?.material ?? emptyMaterial());
     this.needsRefresh = false;
@@ -191,7 +194,6 @@ export class MaterialModel {
       }
       this.savedSnapshot = clone(this._remoteMaterial);
       this._baselineRevision = this.remoteRevision;
-      this.localEpoch++;
       if (this.pendingSave && this.pendingSave.expected_revision !== this._baselineRevision) {
         this.pendingSave = null;
       }
@@ -200,8 +202,13 @@ export class MaterialModel {
     } else if (this._reconcile()) {
       this._writeMirror();
     }
-    this.validation = null;
-    this.invalidatePreview();
+    // Polls are often faster than validation/preview, so a duplicate view must not
+    // invalidate results that still describe the same input and project.
+    if (this._resultInputs() !== before) {
+      this.localEpoch++;
+      this.validation = null;
+      this.invalidatePreview();
+    }
     if (changedWorkspace) this._readMirror();
     return this;
   }
@@ -316,6 +323,14 @@ export class MaterialModel {
   }
 
   invalidatePreview() { this.preview = null; }
+
+  _resultInputs() {
+    return JSON.stringify(canonical([
+      this.workspaceId, this.projectHash, this.remoteRevision, this._baselineRevision,
+      wireMaterial(this._remoteMaterial), wireMaterial(this.savedSnapshot),
+      wireMaterial(this.material),
+    ]));
+  }
 
   // Only an unacknowledged request against the current baseline can still commit
   // content this model has not yet seen; a no-op request cannot change the input.
