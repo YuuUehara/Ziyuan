@@ -24,6 +24,8 @@ pub(crate) struct Inner {
     pub(crate) run: Mutex<Option<(CancelToken, bool)>>,
     /// 空闲的会话，下一个请求取走后增量读取新事件，用完放回。
     pub(crate) cache: Mutex<Option<Session<EventLog>>>,
+    /// 本地资料的工作区身份（启动时规范根目录一次）；失败只令资料接口报错。
+    pub(crate) workspace: Result<String, String>,
 }
 
 #[derive(Debug)]

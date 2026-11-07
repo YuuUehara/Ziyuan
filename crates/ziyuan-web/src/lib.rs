@@ -10,6 +10,7 @@
 mod auth;
 mod edicts;
 mod json;
+mod materials;
 mod personnel;
 mod run;
 mod state;
@@ -152,12 +153,14 @@ pub fn router(config: Config) -> Router {
 
 fn app_state(config: Config, subscriptions: subscriptions::Service) -> AppState {
     let (events, _) = broadcast::channel(1024);
+    let workspace = materials::workspace_identity(&config.root, &config.token);
     AppState(Arc::new(Inner {
         config,
         subscriptions,
         events,
         run: Mutex::new(None),
         cache: Mutex::new(None),
+        workspace,
     }))
 }
 
@@ -253,6 +256,16 @@ fn router_for(app: AppState) -> Router {
         .route(
             "/text/{project}/blocks/{block}/finalize",
             post(text::finalize),
+        )
+        .route("/text/{project}/materials", get(materials::view))
+        .route("/text/{project}/materials/draft", post(materials::save))
+        .route(
+            "/text/{project}/materials/validate",
+            post(materials::validate),
+        )
+        .route(
+            "/text/{project}/materials/preview",
+            post(materials::preview),
         )
         .route("/text/{project}/human/progress", get(text::human_progress))
         .route(

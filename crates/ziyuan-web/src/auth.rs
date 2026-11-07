@@ -95,6 +95,13 @@ pub(crate) fn role(app: &AppState, headers: &axum::http::HeaderMap) -> Option<Ro
         .min_by_key(|role| *role != Role::Emperor)
 }
 
+/// 观政可用的无写入 POST，按完整路由模式精确匹配（不按前缀放行）。
+const VIEWER_POSTS: &[&str] = &[
+    "/api/text/{project}/blocks/{block}/references/preview",
+    "/api/text/{project}/materials/validate",
+    "/api/text/{project}/materials/preview",
+];
+
 pub(crate) async fn require_token(
     State(app): State<AppState>,
     mut request: Request,
@@ -108,9 +115,7 @@ pub(crate) async fn require_token(
                     && request
                         .extensions()
                         .get::<axum::extract::MatchedPath>()
-                        .is_some_and(|p| {
-                            p.as_str() == "/api/text/{project}/blocks/{block}/references/preview"
-                        })) =>
+                        .is_some_and(|p| VIEWER_POSTS.contains(&p.as_str()))) =>
         {
             ApiError(
                 StatusCode::FORBIDDEN,
