@@ -7,6 +7,8 @@ use ziyuan_app::notes::{NewNote, NoteKind, Notes};
 use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects};
 use ziyuan_app::translation::{Translations, context_dir_rel};
 
+const V2_PERSON: &str = r#"{"format":2,"terms":[{"term_id":"t-1","source":"勇者","category":"common","allowed":["勇士"],"scope":{"kind":"project"},"evidence":[],"status":"confirmed"}],"persons":[{"person_id":"p_1","name":"勇者","aliases":["勇者大人"],"terms":[],"address_rules":[{"target":"p_1","speaker":{"kind":"person","person_id":"p_1"},"scope":{"kind":"project"},"term":"t-1","evidence":[]}],"voice":{"description":"庄重"},"evidence":[],"status":"confirmed"}]}"#;
+
 const V2: &str = "{\"format\":2,\"terms\":[],\"persons\":[]}\n";
 const LEGACY: &str = "[ { \"source\": \"勇者\", \"allowed\": [\"勇士\"], \"scope\": \"第二章以后；先人工核对\", \"note\": \"统一\" } ]\n";
 
@@ -241,4 +243,36 @@ fn structured_snapshot_is_read_exported_verified_and_approvable() {
     t.export(&f.project.id, f.block()).unwrap();
     t.verification(None, &f.project.id, f.block()).unwrap();
     assert!(t.approve_context(&f.project.id).unwrap() >= 2);
+}
+
+#[test]
+fn structured_verification_reports_person_and_address_hints() {
+    let f = Fx::new();
+    let t = f.t();
+    t.ensure_context_draft(&f.project.id).unwrap();
+    f.write_glossary_only(V2_PERSON);
+    t.approve_context(&f.project.id)
+        .unwrap_or_else(|e| panic!("approve v2 person: {e}"));
+    let mut target = f.project.chapters[0].blocks[0].clone();
+    for p in &mut target.paragraphs {
+        p.text = "译文没有允许译法。".into();
+    }
+    t.export(&f.project.id, f.block()).unwrap();
+    let dir = t.block_dir(&f.project.id, f.block());
+    fs::write(dir.join("zh.json"), target.serialized().unwrap()).unwrap();
+    let messages = t
+        .verification(None, &f.project.id, f.block())
+        .unwrap()
+        .hints
+        .into_iter()
+        .map(|h| h.message)
+        .collect::<Vec<_>>();
+    assert!(
+        messages.iter().any(|m| m.contains("第二版人物")),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("第二版称谓")),
+        "{messages:?}"
+    );
 }

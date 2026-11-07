@@ -1453,4 +1453,5 @@ CLI 人工流程已通；Web／TUI 入口未开，包版本未升，未发版。
 - Web 资料面板新增“准备生产资料”，POST `/text/<项目>/materials/prepare`，观政拒绝；成功提示“尚未批准”和下一步命令。
 - 生产读取已放开 v2：快照读取、`export` 的 context.json（对象形状）、勘校术语提示与 `context approve` 均可处理 v2；札记的术语并入仍拒绝 v2（文体札记不受影响）。
 - 验收：`materials` 38 项（含 prepare→approve v2）、Web 68 项、`context_v2` 4 项通过；真实浏览器保存草稿→准备生产资料得到 305 字节与下一步命令；`text context approve` 后 `text translate` 成功，导出的 `context.json` 的 glossary 为 v2 对象；全量 `cargo test` 退出码 0（`temp_lease_probe` 预期噪声）。
-- 未做：人物与称谓规则尚未进入 v2 勘校（仅术语）；模型提示的 v2 渲染未单独测试；旧 CLI 未重新构建（事件读本未变，旧版仍拒绝 format 2 文件）。
+- v2 勘校已含人物姓名／别名与称谓规则关联术语的提示；称谓的说话人／目标条件只提示“尚未核”，不做语义判定。旧版 `v1.5.0` 二进制复验：对同一 v2 草稿执行 `text context approve` 报“人物／术语资料尚未开放”并退出 1。
+- 未做：模型提示的 v2 渲染未单独测试；称谓条件无法在无关联输入时判定，仍只给保守提示。

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- 生产批准第二版资料（N2c）：`ContextSnapshot.glossary` 改为 `Glossary`（旧数组／第二版对象分派），生产快照、导出、勘校与批准可读 v2；新增 `ziyuan text context prepare` 与 Web“准备生产资料”，只写 `context/glossary.json`、不批准；札记术语并入仍拒绝 v2。见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料)。
+- 生产批准第二版资料（N2c）：`ContextSnapshot.glossary` 改为 `Glossary`（旧数组／第二版对象分派），生产快照、导出、勘校与批准可读 v2；新增 `ziyuan text context prepare` 与 Web“准备生产资料”，只写 `context/glossary.json`、不批准；v2 勘校覆盖术语、人物姓名/别名与称谓规则术语；旧版 1.5.0 二进制复验仍拒绝 v2。札记术语并入仍拒绝 v2。见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料)。
 - 文档：新增 N2c“生产批准第二版资料”设计（本地草稿与生产资料分离、生产表示、批准流程、消费者改造、兼容与分批验收）；未实现、未改事件或版本。见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料设计未实现)。
 - Web 段旁提示（N2b）：译书当前块显示本地资料草稿适用的术语与人物（仅 ID、段号、状态），只读、未批准、不外发；无草稿时明确说明；空关联不显示称谓规则。见 [N0 第 25 节](docs/novel-workbench-n0.md#25-n2b-段旁只读提示)。
 

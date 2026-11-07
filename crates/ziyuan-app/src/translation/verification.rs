@@ -467,6 +467,43 @@ impl Translations {
                                 });
                             }
                         }
+                        for person in &data.persons {
+                            let names = std::iter::once(person.name.as_str())
+                                .chain(person.aliases.iter().map(String::as_str))
+                                .collect::<Vec<_>>();
+                            if names.iter().any(|n| source.text.contains(*n))
+                                && !names.iter().any(|n| target.text.contains(*n))
+                            {
+                                hints.push(GlossaryHint {
+                                    paragraph: source.id.clone(),
+                                    source: person.name.clone(),
+                                    allowed: names.iter().map(|n| (*n).to_owned()).collect(),
+                                    scope: None,
+                                    note: Some(person.reading.clone().unwrap_or_default()).filter(|s| !s.is_empty()),
+                                    message: "第二版人物：原文出现人物名或别名而译文未见该名；称谓条件、范围与可用起点尚未核，先人工核对".into(),
+                                });
+                            }
+                        }
+                        for person in &data.persons {
+                            for rule in &person.address_rules {
+                                let Some(term) = data.terms.iter().find(|t| t.term_id == rule.term)
+                                else {
+                                    continue;
+                                };
+                                if source.text.contains(&term.source)
+                                    && !term.allowed.iter().any(|a| target.text.contains(a))
+                                {
+                                    hints.push(GlossaryHint {
+                                        paragraph: source.id.clone(),
+                                        source: term.source.clone(),
+                                        allowed: term.allowed.clone(),
+                                        scope: None,
+                                        note: rule.note.clone(),
+                                        message: "第二版称谓：原文命中称谓术语而译文未见允许译法；说话人／称呼对象条件尚未核，先人工核对".into(),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
