@@ -74,7 +74,8 @@ export class MaterialModel {
   constructor({
     project, origin = globalThis.location?.origin ?? "", module = "materials",
     storage, requestId = defaultRequestId, refresh = () => {},
-    maxMirrorBytes = 1024 * 1024,
+    // Browser quota is authoritative; raw nulls can exceed the server's compact size.
+    maxMirrorBytes = Number.POSITIVE_INFINITY,
   }) {
     this.project = project;
     this.origin = origin;
@@ -420,7 +421,8 @@ export class MaterialModel {
           savedSnapshot: this.savedSnapshot, baseRevision: this._baselineRevision,
           entryKeys: this.entryKeys, pendingSave: this.pendingSave,
         });
-        if (new TextEncoder().encode(raw).length > this.maxMirrorBytes) {
+        if (Number.isFinite(this.maxMirrorBytes)
+          && new TextEncoder().encode(raw).length > this.maxMirrorBytes) {
           throw new Error("Session mirror too large");
         }
         this.storage.setItem(this.mirrorKey, raw);

@@ -156,6 +156,82 @@ test("quota failure and oversized mirror preserve complete in-memory input and w
   }
 });
 
+test("default session mirror can retain three near-limit draft snapshots", () => {
+  const session = storage();
+  const state = model({ storage: session });
+  const largeMaterial = (character) => material(character.repeat(1_040_000));
+  const snapshot = largeMaterial("a");
+  const pending = largeMaterial("b");
+  const current = largeMaterial("c");
+  const draftLimit = 1024 * 1024;
+  for (const candidate of [snapshot, pending, current]) {
+    assert.ok(new TextEncoder().encode(JSON.stringify(candidate)).length < draftLimit);
+  }
+
+  const initialView = view();
+  initialView.draft.material = snapshot;
+  state.receive(initialView);
+  state.edit(["terms", 0, "source"], pending.terms[0].source);
+  state.prepareSave();
+  state.edit(["terms", 0, "source"], current.terms[0].source);
+
+  const rawMirror = session.values.get(state.mirrorKey);
+  assert.ok(rawMirror);
+  assert.equal(state.mirrorError, null);
+  assert.ok(new TextEncoder().encode(rawMirror).length > draftLimit);
+  const mirror = JSON.parse(rawMirror);
+  assert.equal(mirror.savedSnapshot.terms[0].source, snapshot.terms[0].source);
+  assert.equal(mirror.pendingSave.material.terms[0].source, pending.terms[0].source);
+  assert.equal(mirror.material.terms[0].source, current.terms[0].source);
+});
+
+test("default mirror does not reject savable null-heavy snapshots by raw JSON size", () => {
+  const session = storage();
+  const state = model({ storage: session });
+  const position = () => ({ chapter: "c", paragraph: null });
+  const snapshot = {
+    format: 2,
+    terms: Array.from({ length: 5_000 }, () => ({
+      term_id: "t", source: "aaa", category: "title", allowed: [], note: null,
+      scope: { kind: "range", from: position(), to: position() },
+      available_from: position(), evidence: [], status: "tentative",
+    })),
+    persons: Array.from({ length: 352 }, () => ({
+      person_id: "p", available_from: null, name: "n", reading: null, aliases: [],
+      terms: [], address_rules: [], voice: { description: "v", examples: null },
+      evidence: [], status: "tentative",
+    })),
+  };
+  const pending = clone(snapshot);
+  pending.terms[0].source = "bbb";
+  const current = clone(snapshot);
+  current.terms[0].source = "ccc";
+  const optionalFields = new Set(["note", "paragraph", "available_from", "reading", "examples"]);
+  const bytes = (value, compact = false) => new TextEncoder().encode(JSON.stringify(value,
+    (key, nested) => compact && nested === null && optionalFields.has(key) ? undefined : nested)).length;
+  const draftLimit = 1024 * 1024;
+  for (const candidate of [snapshot, pending, current]) {
+    assert.ok(bytes(candidate, true) < draftLimit);
+    assert.ok(bytes(candidate) > draftLimit);
+  }
+
+  const initialView = view();
+  initialView.draft.material = snapshot;
+  state.receive(initialView);
+  state.edit(["terms", 0, "source"], pending.terms[0].source);
+  state.prepareSave();
+  state.edit(["terms", 0, "source"], current.terms[0].source);
+
+  const rawMirror = session.values.get(state.mirrorKey);
+  assert.ok(rawMirror);
+  assert.equal(state.mirrorError, null);
+  assert.ok(new TextEncoder().encode(rawMirror).length > 4 * draftLimit);
+  const mirror = JSON.parse(rawMirror);
+  assert.equal(mirror.savedSnapshot.terms[0].scope.from.paragraph, null);
+  assert.equal(mirror.pendingSave.material.terms[0].note, null);
+  assert.equal(mirror.material.persons[0].voice.examples, null);
+});
+
 test("semantic validation errors do not disable saving", () => {
   const state = model();
   state.receive(view());
