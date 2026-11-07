@@ -181,6 +181,21 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     return true;
   }
 
+  // Memory is keyed by index path, so it must follow the items that shift down after a removal.
+  function shiftMemory(rel, removed) {
+    const prefix = `${rel.join(".")}.`;
+    for (const memory of Object.values(state())) {
+      for (const [id, value] of [...memory]) {
+        if (!id.startsWith(prefix)) continue;
+        const [head, ...rest] = id.slice(prefix.length).split(".");
+        const index = Number(head);
+        if (!Number.isInteger(index) || index < removed) continue;
+        memory.delete(id);
+        if (index > removed) memory.set([prefix + (index - 1), ...rest].join("."), value);
+      }
+    }
+  }
+
   function location(rel) {
     const path = [form.group, indexOf(form.group, form.key), ...rel];
     return path.map((part, i) => (typeof part === "number" ? `[${part}]` : i ? `.${part}` : part)).join("");
@@ -359,7 +374,9 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
           typeof item === "string" ? `内容：${display(item)}` : "",
           "其他条目中的引用不会随之修改。"].filter(Boolean).join("\n");
         if (typeof confirm !== "function" || !confirm(prompt)) return;
-        if (write(rel, latest.filter((_, i) => i !== index))) rebuildForm();
+        if (!write(rel, latest.filter((_, i) => i !== index))) return;
+        shiftMemory(rel, index);
+        rebuildForm();
       });
       row.append(remove);
       wrap.append(row);
@@ -407,8 +424,14 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     evidenceList(box, [...rel, "evidence"]);
   }
 
+  function idWarning(box) {
+    box.append(make("p", { className: "hint warning", dataset: { role: "id-warning" },
+      textContent: "修改 ID 会使其他条目中引用旧 ID 的位置失效；编辑器不会自动更新这些引用。" }));
+  }
+
   function termForm(box) {
     textField(box, "术语 ID", ["term_id"]);
+    idWarning(box);
     textField(box, "原文", ["source"]);
     choiceField(box, "类别", ["category"], CATEGORY);
     stringList(box, "允许译法", ["allowed"], "译法");
@@ -422,6 +445,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
 
   function personForm(box) {
     textField(box, "人物 ID", ["person_id"]);
+    idWarning(box);
     textField(box, "姓名", ["name"]);
     optional(box, "读音", ["reading"], () => "", (inner, path) => textField(inner, "读音", path));
     optional(box, "生效位置", ["available_from"], blank.position,
@@ -655,8 +679,42 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     return result;
   }
 
+  // path: [group, entryIndex, ...fields/indexes], e.g. ["persons", 0, "address_rules", 0, "quote"].
+  function focusField(path) {
+    if (disposed || !Array.isArray(path)) return false;
+    const [group, index, ...rel] = path;
+    const key = Object.hasOwn(GROUPS, group) && Number.isInteger(index) ? keys(group)[index] : undefined;
+    if (key === undefined) return false;
+    finishComposition();
+    if (!entryState.has(key)) entryState.set(key, { hidden: new Map(), pages: new Map() });
+    const pageState = entryState.get(key).pages;
+    rel.forEach((part, i) => {
+      if (typeof part === "number" && i > 0) {
+        pageState.set(rel.slice(0, i).join("."), Math.floor(part / NESTED_PAGE_SIZE));
+      }
+    });
+    tab = group;
+    selected[group] = key;
+    lastIndex[group] = index;
+    pages[group] = Math.floor(index / PAGE_SIZE);
+    render();
+    renderForm(true);
+    applyDeferred();
+    const id = rel.join(".");
+    // A field inside an absent option or variant can only be reached through its toggle.
+    let target = form?.fields.get(`field:${id}`) ?? form?.fields.get(`toggle:${id}`);
+    for (let end = rel.length - 1; !target && end > 0; end--) {
+      target = form?.fields.get(`toggle:${rel.slice(0, end).join(".")}`);
+    }
+    if (!target) return false;
+    target.scrollIntoView?.({ block: "nearest" });
+    target.focus();
+    return true;
+  }
+
   return {
     update,
+    focusField,
     hasDirty: () => !disposed && (!!composing || !!model?.dirty),
     flushMirror() {
       if (disposed || !model?.canSave) return;

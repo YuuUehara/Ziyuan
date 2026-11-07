@@ -634,3 +634,107 @@ test("every nested item removal asks confirm and cancelling leaves the material 
   expected.terms[0].allowed.splice(0, 1);
   assert.deepEqual(ctx.mirror(), expected);
 });
+
+function ruleMaterial() {
+  const material = fullMaterial();
+  const evidence = (prefix, count) => Array.from({ length: count }, (_, i) => ({ paragraph: `p${i}`,
+    quote: `${prefix}${i}`, explanation: "", stance: "project_fact", status: "tentative" }));
+  material.persons[0].address_rules = [
+    { target: "p-2", speaker: { kind: "person", person_id: "p-1" }, scope: { kind: "project" },
+      term: "t-1", note: "noteA", evidence: evidence("a", 15) },
+    { target: "p-1", speaker: { kind: "narration" }, scope: { kind: "project" },
+      term: "t-2", evidence: evidence("b", 12) },
+    { target: "p-1", speaker: { kind: "unknown" }, scope: { kind: "project" },
+      term: "t-2", note: "noteC", evidence: [] },
+  ];
+  return material;
+}
+
+test("removing an earlier item never leaks its remembered values or page into the next item", () => {
+  const ctx = setup(ruleMaterial(), { answer: true });
+  const { host } = ctx;
+  click(tab(host, "persons"));
+  check(toggle(host, "address_rules.0.note"), false);
+  choose(field(host, "address_rules.0.speaker.kind"), "unknown");
+  click(control(host, "next", "address_rules.0.evidence"));
+  assert.equal(field(host, "address_rules.0.evidence.10.quote").value, "a10");
+  check(toggle(host, "address_rules.2.note"), false);
+
+  click(control(host, "remove", "address_rules.0"));
+  assert.equal(field(host, "address_rules.0.evidence.0.quote").value, "b0", "page state does not leak");
+  check(toggle(host, "address_rules.0.note"), true);
+  assert.equal(field(host, "address_rules.0.note").value, "", "rule B never receives noteA");
+  choose(field(host, "address_rules.0.speaker.kind"), "person");
+  assert.equal(field(host, "address_rules.0.speaker.person_id").value, "");
+  check(toggle(host, "address_rules.1.note"), true);
+  assert.equal(field(host, "address_rules.1.note").value, "noteC", "later items keep their own memory");
+
+  const rules = ctx.mirror().persons[0].address_rules;
+  assert.deepEqual(rules.map((rule) => rule.note), ["", "noteC"]);
+  assert.deepEqual(rules[0].speaker, { kind: "person", person_id: "" });
+});
+
+test("focusField selects the group, entry and nested page and focuses the control", () => {
+  const material = ruleMaterial();
+  material.persons = [material.persons[1], material.persons[0]];
+  const { host, doc, editor } = setup(material);
+  assert.equal(editor.focusField(["persons", 1, "address_rules", 0, "evidence", 12, "quote"]), true);
+  const quote = field(host, "address_rules.0.evidence.12.quote");
+  assert.equal(doc.activeElement, quote);
+  assert.equal(quote.value, "a12");
+  assert.equal(quote.isConnected, true);
+  assert.equal(tab(host, "persons").getAttribute("aria-selected"), "true");
+  assert.equal(items(host)[1].getAttribute("aria-selected"), "true");
+  assert.equal(field(host, "person_id").value, "p-1");
+
+  assert.equal(editor.focusField(["persons", 1, "address_rules", 0, "evidence", 0, "quote"]), true);
+  assert.equal(doc.activeElement, field(host, "address_rules.0.evidence.0.quote"));
+  assert.equal(editor.focusField(["terms", 0, "scope", "to", "chapter"]), true);
+  assert.equal(doc.activeElement, field(host, "scope.to.chapter"));
+  assert.equal(tab(host, "terms").getAttribute("aria-selected"), "true");
+  assert.equal(editor.focusField(["terms", 1, "note"]), true, "an absent option focuses its toggle");
+  assert.equal(doc.activeElement, toggle(host, "note"));
+  assert.equal(editor.focusField(["terms", 9, "source"]), false);
+});
+
+test("focusField moves to the list page holding the entry", () => {
+  const terms = Array.from({ length: 120 }, (_, i) => ({ term_id: `t-${i}`, source: `词${i}`,
+    category: "common", allowed: [], scope: { kind: "project" }, evidence: [], status: "tentative" }));
+  const { host, doc, editor } = setup({ format: 2, terms, persons: [] });
+  assert.equal(editor.focusField(["terms", 101, "source"]), true);
+  assert.equal(doc.activeElement, field(host, "source"));
+  assert.equal(field(host, "term_id").value, "t-101");
+  const selected = items(host).filter((item) => item.getAttribute("aria-selected") === "true");
+  assert.equal(selected.length, 1);
+  assert.match(selected[0].textContent, /t-101/);
+});
+
+test("ID inputs carry a visible reference warning", () => {
+  const { host } = setup();
+  for (const [group, id] of [["terms", "term_id"], ["persons", "person_id"]]) {
+    click(tab(host, group));
+    const input = field(host, id);
+    const warning = one(host, (node) => node.dataset.role === "id-warning", `${id} warning`);
+    assert.equal(warning.hidden, false);
+    assert.match(warning.textContent, /引用/);
+    const label = input.parentNode;
+    const siblings = label.parentNode.children;
+    assert.equal(siblings[siblings.indexOf(label) + 1], warning, `${id} warning sits beside the input`);
+  }
+});
+
+test("persons with the same name and different IDs are selected and edited independently", () => {
+  const person = (person_id) => ({ person_id, name: "同名", aliases: [], terms: [], address_rules: [],
+    voice: { description: "" }, evidence: [], status: "tentative" });
+  const { host, mirror } = setup({ format: 2, terms: [], persons: [person("p-a"), person("p-b")] });
+  click(tab(host, "persons"));
+  assert.match(items(host)[0].textContent, /p-a/);
+  assert.match(items(host)[1].textContent, /p-b/);
+  click(items(host)[1]);
+  assert.equal(field(host, "person_id").value, "p-b");
+  type(field(host, "name"), "同名乙");
+  click(items(host)[0]);
+  assert.equal(field(host, "person_id").value, "p-a");
+  assert.equal(field(host, "name").value, "同名");
+  assert.deepEqual(mirror().persons.map((p) => [p.person_id, p.name]), [["p-a", "同名"], ["p-b", "同名乙"]]);
+});
