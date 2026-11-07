@@ -58,6 +58,8 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   const doc = host.ownerDocument;
   let disposed = false;
   let model = null;
+  let currentView = null;
+  const listeners = new Set();
   let tab = "terms";
   let composing = null;
   // Updates arriving during an IME composition queue in arrival order; a single
@@ -181,6 +183,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     form.json = JSON.stringify(entries(group)[index]);
     relabel();
     renderStatus();
+    for (const listener of [...listeners]) listener();
     return true;
   }
 
@@ -661,6 +664,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     renderStatus();
     renderList();
     renderForm(false);
+    for (const listener of [...listeners]) listener();
   }
 
   function update(view, ticket) {
@@ -672,6 +676,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     const project = view?.project?.id;
     if (!model || model.project !== project) {
       model = new MaterialModel({ project, storage });
+      currentView = null;
       form = null;
       entryState.clear();
       for (const group of Object.keys(GROUPS)) {
@@ -681,6 +686,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
       }
     }
     const result = model.receive(view, ticket);
+    if (result) currentView = clone(view);
     // A clean changed GET replaces entry objects and their keys; memory keyed by
     // keys that no longer exist can never be reached again. Local edits keep keys
     // (follow/shiftMemory), so their memory survives this prune.
@@ -726,6 +732,18 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
   return {
     update,
     focusField,
+    // Read-only consumers receive a fresh snapshot; temporary preview state stays
+    // outside MaterialModel and its recoverable session mirror.
+    previewState: () => model?.canSave && currentView ? {
+      view: clone(currentView), workspace_id: model.workspaceId,
+      project_id: model.project, project_hash: model.projectHash,
+      local_epoch: model.localEpoch, material: clone(model.material),
+    } : null,
+    subscribe(listener) {
+      if (disposed || typeof listener !== "function") return () => {};
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     // Task 12 polling helpers: tickets for GETs must come from the same model
     // that receives their responses, or the watermark cannot reject stale ones.
     // beginReceive() returns undefined until the first update creates the model.
@@ -744,7 +762,9 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
       composing = null;
       deferred = [];
       form = null;
+      currentView = null;
       listItems = new Map();
+      listeners.clear();
       host.replaceChildren();
     },
   };
