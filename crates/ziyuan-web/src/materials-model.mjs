@@ -105,7 +105,9 @@ export class MaterialModel {
       throw new Error("The materials view has missing or mismatched identity.");
     }
     const changedWorkspace = this.workspaceId !== view.workspace_id;
-    const keepLocal = !changedWorkspace && this.dirty;
+    // An unconfirmed submission may be what this GET shows; a clean-looking local
+    // state (e.g. an edit reverted after submit) must not be overwritten by it.
+    const keepLocal = !changedWorkspace && (this.dirty || this._hasLiveSubmission());
     if (changedWorkspace) {
       this._generation++;
       this._requests.clear();
@@ -242,6 +244,15 @@ export class MaterialModel {
   }
 
   invalidatePreview() { this.preview = null; }
+
+  // Only an unacknowledged request against the current baseline can still commit
+  // content this model has not yet seen; a no-op request cannot change the input.
+  _hasLiveSubmission() {
+    return [...this._requests.values()].some((sent) => sent.generation === this._generation
+      && !this._acknowledged.has(sent.request.request_id)
+      && sent.request.expected_revision === this._baselineRevision
+      && !same(sent.request.material, this.material));
+  }
 
   // When the server already holds the current input or a submitted snapshot (for
   // example a commit whose receipt is late or lost), rebase onto it instead of

@@ -463,6 +463,48 @@ test("restoring a pending request whose commit succeeded but receipt was lost ne
   }
 });
 
+test("a reverted edit survives a GET of its still-unconfirmed submission", () => {
+  let refreshes = 0;
+  const state = model({ refresh: () => refreshes++ });
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "已提交");
+  const request = state.prepareSave();
+  state.edit(["terms", 0, "source"], "先生");
+  assert.equal(state.dirty, false);
+  for (let poll = 0; poll < 2; poll++) {
+    state.receive(view("已提交", revision("3")));
+    assert.equal(state.material.terms[0].source, "先生");
+    assert.equal(state.savedSnapshot.terms[0].source, "已提交");
+    assert.equal(state.remoteRevision, revision("3"));
+    assert.equal(state.conflict, false);
+    assert.equal(state.dirty, true);
+  }
+  assert.equal(state.acceptSave(receipt(revision("3")), request), true);
+  assert.equal(state.material.terms[0].source, "先生");
+  assert.equal(refreshes, 0);
+  const next = state.prepareSave();
+  assert.notEqual(next.request_id, request.request_id);
+  assert.equal(next.expected_revision, revision("3"));
+  assert.equal(next.material.terms[0].source, "先生");
+});
+
+test("a clean model adopts server changes once no submission can still commit on its baseline", () => {
+  const state = model();
+  state.receive(view());
+  state.edit(["terms", 0, "source"], "已提交");
+  const request = state.prepareSave();
+  state.acceptSave(receipt(revision("2")), request);
+  state.receive(view("他处修改", revision("3")));
+  assert.equal(state.material.terms[0].source, "他处修改");
+  assert.equal(state.dirty, false);
+  const unchanged = model();
+  unchanged.receive(view());
+  unchanged.prepareSave();
+  unchanged.receive(view("他处修改", revision("3")));
+  assert.equal(unchanged.material.terms[0].source, "他处修改");
+  assert.equal(unchanged.conflict, false);
+});
+
 test("a failed later mirror write removes the stale mirror so reload does not offer it", () => {
   for (const failure of ["quota", "oversize"]) {
     const session = storage();
