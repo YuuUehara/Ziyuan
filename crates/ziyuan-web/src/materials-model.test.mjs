@@ -698,3 +698,60 @@ test("tickets from another workspace, generation or model are rejected", () => {
     { ...state.beginReceive() }), false);
   assert.equal(state.workspaceId, "b".repeat(64));
 });
+
+test("clearing an optional field to null reconciles with a GET that omits it", () => {
+  let refreshes = 0;
+  const state = model({ refresh: () => refreshes++ });
+  state.receive(view());
+  assert.equal(state.material.terms[0].note, "备注");
+  state.edit(["terms", 0, "note"], null);
+  state.edit(["persons", 0, "reading"], null);
+  state.edit(["persons", 0, "voice", "examples"], null);
+  const request = state.prepareSave();
+  state.edit(["terms", 0, "source"], "提交后");
+  const omitted = view("先生", revision("3"));
+  delete omitted.draft.material.terms[0].note;
+  delete omitted.draft.material.persons[0].reading;
+  delete omitted.draft.material.persons[0].voice.examples;
+  for (let poll = 0; poll < 2; poll++) {
+    state.receive(omitted);
+    assert.equal(state.material.terms[0].source, "提交后");
+    assert.equal(state.remoteRevision, revision("3"));
+    assert.equal(state.conflict, false);
+    assert.equal(state.dirty, true);
+    assert.equal(state.pendingSave, null);
+  }
+  assert.equal(state.acceptSave(receipt(revision("3")), request), true);
+  assert.equal(state.needsRefresh, false);
+  assert.equal(refreshes, 0);
+  const next = state.prepareSave();
+  assert.equal(next.expected_revision, revision("3"));
+  assert.equal(next.material.terms[0].source, "提交后");
+  state.edit(["terms", 0, "source"], "先生");
+  assert.equal(state.dirty, false);
+});
+
+test("nulls in required fields, nested required paragraphs and arrays stay distinct", () => {
+  for (const [path, value] of [
+    [["terms", 0, "allowed"], ["先生", "老师", null]],
+    [["terms", 0, "evidence", 0, "paragraph"], null],
+    [["persons", 0, "voice", "description"], null],
+  ]) {
+    const state = model();
+    state.receive(view());
+    state.edit(path, value);
+    state.prepareSave();
+    assert.equal(state.dirty, true);
+    state.receive(view("先生", revision("2")));
+    assert.equal(state.conflict, true);
+  }
+  const position = model();
+  position.receive(view());
+  position.edit(["terms", 0, "available_from"], { chapter: "chapter1", paragraph: null });
+  position.prepareSave();
+  const remote = view("先生", revision("2"));
+  remote.draft.material.terms[0].available_from = { chapter: "chapter1" };
+  position.receive(remote);
+  assert.equal(position.conflict, false);
+  assert.equal(position.dirty, false);
+});

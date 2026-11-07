@@ -11,6 +11,32 @@ function canonical(value) {
   return value;
 }
 const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+
+// The server stores null in an Option field as None and omits it on GET
+// (skip_serializing_if). Only those fields are normalized; nulls elsewhere stay distinct.
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function withoutNone(value, fields, nested = {}) {
+  if (!isObject(value)) return value;
+  const copy = { ...value };
+  for (const field of fields) if (copy[field] === null) delete copy[field];
+  for (const [field, normalize] of Object.entries(nested)) {
+    if (Object.hasOwn(copy, field)) copy[field] = normalize(copy[field]);
+  }
+  return copy;
+}
+const mapArray = (value, normalize) => (Array.isArray(value) ? value.map(normalize) : value);
+const position = (value) => withoutNone(value, ["paragraph"]);
+const term = (value) => withoutNone(value, ["note", "available_from"], { available_from: position });
+const rule = (value) => withoutNone(value, ["note"]);
+const person = (value) => withoutNone(value, ["available_from", "reading"], {
+  available_from: position,
+  voice: (voice) => withoutNone(voice, ["examples"]),
+  address_rules: (rules) => mapArray(rules, rule),
+});
+const wireMaterial = (value) => withoutNone(value, [], {
+  terms: (terms) => mapArray(terms, term), persons: (persons) => mapArray(persons, person),
+});
+const sameMaterial = (left, right) => same(wireMaterial(left), wireMaterial(right));
 const emptyMaterial = () => ({ format: 2, terms: [], persons: [] });
 const isMaterial = (value) => value?.format === 2
   && Array.isArray(value.terms) && Array.isArray(value.persons);
@@ -85,7 +111,7 @@ export class MaterialModel {
   get canSave() { return this.material !== null && this.workspaceId !== null; }
   get conflict() { return this.canSave && this._baselineRevision !== this.remoteRevision; }
   get dirty() {
-    return this.canSave && (this.conflict || !same(this.material, this.savedSnapshot));
+    return this.canSave && (this.conflict || !sameMaterial(this.material, this.savedSnapshot));
   }
   get identity() {
     return {
@@ -156,7 +182,7 @@ export class MaterialModel {
     this._remoteMaterial = clone(view.draft?.material ?? emptyMaterial());
     this.needsRefresh = false;
     if (!keepLocal) {
-      if (changedWorkspace || !same(this.material, this._remoteMaterial)) {
+      if (changedWorkspace || !sameMaterial(this.material, this._remoteMaterial)) {
         this.material = clone(this._remoteMaterial);
       }
       this.savedSnapshot = clone(this._remoteMaterial);
@@ -197,7 +223,7 @@ export class MaterialModel {
   prepareSave() {
     if (!this.canSave) throw new Error("Load a materials view before saving.");
     // A request built on a superseded baseline would only earn a permanent 409.
-    if (this.pendingSave && same(this.pendingSave.material, this.material)
+    if (this.pendingSave && sameMaterial(this.pendingSave.material, this.material)
       && this.pendingSave.expected_revision === this._baselineRevision) {
       return this.pendingSave;
     }
@@ -223,7 +249,7 @@ export class MaterialModel {
     // server baseline can advance it. Historical idempotency receipts require GET.
     // A GET may already have observed the revision this receipt produced.
     const observed = receipt.revision === this.remoteRevision
-      && same(request.material, this._remoteMaterial);
+      && sameMaterial(request.material, this._remoteMaterial);
     if (sent.generation !== this._generation
       || (request.expected_revision !== this.remoteRevision && !observed)) {
       this.needsRefresh = true;
@@ -288,7 +314,7 @@ export class MaterialModel {
     return [...this._requests.values()].some((sent) => sent.generation === this._generation
       && !this._acknowledged.has(sent.request.request_id)
       && sent.request.expected_revision === this._baselineRevision
-      && !same(sent.request.material, this.material));
+      && !sameMaterial(sent.request.material, this.material));
   }
 
   // When the server already holds the current input or a submitted snapshot (for
@@ -301,11 +327,11 @@ export class MaterialModel {
       .filter((sent) => sent.generation === this._generation
         && !this._acknowledged.has(sent.request.request_id))
       .map((sent) => sent.request)];
-    if (!same(this.material, remote)
-      && !submitted.some((request) => request && same(request.material, remote))) return false;
+    if (!sameMaterial(this.material, remote)
+      && !submitted.some((request) => request && sameMaterial(request.material, remote))) return false;
     this.savedSnapshot = clone(remote);
     this._baselineRevision = this.remoteRevision;
-    if (this.pendingSave && same(this.pendingSave.material, remote)) this.pendingSave = null;
+    if (this.pendingSave && sameMaterial(this.pendingSave.material, remote)) this.pendingSave = null;
     return true;
   }
 
