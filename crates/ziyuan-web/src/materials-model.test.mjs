@@ -755,3 +755,35 @@ test("nulls in required fields, nested required paragraphs and arrays stay disti
   assert.equal(position.conflict, false);
   assert.equal(position.dirty, false);
 });
+
+test("range scope endpoints with null paragraphs reconcile with a GET that omits them", () => {
+  for (const location of ["term", "rule"]) {
+    let refreshes = 0;
+    const state = model({ refresh: () => refreshes++ });
+    state.receive(view());
+    const range = { kind: "range", from: { chapter: "chapter1", paragraph: null },
+      to: { chapter: "chapter1", paragraph: null } };
+    const path = location === "term" ? ["terms", 0, "scope"]
+      : ["persons", 0, "address_rules", 0, "scope"];
+    state.edit(path, range);
+    const request = state.prepareSave();
+    state.edit(["terms", 0, "source"], "提交后");
+    const omitted = view("先生", revision("3"));
+    const target = location === "term" ? omitted.draft.material.terms[0]
+      : omitted.draft.material.persons[0].address_rules[0];
+    target.scope = { kind: "range", from: { chapter: "chapter1" }, to: { chapter: "chapter1" } };
+    for (let poll = 0; poll < 2; poll++) {
+      state.receive(omitted);
+      assert.equal(state.conflict, false, location);
+      assert.equal(state.pendingSave, null, location);
+      assert.equal(state.dirty, true, location);
+      assert.equal(state.material.terms[0].source, "提交后", location);
+      assert.equal(state.remoteRevision, revision("3"), location);
+    }
+    assert.equal(state.acceptSave(receipt(revision("3")), request), true, location);
+    assert.equal(refreshes, 0, location);
+    const next = state.prepareSave();
+    assert.equal(next.expected_revision, revision("3"), location);
+    assert.equal(next.material.terms[0].source, "提交后", location);
+  }
+});

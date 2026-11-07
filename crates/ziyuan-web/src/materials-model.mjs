@@ -26,8 +26,12 @@ function withoutNone(value, fields, nested = {}) {
 }
 const mapArray = (value, normalize) => (Array.isArray(value) ? value.map(normalize) : value);
 const position = (value) => withoutNone(value, ["paragraph"]);
-const term = (value) => withoutNone(value, ["note", "available_from"], { available_from: position });
-const rule = (value) => withoutNone(value, ["note"]);
+const scope = (value) => (value?.kind === "range"
+  ? withoutNone(value, [], { from: position, to: position }) : value);
+const term = (value) => withoutNone(value, ["note", "available_from"], {
+  available_from: position, scope,
+});
+const rule = (value) => withoutNone(value, ["note"], { scope });
 const person = (value) => withoutNone(value, ["available_from", "reading"], {
   available_from: position,
   voice: (voice) => withoutNone(voice, ["examples"]),
