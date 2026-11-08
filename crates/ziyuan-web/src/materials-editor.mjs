@@ -736,6 +736,19 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     focusField,
     // Read-only consumers receive a fresh snapshot; temporary preview state stays
     // outside MaterialModel and its recoverable session mirror.
+    addWizardEntry: (group, patch) => {
+      if (!editable() || !["terms", "persons"].includes(group)) return false;
+      tab = group;
+      const before = entries(group);
+      const entry = { ...blank[group](), ...patch };
+      model.edit([group], [...before, entry]);
+      selected[group] = keys(group)[before.length];
+      lastIndex[group] = before.length;
+      pages[group] = Math.floor(before.length / PAGE_SIZE);
+      render();
+      form?.fields.get(`field:${GROUPS[group].id}`)?.focus();
+      return true;
+    },
     previewState: () => model?.canSave && currentView ? {
       view: clone(currentView), workspace_id: model.workspaceId,
       revision: model.remoteRevision,

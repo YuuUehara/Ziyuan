@@ -877,6 +877,17 @@
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
               <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
+              <dialog id="material-wizard">
+                <form method="dialog" class="write">
+                  <h3>向导式新建</h3>
+                  <label>类型<select id="wizard-kind"><option value="terms">术语</option><option value="persons">人物</option></select></label>
+                  <label>原文／姓名<input id="wizard-name" data-keep placeholder="例如：勇者"></label>
+                  <label>允许译法／别名<input id="wizard-values" data-keep placeholder="多个用分号分隔"></label>
+                  <label>备注<input id="wizard-note" data-keep placeholder="可留空"></label>
+                  <div class="actions"><button class="small" id="wizard-add" type="button">添加</button><button class="small" type="submit">取消</button></div>
+                  <p class="hint" id="wizard-status" role="status" aria-live="polite"></p>
+                </form>
+              </dialog>
               <details class="hint"><summary>新手帮助（不用命令行）</summary>
                 <ol>
                   <li>点「新增术语」或「新增人物」，填名称和译法；不确定的字段留空。</li>
@@ -897,6 +908,7 @@
                 <button class="small" id="materials-qa" type="button">确定性检查</button>
                 <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
                 <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
+                <button class="small" id="materials-wizard" type="button">向导式新建</button>
                 <input type="file" id="materials-termbase-file" accept=".csv,text/csv" hidden>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
               </div>
@@ -1563,6 +1575,26 @@ $("materials-validate")?.addEventListener("click", async () => {
     $("materials-status").textContent = "校验失败：" + materialAdvice(e.body?.error || e.message);
   }
 });
+$("materials-wizard")?.addEventListener("click", () => {
+  if (!materialsEditor?.previewState?.()) { $("materials-status").textContent = "请先读取本地资料。"; return; }
+  $("wizard-status").textContent = "";
+  $("material-wizard").showModal();
+});
+$("wizard-add")?.addEventListener("click", () => {
+  const kind = $("wizard-kind").value;
+  const name = $("wizard-name").value.trim();
+  const values = $("wizard-values").value.split(/[;；]/).map((s) => s.trim()).filter(Boolean);
+  const note = $("wizard-note").value.trim();
+  if (!name) { $("wizard-status").textContent = "请填写原文或姓名。"; return; }
+  if (!values.length) { $("wizard-status").textContent = "请填写至少一个译法或别名。"; return; }
+  const id = (kind === "terms" ? "t-" : "p-") + Date.now().toString(36);
+  const patch = kind === "terms"
+    ? { term_id: id, source: name, category: "common", allowed: values, note: note || undefined, scope: { kind: "project" }, evidence: [], status: "tentative" }
+    : { person_id: id, name, aliases: values, terms: [], address_rules: [], voice: { description: note || "待补充" }, evidence: [], status: "tentative" };
+  if (!materialsEditor.addWizardEntry(kind, patch)) { $("wizard-status").textContent = "当前不能新建，请确认资料已载入且不是观政。"; return; }
+  $("material-wizard").close();
+  $("materials-status").textContent = "已加入本地草稿（未保存、未批准）；请检查后点「保存草稿」。";
+});
 $("materials-simple")?.addEventListener("change", (e) => {
   $("text-materials-editor")?.classList.toggle("simple-mode", e.target.checked);
   if (e.target.checked) $("materials-status").textContent = "简易模式：只显示常用字段；高级字段仍保留原值。";
@@ -1734,19 +1766,25 @@ function associationRow(paragraph) {
     select.dataset.pick = field;
     select.className = "assoc-pick";
     select.setAttribute("aria-label", placeholder);
+    if (field !== "speaker") {
+      select.multiple = true;
+      select.size = 3;
+    }
     select.append(new Option(placeholder, ""));
     select.addEventListener("change", () => {
-      if (!select.value) return;
+      const chosen = field === "speaker" ? [select.value] : [...select.selectedOptions].map((o) => o.value);
+      if (!chosen.some(Boolean)) return;
+      const input = field === "speaker" ? speaker : field === "persons" ? persons : targets;
       if (field === "speaker") {
-        speaker.value = select.value;
+        input.value = select.value;
       } else {
-        const input = field === "persons" ? persons : targets;
         const parts = input.value.split(",").map((s) => s.trim()).filter(Boolean);
-        if (!parts.includes(select.value)) parts.push(select.value);
+        for (const value of chosen) if (value && !parts.includes(value)) parts.push(value);
         input.value = parts.join(",");
       }
-      (field === "speaker" ? speaker : field === "persons" ? persons : targets).dispatchEvent(new Event("input", { bubbles: true }));
-      select.value = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      if (select.multiple) for (const option of select.options) option.selected = false;
+      else select.value = "";
     });
     return select;
   };
