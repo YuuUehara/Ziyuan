@@ -75,10 +75,13 @@ jobs:
           cp crates/ziyuan-web/src/fonts/JetBrainsMono-OFL.txt "$name/"
           if [ "${{ runner.os }}" = Windows ]; then
             cp "target/${{ matrix.target }}/release/ziyuan.exe" "$name/"
+            cp scripts/start-windows.bat "$name/start-ziyuan.bat"
             7z a "$name.zip" "$name" > /dev/null
             asset="$name.zip"
           else
             cp "target/${{ matrix.target }}/release/ziyuan" "$name/"
+            cp scripts/start-unix.sh "$name/start-ziyuan.sh"
+            chmod +x "$name/start-ziyuan.sh"
             tar czf "$name.tar.gz" "$name"
             asset="$name.tar.gz"
           fi

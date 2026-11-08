@@ -526,6 +526,9 @@
 .assoc-row { display: grid; grid-template-columns: 110px repeat(3, minmax(90px, 1fr)); gap: 8px; align-items: start; }
 .assoc-field { display: grid; gap: 4px; min-width: 0; }
 .assoc-field input, .assoc-field select { width: 100%; min-width: 0; box-sizing: border-box; }
+.assoc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.assoc-tag { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; font-size: 12px; }
+.assoc-tag-x { border: 0; background: none; padding: 0; cursor: pointer; color: var(--muted); font: inherit; }
 .text-materials pre {
     white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; max-height: 220px;
     overflow: auto; background: var(--well); border-radius: var(--radius); font: 12px/1.6 var(--mono);
@@ -1662,6 +1665,7 @@ function associationRow(paragraph) {
     input.addEventListener("input", () => {
       const saved = materialsAssoc.get(paragraph.id) || { persons: "", targets: "", speaker: "" };
       materialsAssoc.set(paragraph.id, { ...saved, [input.dataset.field]: input.value });
+      renderAssocTags(input.closest(".assoc-field"));
     });
     return input;
   };
@@ -1692,7 +1696,10 @@ function associationRow(paragraph) {
   const fieldBox = (input, select) => {
     const box = document.createElement("div");
     box.className = "assoc-field";
-    box.append(input, select);
+    const tags = document.createElement("div");
+    tags.className = "assoc-tags";
+    box.append(input, select, tags);
+    queueMicrotask(() => renderAssocTags(box));
     return box;
   };
   row.className = "assoc-row";
@@ -1712,6 +1719,7 @@ $("n2b-refresh")?.addEventListener("click", () => {
   renderN2bHints();
 });
 let n2bKey = null;
+let assocPersonLabels = new Map();
 async function renderN2bHints() {
   const host = $("text-n2b-hints");
   if (!host) return;
@@ -1823,9 +1831,35 @@ function renderMaterialsAssociations() {
   }
   fillAssocDatalists();
 }
+function renderAssocTags(box) {
+  if (!box) return;
+  const input = box.querySelector("input");
+  const host = box.querySelector(".assoc-tags");
+  if (!input || !host) return;
+  const field = input.dataset.field;
+  const values = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+  host.replaceChildren(...values.map((value) => {
+    const chip = document.createElement("span");
+    chip.className = "assoc-tag";
+    chip.append(assocPersonLabels.get(value) || value);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "assoc-tag-x";
+    remove.setAttribute("aria-label", "移除 " + value);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      const rest = input.value.split(",").map((s) => s.trim()).filter((s) => s && s !== value);
+      input.value = rest.join(",");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    chip.append(remove);
+    return chip;
+  }));
+}
 function fillAssocDatalists() {
   const persons = materialsEditor?.previewState?.()?.material?.persons || [];
   const labels = new Map(persons.map((p) => [p.person_id, p.name || p.person_id]));
+  assocPersonLabels = labels;
   const ids = persons.map((p) => p.person_id).filter(Boolean);
   const personList = $("assoc-person-ids");
   if (personList) personList.replaceChildren(...ids.map((id) => { const o = document.createElement("option"); o.value = id; o.label = labels.get(id); return o; }));
@@ -1841,6 +1875,7 @@ function fillAssocDatalists() {
     select.replaceChildren(new Option(placeholder, ""), ...options.map(([value, label]) => new Option(label, value)));
     select.value = options.some(([value]) => value === current) ? current : "";
   }
+  for (const box of document.querySelectorAll(".assoc-field")) renderAssocTags(box);
 }
 function materialAdvice(message) {
   if (/请求身份已被不同内容使用|修订冲突|冲突/.test(message)) return message + " 下一步：重新读取服务器资料；当前输入可先导出备份，再决定保留哪一份。";
