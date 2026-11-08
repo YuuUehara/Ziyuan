@@ -55,6 +55,14 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        检查候选译稿的结构（漏段、重复、顺序、陌生段号、空文本）；
                                        提示块默认取自译稿的 block_id。只查结构，不评判译文质量；
                                        未通过时仍输出报告，退出码 1
+  ziyuan text import-docx <项目ID> <文件.docx>
+                                       导入 DOCX 文字（保留原件，供回填粗体/斜体/表格/图片）
+  ziyuan text import-epub <项目ID> <文件.epub>
+                                       导入 EPUB 正文（保留原件，供回填行内标记与图片）
+  ziyuan text export-docx <项目ID> <输出.docx>
+                                       按已定稿译稿回填原 DOCX，不覆盖已有文件
+  ziyuan text export-epub <项目ID> <输出.epub>
+                                       按已定稿译稿回填原 EPUB，不覆盖已有文件
   ziyuan text human show <项目ID> <块ID>
                                        只读查看本块的人工草稿与修订号
   ziyuan text human save <项目ID> <块ID> --file <草稿.json>
@@ -95,6 +103,8 @@ pub(crate) enum TextAction {
     ImportSrt(String, PathBuf),
     ExportSrt(String, PathBuf),
     ImportEpub(String, PathBuf),
+    ExportDocx(String, PathBuf),
+    ExportEpub(String, PathBuf),
     Preview(String, Vec<ImportSource>, ImportOptions),
     ImportPrepared(String, Vec<ImportSource>, ImportOptions, String),
     Show(String),
@@ -189,33 +199,51 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
         "help" => TextAction::Help,
         "init" => parse_init(rest)?,
         "import" => parse_import(rest, false)?,
-            "import-epub" => {
-                let [id, file] = rest else {
-                    return Err("用法: ziyuan text import-epub <项目ID> <文件.epub>".into());
-                };
-                TextAction::ImportEpub(id.clone(), PathBuf::from(file.clone()))
+        "import-epub" => {
+            let [id, file] = rest else {
+                return Err("用法: ziyuan text import-epub <项目ID> <文件.epub>".into());
+            };
+            TextAction::ImportEpub(id.clone(), PathBuf::from(file.clone()))
+        }
+        "import-srt" => {
+            let [id, file] = rest else {
+                return Err("用法: ziyuan text import-srt <项目ID> <文件.srt>".into());
+            };
+            TextAction::ImportSrt(id.clone(), PathBuf::from(file.clone()))
+        }
+        "export-srt" => {
+            let [id, file] = rest else {
+                return Err("用法: ziyuan text export-srt <项目ID> <文件.srt>".into());
+            };
+            TextAction::ExportSrt(id.clone(), PathBuf::from(file.clone()))
+        }
+        "export-docx" => {
+            let [id, file] = rest else {
+                return Err("用法: ziyuan text export-docx <项目ID> <输出.docx>".into());
+            };
+            if id.starts_with('-') || file.starts_with('-') {
+                return Err("用法: ziyuan text export-docx <项目ID> <输出.docx>".into());
             }
-            "import-srt" => {
-                let [id, file] = rest else {
-                    return Err("用法: ziyuan text import-srt <项目ID> <文件.srt>".into());
-                };
-                TextAction::ImportSrt(id.clone(), PathBuf::from(file.clone()))
+            TextAction::ExportDocx(id.clone(), PathBuf::from(file.clone()))
+        }
+        "export-epub" => {
+            let [id, file] = rest else {
+                return Err("用法: ziyuan text export-epub <项目ID> <输出.epub>".into());
+            };
+            if id.starts_with('-') || file.starts_with('-') {
+                return Err("用法: ziyuan text export-epub <项目ID> <输出.epub>".into());
             }
-            "export-srt" => {
-                let [id, file] = rest else {
-                    return Err("用法: ziyuan text export-srt <项目ID> <文件.srt>".into());
-                };
-                TextAction::ExportSrt(id.clone(), PathBuf::from(file.clone()))
+            TextAction::ExportEpub(id.clone(), PathBuf::from(file.clone()))
+        }
+        "import-docx" => {
+            let [id, file] = rest else {
+                return Err("用法: ziyuan text import-docx <项目ID> <文件.docx>".into());
+            };
+            if id.starts_with('-') || file.is_empty() || file.starts_with('-') {
+                return Err("用法: ziyuan text import-docx <项目ID> <文件.docx>".into());
             }
-            "import-docx" => {
-                let [id, file] = rest else {
-                    return Err("用法: ziyuan text import-docx <项目ID> <文件.docx>".into());
-                };
-                if id.starts_with('-') || file.is_empty() || file.starts_with('-') {
-                    return Err("用法: ziyuan text import-docx <项目ID> <文件.docx>".into());
-                }
-                TextAction::ImportDocx(id.clone(), PathBuf::from(file.clone()))
-            }
+            TextAction::ImportDocx(id.clone(), PathBuf::from(file.clone()))
+        }
         "preview" => parse_import(rest, true)?,
         "export-finished" => parse_export(rest, false)?,
         "export-originals" => parse_export(rest, true)?,
@@ -298,7 +326,8 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
             TextAction::Verification(crate::verification_commands::parse(&args)?)
         }
         "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
-        | "status" | "resume" | "references" => {
+        | "status" | "resume" | "references" | "qa" | "termbase" | "concordance" | "tm"
+        | "comment" | "compare" | "version" => {
             TextAction::Translation(crate::translation_commands::parse(&args)?)
         }
         other => {
@@ -596,6 +625,45 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                 println!("已导出 {cues} 条字幕：{}", file.display());
             }
         }
+        TextAction::ExportDocx(id, file) => {
+            let root = env::current_dir()?;
+            // 先按成稿导出规则核对全部块已有效定稿，再回填，不另造一套资格判断。
+            Session::open(EventLog::new(&root))?.export_finished(
+                &root,
+                &id,
+                &ExportOptions::default(),
+            )?;
+            let paragraphs = Translations::new(&root).export_docx(&id, &file)?;
+            if json {
+                print_json(
+                    serde_json::json!({"project": id, "file": file, "paragraphs": paragraphs}),
+                )?;
+            } else {
+                println!(
+                    "已回填 DOCX：{}（{paragraphs} 段；粗体、斜体、表格与图片保留）。",
+                    file.display()
+                );
+            }
+        }
+        TextAction::ExportEpub(id, file) => {
+            let root = env::current_dir()?;
+            Session::open(EventLog::new(&root))?.export_finished(
+                &root,
+                &id,
+                &ExportOptions::default(),
+            )?;
+            let paragraphs = Translations::new(&root).export_epub(&id, &file)?;
+            if json {
+                print_json(
+                    serde_json::json!({"project": id, "file": file, "paragraphs": paragraphs}),
+                )?;
+            } else {
+                println!(
+                    "已回填 EPUB：{}（{paragraphs} 段；行内粗斜体、表格与图片保留）。",
+                    file.display()
+                );
+            }
+        }
         TextAction::ImportDocx(id, file) => {
             let translations = ziyuan_app::translation::Translations::new(env::current_dir()?);
             let lines = translations.import_docx(&id, &file)?;
@@ -697,14 +765,24 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                 .texts()
                 .upgrade_project_protocol(&project, &guard)?;
             let finalized = translations.finalize_human_translation(&guard, &project, &block)?;
+            let snapshot = translations.auto_snapshot(
+                &project,
+                &block,
+                ziyuan_app::translation::VersionState::Finalized,
+            );
             if json {
-                print_json(serde_json::json!({
+                let mut value = serde_json::json!({
                     "project": project,
                     "block": block,
                     "finalized": finalized,
-                }))?;
+                });
+                if let Some(snapshot) = &snapshot {
+                    value["snapshot"] = serde_json::to_value(snapshot)?;
+                }
+                print_json(value)?;
             } else if finalized {
                 println!("已定稿：{project} / {block}");
+                crate::translation_commands::print_snapshot(&snapshot);
                 println!("下一步：ziyuan text export-finished {project}");
             } else {
                 println!("这次定稿此前已入簿，未重复追加：{project} / {block}");
@@ -723,14 +801,24 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                 .texts()
                 .upgrade_project_protocol(&project, &guard)?;
             let approved = translations.approve_human_submission(&mut guard, &project, &block)?;
+            let snapshot = translations.auto_snapshot(
+                &project,
+                &block,
+                ziyuan_app::translation::VersionState::Approved,
+            );
             if json {
-                print_json(serde_json::json!({
+                let mut value = serde_json::json!({
                     "project": project,
                     "block": block,
                     "approved": approved,
-                }))?;
+                });
+                if let Some(snapshot) = &snapshot {
+                    value["snapshot"] = serde_json::to_value(snapshot)?;
+                }
+                print_json(value)?;
             } else if approved {
                 println!("已准奏并落盘：{project} / {block}");
+                crate::translation_commands::print_snapshot(&snapshot);
                 println!("下一步：ziyuan text human finalize {project} {block}");
             } else {
                 println!("这次准奏此前已入簿并落盘，未重复追加：{project} / {block}");
@@ -2161,5 +2249,26 @@ mod tests {
         assert!(line.contains("leftover.tmp"), "{line}");
         assert!(line.contains("删除失败：."), "{line}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 译书扩展子命令曾漏接路由，`ziyuan text version` 等会报「未知子命令」。
+    #[test]
+    fn translation_subcommands_are_routed() {
+        for args in [
+            vec!["version", "list", "p", "b"],
+            vec!["termbase", "export", "p", "f"],
+            vec!["termbase", "export-tbx", "p", "f"],
+            vec!["tm", "list", "p"],
+            vec!["comment", "list", "p"],
+            vec!["concordance", "p", "q"],
+            vec!["qa", "p", "b"],
+            vec!["compare", "p", "b", "f"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            match parse(args) {
+                Ok(TextAction::Translation(_)) => {}
+                _ => panic!("译书子命令未路由"),
+            }
+        }
     }
 }

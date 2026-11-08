@@ -2430,3 +2430,55 @@ async fn materials_modules_are_served_as_javascript_without_stale_cache() {
         assert_eq!(body, expected.as_bytes(), "{name}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn version_snapshots_list_compare_and_reject_viewer_writes() {
+    let (base, root) = start("versions", false).await;
+    let p = project(&root, "版本", "夜が明ける。\n\n朝だ。\n");
+    let block = &p.chapters[0].blocks[0].block_id;
+    let dir = root.join(block_dir_rel(&p.id, block));
+    fs::create_dir_all(&dir).unwrap();
+    let path = root.join(output_rel(&p.id, block));
+    fs::write(&path, candidate(&p, block)).unwrap();
+    let route = format!("/text/{}/blocks/{block}/versions", p.id);
+
+    let (code, view) = call(&base, &route, Some(TOKEN), None).await;
+    assert_eq!(code, 200, "{view}");
+    assert_eq!(view["versions"].as_array().unwrap().len(), 0);
+
+    let (code, saved) = call(&base, &route, Some(TOKEN), Some(json!({"label": "初稿"}))).await;
+    assert_eq!(code, 200, "{saved}");
+    let id = saved["version"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(saved["version"]["state"], "manual");
+
+    let (code, listed) = call(&base, &route, Some(TOKEN), None).await;
+    assert_eq!(code, 200);
+    assert_eq!(listed["versions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["versions"][0]["label"], "初稿");
+
+    let compare = format!("{route}/{id}?against=current");
+    let (code, view) = call(&base, &compare, Some(TOKEN), None).await;
+    assert_eq!(code, 200, "{view}");
+    assert_eq!(view["changes"].as_array().unwrap().len(), 0);
+
+    // 改一处现行译稿后，对比应报 changed；快照本身不变。
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, text.replacen("译：夜", "改：夜", 1)).unwrap();
+    let (code, view) = call(&base, &compare, Some(TOKEN), None).await;
+    assert_eq!(code, 200, "{view}");
+    let changes = view["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["kind"], "changed");
+
+    // 观政可读列表，但不能保存或清理。
+    let (code, _) = call(&base, &route, Some(VIEWER), None).await;
+    assert_eq!(code, 200);
+    let (code, _) = call(&base, &route, Some(VIEWER), Some(json!({"label": "x"}))).await;
+    assert_eq!(code, 403);
+    let prune = format!("/text/{}/blocks/{block}/versions/prune", p.id);
+    let (code, preview) = call(&base, &prune, Some(TOKEN), Some(json!({"keep": 1}))).await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["candidates"].as_array().unwrap().len(), 0);
+    fs::remove_dir_all(root).unwrap();
+}

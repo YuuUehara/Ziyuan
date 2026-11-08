@@ -2,8 +2,9 @@
 use super::export::ReviseMaterials;
 use super::status::{applied_output, writes};
 use super::{
-    BlockFacts, BlockStatus, ContextFacts, Result, ResumeOptions, Translations, all_blocks,
-    block_dir_rel, block_states, find_block, output_rel, pretty_json, resume_plan, sha256_hex,
+    BlockFacts, BlockStatus, ContextFacts, Result, ResumeOptions, Translations, VersionState,
+    all_blocks, block_dir_rel, block_states, find_block, output_rel, pretty_json, resume_plan,
+    sha256_hex,
 };
 use crate::text_project::Project;
 use crate::{AppError, Session};
@@ -481,6 +482,8 @@ impl<S: EventStore> Session<S> {
                 zhupi,
             )?])
         })?;
+        // 自动快照是辅助材料：失败不撤销这次已完成的定稿。
+        let _ = t.auto_snapshot(project, block, VersionState::Finalized);
         Ok(hash)
     }
 

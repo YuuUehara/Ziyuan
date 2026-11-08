@@ -291,6 +291,18 @@ fn router_for(app: AppState) -> Router {
             "/text/{project}/blocks/{block}/human/finalize",
             post(text::human_finalize),
         )
+        .route(
+            "/text/{project}/blocks/{block}/versions",
+            get(text::versions_list).post(text::version_save),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/versions/prune",
+            post(text::versions_prune),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/versions/{id}",
+            get(text::version_compare),
+        )
         .route("/text/{project}/blocks/{block}/reopen", post(text::reopen))
         .route("/text/{project}/blocks/{block}/issue", post(text::issue))
         .route(

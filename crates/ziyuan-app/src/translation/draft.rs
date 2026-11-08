@@ -1,5 +1,6 @@
 //! Local human drafts and immutable review submissions, never approved writes.
 //! Text, submissions and durable retry receipts share one atomic JSON publication.
+use super::versions::VersionState;
 use super::{
     Result, TargetMark, TargetMarkKind, TranslationError, Translations, check_plain_dirs,
     ensure_plain_dirs, find_block, invalid, markup, sha256_hex,
@@ -676,6 +677,8 @@ impl Translations {
                 (),
             ))
         })?;
+        // 自动快照是辅助材料：失败不撤销这次已成功的保存。
+        let _ = self.snapshot_state(project, block, VersionState::Draft);
         Ok(receipt)
     }
 
@@ -974,7 +977,11 @@ impl Translations {
                     .map_err(|e| invalid(e.to_string()))?,
             );
             match EventLog::new(workspace.root()).append_if_unchanged(&history, &events) {
-                Ok(()) => return Ok(true),
+                Ok(()) => {
+                    // 自动快照是辅助材料：失败不撤销这次已完成的定稿事实。
+                    let _ = self.auto_snapshot(project, block, VersionState::Finalized);
+                    return Ok(true);
+                }
                 Err(
                     ziyuan_storage::StorageError::Conflict { .. }
                     | ziyuan_storage::StorageError::PrefixChanged,
@@ -1333,6 +1340,8 @@ impl Translations {
         guard
             .remove_second_format()
             .map_err(|e| kept_scene(&operation_id, format!("清理恢复记录失败：{e}")))?;
+        // 自动快照是辅助材料：失败不撤销这次已成功的准奏。
+        let _ = self.auto_snapshot(project, block, VersionState::Approved);
         Ok(true)
     }
 

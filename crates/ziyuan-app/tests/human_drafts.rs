@@ -1792,7 +1792,7 @@ fn markdown_capability_reports_only_losslessly_expressible_marks() {
 mod approval {
     use super::*;
     use ziyuan_app::translation::{
-        TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN, human_approve_request_id,
+        TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN, VersionState, human_approve_request_id,
         human_submit_request_id, read_approved_target,
     };
     use ziyuan_core::{HumanApproval, HumanSubmissionBinding};
@@ -1911,6 +1911,39 @@ mod approval {
             )
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn auto_snapshots_record_draft_approval_and_finalization() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "save-snapshot");
+        let versions = f
+            .service()
+            .list_translation_versions(&f.project.id, BLOCK)
+            .unwrap();
+        assert!(versions.iter().any(|v| v.state == VersionState::Draft));
+
+        submit(&f, &revision);
+        assert!(approve(&f).unwrap());
+        assert!(finalize(&f).unwrap());
+
+        let versions = f
+            .service()
+            .list_translation_versions(&f.project.id, BLOCK)
+            .unwrap();
+        assert!(versions.iter().any(|v| v.state == VersionState::Draft));
+        assert!(versions.iter().any(|v| v.state == VersionState::Approved));
+        assert!(versions.iter().any(|v| v.state == VersionState::Finalized));
+        // 草稿与准奏译文相同：自动快照可逐段比较且没有差异。
+        let draft = versions
+            .iter()
+            .find(|v| v.state == VersionState::Draft)
+            .unwrap();
+        let changes = f
+            .service()
+            .compare_version(&f.project.id, BLOCK, &draft.id, true)
+            .unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
     }
 
     #[test]

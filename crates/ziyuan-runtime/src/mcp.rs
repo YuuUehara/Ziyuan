@@ -803,6 +803,18 @@ for line in sys.stdin:
         Some(root.canonicalize().unwrap())
     }
 
+    /// Windows 上刚退出的子进程及其管道可能晚一拍才释放目录句柄；短暂重试，
+    /// 避免并行测试把清理失败误报成产品失败。其他平台通常一次即成功。
+    fn cleanup(root: std::path::PathBuf) {
+        for _ in 0..40 {
+            match std::fs::remove_dir_all(&root) {
+                Ok(()) => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        cleanup(root);
+    }
+
     fn grants(list: &[&str]) -> std::collections::BTreeSet<String> {
         list.iter().map(|g| (*g).to_owned()).collect()
     }
@@ -829,7 +841,7 @@ for line in sys.stdin:
         let missing = sealed_tools(&root, &grants(&["fake/rm"])).err().unwrap();
         assert!(missing.to_string().contains("没有工具 rm"), "{missing}");
         drop(tools);
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup(root);
     }
 
     #[test]
@@ -872,7 +884,7 @@ for line in sys.stdin:
                 .to_string()
                 .contains("haoshe")
         );
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup(root);
     }
 
     #[test]
@@ -890,7 +902,7 @@ for line in sys.stdin:
         assert_eq!(Path::new(fields[2]).canonicalize().unwrap(), root);
         // 先停服务：Windows 上删不掉仍是某进程工作目录的目录。
         drop(tools);
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup(root);
     }
 
     /// 最小的 Streamable HTTP 服务：initialize 回 JSON 并发会话 ID；tools/list 回一段 SSE 流
@@ -972,7 +984,7 @@ s.serve_forever()
         let path = std::env::var("PATH").unwrap_or_default();
         assert_eq!(out, format!("你好|Bearer {path}|2025-06-18"));
         drop((tools, child));
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup(root);
     }
 
     #[test]
@@ -1009,6 +1021,6 @@ s.serve_forever()
         assert_eq!(expand("plain"), "plain");
         assert_eq!(expand("${ZIYUAN_TEST_UNSET_VAR}x"), "x");
         assert_eq!(tool_name("my.srv", "do it"), "my_srv__do_it");
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup(root);
     }
 }

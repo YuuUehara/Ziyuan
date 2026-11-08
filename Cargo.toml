@@ -23,8 +23,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/YuuUehara/Ziyuan"
 
 [workspace.dependencies]
-zip = { version = "2", default-features = false, features = ["deflate"] }
-quick-xml = "0.37"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
 ziyuan-core = { path = "crates/ziyuan-core", version = "=1.12.0" }
 ziyuan-governance = { path = "crates/ziyuan-governance", version = "=1.12.0" }
 ziyuan-runtime = { path = "crates/ziyuan-runtime", version = "=1.12.0" }

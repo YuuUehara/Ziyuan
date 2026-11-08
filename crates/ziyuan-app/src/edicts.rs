@@ -457,12 +457,42 @@ impl<S: EventStore> Session<S> {
         let entry = self.court.task(task).expect("已确认存在");
         let files = &entry.changes.as_ref().expect("已确认有待决改动").files;
         let selected = selected_files(files, &skipped);
+        let translation = entry
+            .translation
+            .as_ref()
+            .filter(|l| l.kind.writes())
+            .map(|l| (l.project.clone(), l.block.clone(), l.output_path.clone()));
         if let Some(link) = entry.translation.as_ref().filter(|l| l.kind.writes()) {
             crate::translation::check_gate(root, &self.court, entry, link, &selected)?;
         }
+        // 准奏前的候选稿先留在内存里，写入成功后才存为草稿快照；
+        // 写入失败不留下看似已准奏的版本记录。
+        let draft_snapshot = translation.as_ref().and_then(|(_, _, output)| {
+            files
+                .iter()
+                .find(|file| &file.path == output)
+                .map(|file| file.after.clone())
+        });
         // 事件的条数与内容取自既有的事件簿：追记后应得的条数即已知条数加这一条。
         let known = self.len;
         let problems = self.write_transaction(root, &selected, task, skipped, known, event)?;
+        // 自动快照是辅助材料：失败不回滚已经落盘的准奏。
+        if let Some((project, block, _)) = &translation {
+            let translations = crate::translation::Translations::new(root);
+            if let Some(bytes) = &draft_snapshot {
+                let _ = translations.snapshot_translation_content(
+                    project,
+                    block,
+                    bytes.as_bytes(),
+                    crate::translation::VersionState::Draft,
+                );
+            }
+            let _ = translations.auto_snapshot(
+                project,
+                block,
+                crate::translation::VersionState::Approved,
+            );
+        }
         Ok(problems)
     }
 

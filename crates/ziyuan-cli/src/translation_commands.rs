@@ -49,9 +49,12 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text comment reply <项目ID> <评论ID> <内容>
   ziyuan text comment assign <项目ID> <评论ID> <负责人>
   ziyuan text compare <项目ID> <块ID> <旧译稿.json>   逐段对比当前译稿与旧 PromptBlock
-  ziyuan text version save <项目ID> <块ID> [标签]    保存当前译稿快照
-  ziyuan text version list <项目ID> <块ID>           列出快照
-  ziyuan text version compare <项目ID> <块ID> <快照> 对比当前译稿与快照
+  ziyuan text version save <项目ID> <块ID> [标签]    保存当前译稿快照（手工）
+  ziyuan text version list <项目ID> <块ID>           列出草稿/准奏/定稿/手工快照
+  ziyuan text version compare <项目ID> <块ID> <快照> 对比现行译稿与快照
+  ziyuan text version compare-draft <项目ID> <块ID> <快照>  对比人工草稿与快照
+  ziyuan text version prune <项目ID> <块ID> [--keep N] [--include-manual] [--yes]
+                                                     清理旧快照；默认只预览，--yes 才删除
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -100,6 +103,14 @@ pub(crate) enum TranslationAction {
     VersionSave(String, String, String),
     VersionList(String, String),
     VersionCompare(String, String, String),
+    VersionCompareDraft(String, String, String),
+    VersionPrune {
+        project: String,
+        block: String,
+        keep: usize,
+        include_manual: bool,
+        apply: bool,
+    },
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -217,8 +228,10 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         }
         ["termbase", "import-tbx", p, f] if positional(p) && positional(f) => {
             TranslationAction::TbxImport((*p).into(), (*f).into())
-        },
-        ["comment", "list", p] if positional(p) => TranslationAction::CommentList((*p).into(), None),
+        }
+        ["comment", "list", p] if positional(p) => {
+            TranslationAction::CommentList((*p).into(), None)
+        }
         ["comment", "list", p, b] if positional(p) && positional(b) => {
             TranslationAction::CommentList((*p).into(), Some((*b).into()))
         }
@@ -233,7 +246,9 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["comment", "reopen", p, id] if positional(p) && positional(id) => {
             TranslationAction::CommentResolve((*p).into(), (*id).into(), false)
         }
-        ["comment", "reply", p, id, body] if positional(p) && positional(id) && positional(body) => {
+        ["comment", "reply", p, id, body]
+            if positional(p) && positional(id) && positional(body) =>
+        {
             TranslationAction::CommentReply((*p).into(), (*id).into(), (*body).into())
         }
         ["comment", "assign", p, id, who] if positional(p) && positional(id) && positional(who) => {
@@ -253,7 +268,37 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         }
         ["version", "compare", p, b, id] if positional(p) && positional(b) && positional(id) => {
             TranslationAction::VersionCompare((*p).into(), (*b).into(), (*id).into())
-        },
+        }
+        ["version", "compare-draft", p, b, id]
+            if positional(p) && positional(b) && positional(id) =>
+        {
+            TranslationAction::VersionCompareDraft((*p).into(), (*b).into(), (*id).into())
+        }
+        ["version", "prune", p, b, rest @ ..] if positional(p) && positional(b) => {
+            let (mut keep, mut include_manual, mut apply) = (3usize, false, false);
+            let mut rest = rest.iter();
+            while let Some(flag) = rest.next() {
+                match *flag {
+                    "--keep" => {
+                        let value = rest.next().ok_or(usage)?;
+                        keep = value.parse().map_err(|_| usage)?;
+                        if keep == 0 || keep > 100 {
+                            return Err(usage.into());
+                        }
+                    }
+                    "--include-manual" => include_manual = true,
+                    "--yes" => apply = true,
+                    _ => return Err(usage.into()),
+                }
+            }
+            TranslationAction::VersionPrune {
+                project: (*p).into(),
+                block: (*b).into(),
+                keep,
+                include_manual,
+                apply,
+            }
+        }
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
         }
@@ -346,20 +391,111 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let translations = Translations::new(&root);
     let action = match action {
         TranslationAction::VersionSave(project, block, label) => {
-            let id = translations.snapshot_translation(&project, &block, &label)?;
-            if json { print_json(serde_json::json!({"project": project, "block": block, "id": id}))?; } else { println!("已保存快照 {id}。"); }
+            let info = translations.snapshot_translation(&project, &block, &label)?;
+            if json {
+                print_json(
+                    serde_json::json!({"project": project, "block": block, "version": info}),
+                )?;
+            } else {
+                println!("已保存快照 {}（{}）。", info.id, info.state.label());
+            }
             return Ok(());
         }
         TranslationAction::VersionList(project, block) => {
-            let ids = translations.list_translation_versions(&project, &block)?;
-            if json { print_json(serde_json::json!(ids))?; } else { for id in ids { println!("{id}"); } }
+            let versions = translations.list_translation_versions(&project, &block)?;
+            if json {
+                print_json(
+                    serde_json::json!({"project": project, "block": block, "versions": versions}),
+                )?;
+            } else if versions.is_empty() {
+                println!("尚无快照。");
+            } else {
+                for info in versions {
+                    let label = if info.label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", info.label)
+                    };
+                    println!(
+                        "{} · {}{} · {} · {}",
+                        info.id,
+                        info.state.label(),
+                        label,
+                        info.created_ms,
+                        &info.hash[..12.min(info.hash.len())]
+                    );
+                }
+            }
             return Ok(());
         }
         TranslationAction::VersionCompare(project, block, id) => {
-            let old = translations.read_translation_version(&project, &block, &id)?;
-            let changes = translations.compare_translation(&project, &block, &old)?;
-            if json { print_json(serde_json::json!(changes))?; } else {
-                for change in changes { println!("{} {}：{:?} -> {:?}", change.kind, change.paragraph, change.old, change.new); }
+            let changes = translations.compare_version(&project, &block, &id, false)?;
+            if json {
+                print_json(serde_json::json!(changes))?;
+            } else if changes.is_empty() {
+                println!("现行译稿与此快照一致。");
+            } else {
+                for change in changes {
+                    match change.kind {
+                        "markup" => println!("markup {}：译文相同，标记有变", change.paragraph),
+                        _ => println!(
+                            "{} {}：{:?} -> {:?}",
+                            change.kind, change.paragraph, change.old, change.new
+                        ),
+                    }
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::VersionCompareDraft(project, block, id) => {
+            let changes = translations.compare_version(&project, &block, &id, true)?;
+            if json {
+                print_json(serde_json::json!(changes))?;
+            } else if changes.is_empty() {
+                println!("人工草稿与此快照一致。");
+            } else {
+                for change in changes {
+                    match change.kind {
+                        "markup" => println!("markup {}：译文相同，标记有变", change.paragraph),
+                        _ => println!(
+                            "{} {}：{:?} -> {:?}",
+                            change.kind, change.paragraph, change.old, change.new
+                        ),
+                    }
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::VersionPrune {
+            project,
+            block,
+            keep,
+            include_manual,
+            apply,
+        } => {
+            let report =
+                translations.prune_versions(&project, &block, keep, include_manual, apply)?;
+            if json {
+                print_json(serde_json::json!(report))?;
+            } else if report.candidates.is_empty() {
+                println!("没有可清理的快照（每个状态保留最新 {keep} 份）。");
+            } else if apply {
+                println!(
+                    "已删除 {} 份旧快照，保留 {} 份。",
+                    report.deleted.len(),
+                    report.kept
+                );
+                for id in &report.deleted {
+                    println!("  已删 {id}");
+                }
+            } else {
+                println!(
+                    "将删除 {} 份旧快照（预览；加 --yes 才删除）：",
+                    report.candidates.len()
+                );
+                for id in &report.candidates {
+                    println!("  {id}");
+                }
             }
             return Ok(());
         }
@@ -370,50 +506,90 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                 print_json(serde_json::json!(changes))?;
             } else {
                 for change in changes {
-                    println!("{} {}：{:?} -> {:?}", change.kind, change.paragraph, change.old, change.new);
+                    println!(
+                        "{} {}：{:?} -> {:?}",
+                        change.kind, change.paragraph, change.old, change.new
+                    );
                 }
             }
             return Ok(());
         }
         TranslationAction::CommentReply(project, parent, body) => {
             let comment = translations.comment_reply(&project, &parent, &body)?;
-            if !json { println!("已回复评论 {}（父 {}）。", comment.id, parent); }
+            if !json {
+                println!("已回复评论 {}（父 {}）。", comment.id, parent);
+            }
             return Ok(());
         }
         TranslationAction::CommentAssign(project, id, who) => {
             let comment = translations.comment_assign(&project, &id, &who)?;
-            if !json { println!("评论 {} 已指派给 {}。", comment.id, who); }
+            if !json {
+                println!("评论 {} 已指派给 {}。", comment.id, who);
+            }
             return Ok(());
         }
         TranslationAction::CommentList(project, block) => {
             let comments = translations.comment_list(&project, block.as_deref())?;
-            if json { print_json(serde_json::json!(comments))?; } else {
+            if json {
+                print_json(serde_json::json!(comments))?;
+            } else {
                 for c in comments {
-                    println!("{}\t{}\t{}\t{}\t{}", c.id, c.block, c.paragraph, if c.resolved { "已解决" } else { "未解决" }, c.body);
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        c.id,
+                        c.block,
+                        c.paragraph,
+                        if c.resolved { "已解决" } else { "未解决" },
+                        c.body
+                    );
                 }
             }
             return Ok(());
         }
         TranslationAction::CommentAdd(project, block, paragraph, body) => {
-            let comment = translations.comment_add(&project, &block, if paragraph == "-" { "" } else { &paragraph }, &body)?;
-            if json { print_json(serde_json::json!(comment))?; } else { println!("已新增评论 {}。", comment.id); }
+            let comment = translations.comment_add(
+                &project,
+                &block,
+                if paragraph == "-" { "" } else { &paragraph },
+                &body,
+            )?;
+            if json {
+                print_json(serde_json::json!(comment))?;
+            } else {
+                println!("已新增评论 {}。", comment.id);
+            }
             return Ok(());
         }
         TranslationAction::CommentResolve(project, id, resolved) => {
             let comment = translations.comment_resolve(&project, &id, resolved)?;
-            if json { print_json(serde_json::json!(comment))?; } else { println!("评论 {} 已标记为{}。", comment.id, if resolved { "已解决" } else { "未解决" }); }
+            if json {
+                print_json(serde_json::json!(comment))?;
+            } else {
+                println!(
+                    "评论 {} 已标记为{}。",
+                    comment.id,
+                    if resolved { "已解决" } else { "未解决" }
+                );
+            }
             return Ok(());
         }
         TranslationAction::TbxExport(project, file) => {
             let tbx = translations.export_termbase_tbx(&project)?;
             std::fs::write(&file, tbx.as_bytes())?;
-            if !json { println!("已导出 TBX：{}（{} 字节）。", file.display(), tbx.len()); }
+            if !json {
+                println!("已导出 TBX：{}（{} 字节）。", file.display(), tbx.len());
+            }
             return Ok(());
         }
         TranslationAction::TbxImport(project, file) => {
             let bytes = std::fs::read(&file)?;
             let receipt = translations.import_termbase_tbx(&project, &bytes)?;
-            if !json { println!("已合并 TBX 到本地草稿（未批准）：修订 {}。", receipt.revision); }
+            if !json {
+                println!(
+                    "已合并 TBX 到本地草稿（未批准）：修订 {}。",
+                    receipt.revision
+                );
+            }
             return Ok(());
         }
         TranslationAction::TmList(project) => {
@@ -422,34 +598,55 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                 print_json(serde_json::json!(entries))?;
             } else {
                 for entry in entries {
-                    println!("{}\t{}\t{}\t采纳 {}", entry.id, entry.source, entry.target, entry.adopted);
+                    println!(
+                        "{}\t{}\t{}\t采纳 {}",
+                        entry.id, entry.source, entry.target, entry.adopted
+                    );
                 }
             }
             return Ok(());
         }
         TranslationAction::TmAdd(project, source, target) => {
             let entry = translations.tm_add(&project, &source, &target)?;
-            if json { print_json(serde_json::json!(entry))?; } else { println!("已新增 {}。", entry.id); }
+            if json {
+                print_json(serde_json::json!(entry))?;
+            } else {
+                println!("已新增 {}。", entry.id);
+            }
             return Ok(());
         }
         TranslationAction::TmUpdate(project, id, source, target) => {
             let entry = translations.tm_update(&project, &id, &source, &target)?;
-            if json { print_json(serde_json::json!(entry))?; } else { println!("已更新 {}。", entry.id); }
+            if json {
+                print_json(serde_json::json!(entry))?;
+            } else {
+                println!("已更新 {}。", entry.id);
+            }
             return Ok(());
         }
         TranslationAction::TmDelete(project, id) => {
             translations.tm_delete(&project, &id)?;
-            if !json { println!("已删除 {id}。"); }
+            if !json {
+                println!("已删除 {id}。");
+            }
             return Ok(());
         }
         TranslationAction::TmAdopt(project, id) => {
             let entry = translations.tm_adopt(&project, &id)?;
-            if json { print_json(serde_json::json!(entry))?; } else { println!("已记录采纳 {}（{} 次）。", entry.id, entry.adopted); }
+            if json {
+                print_json(serde_json::json!(entry))?;
+            } else {
+                println!("已记录采纳 {}（{} 次）。", entry.id, entry.adopted);
+            }
             return Ok(());
         }
         TranslationAction::TmBuild(project) => {
             let added = translations.tm_build(&project)?;
-            if json { print_json(serde_json::json!({"project": project, "added": added}))?; } else { println!("从现有译稿新增 {added} 条记忆。"); }
+            if json {
+                print_json(serde_json::json!({"project": project, "added": added}))?;
+            } else {
+                println!("从现有译稿新增 {added} 条记忆。");
+            }
             return Ok(());
         }
         TranslationAction::Concordance(project, query) => {
@@ -728,12 +925,20 @@ fn run_session(
         }
         TranslationAction::Finalize(project, block) => {
             let hash = session.finalize_translation(root, &project, &block)?;
+            let snapshot = Translations::new(root).auto_snapshot(
+                &project,
+                &block,
+                ziyuan_app::translation::VersionState::Finalized,
+            );
             if json {
-                print_json(
-                    serde_json::json!({"project":project,"block":block,"translation_hash":hash,"finalized":true}),
-                )?;
+                let mut value = serde_json::json!({"project":project,"block":block,"translation_hash":hash,"finalized":true});
+                if let Some(snapshot) = &snapshot {
+                    value["snapshot"] = serde_json::to_value(snapshot)?;
+                }
+                print_json(value)?;
             } else {
                 println!("{project} / {block} 已御览定稿：{hash}");
+                print_snapshot(&snapshot);
             }
             return Ok(());
         }
@@ -783,6 +988,25 @@ fn run_session(
         println!("下一步：ziyuan run；译稿完成后仍须 ziyuan apply 准奏。");
     }
     Ok(())
+}
+
+/// 自动快照结果的简短文字；写快照失败不改变已完成的定稿或准奏。
+pub(crate) fn print_snapshot(snapshot: &Option<ziyuan_app::translation::AutoSnapshot>) {
+    let Some(snapshot) = snapshot else {
+        println!("（自动快照未能写入；定稿与译稿不受影响，可稍后手工 version save）");
+        return;
+    };
+    let info = &snapshot.info;
+    if snapshot.compared_with_draft {
+        println!(
+            "自动快照 {}（{}）；与最近草稿快照比较：{} 处差异（用 ziyuan text version compare-draft 查看）。",
+            info.id,
+            info.state.label(),
+            snapshot.draft_changes.len()
+        );
+    } else {
+        println!("自动快照 {}（{}）。", info.id, info.state.label());
+    }
 }
 
 fn print_statuses(statuses: &[BlockStatus]) {

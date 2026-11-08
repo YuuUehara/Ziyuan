@@ -8,16 +8,13 @@
 //! 哈希一律为 SHA-256 小写十六进制（无前缀）：原文哈希是块 JSON（与项目内
 //! `blocks/<块>.json` 逐字节相同，即 [`PromptBlock::serialized`]）的哈希；
 //! 译稿哈希是 `zh.json` 文件字节的哈希。
-mod concordance;
-mod tm;
 mod comments;
-mod docx;
-mod srt;
-mod epub;
 mod compare;
-mod versions;
+mod concordance;
 mod context;
+mod docx;
 mod draft;
+mod epub;
 mod export;
 mod export_package;
 mod finished;
@@ -25,20 +22,25 @@ mod gate;
 mod glossary;
 mod markup;
 pub mod materials;
+mod packages;
 mod references;
 mod session;
 mod source;
+mod srt;
 mod status;
 mod strict_json;
 mod target;
+mod tm;
 mod usage;
 mod verification;
+mod versions;
 pub mod visibility;
 mod zhupi;
 
 #[cfg(test)]
 mod tests;
 
+pub use compare::TranslationChange as VersionChange;
 pub use context::{
     ContextManifest, ContextSnapshot, GLOSSARY_FILE, GlossaryEntry, ManifestFile, STYLE_FILE,
     SUMMARIES_DIR, parse_glossary,
@@ -80,6 +82,10 @@ pub use verification::{
     ParagraphVerification, Resolution, ReviewAdvice, SemanticCategory, SemanticCheck,
     TranslationChange, VerificationInput, VerificationRecord, VerificationRecordView,
     VerificationSnapshot, VerificationView,
+};
+pub use versions::{
+    AUTO_KEEP_PER_STATE, AutoSnapshot, PruneReport, VERSION_FILE_FORMAT, VersionFile, VersionInfo,
+    VersionParagraph, VersionState,
 };
 pub use visibility::{
     ParagraphAssociations, VisibilityDiagnostic, VisibilityIdentity, VisibilityKind,

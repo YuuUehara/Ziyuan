@@ -839,11 +839,26 @@ pub(crate) async fn finalize(
     UrlPath((id, block)): UrlPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let root = app.0.config.root.clone();
+    let (snapshot_root, snapshot_id, snapshot_block) = (root.clone(), id.clone(), block.clone());
     let hash = app
         .with_session(move |s| s.finalize_translation(&root, &id, &block))
         .await?;
+    let snapshot = blocking(move || {
+        Ok::<_, ApiError>(Translations::new(&snapshot_root).auto_snapshot(
+            &snapshot_id,
+            &snapshot_block,
+            ziyuan_app::translation::VersionState::Finalized,
+        ))
+    })
+    .await
+    .ok()
+    .flatten();
     app.emit("changed", json!({}));
-    Ok(Json(json!({ "translation_hash": hash })))
+    let mut value = json!({ "translation_hash": hash });
+    if let Some(snapshot) = snapshot {
+        value["snapshot"] = serde_json::to_value(snapshot).unwrap_or(Value::Null);
+    }
+    Ok(Json(value))
 }
 
 /// 退回重修：`{ reason }`。
@@ -1530,6 +1545,11 @@ pub(crate) async fn human_approve(
             let approved = translations
                 .approve_web_human_submission(&mut guard, &project, &block)
                 .map_err(human_write_error)?;
+            let snapshot = translations.auto_snapshot(
+                &project,
+                &block,
+                ziyuan_app::translation::VersionState::Approved,
+            );
             // 操作身份与准奏目标只从回放读，不再写盘。
             let history = EventLog::new(&root).load().map_err(|e| {
                 ApiError::internal(format!("准奏后事件簿读不出来（{e}）；请运行 ziyuan text recovery status。"))
@@ -1547,6 +1567,7 @@ pub(crate) async fn human_approve(
                 "operation_id": approval.map(|a| a.operation_id.clone()),
                 "target_format": approval.map(|a| a.request.target.format.clone()),
                 "target_hash": approval.map(|a| a.request.target.after.clone()),
+                "snapshot": snapshot.map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
                 "message": if approved {
                     "已准奏并落盘：译稿写入 zh.json，准奏事实已入簿。下一步：御览定稿（POST /api/text/{项目}/blocks/{块}/human/finalize）。"
                 } else {
@@ -1588,8 +1609,14 @@ pub(crate) async fn human_finalize(
             let finalized = translations
                 .finalize_human_translation(&guard, &project, &block)
                 .map_err(human_write_error)?;
+            let snapshot = translations.auto_snapshot(
+                &project,
+                &block,
+                ziyuan_app::translation::VersionState::Finalized,
+            );
             Ok(json!({
                 "finalized": finalized,
+                "snapshot": snapshot.map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
                 "message": if finalized {
                     "已御览定稿并入簿，可导出成品（ziyuan text export-finished）。"
                 } else {
@@ -1601,4 +1628,129 @@ pub(crate) async fn human_finalize(
     .await?;
     app.emit("changed", json!({}));
     Ok(Json(report))
+}
+
+// ---- 译稿版本快照：列表、手工保存、对比与清理 ----
+
+pub(crate) async fn versions_list(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let versions = blocking({
+        let (root, project, block) = (root.clone(), project.clone(), block.clone());
+        move || {
+            Translations::new(&root)
+                .list_translation_versions(&project, &block)
+                .map_err(material)
+        }
+    })
+    .await?;
+    Ok(Json(json!({
+        "project": project,
+        "block": block,
+        "versions": versions,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionSaveBody {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// 手工保存当前译稿；观政由令牌中间件挡在 POST 之外。
+pub(crate) async fn version_save(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<VersionSaveBody>,
+) -> Result<Json<Value>, ApiError> {
+    let label = body.label.unwrap_or_default();
+    let root = app.0.config.root.clone();
+    let info = blocking(move || {
+        Translations::new(&root)
+            .snapshot_translation(&project, &block, &label)
+            .map_err(material)
+    })
+    .await?;
+    app.emit("changed", json!({}));
+    Ok(Json(json!({ "version": info })))
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct VersionCompareQuery {
+    #[serde(default)]
+    against: Option<String>,
+}
+
+/// 对比快照与现行译稿（`current`，默认）或人工草稿（`draft`）。
+pub(crate) async fn version_compare(
+    State(app): State<AppState>,
+    UrlPath((project, block, id)): UrlPath<(String, String, String)>,
+    Query(query): Query<VersionCompareQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let against_draft = match query.against.as_deref() {
+        None | Some("current") => false,
+        Some("draft") => true,
+        Some(_) => return Err(ApiError::bad("对比对象只接受 current 或 draft")),
+    };
+    let root = app.0.config.root.clone();
+    let changes = blocking({
+        let (project, block, id) = (project.clone(), block.clone(), id.clone());
+        move || {
+            Translations::new(&root)
+                .compare_version(&project, &block, &id, against_draft)
+                .map_err(material)
+        }
+    })
+    .await?;
+    Ok(Json(json!({
+        "project": project,
+        "block": block,
+        "id": id,
+        "against": if against_draft { "draft" } else { "current" },
+        "changes": changes,
+        "message": if changes.is_empty() {
+            "没有差异。"
+        } else {
+            "按段列出差异；标记差异只表示译文相同、标记有变。"
+        },
+    })))
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct VersionPruneBody {
+    #[serde(default)]
+    keep: Option<usize>,
+    #[serde(default)]
+    include_manual: bool,
+    /// 默认只预览；页面需再次确认后才删除。
+    #[serde(default = "default_true")]
+    dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 清理旧快照：默认只预览，`dry_run:false` 才删除。人工快照默认保留。
+pub(crate) async fn versions_prune(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<VersionPruneBody>,
+) -> Result<Json<Value>, ApiError> {
+    let keep = body.keep.unwrap_or(3);
+    if keep == 0 || keep > 100 {
+        return Err(ApiError::bad("保留份数须在 1–100 之间"));
+    }
+    let root = app.0.config.root.clone();
+    let report = blocking(move || {
+        Translations::new(&root)
+            .prune_versions(&project, &block, keep, body.include_manual, !body.dry_run)
+            .map_err(material)
+    })
+    .await?;
+    app.emit("changed", json!({}));
+    Ok(Json(json!(report)))
 }

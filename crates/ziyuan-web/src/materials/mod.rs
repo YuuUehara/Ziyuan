@@ -44,19 +44,16 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/text/{project}/tm", get(tm_list).post(tm_add))
         .route("/text/{project}/tm/{id}/adopt", post(tm_adopt))
-        .route("/text/{project}/comments", get(comment_list).post(comment_add))
+        .route(
+            "/text/{project}/comments",
+            get(comment_list).post(comment_add),
+        )
         .route(
             "/text/{project}/comments/{id}/resolve",
             post(comment_resolve),
         )
-        .route(
-            "/text/{project}/comments/{id}/reply",
-            post(comment_reply),
-        )
-        .route(
-            "/text/{project}/comments/{id}/assign",
-            post(comment_assign),
-        )
+        .route("/text/{project}/comments/{id}/reply", post(comment_reply))
+        .route("/text/{project}/comments/{id}/assign", post(comment_assign))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
@@ -157,69 +154,196 @@ pub(crate) async fn diff(
 }
 
 #[derive(serde::Deserialize)]
-struct TmAddBody { source: String, target: String }
+struct TmAddBody {
+    source: String,
+    target: String,
+}
 #[derive(serde::Deserialize)]
-struct CommentAddBody { block: String, #[serde(default)] paragraph: String, body: String }
+struct CommentAddBody {
+    block: String,
+    #[serde(default)]
+    paragraph: String,
+    body: String,
+}
 
 async fn tm_list(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).tm_list(&project).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .tm_list(&project)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
-async fn tm_add(State(app): State<AppState>, UrlPath(project): UrlPath<String>, Json(body): Json<TmAddBody>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+async fn tm_add(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+    Json(body): Json<TmAddBody>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).tm_add(&project, &body.source, &body.target).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .tm_add(&project, &body.source, &body.target)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
-async fn tm_adopt(State(app): State<AppState>, UrlPath((project, tm_id)): UrlPath<(String, String)>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+async fn tm_adopt(
+    State(app): State<AppState>,
+    UrlPath((project, tm_id)): UrlPath<(String, String)>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).tm_adopt(&project, &tm_id).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .tm_adopt(&project, &tm_id)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
 async fn comment_list(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).comment_list(&project, None).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .comment_list(&project, None)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
-async fn comment_add(State(app): State<AppState>, UrlPath(project): UrlPath<String>, Json(body): Json<CommentAddBody>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+async fn comment_add(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+    Json(body): Json<CommentAddBody>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).comment_add(&project, &body.block, &body.paragraph, &body.body).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .comment_add(&project, &body.block, &body.paragraph, &body.body)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
 #[derive(serde::Deserialize)]
-struct ReplyBody { body: String }
-#[derive(serde::Deserialize)]
-struct AssignBody { assignee: String }
-async fn comment_reply(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>, Json(body): Json<ReplyBody>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
-    let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).comment_reply(&project, &comment_id, &body.body).map_err(MaterialError::Visibility)).await
+struct ReplyBody {
+    body: String,
 }
-async fn comment_assign(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>, Json(body): Json<AssignBody>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+#[derive(serde::Deserialize)]
+struct AssignBody {
+    assignee: String,
+}
+async fn comment_reply(
+    State(app): State<AppState>,
+    UrlPath((project, comment_id)): UrlPath<(String, String)>,
+    Json(body): Json<ReplyBody>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).comment_assign(&project, &comment_id, &body.assignee).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .comment_reply(&project, &comment_id, &body.body)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
+}
+async fn comment_assign(
+    State(app): State<AppState>,
+    UrlPath((project, comment_id)): UrlPath<(String, String)>,
+    Json(body): Json<AssignBody>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
+    let root = app.0.config.root.clone();
+    run(id, move || {
+        Translations::new(&root)
+            .comment_assign(&project, &comment_id, &body.assignee)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
 
-async fn comment_resolve(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+async fn comment_resolve(
+    State(app): State<AppState>,
+    UrlPath((project, comment_id)): UrlPath<(String, String)>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).comment_resolve(&project, &comment_id, true).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .comment_resolve(&project, &comment_id, true)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
-async fn termbase_tbx_export(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+async fn termbase_tbx_export(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
     let root = app.0.config.root.clone();
-    match tokio::task::spawn_blocking(move || Translations::new(&root).export_termbase_tbx(&project)).await {
-        Ok(Ok(tbx)) => ([(header::CONTENT_TYPE, "application/xml; charset=utf-8")], tbx).into_response(),
+    match tokio::task::spawn_blocking(move || {
+        Translations::new(&root).export_termbase_tbx(&project)
+    })
+    .await
+    {
+        Ok(Ok(tbx)) => (
+            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+            tbx,
+        )
+            .into_response(),
         Ok(Err(e)) => reply(&id, StatusCode::BAD_REQUEST, e.to_string(), None),
         Err(e) => reply(&id, StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None),
     }
 }
-async fn termbase_tbx_import(State(app): State<AppState>, UrlPath(project): UrlPath<String>, body: Result<Bytes, BytesRejection>) -> Response {
-    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
-    let body = match body { Ok(b) => b, Err(_) => return reply(&id, StatusCode::BAD_REQUEST, "TBX 读取失败".into(), None) };
+async fn termbase_tbx_import(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
+    let body = match body {
+        Ok(b) => b,
+        Err(_) => return reply(&id, StatusCode::BAD_REQUEST, "TBX 读取失败".into(), None),
+    };
     let root = app.0.config.root.clone();
-    run(id, move || Translations::new(&root).import_termbase_tbx(&project, &body).map_err(MaterialError::Visibility)).await
+    run(id, move || {
+        Translations::new(&root)
+            .import_termbase_tbx(&project, &body)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
 
 async fn termbase_export(

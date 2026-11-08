@@ -873,9 +873,23 @@
               <div class="text-col"><h4>待准修订</h4><div class="text-scroll" id="text-pending"></div></div>
             </div>
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
+            <section class="text-materials" id="text-versions" aria-label="译稿版本快照">
+              <h3>译稿版本 <small class="hint">草稿／准奏／定稿自动留存；只读对比，不改译稿</small></h3>
+              <p class="hint">准奏与定稿时自动写快照，保存草稿时也留一份；每状态默认保留最新 3 份，手工快照不自动删除。快照存在本地，不批准、不外发，也不是导出凭据。</p>
+              <div class="actions">
+                <label class="hint" for="version-list">快照</label>
+                <select id="version-list" data-keep></select>
+                <button class="small" id="version-compare-current" type="button">对比现行译稿</button>
+                <button class="small" id="version-compare-draft" type="button">对比草稿</button>
+                <button class="small" id="version-save" type="button">保存当前快照</button>
+                <button class="small" id="version-prune" type="button">清理旧快照</button>
+              </div>
+              <p class="hint" id="version-status" role="status" aria-live="polite">选一个块后列出快照。</p>
+              <div id="version-diff" class="materials-report" aria-live="polite"></div>
+            </section>
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
-              <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
+              <h3>本地资料 <small class="hint">独立草稿；批准前不进入生产译文、不外发</small></h3>
               <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
               <dialog id="material-wizard">
                 <form method="dialog" class="write">
@@ -893,7 +907,7 @@
                   <li>点「新增术语」或「新增人物」，填名称和译法；不确定的字段留空。</li>
                   <li>点「保存草稿」；保存不等于批准。</li>
                   <li>点「校验」，通过后点「准备生产资料」。</li>
-                  <li>准备仍不是批准；批准需要命令行 `ziyuan text context approve`，或由管理员完成。</li>
+                  <li>准备仍不是批准；批准可在译书操作区点「批准上下文」，或运行 `ziyuan text context approve`。</li>
                 </ol>
               </details>
               <div class="actions">
@@ -1498,6 +1512,7 @@ function loadHumanEditor() {
       onNext: (block) => selectTextBlock(block),
       onChanged: (project, block) => {
         if (project === textProjectId && block === textBlockId) loadTextProject();
+        if (project === textProjectId && block === textBlockId) loadTextVersions();
       },
     });
     renderHumanEditor();
@@ -1778,7 +1793,7 @@ $("materials-prepare")?.addEventListener("click", async () => {
   try {
     const result = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/prepare", {});
     setMaterialState("save", "服务器：已准备（未批准）");
-    $("materials-status").textContent = "已准备生产资料（" + result.bytes + " 字节）；尚未批准。下一步：ziyuan text context approve " + textProjectId;
+    $("materials-status").textContent = "已准备生产资料（" + result.bytes + " 字节）；尚未批准。下一步：在译书操作区点「批准上下文」，或运行 ziyuan text context approve " + textProjectId;
   } catch (e) {
     setMaterialState("save", "服务器：准备失败");
     $("materials-status").textContent = "准备失败：" + materialAdvice(e.body?.error || e.message);
@@ -2610,6 +2625,7 @@ async function loadTextBlock() {
     textError = `无法加载此块：${e.message}`;
   }
   renderText();
+  loadTextVersions();
 }
 function textPickedLoad() {
   try {
@@ -2633,6 +2649,141 @@ function selectTextBlock(block) {
   history.replaceState(null, "", textHash());
   loadTextBlock();
 }
+
+// ---- 译稿版本：草稿／准奏／定稿自动留存，只读对比与显式清理 ----
+let textVersions = [];
+let textVersionRequest = 0;
+function versionStateLabel(kind) {
+  return { draft: "草稿", approved: "准奏", finalized: "定稿", manual: "手工" }[kind] || String(kind);
+}
+function versionTime(ms) {
+  try { return new Date(ms).toLocaleString(); } catch { return String(ms); }
+}
+function versionBase() {
+  return `/text/${encodeURIComponent(textProjectId || "")}/blocks/${encodeURIComponent(textBlockId || "")}`;
+}
+function renderVersionButtons() {
+  const viewer = !state || !!state.viewer;
+  const has = textVersions.length > 0;
+  for (const [id, disabled] of [
+    ["version-compare-current", !has],
+    ["version-compare-draft", !has],
+    ["version-save", viewer || !textBlockId],
+    ["version-prune", viewer || !has],
+  ]) {
+    const button = $(id);
+    if (button) button.disabled = disabled;
+  }
+}
+async function loadTextVersions() {
+  const project = textProjectId, block = textBlockId;
+  const ticket = ++textVersionRequest;
+  const list = $("version-list"), status = $("version-status"), diff = $("version-diff");
+  if (!list) return;
+  if (!project || !block) {
+    textVersions = [];
+    list.innerHTML = "";
+    list.disabled = true;
+    status.textContent = "选一个块后列出快照。";
+    diff.replaceChildren();
+    renderVersionButtons();
+    return;
+  }
+  list.disabled = true;
+  status.textContent = "正在读取快照…";
+  try {
+    const result = await api(`${versionBase()}/versions?t=${Date.now()}`);
+    if (ticket !== textVersionRequest || project !== textProjectId || block !== textBlockId) return;
+    textVersions = result.versions || [];
+    list.innerHTML = textVersions.length
+      ? textVersions.slice().reverse().map((v) =>
+          `<option value="${esc(v.id)}">${esc(versionStateLabel(v.state))}${v.label ? " · " + esc(v.label) : ""} · ${esc(versionTime(v.created_ms))}</option>`).join("")
+      : `<option value="">（尚无快照）</option>`;
+    list.disabled = !textVersions.length;
+    status.textContent = textVersions.length
+      ? `共 ${textVersions.length} 份快照；自动快照每个状态保留最新 3 份。`
+      : "尚无快照：保存草稿或准奏／定稿后自动出现；也可点「保存当前快照」。";
+    diff.replaceChildren();
+    renderVersionButtons();
+  } catch (e) {
+    if (ticket !== textVersionRequest) return;
+    textVersions = [];
+    list.innerHTML = `<option value="">（读取失败）</option>`;
+    list.disabled = true;
+    status.textContent = "读取快照失败：" + (e.body?.error || e.message);
+    renderVersionButtons();
+  }
+}
+function renderVersionDiff(result) {
+  const host = $("version-diff");
+  host.replaceChildren();
+  const changes = result.changes || [];
+  $("version-status").textContent = changes.length
+    ? `${changes.length} 处差异（对比${result.against === "draft" ? "草稿" : "现行译稿"}）。标记差异只表示译文相同、标记有变。`
+    : "没有差异。";
+  for (const change of changes) {
+    const row = document.createElement("p");
+    const kinds = { added: "新增", removed: "删除", changed: "改写", markup: "标记" };
+    let text = `${change.paragraph} · ${kinds[change.kind] || change.kind}`;
+    if (change.kind === "changed") text += `：${change.old || ""} → ${change.new || ""}`;
+    else if (change.kind === "added") text += `：${change.new || ""}`;
+    else if (change.kind === "removed") text += `：${change.old || ""}`;
+    row.textContent = text;
+    host.append(row);
+  }
+}
+async function compareTextVersion(against) {
+  const project = textProjectId, block = textBlockId, id = $("version-list")?.value;
+  if (!project || !block || !id) { $("version-status").textContent = "没有可比较的快照。"; return; }
+  $("version-status").textContent = "正在比较…";
+  try {
+    const result = await api(`${versionBase()}/versions/${encodeURIComponent(id)}?against=${against}`);
+    if (project !== textProjectId || block !== textBlockId) return;
+    renderVersionDiff(result);
+  } catch (e) {
+    $("version-status").textContent = "比较失败：" + (e.body?.error || e.message);
+  }
+}
+async function saveTextVersion() {
+  const project = textProjectId, block = textBlockId;
+  if (!project || !block) return;
+  try {
+    const result = await api(`${versionBase()}/versions`, { label: "" });
+    $("version-status").textContent = `已保存快照 ${result.version?.id || ""}（手工）。`;
+    await loadTextVersions();
+  } catch (e) {
+    $("version-status").textContent = "保存快照失败：" + (e.body?.error || e.message);
+  }
+}
+async function pruneTextVersions() {
+  const project = textProjectId, block = textBlockId;
+  if (!project || !block) return;
+  try {
+    const preview = await api(`${versionBase()}/versions/prune`, { keep: 3, dry_run: true });
+    if (!preview.candidates.length) {
+      $("version-status").textContent = "没有可清理的快照（自动快照每个状态保留最新 3 份，手工快照默认保留）。";
+      return;
+    }
+    const ok = window.confirm(
+      `将删除 ${preview.candidates.length} 份旧快照（每个状态保留最新 3 份，手工快照默认保留）：\n\n` +
+      preview.candidates.join("\n") + "\n\n继续删除？"
+    );
+    if (!ok) { $("version-status").textContent = "已取消清理，未删除任何快照。"; return; }
+    const done = await api(`${versionBase()}/versions/prune`, { keep: 3, dry_run: false });
+    $("version-status").textContent = `已删除 ${done.deleted.length} 份，保留 ${done.kept} 份。`;
+    await loadTextVersions();
+  } catch (e) {
+    $("version-status").textContent = "清理失败：" + (e.body?.error || e.message);
+  }
+}
+$("version-list")?.addEventListener("change", () => {
+  $("version-diff").replaceChildren();
+  $("version-status").textContent = "选择快照后点「对比现行译稿」或「对比草稿」。";
+});
+$("version-compare-current")?.addEventListener("click", () => compareTextVersion("current"));
+$("version-compare-draft")?.addEventListener("click", () => compareTextVersion("draft"));
+$("version-save")?.addEventListener("click", saveTextVersion);
+$("version-prune")?.addEventListener("click", pruneTextVersions);
 
 // 各栏独立滚动；重绘时保留输入的文字、焦点与滚动位置。
 function textScrollers() {
@@ -2893,6 +3044,7 @@ async function textAction(path, body, done) {
     const result = await api(path, body);
     textMessage(done(result));
     await loadTextProject();
+    loadTextVersions();
     return true;
   } catch (e) {
     // 失败时保留朱批输入，只报错。

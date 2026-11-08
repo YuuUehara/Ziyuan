@@ -1170,6 +1170,26 @@ fn finalize_requires_the_applied_translation_and_reopen_returns_it() {
         "未准奏"
     );
     s.apply_changes(task, &fx.root, vec![]).unwrap();
+    let versions = fx.t().list_translation_versions(&fx.project, B1).unwrap();
+    assert!(
+        versions.iter().any(|v| v.state == VersionState::Draft),
+        "准奏前候选应存为草稿快照：{versions:?}"
+    );
+    assert!(
+        versions.iter().any(|v| v.state == VersionState::Approved),
+        "准奏后应存准奏快照：{versions:?}"
+    );
+    let draft = versions
+        .iter()
+        .find(|v| v.state == VersionState::Draft)
+        .unwrap();
+    assert!(
+        fx.t()
+            .compare_version(&fx.project, B1, &draft.id, false)
+            .unwrap()
+            .is_empty(),
+        "整份准奏时候选与准奏译文应无差异"
+    );
     let good = fs::read_to_string(fx.zh_path(B1)).unwrap();
     fs::write(
         fx.zh_path(B1),
@@ -1192,6 +1212,14 @@ fn finalize_requires_the_applied_translation_and_reopen_returns_it() {
     fx.t().clear_zhupi(&fx.project, B1, "c0001-p0002").unwrap();
     let hash = s.finalize_translation(&fx.root, &fx.project, B1).unwrap();
     assert_eq!(hash, sha256_hex(good.as_bytes()));
+    assert!(
+        fx.t()
+            .list_translation_versions(&fx.project, B1)
+            .unwrap()
+            .iter()
+            .any(|v| v.state == VersionState::Finalized),
+        "定稿后应存定稿快照"
+    );
     assert_eq!(
         s.court().translation_signoff(&fx.project, B1),
         Some(&ziyuan_governance::Signoff::Finalized {

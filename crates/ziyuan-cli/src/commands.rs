@@ -392,6 +392,19 @@ pub(crate) fn execute(
                     "诏令已颁：准奏，诏令 #{} 的改动已写入项目{skipped}。",
                     task.0
                 );
+                if let Some(link) = session
+                    .court()
+                    .task(task)
+                    .and_then(|t| t.translation.as_ref())
+                    .filter(|l| l.kind.writes())
+                {
+                    let snapshot = ziyuan_app::translation::Translations::new(&root).auto_snapshot(
+                        &link.project,
+                        &link.block,
+                        ziyuan_app::translation::VersionState::Approved,
+                    );
+                    crate::translation_commands::print_snapshot(&snapshot);
+                }
             }
             if commit {
                 let made = session.commit_applied(task, &root).map_err(|e| {
