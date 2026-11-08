@@ -2,6 +2,7 @@ use super::support::{Fixture, PROJECT_ENV, changed, is_lower_hex, tree, unfinish
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use ziyuan_app::translation::{
@@ -429,6 +430,49 @@ fn srt_import_creates_project_paragraphs() {
     let cues = Translations::new(&root).import_srt(&project.id, &srt).unwrap();
     assert_eq!(cues, 2);
     let loaded = Translations::new(&root).project(&project.id).unwrap();
+    assert_eq!(loaded.chapters[0].paragraphs.len(), 2);
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn zip_bytes(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        for (name, content) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+#[test]
+fn docx_and_epub_import_plain_text() {
+    let root = std::env::temp_dir().join(format!("ziyuan-formats-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let texts = TextProjects::new(&root);
+    let make = |title: &str| texts.create(NewProject {
+        title: title.into(), source_language: "ja".into(), target_language: "zh-CN".into(),
+        provenance: Provenance::default(),
+    }).unwrap();
+    let docx = root.join("a.docx");
+    fs::write(&docx, zip_bytes(&[("word/document.xml", r#"<w:document><w:body><w:p><w:r><w:t>夜が明ける。</w:t></w:r></w:p><w:p><w:r><w:t>朝だ。</w:t></w:r></w:p></w:body></w:document>"#)])).unwrap();
+    let docx_project = make("DOCX");
+    Translations::new(&root).import_docx(&docx_project.id, &docx).unwrap();
+    let loaded = Translations::new(&root).project(&docx_project.id).unwrap();
+    assert_eq!(loaded.chapters[0].paragraphs.len(), 2);
+
+    let epub = root.join("a.epub");
+    fs::write(&epub, zip_bytes(&[
+        ("META-INF/container.xml", r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#),
+        ("OEBPS/content.opf", r#"<package><manifest><item id="c1" href="c1.xhtml"/></manifest><spine><itemref idref="c1"/></spine></package>"#),
+        ("OEBPS/c1.xhtml", r#"<html><body><p>夜が明ける。</p><p>朝だ。</p></body></html>"#),
+    ])).unwrap();
+    let epub_project = make("EPUB");
+    Translations::new(&root).import_epub(&epub_project.id, &epub).unwrap();
+    let loaded = Translations::new(&root).project(&epub_project.id).unwrap();
     assert_eq!(loaded.chapters[0].paragraphs.len(), 2);
     let _ = fs::remove_dir_all(&root);
 }

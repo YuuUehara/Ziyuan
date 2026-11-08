@@ -24,7 +24,7 @@ fn opf_path(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Result<String> {
     let mut reader = Reader::from_str(&container);
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"rootfile" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.local_name().as_ref() == b"rootfile" => {
                 if let Some(path) = attr(&e, b"full-path") { return Ok(path); }
             }
             Ok(Event::Eof) => break,
@@ -44,14 +44,14 @@ fn spine(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, opf: &str) -> Result<Vec<Stri
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"manifest" => {}
-            Ok(Event::Start(e)) if e.local_name().as_ref() == b"item" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.local_name().as_ref() == b"item" => {
                 if let (Some(id), Some(href)) = (attr(&e, b"id"), attr(&e, b"href")) {
                     manifest.insert(id, href);
                 }
             }
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"spine" => in_spine = true,
             Ok(Event::End(e)) if e.local_name().as_ref() == b"spine" => in_spine = false,
-            Ok(Event::Start(e)) if in_spine && e.local_name().as_ref() == b"itemref" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if in_spine && e.local_name().as_ref() == b"itemref" => {
                 if let Some(idref) = attr(&e, b"idref") { order.push(idref); }
             }
             Ok(Event::Eof) => break,
