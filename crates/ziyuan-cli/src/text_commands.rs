@@ -91,6 +91,9 @@ pub(crate) enum TextAction {
     Recovery(RecoveryAction),
     Init(NewProject),
     Import(String, Vec<PathBuf>),
+    ImportDocx(String, PathBuf),
+    ImportSrt(String, PathBuf),
+    ExportSrt(String, PathBuf),
     Preview(String, Vec<ImportSource>, ImportOptions),
     ImportPrepared(String, Vec<ImportSource>, ImportOptions, String),
     Show(String),
@@ -185,6 +188,27 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
         "help" => TextAction::Help,
         "init" => parse_init(rest)?,
         "import" => parse_import(rest, false)?,
+            "import-srt" => {
+                let [id, file] = rest else {
+                    return Err("用法: ziyuan text import-srt <项目ID> <文件.srt>".into());
+                };
+                TextAction::ImportSrt(id.clone(), PathBuf::from(file.clone()))
+            }
+            "export-srt" => {
+                let [id, file] = rest else {
+                    return Err("用法: ziyuan text export-srt <项目ID> <文件.srt>".into());
+                };
+                TextAction::ExportSrt(id.clone(), PathBuf::from(file.clone()))
+            }
+            "import-docx" => {
+                let [id, file] = rest else {
+                    return Err("用法: ziyuan text import-docx <项目ID> <文件.docx>".into());
+                };
+                if id.starts_with('-') || file.is_empty() || file.starts_with('-') {
+                    return Err("用法: ziyuan text import-docx <项目ID> <文件.docx>".into());
+                }
+                TextAction::ImportDocx(id.clone(), PathBuf::from(file.clone()))
+            }
         "preview" => parse_import(rest, true)?,
         "export-finished" => parse_export(rest, false)?,
         "export-originals" => parse_export(rest, true)?,
@@ -536,6 +560,33 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                     println!("目录：{}", projects.project_dir(&project.id)?.display());
                     println!("下一步：ziyuan text import {} <章节.txt>...", project.id);
                 }
+            }
+        }
+        TextAction::ImportSrt(id, file) => {
+            let translations = ziyuan_app::translation::Translations::new(env::current_dir()?);
+            let cues = translations.import_srt(&id, &file)?;
+            if json {
+                print_json(serde_json::json!({"project": id, "cues": cues}))?;
+            } else {
+                println!("已从 SRT 导入 {cues} 条字幕（时间轴存于 srt.json）。");
+            }
+        }
+        TextAction::ExportSrt(id, file) => {
+            let translations = ziyuan_app::translation::Translations::new(env::current_dir()?);
+            let cues = translations.export_srt(&id, &file)?;
+            if json {
+                print_json(serde_json::json!({"project": id, "cues": cues, "file": file}))?;
+            } else {
+                println!("已导出 {cues} 条字幕：{}", file.display());
+            }
+        }
+        TextAction::ImportDocx(id, file) => {
+            let translations = ziyuan_app::translation::Translations::new(env::current_dir()?);
+            let lines = translations.import_docx(&id, &file)?;
+            if json {
+                print_json(serde_json::json!({"project": id, "paragraphs": lines}))?;
+            } else {
+                println!("已从 DOCX 导入 {lines} 行文本。");
             }
         }
         TextAction::Import(id, files) => {
