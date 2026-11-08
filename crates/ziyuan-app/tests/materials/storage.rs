@@ -8,6 +8,7 @@ use ziyuan_app::translation::{
     Glossary, MaterialDraft, MaterialError, MaterialIssueCode, MaterialPathSegment,
     MaterialReceipt, MaterialSave, Translations, validate_material,
 };
+use ziyuan_app::text_project::{NewProject, Provenance, TextProjects};
 use ziyuan_storage::{JsonFileError, LockScope, Workspace};
 
 const ROOT_ENV: &str = "ZIYUAN_TEST_MATERIAL_ROOT";
@@ -409,4 +410,25 @@ fn tm_comments_and_tbx_roundtrip() {
     assert!(tbx.contains("<termEntry id=\"p_1\">"));
     let receipt = t.import_termbase_tbx(&f.project, tbx.as_bytes()).unwrap();
     assert!(!receipt.revision.is_empty());
+}
+
+#[test]
+fn srt_import_creates_project_paragraphs() {
+    let root = std::env::temp_dir().join(format!("ziyuan-srt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let texts = TextProjects::new(&root);
+    let project = texts.create(NewProject {
+        title: "字幕".into(),
+        source_language: "ja".into(),
+        target_language: "zh-CN".into(),
+        provenance: Provenance::default(),
+    }).unwrap();
+    let srt = root.join("a.srt");
+    fs::write(&srt, "1\n00:00:01,000 --> 00:00:02,000\n夜が明ける。\n\n2\n00:00:03,000 --> 00:00:04,000\n朝だ。\n").unwrap();
+    let cues = Translations::new(&root).import_srt(&project.id, &srt).unwrap();
+    assert_eq!(cues, 2);
+    let loaded = Translations::new(&root).project(&project.id).unwrap();
+    assert_eq!(loaded.chapters[0].paragraphs.len(), 2);
+    let _ = fs::remove_dir_all(&root);
 }
