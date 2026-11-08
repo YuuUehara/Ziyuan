@@ -255,6 +255,7 @@ fn router_for(app: AppState) -> Router {
             "/text/{project}/blocks/{block}/verification/associations",
             get(text::verification_associations),
         )
+        .route("/text/{project}/blocks/{block}/qa", get(text::qa))
         .route(
             "/text/{project}/blocks/{block}/evidence",
             post(text::evidence_add),

@@ -31,6 +31,7 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text reopen <项目ID> <块ID> --reason <理由>     退回重修
   ziyuan text context prepare <项目ID>                 把本地资料草稿准备为生产 glossary.json（尚未批准）
   ziyuan text context diff <项目ID>                    只读对比本地草稿与已批准资料
+  ziyuan text qa <项目ID> <块ID>                       确定性检查（空译、数字、段号、术语、人物）
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -58,6 +59,7 @@ pub(crate) enum TranslationAction {
     ContextApprove(String),
     ContextPrepare(String),
     ContextDiff(String),
+    Qa(String, String),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -142,6 +144,9 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
             TranslationAction::ContextPrepare((*p).into())
         }
         ["context", "diff", p] if positional(p) => TranslationAction::ContextDiff((*p).into()),
+        ["qa", p, b] if positional(p) && positional(b) => {
+            TranslationAction::Qa((*p).into(), (*b).into())
+        }
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
         }
@@ -233,6 +238,25 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::Qa(project, block) => {
+            let report = translations.qa(&project, &block)?;
+            if json {
+                print_json(serde_json::json!(report))?;
+            } else {
+                println!(
+                    "项目 {project} 块 {block}：{} 段，{} 个问题",
+                    report.paragraphs,
+                    report.issues.len()
+                );
+                for issue in &report.issues {
+                    println!("{} {}：{}", issue.code, issue.paragraph, issue.message);
+                }
+                if report.issues.is_empty() {
+                    println!("未发现确定性检查问题（不代表语义正确）。");
+                }
+            }
+            return Ok(());
+        }
         TranslationAction::ContextDiff(project) => {
             let diff = translations.material_diff(&project)?;
             if json {

@@ -1308,6 +1308,8 @@ fn text_frontend_contract() {
         "准备生产资料",
         "对比草稿与生产",
         "导出备份文件",
+        "确定性检查",
+        "/qa",
         "第一次使用",
         "/materials/diff",
         "materials-associations",

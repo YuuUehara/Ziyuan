@@ -141,6 +141,21 @@ pub(crate) async fn verification_associations(
     Ok(Json(json!(view)))
 }
 
+pub(crate) async fn qa(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let value = blocking(move || {
+        Translations::new(&root)
+            .qa(&project, &block)
+            .map(|v| json!(v))
+            .map_err(verification_error)
+    })
+    .await?;
+    Ok(Json(value))
+}
+
 pub(crate) async fn verification_record(
     State(app): State<AppState>,
     UrlPath((project, block)): UrlPath<(String, String)>,

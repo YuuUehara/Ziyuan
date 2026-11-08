@@ -893,6 +893,7 @@
                 <button class="small" id="materials-copy" type="button">复制恢复 JSON（高级）</button>
                 <button class="small" id="materials-prepare" type="button">准备生产资料</button>
                 <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
+                <button class="small" id="materials-qa" type="button">确定性检查</button>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
               </div>
               <p class="hint" id="materials-states" aria-live="polite">
@@ -902,6 +903,7 @@
               </p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
+              <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
               <div class="actions">
                 <button class="small" id="materials-restore" type="button" hidden>恢复会话暂存</button>
                 <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
@@ -1554,6 +1556,18 @@ $("materials-validate")?.addEventListener("click", async () => {
       : "校验通过；通过仍不是批准，保存也不授予批准。";
   } catch (e) {
     $("materials-status").textContent = "校验失败：" + materialAdvice(e.body?.error || e.message);
+  }
+});
+$("materials-qa")?.addEventListener("click", async () => {
+  if (!textProjectId || !textBlockId) { $("materials-status").textContent = "请先选择项目和块。"; return; }
+  try {
+    const report = await api("/text/" + encodeURIComponent(textProjectId) + "/blocks/" + encodeURIComponent(textBlockId) + "/qa");
+    const labels = { no_translation: "没有有效译稿", missing_paragraph: "缺段", paragraph_id_mismatch: "段号不一致", extra_paragraph: "多段", duplicate_paragraph: "段号重复", empty_translation: "空译", untranslated: "疑似未翻译", number_mismatch: "数字不一致", duplicate_text: "重复译文", term_inconsistent: "术语不一致", person_inconsistent: "人物名不一致" };
+    $("materials-qa-result").textContent = report.issues.length
+      ? report.issues.map((i) => (labels[i.code] || i.code) + (i.paragraph ? "（" + i.paragraph + "）" : "") + "：" + i.message).join("\n")
+      : "未发现确定性检查问题（不代表语义正确）。";
+  } catch (e) {
+    $("materials-qa-result").textContent = "检查失败：" + materialAdvice(e.body?.error || e.message);
   }
 });
 $("materials-diff-run")?.addEventListener("click", async () => {

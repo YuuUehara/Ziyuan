@@ -81,6 +81,21 @@ pub struct SemanticCheck {
     pub evidence: Vec<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QaIssue {
+    pub paragraph: String,
+    pub code: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QaReport {
+    pub project: String,
+    pub block: String,
+    pub paragraphs: usize,
+    pub issues: Vec<QaIssue>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerificationInput {
@@ -560,6 +575,168 @@ impl Translations {
             records,
             hints,
             paragraphs,
+        })
+    }
+
+    /// Deterministic, local QA. No model call, no writes, no approval.
+    pub fn qa(&self, project: &str, block: &str) -> Result<QaReport> {
+        let material = self.verification_materials(None, project, block)?;
+        let mut issues = Vec::new();
+        let Some(translation) = &material.translation else {
+            issues.push(QaIssue {
+                paragraph: String::new(),
+                code: "no_translation",
+                message: "没有结构有效的译稿；请先完成初译或人工译稿。".into(),
+            });
+            return Ok(QaReport {
+                project: project.into(),
+                block: block.into(),
+                paragraphs: material.source.paragraphs.len(),
+                issues,
+            });
+        };
+        let source = &material.source.paragraphs;
+        let target = &translation.paragraphs;
+        let mut seen_ids = std::collections::HashSet::new();
+        for (index, source_para) in source.iter().enumerate() {
+            let Some(target_para) = target.get(index) else {
+                issues.push(QaIssue {
+                    paragraph: source_para.id.clone(),
+                    code: "missing_paragraph",
+                    message: "译稿缺少这一段。".into(),
+                });
+                continue;
+            };
+            if target_para.id != source_para.id {
+                issues.push(QaIssue {
+                    paragraph: source_para.id.clone(),
+                    code: "paragraph_id_mismatch",
+                    message: format!("译稿段号是 {}，与原文不一致。", target_para.id),
+                });
+            }
+            if !seen_ids.insert(target_para.id.clone()) {
+                issues.push(QaIssue {
+                    paragraph: target_para.id.clone(),
+                    code: "duplicate_paragraph",
+                    message: "译稿里同一段号出现多次。".into(),
+                });
+            }
+            if target_para.text.trim().is_empty() {
+                issues.push(QaIssue {
+                    paragraph: source_para.id.clone(),
+                    code: "empty_translation",
+                    message: "译文为空。".into(),
+                });
+            } else if target_para.text.trim() == source_para.text.trim() {
+                issues.push(QaIssue {
+                    paragraph: source_para.id.clone(),
+                    code: "untranslated",
+                    message: "译文与原文相同，可能未翻译。".into(),
+                });
+            }
+            let source_digits: String = source_para
+                .text
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect();
+            let target_digits: String = target_para
+                .text
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect();
+            if source_digits != target_digits {
+                issues.push(QaIssue {
+                    paragraph: source_para.id.clone(),
+                    code: "number_mismatch",
+                    message: format!(
+                        "数字不一致：原文 {source_digits:?}，译文 {target_digits:?}。"
+                    ),
+                });
+            }
+        }
+        if target.len() > source.len() {
+            issues.push(QaIssue {
+                paragraph: String::new(),
+                code: "extra_paragraph",
+                message: "译稿比原文多出段落。".into(),
+            });
+        }
+        let mut texts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for para in target {
+            if !para.text.trim().is_empty() {
+                *texts.entry(para.text.as_str()).or_default() += 1;
+            }
+        }
+        for (text, count) in texts {
+            if count > 1 {
+                issues.push(QaIssue {
+                    paragraph: String::new(),
+                    code: "duplicate_text",
+                    message: format!(
+                        "同一段译文重复 {count} 次：{}",
+                        text.chars().take(30).collect::<String>()
+                    ),
+                });
+            }
+        }
+        if let Some(context) = &material.context {
+            match &context.glossary {
+                crate::translation::Glossary::Legacy(entries) => {
+                    for entry in entries {
+                        for (source_para, target_para) in source.iter().zip(target) {
+                            if source_para.text.contains(&entry.source)
+                                && !entry.allowed.iter().any(|a| target_para.text.contains(a))
+                            {
+                                issues.push(QaIssue {
+                                    paragraph: source_para.id.clone(),
+                                    code: "term_inconsistent",
+                                    message: format!("术语「{}」没有使用允许译法。", entry.source),
+                                });
+                            }
+                        }
+                    }
+                }
+                crate::translation::Glossary::Structured(data) => {
+                    for term in &data.terms {
+                        for (source_para, target_para) in source.iter().zip(target) {
+                            if source_para.text.contains(&term.source)
+                                && !term.allowed.iter().any(|a| target_para.text.contains(a))
+                            {
+                                issues.push(QaIssue {
+                                    paragraph: source_para.id.clone(),
+                                    code: "term_inconsistent",
+                                    message: format!("术语「{}」没有使用允许译法。", term.source),
+                                });
+                            }
+                        }
+                    }
+                    for person in &data.persons {
+                        let names: Vec<&str> = std::iter::once(person.name.as_str())
+                            .chain(person.aliases.iter().map(String::as_str))
+                            .collect();
+                        for (source_para, target_para) in source.iter().zip(target) {
+                            if names.iter().any(|n| source_para.text.contains(*n))
+                                && !names.iter().any(|n| target_para.text.contains(*n))
+                            {
+                                issues.push(QaIssue {
+                                    paragraph: source_para.id.clone(),
+                                    code: "person_inconsistent",
+                                    message: format!(
+                                        "人物「{}」的姓名或别名未在译文中出现。",
+                                        person.name
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(QaReport {
+            project: project.into(),
+            block: block.into(),
+            paragraphs: source.len(),
+            issues,
         })
     }
 
