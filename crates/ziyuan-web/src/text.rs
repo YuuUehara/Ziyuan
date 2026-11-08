@@ -90,6 +90,57 @@ pub(crate) async fn verification(
     Ok(Json(json!(view)))
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct VerificationAssociationsQuery {
+    #[serde(default)]
+    associations: Option<String>,
+}
+
+pub(crate) async fn verification_associations(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<VerificationAssociationsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let associations: Vec<ziyuan_app::translation::visibility::ParagraphAssociations> =
+        match query.associations {
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|_| ApiError::bad("复核关联不是有效 JSON 数组"))?,
+            None => Vec::new(),
+        };
+    let root = app.0.config.root.clone();
+    let result = app
+        .session_result({
+            let (root, project, block, associations) = (
+                root.clone(),
+                project.clone(),
+                block.clone(),
+                associations.clone(),
+            );
+            move |s| {
+                Ok(Translations::new(&root).verification_with_associations(
+                    Some(s.court()),
+                    &project,
+                    &block,
+                    &associations,
+                )?)
+            }
+        })
+        .await?;
+    let view = match result {
+        Ok(view) => view,
+        Err(AppError::NotFounded) => {
+            blocking(move || {
+                Translations::new(&root)
+                    .verification_with_associations(None, &project, &block, &associations)
+                    .map_err(verification_error)
+            })
+            .await?
+        }
+        Err(e) => return Err(verification_error(e)),
+    };
+    Ok(Json(json!(view)))
+}
+
 pub(crate) async fn verification_record(
     State(app): State<AppState>,
     UrlPath((project, block)): UrlPath<(String, String)>,

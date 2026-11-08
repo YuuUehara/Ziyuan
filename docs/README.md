@@ -1,6 +1,6 @@
 # 文档目录
 
-当前已发布 **1.5.3**；版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录在 [验收记录](#验收记录)，只记录当时实际做过的检查。
+当前已发布 **1.6.0**；版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录在 [验收记录](#验收记录)，只记录当时实际做过的检查。
 
 ## 使用
 
@@ -29,6 +29,7 @@
 
 每份只记录当时实际做过的检查和未测项目，不代表当前版本。
 
+- [1.5.x（1.5.0–1.5.3）](acceptance/1.5.x.md)
 - [1.4.1](acceptance/1.4.1.md)
 - [1.4.0 汇总](acceptance/1.4.0.md)
 - [1.4 第一批](acceptance/1.4-first-batch.md)

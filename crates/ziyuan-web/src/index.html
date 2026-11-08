@@ -521,6 +521,8 @@
 .text-materials-assoc[open] { display: grid; gap: 8px; }
 .text-materials-assoc textarea { width: 100%; box-sizing: border-box; min-height: 64px; }
 .text-materials-assoc .bad { color: var(--bad); }
+.link-button { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline dotted; cursor: pointer; font: inherit; }
+.link-button:focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
 .text-materials pre {
     white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; max-height: 220px;
     overflow: auto; background: var(--well); border-radius: var(--radius); font: 12px/1.6 var(--mono);
@@ -888,6 +890,8 @@
                 <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
               </div>
               <ul class="text-problems" id="materials-issues" aria-live="polite"></ul>
+              <datalist id="assoc-person-ids"></datalist>
+              <datalist id="assoc-speaker-ids"></datalist>
               <div id="materials-associations" aria-label="当前块的临时段落关联"></div>
             <div class="text-materials-assoc" id="text-n2b-assoc">
               <p class="hint">段旁提示使用「临时关联」（只用于本次预览，不保存）；改完关联后点「刷新段旁提示」。</p>
@@ -1609,9 +1613,9 @@ function associationRow(paragraph) {
     });
     return input;
   };
-  const persons = make("人物 ID"); persons.dataset.field = "persons";
-  const targets = make("称呼对象 ID"); targets.dataset.field = "targets";
-  const speaker = make("speaker"); speaker.dataset.field = "speaker";
+  const persons = make("人物 ID"); persons.dataset.field = "persons"; persons.setAttribute("list", "assoc-person-ids");
+  const targets = make("称呼对象 ID"); targets.dataset.field = "targets"; targets.setAttribute("list", "assoc-person-ids");
+  const speaker = make("speaker"); speaker.dataset.field = "speaker"; speaker.setAttribute("list", "assoc-speaker-ids");
   row.append(label, persons, targets, speaker);
   return row;
 }
@@ -1659,12 +1663,33 @@ async function renderN2bHints() {
     const applicable = result.report?.applicable || {};
     const terms = applicable.terms || [];
     const persons = applicable.persons || [];
-    const parts = [];
-    if (terms.length) parts.push("术语：" + terms.map((t) => t.term_id + "（" + (t.paragraphs || []).join("、") + "）").join("；"));
-    if (persons.length) parts.push("人物：" + persons.map((t) => t.person_id + "（" + (t.paragraphs || []).join("、") + "）").join("；"));
-    hint.textContent = parts.length
-      ? "段旁提示（只读，未批准，不外发）：" + parts.join("｜")
-      : "段旁提示：当前块没有适用的本地术语或人物（只读）。";
+    if (!terms.length && !persons.length) {
+      hint.textContent = "段旁提示：当前块没有适用的本地术语或人物（只读）。";
+    } else {
+      hint.append("段旁提示（只读，未批准，不外发）：");
+      const addGroup = (label, items, idKey) => {
+        hint.append(label + "：");
+        items.forEach((item, index) => {
+          if (index) hint.append("；");
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "link-button";
+          button.textContent = item[idKey];
+          button.title = "定位到段落 " + (item.paragraphs || []).join("、");
+          button.addEventListener("click", () => {
+            const first = (item.paragraphs || [])[0];
+            const target = first && document.querySelector('[data-text-para="' + CSS.escape(first) + '"]');
+            if (target) target.scrollIntoView({ block: "center" });
+          });
+          hint.append(button, "（" + (item.paragraphs || []).join("、") + "）");
+        });
+      };
+      if (terms.length) addGroup("术语", terms, "term_id");
+      if (persons.length) {
+        if (terms.length) hint.append("｜");
+        addGroup("人物", persons, "person_id");
+      }
+    }
     host.append(hint);
   } catch (e) {
     if (n2bKey !== epoch) return;
@@ -1697,6 +1722,7 @@ function renderMaterialsAssociations() {
     if (!wanted.has(row.dataset.assocId)) row.remove();
     else existing.set(row.dataset.assocId, row);
   }
+  fillAssocDatalists();
   for (const paragraph of paragraphs) {
     const saved = materialsAssoc.get(paragraph.id) || { persons: "", targets: "", speaker: "" };
     let row = existing.get(paragraph.id);
@@ -1709,6 +1735,14 @@ function renderMaterialsAssociations() {
     if (inputs[1].value !== saved.targets) inputs[1].value = saved.targets;
     if (inputs[2].value !== saved.speaker) inputs[2].value = saved.speaker;
   }
+}
+function fillAssocDatalists() {
+  const persons = materialsEditor?.previewState?.()?.material?.persons || [];
+  const ids = persons.map((p) => p.person_id).filter(Boolean);
+  const personList = $("assoc-person-ids");
+  if (personList) personList.replaceChildren(...ids.map((id) => { const o = document.createElement("option"); o.value = id; return o; }));
+  const speakerList = $("assoc-speaker-ids");
+  if (speakerList) speakerList.replaceChildren(...["narration", "unknown", ...ids].map((id) => { const o = document.createElement("option"); o.value = id; return o; }));
 }
 function setMaterialState(kind, text) {
   const id = kind === "save" ? "materials-save-state"
@@ -2089,7 +2123,11 @@ async function loadVerification() {
   verificationError = "";
   renderVerification();
   try {
-    const view = await api(verificationBase() + "/verification");
+    const assoc = typeof readMaterialsAssociations === "function" ? readMaterialsAssociations() : [];
+    const suffix = assoc.length
+      ? "/verification/associations?associations=" + encodeURIComponent(JSON.stringify(assoc))
+      : "/verification";
+    const view = await api(verificationBase() + suffix);
     if (scope !== currentVerificationScope() || request !== verificationRequest) return;
     verificationView = view;
   } catch (e) {
@@ -2133,7 +2171,7 @@ function renderVerification() {
   if (!panel) {
     panel = document.createElement("section"); panel.id = "verification-panel"; panel.className = "text-material";
     $("text-materials").after(panel);
-    panel.innerHTML = `<h3>词证与逐段勘校</h3><p class="hint">记录词义依据，逐段核对译文。记录只保存在本地，不自动纳入已批准上下文或发送给模型；保存勘校记录不会自动准奏、御览定稿或启动下一块。</p><label>勘校段落<select id="verification-paragraph" data-view></select></label><div id="verification-message" role="status"></div><div id="verification-facts"></div><div id="verification-form"></div>`;
+    panel.innerHTML = `<h3>词证与逐段勘校</h3><p class="hint">记录词义依据，逐段核对译文。记录只保存在本地，不自动纳入已批准上下文或发送给模型；保存勘校记录不会自动准奏、御览定稿或启动下一块。资料面板的「临时关联」会用于称谓条件判定；改后点「重新读取」。</p><div class="actions"><button type="button" class="small" id="verification-reload">重新读取（含关联）</button></div><label>勘校段落<select id="verification-paragraph" data-view></select></label><div id="verification-message" role="status"></div><div id="verification-facts"></div><div id="verification-form"></div>`;
     const saveInput = (e) => {
       if (!verificationView || !verificationParagraph) return;
       const d = verificationDraft(), el = e.target;
@@ -2186,9 +2224,10 @@ function renderVerification() {
 }
 async function verificationClick(e) {
   const action = e.target.id;
-  if (!["verification-save", "verification-refresh", "evidence-save"].includes(action) || verificationBusy || document.body.classList.contains("viewer")) return;
+  if (!["verification-save", "verification-refresh", "verification-reload", "evidence-save"].includes(action) || verificationBusy || document.body.classList.contains("viewer")) return;
   const scope = currentVerificationScope(), d = verificationDraft();
   if (action === "verification-refresh") { d.fingerprint = verificationView.fingerprint; renderVerification(); return; }
+    if (action === "verification-reload") { await loadVerification(); return; }
   let body, endpoint;
   try {
     if (action === "evidence-save") { body = {paragraph: verificationParagraph, ...d.evidence}; endpoint = "/evidence"; }
