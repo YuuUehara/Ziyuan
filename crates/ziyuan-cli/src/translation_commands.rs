@@ -32,6 +32,9 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text context prepare <项目ID>                 把本地资料草稿准备为生产 glossary.json（尚未批准）
   ziyuan text context diff <项目ID>                    只读对比本地草稿与已批准资料
   ziyuan text qa <项目ID> <块ID>                       确定性检查（空译、数字、段号、术语、人物）
+  ziyuan text termbase export <项目ID> <术语表.csv>    导出本地草稿术语/人物 CSV
+  ziyuan text termbase import <项目ID> <术语表.csv>    合并 CSV 到本地资料草稿（未批准）
+  ziyuan text concordance <项目ID> <原文片段>         模糊检索本项目已有译文（双语对照）
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -60,6 +63,9 @@ pub(crate) enum TranslationAction {
     ContextPrepare(String),
     ContextDiff(String),
     Qa(String, String),
+    TermbaseExport(String, PathBuf),
+    TermbaseImport(String, PathBuf),
+    Concordance(String, String),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -146,6 +152,15 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["context", "diff", p] if positional(p) => TranslationAction::ContextDiff((*p).into()),
         ["qa", p, b] if positional(p) && positional(b) => {
             TranslationAction::Qa((*p).into(), (*b).into())
+        }
+        ["termbase", "export", p, f] if positional(p) && positional(f) => {
+            TranslationAction::TermbaseExport((*p).into(), (*f).into())
+        }
+        ["termbase", "import", p, f] if positional(p) && positional(f) => {
+            TranslationAction::TermbaseImport((*p).into(), (*f).into())
+        }
+        ["concordance", p, q] if positional(p) && positional(q) => {
+            TranslationAction::Concordance((*p).into(), (*q).into())
         }
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
@@ -238,6 +253,50 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::Concordance(project, query) => {
+            let hits = translations.concordance(&project, &query, 10)?;
+            if json {
+                print_json(serde_json::json!(hits))?;
+            } else if hits.is_empty() {
+                println!("没有找到相近的已有译文。");
+            } else {
+                for hit in &hits {
+                    println!(
+                        "{:.2}\t{}\t原文：{}\n\t译文：{}",
+                        hit.score,
+                        hit.paragraph,
+                        hit.source.chars().take(60).collect::<String>(),
+                        hit.target.chars().take(60).collect::<String>()
+                    );
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::TermbaseExport(project, file) => {
+            let csv = translations.export_termbase_csv(&project)?;
+            std::fs::write(&file, csv.as_bytes())?;
+            if json {
+                print_json(
+                    serde_json::json!({"project": project, "file": file, "bytes": csv.len()}),
+                )?;
+            } else {
+                println!("已导出术语表：{}（{} 字节）。", file.display(), csv.len());
+            }
+            return Ok(());
+        }
+        TranslationAction::TermbaseImport(project, file) => {
+            let bytes = std::fs::read(&file)?;
+            let receipt = translations.import_termbase_csv(&project, &bytes)?;
+            if json {
+                print_json(serde_json::json!({"project": project, "revision": receipt.revision}))?;
+            } else {
+                println!(
+                    "已合并术语表到本地资料草稿（未批准）：修订 {}。",
+                    receipt.revision
+                );
+            }
+            return Ok(());
+        }
         TranslationAction::Qa(project, block) => {
             let report = translations.qa(&project, &block)?;
             if json {

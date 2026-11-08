@@ -225,6 +225,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
 
   function fieldset(legend) {
     const node = make("fieldset");
+    node.dataset.legend = legend;
     node.append(make("legend", { textContent: legend }));
     return node;
   }

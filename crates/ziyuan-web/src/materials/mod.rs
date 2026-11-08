@@ -34,6 +34,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/text/{project}/materials/preview", post(preview))
         .route("/text/{project}/materials/prepare", post(prepare))
         .route("/text/{project}/materials/diff", get(diff))
+        .route(
+            "/text/{project}/materials/termbase",
+            get(termbase_export).post(termbase_import),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
@@ -128,6 +132,55 @@ pub(crate) async fn diff(
     run(id, move || {
         Translations::new(&root)
             .material_diff(&project)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
+}
+
+async fn termbase_export(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let root = app.0.config.root.clone();
+    match tokio::task::spawn_blocking(move || {
+        Translations::new(&root).export_termbase_csv(&project)
+    })
+    .await
+    {
+        Ok(Ok(csv)) => ([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], csv).into_response(),
+        Ok(Err(error)) => reply(&id, StatusCode::BAD_REQUEST, error.to_string(), None),
+        Err(error) => reply(
+            &id,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+            None,
+        ),
+    }
+}
+
+async fn termbase_import(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return reply(&id, StatusCode::BAD_REQUEST, "术语表读取失败".into(), None);
+        }
+    };
+    let root = app.0.config.root.clone();
+    run(id, move || {
+        Translations::new(&root)
+            .import_termbase_csv(&project, &body)
             .map_err(MaterialError::Visibility)
     })
     .await

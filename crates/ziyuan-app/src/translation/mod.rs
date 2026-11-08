@@ -8,6 +8,7 @@
 //! 哈希一律为 SHA-256 小写十六进制（无前缀）：原文哈希是块 JSON（与项目内
 //! `blocks/<块>.json` 逐字节相同，即 [`PromptBlock::serialized`]）的哈希；
 //! 译稿哈希是 `zh.json` 文件字节的哈希。
+mod concordance;
 mod context;
 mod draft;
 mod export;

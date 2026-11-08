@@ -4,6 +4,7 @@ mod diff;
 mod model;
 mod preview;
 mod store;
+mod termbase;
 mod validation;
 
 pub use diff::*;

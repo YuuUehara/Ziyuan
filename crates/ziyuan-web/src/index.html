@@ -529,6 +529,7 @@
 .assoc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .assoc-tag { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; font-size: 12px; }
 .assoc-tag-x { border: 0; background: none; padding: 0; cursor: pointer; color: var(--muted); font: inherit; }
+#text-materials-editor.simple-mode fieldset[data-legend="出处"], #text-materials-editor.simple-mode fieldset[data-legend="适用范围"], #text-materials-editor.simple-mode fieldset[data-legend="说话人"], #text-materials-editor.simple-mode fieldset[data-legend="称呼规则"], #text-materials-editor.simple-mode fieldset[data-legend="关联术语"], #text-materials-editor.simple-mode fieldset[data-legend="语气"], #text-materials-editor.simple-mode fieldset[data-legend="生效位置"] { display: none; }
 .text-materials pre {
     white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; max-height: 220px;
     overflow: auto; background: var(--well); border-radius: var(--radius); font: 12px/1.6 var(--mono);
@@ -894,6 +895,9 @@
                 <button class="small" id="materials-prepare" type="button">准备生产资料</button>
                 <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
                 <button class="small" id="materials-qa" type="button">确定性检查</button>
+                <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
+                <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
+                <input type="file" id="materials-termbase-file" accept=".csv,text/csv" hidden>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
               </div>
               <p class="hint" id="materials-states" aria-live="polite">
@@ -901,6 +905,7 @@
                 <span id="materials-session-state">会话暂存：—</span> ·
                 <span id="materials-validate-state">校验：未校验</span>
               </p>
+              <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（隐藏范围、证据、称谓等高级字段）</label></p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
               <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
@@ -1557,6 +1562,44 @@ $("materials-validate")?.addEventListener("click", async () => {
   } catch (e) {
     $("materials-status").textContent = "校验失败：" + materialAdvice(e.body?.error || e.message);
   }
+});
+$("materials-simple")?.addEventListener("change", (e) => {
+  $("text-materials-editor")?.classList.toggle("simple-mode", e.target.checked);
+  if (e.target.checked) $("materials-status").textContent = "简易模式：只显示常用字段；高级字段仍保留原值。";
+});
+$("text-materials-editor")?.addEventListener("click", (e) => {
+  if (e.target.closest('[data-role="add"]')) {
+    $("materials-status").textContent = "第一步：填名称和译法；保存草稿后再按需补范围、证据或称谓。";
+  }
+});
+$("materials-termbase-export")?.addEventListener("click", async () => {
+  if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  try {
+    const response = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase");
+    if (!response.ok) throw new Error("导出失败");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "ziyuan-termbase-" + textProjectId + ".csv"; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    $("materials-status").textContent = "已导出术语表 CSV（本地草稿）。";
+  } catch (e) { $("materials-status").textContent = "导出失败：" + materialAdvice(e.message); }
+});
+$("materials-termbase-import")?.addEventListener("click", () => $("materials-termbase-file")?.click());
+$("materials-termbase-file")?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file || !textProjectId) return;
+  try {
+    const text = await file.text();
+    const response = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase", {
+      method: "POST", headers: { "Content-Type": "text/csv" }, body: text,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "导入失败");
+    $("materials-status").textContent = "已合并术语表到本地草稿（未批准）；请刷新或重新读取。";
+    await loadMaterialsView();
+  } catch (err) { $("materials-status").textContent = "导入失败：" + materialAdvice(err.message); }
+  e.target.value = "";
 });
 $("materials-qa")?.addEventListener("click", async () => {
   if (!textProjectId || !textBlockId) { $("materials-status").textContent = "请先选择项目和块。"; return; }

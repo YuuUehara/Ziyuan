@@ -343,3 +343,40 @@ fn material_diff_reports_added_changed_and_removed() {
     let added = diff.terms.iter().find(|c| c.id == "t-2").unwrap();
     assert_eq!(added.kind, "added");
 }
+
+#[test]
+fn termbase_csv_roundtrip_terms_and_persons() {
+    let f = Fixture::new();
+    let t = f.service();
+    let material = serde_json::from_value(json!({
+        "format": 2,
+        "terms": [{
+            "term_id": "t-1", "source": "夜", "category": "common",
+            "allowed": ["夜晚", "夜里"], "scope": {"kind": "project"},
+            "evidence": [], "status": "confirmed"
+        }],
+        "persons": [{
+            "person_id": "p_1", "name": "夜", "aliases": ["夜晚"], "terms": [],
+            "address_rules": [], "voice": {"description": "低"}, "evidence": [],
+            "status": "tentative"
+        }]
+    }))
+    .unwrap();
+    t.save_material_draft(
+        &f.project,
+        &MaterialSave {
+            request_id: "termbase-save".into(),
+            expected_revision: None,
+            material,
+        },
+    )
+    .unwrap();
+    let csv = t.export_termbase_csv(&f.project).unwrap();
+    assert!(csv.starts_with("kind,id,source,name,allowed,aliases,status,note"));
+    assert!(csv.contains("term,t-1,夜,,夜晚;夜里,,confirmed,"), "{csv}");
+    assert!(csv.contains("person,p_1,,夜,,夜晚,tentative,"), "{csv}");
+    let receipt = t.import_termbase_csv(&f.project, csv.as_bytes()).unwrap();
+    assert!(!receipt.revision.is_empty());
+    let csv2 = t.export_termbase_csv(&f.project).unwrap();
+    assert_eq!(csv, csv2);
+}
