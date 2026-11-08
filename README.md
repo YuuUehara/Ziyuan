@@ -4,7 +4,7 @@
 
 > 用 Rust 编写的多智能体协作工具：你提出任务、分配权限、审阅结果，再决定是否把改动写入文件。界面和角色借用了中国古代朝廷的称呼。
 
-**当前版本 1.12.0**：在 1.4 的译书流程（原文预览与注音、成稿导出、显式参考、词证与逐段勘校、用量账本）之上，加入本地人物/术语资料、段旁提示、第二版资料的生产准备与复核关联。**1.13 开发中（未发布）**再加入译稿三态快照与版本对比、DOCX／EPUB 标记回填、术语表完整字段与版本清理。版本变化见 [CHANGELOG](CHANGELOG.md)，下载见 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases)。保留初译、双路审校、朱批、修订、御览与人工分批，不自动推进整部小说；工程验收不等于文学质量保证。也可用命令行、Web 或终端界面管理代码任务，查看执行记录，并在批准前审阅文件差异。
+**当前版本 1.13.0**：在 1.4 的译书流程（原文预览与注音、成稿导出、显式参考、词证与逐段勘校、用量账本）之上，加入本地人物／术语资料、段旁提示、第二版资料的生产准备与复核关联；1.13 另加译稿三态快照与版本对比、DOCX／EPUB 标记回填、完整术语表字段、本地翻译记忆与审校评论、SRT 导入导出与版本清理。版本变化见 [CHANGELOG](CHANGELOG.md)，下载见 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases)。保留初译、双路审校、朱批、修订、御览与人工分批，不自动推进整部小说；工程验收不等于文学质量保证。也可用命令行、Web 或终端界面管理代码任务，查看执行记录，并在批准前审阅文件差异。
 
 - **先试用，不必先配置模型**：未设置 `ZIYUAN_LLM_MODEL` 时只演示派工，不会真的分析或修改文件。
 - **接入模型后才执行真实工作**：支持 OpenAI 兼容接口，已有 DeepSeek 实测。默认只能读取项目；修改文件和运行测试要另行授权。
@@ -20,7 +20,9 @@
 
 **术语表与双语检索**：`ziyuan text termbase export/import <项目ID> <文件.csv>` 与 `export-tbx/import-tbx` 导出或合并本地术语与人物；CSV／TBX 都保存类别、范围、可用起点、读音、证据、关联术语、声线与称谓规则，旧八列 CSV 仍可读。`ziyuan text concordance <项目ID> <原文片段>` 模糊检索本项目已有原文与译文。
 
-**译稿版本与格式回填（开发中，未发布）**：保存草稿、准奏与定稿时自动写快照；`ziyuan text version list|save|compare|compare-draft|prune` 与 Web「译稿版本」面板可查看、对比现行译稿或人工草稿，并清理旧快照。`ziyuan text import-docx/import-epub` 会保留原件，`export-docx/export-epub` 按已定稿译稿回填文字，保留粗体、斜体、表格与图片。快照只是本地辅助材料，不批准、不外发。边界见[文本项目指南](docs/text-projects.md#113译稿版本与格式回填开发中未发布)。
+**译稿版本与格式回填**：保存草稿、准奏与定稿时自动写快照；`ziyuan text version list|save|compare|compare-draft|prune` 与 Web「译稿版本」面板可查看、对比现行译稿或人工草稿，并清理旧快照。`ziyuan text import-docx/import-epub` 会保留原件，`export-docx/export-epub` 按已定稿译稿回填文字，保留粗体、斜体、表格与图片。快照只是本地辅助材料，不批准、不外发。边界见[文本项目指南](docs/text-projects.md#113译稿版本与格式回填)。
+
+**翻译记忆、评论与字幕**：`ziyuan text tm ...` 可按项目维护本地原译文记忆，`text comment ...` 记录审校评论；两者都不自动改稿、不批准。`text import-srt`／`export-srt` 导入或导出字幕文字，时间轴存于 `srt.json`。详见[文本项目指南](docs/text-projects.md#翻译记忆审校评论与字幕)。
 
 **向导式新建**：资料面板的「向导式新建」用三步对话框创建术语或人物；「临时关联」的人物/对象支持多选，选择结果以可移除标签显示。
 

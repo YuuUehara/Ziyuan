@@ -59,6 +59,10 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        导入 DOCX 文字（保留原件，供回填粗体/斜体/表格/图片）
   ziyuan text import-epub <项目ID> <文件.epub>
                                        导入 EPUB 正文（保留原件，供回填行内标记与图片）
+  ziyuan text import-srt <项目ID> <文件.srt>
+                                       导入 SRT 字幕文字，时间轴另存 srt.json
+  ziyuan text export-srt <项目ID> <文件.srt>
+                                       按现行译稿导出 SRT；段数与字幕数不一致即拒绝
   ziyuan text export-docx <项目ID> <输出.docx>
                                        按已定稿译稿回填原 DOCX，不覆盖已有文件
   ziyuan text export-epub <项目ID> <输出.epub>

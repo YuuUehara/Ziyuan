@@ -1,17 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.13.0 — 2026-11-09
 
 - 译稿版本快照：保存草稿、准奏与定稿时自动写快照（草稿／准奏／定稿三态），同状态同内容不重复；新增 `ziyuan text version list|save|compare|compare-draft|prune` 与 Web「译稿版本」面板，可对比现行译稿或人工草稿，逐段列出新增、删除、改写与标记变化。
 - 版本清理：自动快照每个状态默认保留最新 3 份；`version prune` 与 Web「清理旧快照」默认只预览，加 `--yes`／再次确认才删除，手工快照默认保留。快照只是本地辅助材料，不批准、不外发、不作导出凭据。
-- DOCX／EPUB 标记保留：导入不再拒绝粗体、斜体、表格与图片；新增 `ziyuan text export-docx`／`export-epub`，按已定稿译稿回填原件文字，保留原有 run 标记、表格与图片。段落数不一致或输出文件已存在时整批拒绝。
+- DOCX／EPUB 标记保留：导入不再拒绝粗体、斜体、表格与图片，并把原件保留在项目内；新增 `ziyuan text export-docx`／`export-epub`，按已定稿译稿回填原件文字，保留原有 run 标记、表格与图片。段落数不一致或输出文件已存在时整批拒绝。
 - 术语表完整字段：CSV／TBX 新增类别、范围、可用起点、读音、证据、关联术语、声线与称谓规则（目标、说话人、范围、术语、备注、证据）；旧八列 CSV 仍可读，往返不丢字段。
+- 本地翻译记忆与审校评论：新增 `ziyuan text tm list|add|update|delete|adopt|build` 与 `ziyuan text comment list|add|resolve|reopen|reply|assign`；记忆和评论分项目保存在本地，命中不自动替换译文，评论不改译稿、不批准。Web 本地资料面板提供列示与采纳／解决入口。
+- 字幕与旧稿对比：新增 `ziyuan text import-srt`／`export-srt`（时间轴存 `srt.json`，段数与字幕数不符即拒绝）与 `ziyuan text compare`（逐段对比现行译稿与旧 PromptBlock JSON）。
 - Web：译书卡片新增版本快照列表、对比与清理；本地资料文案与批准边界和当前能力对齐。
-- 确定性翻译检查：新增 `ziyuan text qa <项目> <块>` 与 Web「确定性检查」；检查空译、疑似未翻译、段号缺失/重复/错位、多段、重复译文、数字不一致、术语未用允许译法、人物名缺失。纯本地、不调用模型、不写盘、不批准。
-- 修复 `ziyuan text` 未路由 `termbase`／`tm`／`comment`／`concordance`／`qa`／`compare`／`version` 子命令的问题；此前这些命令会报「未知的 text 子命令」。
+- 修复 `ziyuan text` 未路由 `termbase`／`tm`／`comment`／`concordance`／`qa`／`compare`／`version` 子命令的问题；此前这些命令会报「未知的 text 子命令」。补齐 SRT 导入导出的命令帮助。
 - 依赖安全：升级 `zip` 至 9.4.2、`quick-xml` 至 0.41，清除 RUSTSEC-2026-0367／0368／0369／0429 与 RUSTSEC-2026-0194／0195；DOCX／EPUB 读写随新 API 调整，输出与测试不变。
 - CI：补齐 `cargo fmt` 差异；`cargo audit` 仅余 `bincode` 未维护警告（不阻断）。Windows 上 MCP 测试的临时目录清理改为短暂重试，避免子进程句柄晚释放造成偶发失败。
-- 文档：README、文本项目指南、稳定性约定与 1.13 验收记录同步以上边界；确定性检查的说明保留。
+- 文档：README、文本项目指南、稳定性约定、路线图与 1.13.0 验收记录同步以上边界，并加入版本面板真实浏览器截图；复杂 DOCX／EPUB 版式与真实文件往返仍未验收。
 
 ## 1.12.0 — 2026-11-09
 
