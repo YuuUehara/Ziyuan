@@ -873,12 +873,21 @@
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
               <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
+              <details class="hint"><summary>新手帮助（不用命令行）</summary>
+                <ol>
+                  <li>点「新增术语」或「新增人物」，填名称和译法；不确定的字段留空。</li>
+                  <li>点「保存草稿」；保存不等于批准。</li>
+                  <li>点「校验」，通过后点「准备生产资料」。</li>
+                  <li>准备仍不是批准；批准需要命令行 `ziyuan text context approve`，或由管理员完成。</li>
+                </ol>
+              </details>
               <div class="actions">
                 <button class="small" id="materials-load" type="button">读取本地资料</button>
                 <button class="small" id="materials-refresh" type="button">刷新</button>
                 <button class="small" id="materials-save" type="button">保存草稿</button>
                 <button class="small" id="materials-validate" type="button">校验</button>
-                <button class="small" id="materials-copy" type="button">复制恢复 JSON</button>
+                <button class="small" id="materials-backup" type="button">导出备份文件</button>
+                <button class="small" id="materials-copy" type="button">复制恢复 JSON（高级）</button>
                 <button class="small" id="materials-prepare" type="button">准备生产资料</button>
                 <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
@@ -1501,6 +1510,9 @@ async function loadMaterialsView() {
     renderMaterialsState();
     setMaterialState("save", view.draft ? "服务器：已载入" : "服务器：无草稿");
     setMaterialState("session", materialsEditor.recovery() ? "会话暂存：有" : "会话暂存：无");
+    if (!view.draft) {
+      $("materials-status").textContent = "尚无本地资料草稿。第一次使用：1) 新增一条术语或人物；2）保存草稿；3）准备生产资料（准备不是批准）。";
+    }
     setMaterialState("validate", "校验：未校验");
     if (materialsEditor.recovery()) {
       $("materials-restore").hidden = false;
@@ -1538,7 +1550,7 @@ $("materials-validate")?.addEventListener("click", async () => {
       ? "校验未通过（" + issues.length + " 处）；未通过不是批准，也不会自动修改资料。"
       : "校验通过；通过仍不是批准，保存也不授予批准。";
   } catch (e) {
-    $("materials-status").textContent = "校验失败：" + (e.body?.error || e.message);
+    $("materials-status").textContent = "校验失败：" + materialAdvice(e.body?.error || e.message);
   }
 });
 $("materials-diff-run")?.addEventListener("click", async () => {
@@ -1548,13 +1560,19 @@ $("materials-diff-run")?.addEventListener("click", async () => {
     const lines = [];
     lines.push("草稿修订 " + diff.draft_revision + " · 已批准 " + (diff.approved_version ?? "无") + "（历史 " + (diff.approved_versions || []).join("、") + "）");
     if (diff.legacy_production) lines.push("生产仍是旧数组资料，结构对比不可用。");
+    const fieldNames = { allowed: "允许译法", source: "原文", category: "类别", note: "备注", scope: "范围", available_from: "可用起点", evidence: "证据", status: "状态", name: "姓名", reading: "读音", aliases: "别名", terms: "关联术语", address_rules: "称谓规则", voice: "声线" };
+    const counts = {};
     for (const change of (diff.terms || []).concat(diff.persons || [])) {
-      lines.push(change.id + "：" + ({ added: "新增", removed: "删除", changed: "改动" }[change.kind] || change.kind) + (change.fields.length ? "（" + change.fields.join("、") + "）" : ""));
+      counts[change.kind] = (counts[change.kind] || 0) + 1;
+      const kind = ({ added: "新增", removed: "删除", changed: "改动" }[change.kind] || change.kind);
+      const fields = (change.fields || []).map((f) => fieldNames[f] || f);
+      lines.push(change.id + "：" + kind + (fields.length ? "（" + fields.join("、") + "）" : ""));
     }
+    if (Object.keys(counts).length) lines.splice(1, 0, "摘要：" + Object.entries(counts).map(([k, v]) => ({ added: "新增", removed: "删除", changed: "改动" }[k] || k) + " " + v).join(" · "));
     if (!(diff.terms || []).length && !(diff.persons || []).length) lines.push("草稿与已批准资料一致。");
     $("materials-diff").textContent = lines.join("\n");
   } catch (e) {
-    $("materials-diff").textContent = "对比失败：" + (e.body?.error || e.message);
+    $("materials-diff").textContent = "对比失败：" + materialAdvice(e.body?.error || e.message);
   }
 });
 $("materials-prepare")?.addEventListener("click", async () => {
@@ -1567,8 +1585,21 @@ $("materials-prepare")?.addEventListener("click", async () => {
     $("materials-status").textContent = "已准备生产资料（" + result.bytes + " 字节）；尚未批准。下一步：ziyuan text context approve " + textProjectId;
   } catch (e) {
     setMaterialState("save", "服务器：准备失败");
-    $("materials-status").textContent = "准备失败：" + (e.body?.error || e.message);
+    $("materials-status").textContent = "准备失败：" + materialAdvice(e.body?.error || e.message);
   }
+});
+$("materials-backup")?.addEventListener("click", () => {
+  const snapshot = materialsEditor?.previewState();
+  if (!snapshot) { $("materials-status").textContent = "资料尚未载入，无法导出。"; return; }
+  const text = JSON.stringify({ workspace_id: snapshot.workspace_id, project: snapshot.project_id, revision: snapshot.revision, material: snapshot.material }, null, 2);
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "ziyuan-materials-" + snapshot.project_id + "-" + snapshot.revision + ".json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  $("materials-status").textContent = "已导出当前资料备份（未批准草稿；可用于人工恢复）。";
 });
 $("materials-copy")?.addEventListener("click", async () => {
   const snapshot = materialsEditor?.previewState();
@@ -1741,7 +1772,8 @@ async function renderN2bHints() {
       if (terms.length) addGroup("术语", terms, "term_id");
       if (persons.length) {
         if (terms.length) hint.append("｜");
-        addGroup("人物", persons, "person_id");
+        const names = new Map((materialsEditor?.previewState?.()?.material?.persons || []).map((p) => [p.person_id, p.name]));
+        addGroup("人物", persons.map((p) => ({ ...p, person_id: names.get(p.person_id) ? names.get(p.person_id) + "（" + p.person_id + "）" : p.person_id })), "person_id");
       }
     }
     host.append(hint);
@@ -1793,21 +1825,29 @@ function renderMaterialsAssociations() {
 }
 function fillAssocDatalists() {
   const persons = materialsEditor?.previewState?.()?.material?.persons || [];
+  const labels = new Map(persons.map((p) => [p.person_id, p.name || p.person_id]));
   const ids = persons.map((p) => p.person_id).filter(Boolean);
   const personList = $("assoc-person-ids");
-  if (personList) personList.replaceChildren(...ids.map((id) => { const o = document.createElement("option"); o.value = id; return o; }));
+  if (personList) personList.replaceChildren(...ids.map((id) => { const o = document.createElement("option"); o.value = id; o.label = labels.get(id); return o; }));
   const speakerList = $("assoc-speaker-ids");
-  if (speakerList) speakerList.replaceChildren(...["narration", "unknown", ...ids].map((id) => { const o = document.createElement("option"); o.value = id; return o; }));
+  if (speakerList) speakerList.replaceChildren(...["narration", "unknown", ...ids].map((id) => { const o = document.createElement("option"); o.value = id; o.label = labels.get(id) || id; return o; }));
   for (const select of document.querySelectorAll("select.assoc-pick")) {
     const current = select.value;
     const field = select.dataset.pick;
     const options = ["persons", "targets"].includes(field)
-      ? ids.map((id) => [id, id])
-      : [["narration", "narration"], ["unknown", "unknown"], ...ids.map((id) => [id, id])];
+      ? ids.map((id) => [id, labels.get(id) ? labels.get(id) + "（" + id + "）" : id])
+      : [["narration", "narration"], ["unknown", "unknown"], ...ids.map((id) => [id, labels.get(id) ? labels.get(id) + "（" + id + "）" : id])];
     const placeholder = field === "persons" ? "选人物" : field === "targets" ? "选对象" : "选说话人";
     select.replaceChildren(new Option(placeholder, ""), ...options.map(([value, label]) => new Option(label, value)));
     select.value = options.some(([value]) => value === current) ? current : "";
   }
+}
+function materialAdvice(message) {
+  if (/请求身份已被不同内容使用|修订冲突|冲突/.test(message)) return message + " 下一步：重新读取服务器资料；当前输入可先导出备份，再决定保留哪一份。";
+  if (/尚无本地资料草稿/.test(message)) return message + " 下一步：先新增一条术语或人物，保存草稿，再准备生产资料。";
+  if (/不是有效 JSON|JSON 无效|格式不对/.test(message)) return message + " 下一步：检查括号和逗号；可先导出备份再修改。";
+  if (/准备.*失败|准备生产资料/.test(message)) return message + " 下一步：先保存并通过校验，再点「准备生产资料」。";
+  return message;
 }
 function setMaterialState(kind, text) {
   const id = kind === "save" ? "materials-save-state"
@@ -1904,7 +1944,7 @@ $("materials-save")?.addEventListener("click", async () => {
     $("materials-status").textContent = "已保存本地资料草稿（未批准；不会自动生效）。";
   } catch (e) {
     setMaterialState("save", "服务器：保存失败");
-    $("materials-status").textContent = "保存失败：" + (e.body?.error || e.message) + "；当前输入仍在编辑器中，未自动覆盖远端。可先“复制恢复 JSON”留档，再“放弃本地，载入服务器”核对。";
+    $("materials-status").textContent = "保存失败：" + materialAdvice(e.body?.error || e.message) + " 当前输入仍在编辑器中，未自动覆盖远端。可先「导出备份文件」留档，再「放弃本地，载入服务器」核对。";
     $("materials-discard").hidden = false;
   }
 });
