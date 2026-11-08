@@ -33,6 +33,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/text/{project}/materials/validate", post(validate))
         .route("/text/{project}/materials/preview", post(preview))
         .route("/text/{project}/materials/prepare", post(prepare))
+        .route("/text/{project}/materials/diff", get(diff))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
@@ -111,6 +112,23 @@ pub(crate) async fn preview(
             &request.block,
             &associations,
         )
+    })
+    .await
+}
+
+pub(crate) async fn diff(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let root = app.0.config.root.clone();
+    run(id, move || {
+        Translations::new(&root)
+            .material_diff(&project)
+            .map_err(MaterialError::Visibility)
     })
     .await
 }

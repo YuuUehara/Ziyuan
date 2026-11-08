@@ -1306,6 +1306,8 @@ fn text_frontend_contract() {
         "/materials/preview",
         "/materials/prepare",
         "准备生产资料",
+        "对比草稿与生产",
+        "/materials/diff",
         "materials-associations",
         "适用（applicable）",
         "materials-restore",

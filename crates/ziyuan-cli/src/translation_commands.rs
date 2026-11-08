@@ -30,6 +30,7 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text finalize <项目ID> <块ID>                  御览定稿
   ziyuan text reopen <项目ID> <块ID> --reason <理由>     退回重修
   ziyuan text context prepare <项目ID>                 把本地资料草稿准备为生产 glossary.json（尚未批准）
+  ziyuan text context diff <项目ID>                    只读对比本地草稿与已批准资料
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -56,6 +57,7 @@ pub(crate) enum TranslationAction {
     Reopen(String, String, String),
     ContextApprove(String),
     ContextPrepare(String),
+    ContextDiff(String),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -139,6 +141,7 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["context", "prepare", p] if positional(p) => {
             TranslationAction::ContextPrepare((*p).into())
         }
+        ["context", "diff", p] if positional(p) => TranslationAction::ContextDiff((*p).into()),
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
         }
@@ -230,6 +233,36 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::ContextDiff(project) => {
+            let diff = translations.material_diff(&project)?;
+            if json {
+                print_json(serde_json::json!(diff))?;
+            } else {
+                println!(
+                    "草稿 {} · 已批准 v{:?}（共 {:?} 版）{}",
+                    diff.draft_revision,
+                    diff.approved_version,
+                    diff.approved_versions,
+                    if diff.legacy_production {
+                        " · 生产仍是旧数组，结构对比不可用"
+                    } else {
+                        ""
+                    }
+                );
+                for change in diff.terms.iter().chain(&diff.persons) {
+                    println!(
+                        "{} {}：{}",
+                        change.kind,
+                        change.id,
+                        change.fields.join(", ")
+                    );
+                }
+                if diff.terms.is_empty() && diff.persons.is_empty() {
+                    println!("草稿与已批准资料一致。");
+                }
+            }
+            return Ok(());
+        }
         TranslationAction::ContextPrepare(project) => {
             let workspace = Workspace::open(&root).map_err(|e| e.to_string())?;
             let mut guard = workspace

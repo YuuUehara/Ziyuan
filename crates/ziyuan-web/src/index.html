@@ -877,6 +877,7 @@
                 <button class="small" id="materials-validate" type="button">校验</button>
                 <button class="small" id="materials-copy" type="button">复制恢复 JSON</button>
                 <button class="small" id="materials-prepare" type="button">准备生产资料</button>
+                <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
               </div>
               <p class="hint" id="materials-states" aria-live="polite">
@@ -885,6 +886,7 @@
                 <span id="materials-validate-state">校验：未校验</span>
               </p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
+              <div id="materials-diff" class="materials-report" aria-live="polite"></div>
               <div class="actions">
                 <button class="small" id="materials-restore" type="button" hidden>恢复会话暂存</button>
                 <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
@@ -1534,6 +1536,22 @@ $("materials-validate")?.addEventListener("click", async () => {
       : "校验通过；通过仍不是批准，保存也不授予批准。";
   } catch (e) {
     $("materials-status").textContent = "校验失败：" + (e.body?.error || e.message);
+  }
+});
+$("materials-diff-run")?.addEventListener("click", async () => {
+  if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  try {
+    const diff = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/diff");
+    const lines = [];
+    lines.push("草稿修订 " + diff.draft_revision + " · 已批准 " + (diff.approved_version ?? "无") + "（历史 " + (diff.approved_versions || []).join("、") + "）");
+    if (diff.legacy_production) lines.push("生产仍是旧数组资料，结构对比不可用。");
+    for (const change of (diff.terms || []).concat(diff.persons || [])) {
+      lines.push(change.id + "：" + ({ added: "新增", removed: "删除", changed: "改动" }[change.kind] || change.kind) + (change.fields.length ? "（" + change.fields.join("、") + "）" : ""));
+    }
+    if (!(diff.terms || []).length && !(diff.persons || []).length) lines.push("草稿与已批准资料一致。");
+    $("materials-diff").textContent = lines.join("\n");
+  } catch (e) {
+    $("materials-diff").textContent = "对比失败：" + (e.body?.error || e.message);
   }
 });
 $("materials-prepare")?.addEventListener("click", async () => {

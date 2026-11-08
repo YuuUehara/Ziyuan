@@ -1457,3 +1457,9 @@ CLI 人工流程已通；Web／TUI 入口未开，包版本未升，未发版。
 - 模型提示材料：`export` 的 `context.json` 已加 v2 形状断言（`glossary.format=2`、`terms` 数组）。
 - 复核关联：新增 `verification_with_associations` 与 CLI `text verification show <项目> <块> --associations <文件>`；提供段落关联时，称谓规则经 `evaluate_context_visibility` 过滤后才提示，未提供时保留条件展示。
 - 段旁提示：译书页新增关联 JSON 输入与“应用关联”，传给 `/materials/preview` 的 `associations`；空关联仍只显示术语/人物。
+
+## 27. 资料差异与历史（1.7.0）
+
+- 新增只读对比：本地草稿 vs 当前已批准上下文。输出草稿修订号、已批准版本与历史版本号、术语/人物的新增、删除、改动字段；生产仍是旧数组时明确标为不可结构化对比。
+- CLI：`ziyuan text context diff <项目ID> [--json]`；Web 资料面板「对比草稿与生产」。
+- 不写盘、不批准、不外发；不提供自动回滚，旧快照仍可按版本读取。

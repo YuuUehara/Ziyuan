@@ -272,3 +272,74 @@ fn prepare_material_production_writes_v2_and_approve_succeeds() {
         Glossary::Legacy(_) => panic!("应为第二版资料快照"),
     }
 }
+
+#[test]
+fn material_diff_reports_added_changed_and_removed() {
+    let f = Fixture::new();
+    let t = f.service();
+    let material_a = serde_json::from_value(json!({
+        "format": 2,
+        "terms": [{
+            "term_id": "t-1", "source": "夜", "category": "common",
+            "allowed": ["夜晚"], "scope": {"kind": "project"},
+            "evidence": [], "status": "confirmed"
+        }],
+        "persons": []
+    }))
+    .unwrap();
+    t.save_material_draft(
+        &f.project,
+        &MaterialSave {
+            request_id: "diff-a".into(),
+            expected_revision: None,
+            material: material_a,
+        },
+    )
+    .unwrap();
+    t.ensure_context_draft(&f.project).unwrap();
+    let workspace = Workspace::open(&f.root).unwrap();
+    let mut guard = workspace.lock(LockScope::Workspace).unwrap();
+    guard.upgrade_write_protocol().unwrap();
+    t.texts()
+        .upgrade_project_protocol(&f.project, &guard)
+        .unwrap();
+    t.prepare_material_production(&guard, &f.project).unwrap();
+    drop(guard);
+    assert_eq!(t.approve_context(&f.project).unwrap(), 1);
+
+    let material_b = serde_json::from_value(json!({
+        "format": 2,
+        "terms": [
+            {
+                "term_id": "t-1", "source": "夜", "category": "common",
+                "allowed": ["夜"], "scope": {"kind": "project"},
+                "evidence": [], "status": "confirmed"
+            },
+            {
+                "term_id": "t-2", "source": "明", "category": "common",
+                "allowed": ["明亮"], "scope": {"kind": "project"},
+                "evidence": [], "status": "tentative"
+            }
+        ],
+        "persons": []
+    }))
+    .unwrap();
+    t.save_material_draft(
+        &f.project,
+        &MaterialSave {
+            request_id: "diff-b".into(),
+            expected_revision: Some(t.material_draft(&f.project).unwrap().unwrap().revision),
+            material: material_b,
+        },
+    )
+    .unwrap();
+    let diff = t.material_diff(&f.project).unwrap();
+    assert_eq!(diff.approved_version, Some(1));
+    assert!(!diff.legacy_production);
+    assert_eq!(diff.terms.len(), 2);
+    let changed = diff.terms.iter().find(|c| c.id == "t-1").unwrap();
+    assert_eq!(changed.kind, "changed");
+    assert!(changed.fields.contains(&"allowed".to_string()));
+    let added = diff.terms.iter().find(|c| c.id == "t-2").unwrap();
+    assert_eq!(added.kind, "added");
+}
