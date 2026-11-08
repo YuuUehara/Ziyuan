@@ -1,8 +1,13 @@
 # Changelog
 
+## 1.5.3 — 2026-11-08
+
+- Web：段旁提示并入「临时关联」流程，去掉重复的 JSON 输入；段旁提示移到临时关联下方，改关联后点「刷新段旁提示」即可重算；文案统一为“只读、未批准、不外发”。
+- 文档：README 以列表重写本地资料/段旁提示/复核关联用法，与界面用词对齐。
+
 ## 1.5.2 — 2026-11-08
 
-- 第二版资料复核：`context.json` 导出形状加测试；`verification_with_associations` 与 CLI `--associations` 按段落关联过滤称谓规则；段旁提示支持关联 JSON 输入。
+- 第二版资料复核：`context.json` 导出形状加测试；`verification_with_associations` 与 CLI `--associations` 按段落关联过滤称谓规则（段旁提示的旧 JSON 输入在 1.5.3 被临时关联取代）。
 
 ## 1.5.1 — 2026-11-08
 

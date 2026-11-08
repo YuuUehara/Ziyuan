@@ -865,14 +865,6 @@
             </div>
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
-            <div class="text-materials-assoc" id="text-n2b-assoc">
-              <p class="hint">段旁提示使用下方「临时关联」（只用于本次预览，不保存）；改完关联后点「刷新段旁提示」。</p>
-              <div class="actions">
-                <button class="small" id="n2b-refresh" type="button">刷新段旁提示</button>
-                <span class="hint" id="n2b-assoc-state" role="status" aria-live="polite">使用当前临时关联</span>
-              </div>
-            </div>
-            <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">未批准草稿；批准、模型调用与外发关闭</small></h3>
               <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
@@ -897,6 +889,14 @@
               </div>
               <ul class="text-problems" id="materials-issues" aria-live="polite"></ul>
               <div id="materials-associations" aria-label="当前块的临时段落关联"></div>
+            <div class="text-materials-assoc" id="text-n2b-assoc">
+              <p class="hint">段旁提示使用「临时关联」（只用于本次预览，不保存）；改完关联后点「刷新段旁提示」。</p>
+              <div class="actions">
+                <button class="small" id="n2b-refresh" type="button">刷新段旁提示</button>
+                <span class="hint" id="n2b-assoc-state" role="status" aria-live="polite">使用当前临时关联</span>
+              </div>
+            </div>
+            <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
               <div id="materials-preview" class="materials-report" aria-live="polite"></div>
               <section id="text-materials-editor" aria-label="本地资料编辑器"></section>
             </section>

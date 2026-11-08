@@ -20,7 +20,12 @@
 
 **显式选用参考**：从译文记忆中主动选择参考，先预览完整参考外发文本，再确认初译或修订。默认不选；预览不发送，下诏只入队。Web 仅当前项目；所选原译文保存在事件簿，分享前须核对隐私与权利。详见[选择、确认与重试](docs/memory.md#unreleased--14-第三批-a显式选用参考)及[兼容边界](docs/stability.md#unreleased--14-第三批-a显式选用参考)。
 
-**本地资料与段旁提示**：译书页可保存独立的人物/术语资料草稿（未批准，不进入生产译文）。段旁提示只读显示当前块适用的术语与人物；在「临时关联」填写本段人物、称呼对象与说话人后点「刷新段旁提示」，称谓条件才参与判定。保存草稿不等于批准；「准备生产资料」只写 `context/glossary.json`，仍需 `ziyuan text context approve`。复核可用 `ziyuan text verification show <项目ID> <块ID> --associations <关联.json>`。见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料)。
+**本地资料与段旁提示**
+- 译书页可保存独立的人物/术语资料草稿；未批准，不进入生产译文。
+- 在「临时关联」填写本段人物、称呼对象与说话人，点「刷新段旁提示」；段旁提示按当前关联显示术语、人物与称谓条件。
+- 保存草稿不等于批准；「准备生产资料」只写 `context/glossary.json`，仍需 `ziyuan text context approve`。
+- 复核可带关联：`ziyuan text verification show <项目ID> <块ID> --associations <关联.json>`。
+- 详见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料)。
 
 **词证与逐段勘校**：词证是词义核对的出处和说明。CLI 和 Web 可按言行归属、事理正反、数目分寸、前后次第、称谓名分、谐趣留白六事逐段记录，保留历史；材料变化后须重新核对。结构通过、意见已处理、人工复核和御览定稿不能互相替代。说明与短例见[勘校指南](docs/text-projects.md#unreleased--14-第三批-b词证与逐段勘校)。
 
