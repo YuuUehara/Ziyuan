@@ -1648,12 +1648,25 @@ $("materials-comment-list")?.addEventListener("click", async () => {
   if (!comments.length) { host.textContent = "暂无评论。"; return; }
   for (const c of comments) {
     const row = document.createElement("p"); row.className = "hint";
-    row.textContent = c.id + " · " + c.block + (c.paragraph ? " / " + c.paragraph : "") + " · " + (c.resolved ? "已解决" : "未解决") + " · " + c.body + " ";
+    row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + c.block + (c.paragraph ? " / " + c.paragraph : "") + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
     if (!c.resolved) {
       const done = document.createElement("button"); done.type = "button"; done.className = "link-button"; done.textContent = "标记解决";
       done.addEventListener("click", async () => { await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/resolve", {}); $("materials-status").textContent = "评论已标记解决；未修改译稿。"; });
       row.append(done);
     }
+    const reply = document.createElement("button"); reply.type = "button"; reply.className = "link-button"; reply.textContent = "回复";
+    reply.addEventListener("click", async () => {
+      const text = window.prompt("回复内容"); if (!text) return;
+      await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/reply", { body: text });
+      $("materials-status").textContent = "已回复。"; 
+    });
+    const assign = document.createElement("button"); assign.type = "button"; assign.className = "link-button"; assign.textContent = "指派";
+    assign.addEventListener("click", async () => {
+      const who = window.prompt("负责人", c.assignee || ""); if (who === null) return;
+      await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/assign", { assignee: who });
+      $("materials-status").textContent = "已指派（空字符串表示取消）。";
+    });
+    row.append(reply, assign);
     host.append(row);
   }
 });

@@ -46,6 +46,9 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text comment list <项目ID> [块ID]
   ziyuan text comment add <项目ID> <块ID> <段ID|-> <内容>
   ziyuan text comment resolve|reopen <项目ID> <评论ID>
+  ziyuan text comment reply <项目ID> <评论ID> <内容>
+  ziyuan text comment assign <项目ID> <评论ID> <负责人>
+  ziyuan text compare <项目ID> <块ID> <旧译稿.json>   逐段对比当前译稿与旧 PromptBlock
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -88,6 +91,9 @@ pub(crate) enum TranslationAction {
     CommentList(String, Option<String>),
     CommentAdd(String, String, String, String),
     CommentResolve(String, String, bool),
+    CommentReply(String, String, String),
+    CommentAssign(String, String, String),
+    Compare(String, String, PathBuf),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -220,6 +226,15 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         }
         ["comment", "reopen", p, id] if positional(p) && positional(id) => {
             TranslationAction::CommentResolve((*p).into(), (*id).into(), false)
+        }
+        ["comment", "reply", p, id, body] if positional(p) && positional(id) && positional(body) => {
+            TranslationAction::CommentReply((*p).into(), (*id).into(), (*body).into())
+        }
+        ["comment", "assign", p, id, who] if positional(p) && positional(id) && positional(who) => {
+            TranslationAction::CommentAssign((*p).into(), (*id).into(), (*who).into())
+        }
+        ["compare", p, b, f] if positional(p) && positional(b) && positional(f) => {
+            TranslationAction::Compare((*p).into(), (*b).into(), (*f).into())
         },
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
@@ -312,6 +327,28 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::Compare(project, block, file) => {
+            let old = std::fs::read(&file)?;
+            let changes = translations.compare_translation(&project, &block, &old)?;
+            if json {
+                print_json(serde_json::json!(changes))?;
+            } else {
+                for change in changes {
+                    println!("{} {}：{:?} -> {:?}", change.kind, change.paragraph, change.old, change.new);
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::CommentReply(project, parent, body) => {
+            let comment = translations.comment_reply(&project, &parent, &body)?;
+            if !json { println!("已回复评论 {}（父 {}）。", comment.id, parent); }
+            return Ok(());
+        }
+        TranslationAction::CommentAssign(project, id, who) => {
+            let comment = translations.comment_assign(&project, &id, &who)?;
+            if !json { println!("评论 {} 已指派给 {}。", comment.id, who); }
+            return Ok(());
+        }
         TranslationAction::CommentList(project, block) => {
             let comments = translations.comment_list(&project, block.as_deref())?;
             if json { print_json(serde_json::json!(comments))?; } else {

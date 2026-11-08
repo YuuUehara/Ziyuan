@@ -12,6 +12,10 @@ pub struct Comment {
     pub body: String,
     #[serde(default)]
     pub resolved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -76,10 +80,40 @@ impl Translations {
             paragraph: paragraph.to_owned(),
             body: body.to_owned(),
             resolved: false,
+            parent_id: None,
+            assignee: None,
         };
         book.comments.push(comment.clone());
         self.save_comments(project, &book)?;
         Ok(comment)
+    }
+
+    pub fn comment_reply(&self, project: &str, parent: &str, body: &str) -> Result<Comment> {
+        if body.trim().is_empty() { return Err(invalid("评论内容不能为空")); }
+        let mut book = self.load_comments(project)?;
+        let source = book.comments.iter().find(|c| c.id == parent).cloned().ok_or_else(|| invalid("没有这条评论"))?;
+        let next = book.comments.iter().filter_map(|c| c.id.strip_prefix("c-").and_then(|n| n.parse::<u64>().ok())).max().unwrap_or(0) + 1;
+        let comment = Comment {
+            id: format!("c-{next}"),
+            block: source.block,
+            paragraph: source.paragraph,
+            body: body.to_owned(),
+            resolved: false,
+            parent_id: Some(parent.to_owned()),
+            assignee: None,
+        };
+        book.comments.push(comment.clone());
+        self.save_comments(project, &book)?;
+        Ok(comment)
+    }
+
+    pub fn comment_assign(&self, project: &str, id: &str, assignee: &str) -> Result<Comment> {
+        let mut book = self.load_comments(project)?;
+        let comment = book.comments.iter_mut().find(|c| c.id == id).ok_or_else(|| invalid("没有这条评论"))?;
+        comment.assignee = if assignee.trim().is_empty() { None } else { Some(assignee.to_owned()) };
+        let out = comment.clone();
+        self.save_comments(project, &book)?;
+        Ok(out)
     }
 
     pub fn comment_resolve(&self, project: &str, id: &str, resolved: bool) -> Result<Comment> {

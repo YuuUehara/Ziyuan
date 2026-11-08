@@ -49,6 +49,14 @@ pub(crate) fn router() -> Router<AppState> {
             "/text/{project}/comments/{id}/resolve",
             post(comment_resolve),
         )
+        .route(
+            "/text/{project}/comments/{id}/reply",
+            post(comment_reply),
+        )
+        .route(
+            "/text/{project}/comments/{id}/assign",
+            post(comment_assign),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
@@ -178,6 +186,21 @@ async fn comment_add(State(app): State<AppState>, UrlPath(project): UrlPath<Stri
     let root = app.0.config.root.clone();
     run(id, move || Translations::new(&root).comment_add(&project, &body.block, &body.paragraph, &body.body).map_err(MaterialError::Visibility)).await
 }
+#[derive(serde::Deserialize)]
+struct ReplyBody { body: String }
+#[derive(serde::Deserialize)]
+struct AssignBody { assignee: String }
+async fn comment_reply(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>, Json(body): Json<ReplyBody>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).comment_reply(&project, &comment_id, &body.body).map_err(MaterialError::Visibility)).await
+}
+async fn comment_assign(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>, Json(body): Json<AssignBody>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).comment_assign(&project, &comment_id, &body.assignee).map_err(MaterialError::Visibility)).await
+}
+
 async fn comment_resolve(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>) -> Response {
     let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
     let root = app.0.config.root.clone();

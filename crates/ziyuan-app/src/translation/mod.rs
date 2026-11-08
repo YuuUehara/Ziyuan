@@ -14,6 +14,7 @@ mod comments;
 mod docx;
 mod srt;
 mod epub;
+mod compare;
 mod context;
 mod draft;
 mod export;
