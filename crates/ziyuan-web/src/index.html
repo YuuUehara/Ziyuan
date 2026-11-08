@@ -523,6 +523,9 @@
 .text-materials-assoc .bad { color: var(--bad); }
 .link-button { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline dotted; cursor: pointer; font: inherit; }
 .link-button:focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
+.assoc-row { display: grid; grid-template-columns: 110px repeat(3, minmax(90px, 1fr)); gap: 8px; align-items: start; }
+.assoc-field { display: grid; gap: 4px; min-width: 0; }
+.assoc-field input, .assoc-field select { width: 100%; min-width: 0; box-sizing: border-box; }
 .text-materials pre {
     white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; max-height: 220px;
     overflow: auto; background: var(--well); border-radius: var(--radius); font: 12px/1.6 var(--mono);
@@ -1634,7 +1637,40 @@ function associationRow(paragraph) {
   const persons = make("人物 ID"); persons.dataset.field = "persons"; persons.setAttribute("list", "assoc-person-ids");
   const targets = make("称呼对象 ID"); targets.dataset.field = "targets"; targets.setAttribute("list", "assoc-person-ids");
   const speaker = make("speaker"); speaker.dataset.field = "speaker"; speaker.setAttribute("list", "assoc-speaker-ids");
-  row.append(label, persons, targets, speaker);
+  const pick = (field, placeholder) => {
+    const select = document.createElement("select");
+    select.dataset.pick = field;
+    select.className = "assoc-pick";
+    select.setAttribute("aria-label", placeholder);
+    select.append(new Option(placeholder, ""));
+    select.addEventListener("change", () => {
+      if (!select.value) return;
+      if (field === "speaker") {
+        speaker.value = select.value;
+      } else {
+        const input = field === "persons" ? persons : targets;
+        const parts = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!parts.includes(select.value)) parts.push(select.value);
+        input.value = parts.join(",");
+      }
+      (field === "speaker" ? speaker : field === "persons" ? persons : targets).dispatchEvent(new Event("input", { bubbles: true }));
+      select.value = "";
+    });
+    return select;
+  };
+  const fieldBox = (input, select) => {
+    const box = document.createElement("div");
+    box.className = "assoc-field";
+    box.append(input, select);
+    return box;
+  };
+  row.className = "assoc-row";
+  row.append(
+    label,
+    fieldBox(persons, pick("persons", "选人物")),
+    fieldBox(targets, pick("targets", "选对象")),
+    fieldBox(speaker, pick("speaker", "选说话人")),
+  );
   return row;
 }
 $("n2b-refresh")?.addEventListener("click", () => {
@@ -1753,6 +1789,7 @@ function renderMaterialsAssociations() {
     if (inputs[1].value !== saved.targets) inputs[1].value = saved.targets;
     if (inputs[2].value !== saved.speaker) inputs[2].value = saved.speaker;
   }
+  fillAssocDatalists();
 }
 function fillAssocDatalists() {
   const persons = materialsEditor?.previewState?.()?.material?.persons || [];
@@ -1761,6 +1798,16 @@ function fillAssocDatalists() {
   if (personList) personList.replaceChildren(...ids.map((id) => { const o = document.createElement("option"); o.value = id; return o; }));
   const speakerList = $("assoc-speaker-ids");
   if (speakerList) speakerList.replaceChildren(...["narration", "unknown", ...ids].map((id) => { const o = document.createElement("option"); o.value = id; return o; }));
+  for (const select of document.querySelectorAll("select.assoc-pick")) {
+    const current = select.value;
+    const field = select.dataset.pick;
+    const options = ["persons", "targets"].includes(field)
+      ? ids.map((id) => [id, id])
+      : [["narration", "narration"], ["unknown", "unknown"], ...ids.map((id) => [id, id])];
+    const placeholder = field === "persons" ? "选人物" : field === "targets" ? "选对象" : "选说话人";
+    select.replaceChildren(new Option(placeholder, ""), ...options.map(([value, label]) => new Option(label, value)));
+    select.value = options.some(([value]) => value === current) ? current : "";
+  }
 }
 function setMaterialState(kind, text) {
   const id = kind === "save" ? "materials-save-state"

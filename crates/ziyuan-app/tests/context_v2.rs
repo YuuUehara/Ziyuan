@@ -282,3 +282,29 @@ fn structured_verification_reports_person_and_address_hints() {
         "{messages:?}"
     );
 }
+
+#[test]
+fn old_approved_snapshot_stays_readable_after_new_approval() {
+    let f = Fx::new();
+    let t = f.t();
+    t.ensure_context_draft(&f.project.id).unwrap();
+    f.write_glossary_only(V2_PERSON);
+    assert_eq!(t.approve_context(&f.project.id).unwrap(), 1);
+    f.write_glossary_only(V2);
+    assert_eq!(t.approve_context(&f.project.id).unwrap(), 2);
+    assert_eq!(t.context_versions(&f.project.id).unwrap(), [1, 2]);
+    let first = t.context_snapshot(&f.project.id, 1).unwrap();
+    match first.glossary {
+        ziyuan_app::translation::Glossary::Structured(data) => {
+            assert_eq!(data.terms.len(), 1);
+            assert_eq!(data.terms[0].term_id, "t-1");
+        }
+        ziyuan_app::translation::Glossary::Legacy(_) => panic!("应为第二版快照"),
+    }
+    let current = t.current_context(&f.project.id).unwrap().unwrap();
+    assert_eq!(current.version, 2);
+    match current.glossary {
+        ziyuan_app::translation::Glossary::Structured(data) => assert!(data.terms.is_empty()),
+        ziyuan_app::translation::Glossary::Legacy(_) => panic!("应为第二版快照"),
+    }
+}
