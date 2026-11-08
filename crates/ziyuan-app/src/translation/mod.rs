@@ -10,6 +10,7 @@
 //! 译稿哈希是 `zh.json` 文件字节的哈希。
 mod concordance;
 mod tm;
+mod comments;
 mod context;
 mod draft;
 mod export;

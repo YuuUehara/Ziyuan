@@ -43,6 +43,9 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text tm build <项目ID>                      从现有译稿生成记忆（去重）
   ziyuan text termbase export-tbx <项目ID> <文件.tbx>
   ziyuan text termbase import-tbx <项目ID> <文件.tbx>
+  ziyuan text comment list <项目ID> [块ID]
+  ziyuan text comment add <项目ID> <块ID> <段ID|-> <内容>
+  ziyuan text comment resolve|reopen <项目ID> <评论ID>
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -82,6 +85,9 @@ pub(crate) enum TranslationAction {
     TmBuild(String),
     TbxExport(String, PathBuf),
     TbxImport(String, PathBuf),
+    CommentList(String, Option<String>),
+    CommentAdd(String, String, String, String),
+    CommentResolve(String, String, bool),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -200,6 +206,21 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["termbase", "import-tbx", p, f] if positional(p) && positional(f) => {
             TranslationAction::TbxImport((*p).into(), (*f).into())
         },
+        ["comment", "list", p] if positional(p) => TranslationAction::CommentList((*p).into(), None),
+        ["comment", "list", p, b] if positional(p) && positional(b) => {
+            TranslationAction::CommentList((*p).into(), Some((*b).into()))
+        }
+        ["comment", "add", p, b, para, body]
+            if positional(p) && positional(b) && positional(para) && positional(body) =>
+        {
+            TranslationAction::CommentAdd((*p).into(), (*b).into(), (*para).into(), (*body).into())
+        }
+        ["comment", "resolve", p, id] if positional(p) && positional(id) => {
+            TranslationAction::CommentResolve((*p).into(), (*id).into(), true)
+        }
+        ["comment", "reopen", p, id] if positional(p) && positional(id) => {
+            TranslationAction::CommentResolve((*p).into(), (*id).into(), false)
+        },
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
         }
@@ -291,6 +312,25 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::CommentList(project, block) => {
+            let comments = translations.comment_list(&project, block.as_deref())?;
+            if json { print_json(serde_json::json!(comments))?; } else {
+                for c in comments {
+                    println!("{}\t{}\t{}\t{}\t{}", c.id, c.block, c.paragraph, if c.resolved { "已解决" } else { "未解决" }, c.body);
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::CommentAdd(project, block, paragraph, body) => {
+            let comment = translations.comment_add(&project, &block, if paragraph == "-" { "" } else { &paragraph }, &body)?;
+            if json { print_json(serde_json::json!(comment))?; } else { println!("已新增评论 {}。", comment.id); }
+            return Ok(());
+        }
+        TranslationAction::CommentResolve(project, id, resolved) => {
+            let comment = translations.comment_resolve(&project, &id, resolved)?;
+            if json { print_json(serde_json::json!(comment))?; } else { println!("评论 {} 已标记为{}。", comment.id, if resolved { "已解决" } else { "未解决" }); }
+            return Ok(());
+        }
         TranslationAction::TbxExport(project, file) => {
             let tbx = translations.export_termbase_tbx(&project)?;
             std::fs::write(&file, tbx.as_bytes())?;
