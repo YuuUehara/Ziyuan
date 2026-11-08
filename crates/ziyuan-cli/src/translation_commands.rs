@@ -35,6 +35,12 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text termbase export <项目ID> <术语表.csv>    导出本地草稿术语/人物 CSV
   ziyuan text termbase import <项目ID> <术语表.csv>    合并 CSV 到本地资料草稿（未批准）
   ziyuan text concordance <项目ID> <原文片段>         模糊检索本项目已有译文（双语对照）
+  ziyuan text tm list <项目ID>                       列出本地翻译记忆
+  ziyuan text tm add <项目ID> <原文> <译文>          新增一条记忆
+  ziyuan text tm update <项目ID> <ID> <原文> <译文>  修改一条记忆
+  ziyuan text tm delete <项目ID> <ID>                删除一条记忆
+  ziyuan text tm adopt <项目ID> <ID>                 记录一次人工采纳
+  ziyuan text tm build <项目ID>                      从现有译稿生成记忆（去重）
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -66,6 +72,12 @@ pub(crate) enum TranslationAction {
     TermbaseExport(String, PathBuf),
     TermbaseImport(String, PathBuf),
     Concordance(String, String),
+    TmList(String),
+    TmAdd(String, String, String),
+    TmUpdate(String, String, String, String),
+    TmDelete(String, String),
+    TmAdopt(String, String),
+    TmBuild(String),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -162,6 +174,22 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["concordance", p, q] if positional(p) && positional(q) => {
             TranslationAction::Concordance((*p).into(), (*q).into())
         }
+        ["tm", "list", p] if positional(p) => TranslationAction::TmList((*p).into()),
+        ["tm", "add", p, s, t] if positional(p) && positional(s) && positional(t) => {
+            TranslationAction::TmAdd((*p).into(), (*s).into(), (*t).into())
+        }
+        ["tm", "update", p, id, s, t]
+            if positional(p) && positional(id) && positional(s) && positional(t) =>
+        {
+            TranslationAction::TmUpdate((*p).into(), (*id).into(), (*s).into(), (*t).into())
+        }
+        ["tm", "delete", p, id] if positional(p) && positional(id) => {
+            TranslationAction::TmDelete((*p).into(), (*id).into())
+        }
+        ["tm", "adopt", p, id] if positional(p) && positional(id) => {
+            TranslationAction::TmAdopt((*p).into(), (*id).into())
+        }
+        ["tm", "build", p] if positional(p) => TranslationAction::TmBuild((*p).into()),
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
         }
@@ -253,6 +281,42 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::TmList(project) => {
+            let entries = translations.tm_list(&project)?;
+            if json {
+                print_json(serde_json::json!(entries))?;
+            } else {
+                for entry in entries {
+                    println!("{}\t{}\t{}\t采纳 {}", entry.id, entry.source, entry.target, entry.adopted);
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::TmAdd(project, source, target) => {
+            let entry = translations.tm_add(&project, &source, &target)?;
+            if json { print_json(serde_json::json!(entry))?; } else { println!("已新增 {}。", entry.id); }
+            return Ok(());
+        }
+        TranslationAction::TmUpdate(project, id, source, target) => {
+            let entry = translations.tm_update(&project, &id, &source, &target)?;
+            if json { print_json(serde_json::json!(entry))?; } else { println!("已更新 {}。", entry.id); }
+            return Ok(());
+        }
+        TranslationAction::TmDelete(project, id) => {
+            translations.tm_delete(&project, &id)?;
+            if !json { println!("已删除 {id}。"); }
+            return Ok(());
+        }
+        TranslationAction::TmAdopt(project, id) => {
+            let entry = translations.tm_adopt(&project, &id)?;
+            if json { print_json(serde_json::json!(entry))?; } else { println!("已记录采纳 {}（{} 次）。", entry.id, entry.adopted); }
+            return Ok(());
+        }
+        TranslationAction::TmBuild(project) => {
+            let added = translations.tm_build(&project)?;
+            if json { print_json(serde_json::json!({"project": project, "added": added}))?; } else { println!("从现有译稿新增 {added} 条记忆。"); }
+            return Ok(());
+        }
         TranslationAction::Concordance(project, query) => {
             let hits = translations.concordance(&project, &query, 10)?;
             if json {
