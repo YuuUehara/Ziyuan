@@ -49,6 +49,9 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text comment reply <项目ID> <评论ID> <内容>
   ziyuan text comment assign <项目ID> <评论ID> <负责人>
   ziyuan text compare <项目ID> <块ID> <旧译稿.json>   逐段对比当前译稿与旧 PromptBlock
+  ziyuan text version save <项目ID> <块ID> [标签]    保存当前译稿快照
+  ziyuan text version list <项目ID> <块ID>           列出快照
+  ziyuan text version compare <项目ID> <块ID> <快照> 对比当前译稿与快照
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -94,6 +97,9 @@ pub(crate) enum TranslationAction {
     CommentReply(String, String, String),
     CommentAssign(String, String, String),
     Compare(String, String, PathBuf),
+    VersionSave(String, String, String),
+    VersionList(String, String),
+    VersionCompare(String, String, String),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -235,6 +241,18 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         }
         ["compare", p, b, f] if positional(p) && positional(b) && positional(f) => {
             TranslationAction::Compare((*p).into(), (*b).into(), (*f).into())
+        }
+        ["version", "save", p, b] if positional(p) && positional(b) => {
+            TranslationAction::VersionSave((*p).into(), (*b).into(), "manual".into())
+        }
+        ["version", "save", p, b, label] if positional(p) && positional(b) && positional(label) => {
+            TranslationAction::VersionSave((*p).into(), (*b).into(), (*label).into())
+        }
+        ["version", "list", p, b] if positional(p) && positional(b) => {
+            TranslationAction::VersionList((*p).into(), (*b).into())
+        }
+        ["version", "compare", p, b, id] if positional(p) && positional(b) && positional(id) => {
+            TranslationAction::VersionCompare((*p).into(), (*b).into(), (*id).into())
         },
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
@@ -327,6 +345,24 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::VersionSave(project, block, label) => {
+            let id = translations.snapshot_translation(&project, &block, &label)?;
+            if json { print_json(serde_json::json!({"project": project, "block": block, "id": id}))?; } else { println!("已保存快照 {id}。"); }
+            return Ok(());
+        }
+        TranslationAction::VersionList(project, block) => {
+            let ids = translations.list_translation_versions(&project, &block)?;
+            if json { print_json(serde_json::json!(ids))?; } else { for id in ids { println!("{id}"); } }
+            return Ok(());
+        }
+        TranslationAction::VersionCompare(project, block, id) => {
+            let old = translations.read_translation_version(&project, &block, &id)?;
+            let changes = translations.compare_translation(&project, &block, &old)?;
+            if json { print_json(serde_json::json!(changes))?; } else {
+                for change in changes { println!("{} {}：{:?} -> {:?}", change.kind, change.paragraph, change.old, change.new); }
+            }
+            return Ok(());
+        }
         TranslationAction::Compare(project, block, file) => {
             let old = std::fs::read(&file)?;
             let changes = translations.compare_translation(&project, &block, &old)?;

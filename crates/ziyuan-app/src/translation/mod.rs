@@ -15,6 +15,7 @@ mod docx;
 mod srt;
 mod epub;
 mod compare;
+mod versions;
 mod context;
 mod draft;
 mod export;
