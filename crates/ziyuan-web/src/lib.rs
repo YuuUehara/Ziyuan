@@ -239,6 +239,7 @@ fn router_for(app: AppState) -> Router {
         .route("/nominate", post(nominate))
         .route("/palace", post(palace))
         .route("/text", get(text::list))
+        .route("/text/projects", post(text::create_project))
         .route("/text/{project}", get(text::project))
         .route("/text/{project}/export", get(text::export))
         .route("/text/{project}/import/preview", post(text::import_preview))

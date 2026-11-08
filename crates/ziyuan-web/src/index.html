@@ -304,6 +304,9 @@
   pre.diff .pick input { margin: 0; }
   #schedule-dialog { box-sizing: border-box; width: min(760px, calc(100vw - 32px)); max-height: 86vh; overflow: hidden; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
   #schedule-dialog::backdrop { background: #1f282655; }
+  #text-new-project-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
+  #text-new-project-dialog::backdrop { background: #1f282655; }
+  #text-new-project-dialog .row { flex-wrap: wrap; }
   #schedule-form { display: flex; flex-direction: column; max-height: calc(86vh - 50px); }
   #schedule-title { flex-shrink: 0; margin: 0 0 12px; }
   .schedule-content { min-height: 0; overflow: auto; padding: 4px; margin: 0 -4px; }
@@ -860,12 +863,46 @@
           <div class="text-side">
             <label for="text-project">项目</label>
             <select id="text-project" data-keep></select>
+            <div class="actions"><button class="small" id="text-new-project" type="button">新建项目</button></div>
             <p class="hint" id="text-project-meta"></p>
             <div class="text-outline" id="text-outline" role="region" aria-label="章与块" tabindex="0"></div>
           </div>
           <div class="text-main">
             <p class="hint" id="text-status" role="status" aria-live="polite"></p>
             <section id="text-import" aria-label="导入原文"></section>
+            <dialog id="text-new-project-dialog" aria-labelledby="text-new-project-title">
+              <form id="text-new-project-form" class="write">
+                <h3 id="text-new-project-title">新建项目</h3>
+                <p class="hint">只建空项目；导入仍在「导入原文」预览后确认。来源与权利只作记录，不作核验。</p>
+                <label for="new-project-title">标题</label>
+                <input id="new-project-title" type="text" required autocomplete="off" placeholder="如：日文练习">
+                <label for="new-project-language">原文语言</label>
+                <select id="new-project-language">
+                  <option value="ja">日文</option>
+                  <option value="en">英文</option>
+                </select>
+                <label for="new-project-source">来源</label>
+                <input id="new-project-source" type="text" required autocomplete="off" placeholder="如：购买电子书／书目网址">
+                <label for="new-project-rights">权利声明</label>
+                <input id="new-project-rights" type="text" required autocomplete="off" placeholder="如：本人创作，仅本地使用">
+                <details>
+                  <summary>出处补充（可选）</summary>
+                  <label for="new-project-author">作者</label>
+                  <input id="new-project-author" type="text" autocomplete="off">
+                  <label for="new-project-version">版本</label>
+                  <input id="new-project-version" type="text" autocomplete="off">
+                  <label for="new-project-date">取得日期</label>
+                  <input id="new-project-date" type="text" autocomplete="off">
+                  <label for="new-project-scope">使用范围</label>
+                  <input id="new-project-scope" type="text" autocomplete="off">
+                </details>
+                <p class="hint" id="new-project-status" role="status" aria-live="polite"></p>
+                <div class="actions">
+                  <button type="submit" id="new-project-submit">建立</button>
+                  <button type="button" class="small" id="new-project-cancel">取消</button>
+                </div>
+              </form>
+            </dialog>
             <section class="text-memory" id="text-export" aria-label="章节导出"></section>
             <div class="text-compare">
               <div class="text-col"><h4>原文</h4><div class="text-scroll" id="text-source"></div></div>
@@ -874,8 +911,8 @@
             </div>
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section class="text-materials" id="text-versions" aria-label="译稿版本快照">
-              <h3>译稿版本 <small class="hint">草稿／准奏／定稿自动留存；只读对比，不改译稿</small></h3>
-              <p class="hint">准奏与定稿时自动写快照，保存草稿时也留一份；每状态默认保留最新 3 份，手工快照不自动删除。快照存在本地，不批准、不外发，也不是导出凭据。</p>
+              <h3>译稿版本 <small class="hint">三态自动留存；只读对比</small></h3>
+              <p class="hint">保存草稿、准奏、定稿各留一份；自动快照每态留最新 3 份，手工快照不自动删。只在本地，不批准、不外发。</p>
               <div class="actions">
                 <label class="hint" for="version-list">快照</label>
                 <select id="version-list" data-keep></select>
@@ -2302,7 +2339,7 @@ function renderImport() {
   const files = box.dataset.project === d.project ? $("import-files") : null;
   box.dataset.project = d.project; box.dataset.revision = String(d.revision);
   const disabled = d.busy ? "disabled" : "";
-  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；先用 ziyuan text init 建项目。不追加、不替换。UTF-8；HTTP JSON 请求体上限 2 MiB（含转义和元数据），应用层原文上限 8 MiB。请明确调整文件顺序后预览。</p>
+  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；不追加、不替换。UTF-8；HTTP JSON 请求体上限 2 MiB（含转义和元数据），应用层原文上限 8 MiB。用上移／下移调整章序，改动后须重新预览。</p>
     <label>选择文件 <input type="file" id="import-files" multiple accept=".txt,.md,.markdown" ${disabled}></label>
     <ol>${d.files.map((f, i) => `<li><div class="row"><span>${esc(f.name)}</span><span class="shrink"><button type="button" class="small" data-import-move="${i}" data-step="-1" ${i === 0 ? "disabled" : disabled}>上移</button> <button type="button" class="small" data-import-move="${i}" data-step="1" ${i === d.files.length - 1 ? "disabled" : disabled}>下移</button></span></div></li>`).join("")}</ol>
     <label><input id="import-ruby" type="checkbox" ${d.ruby ? "checked" : ""} ${disabled}>显式识别注音 ruby</label>
@@ -2365,6 +2402,60 @@ $("text-import").addEventListener("input", (e) => {
     d.dirty = true; $("import-confirm").disabled = true;
     d.message = "章节标题已修改，必须重新预览后才能确认。";
     $("text-import").querySelector('[role="status"]').textContent = d.message;
+  }
+});
+
+// 新建文本项目：只建空项目，导入仍走上面的预览／确认流程。
+function openNewProjectDialog() {
+  if (!state || state.viewer) return;
+  $("new-project-status").textContent = "";
+  $("text-new-project-dialog").showModal();
+  $("new-project-title").focus();
+}
+$("text-new-project")?.addEventListener("click", openNewProjectDialog);
+$("new-project-cancel")?.addEventListener("click", () => $("text-new-project-dialog")?.close());
+$("text-new-project-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state || state.viewer) return;
+  const title = $("new-project-title").value.trim();
+  const source = $("new-project-source").value.trim();
+  const rights = $("new-project-rights").value.trim();
+  const status = $("new-project-status");
+  if (!title) { status.textContent = "标题不能为空。"; $("new-project-title").focus(); return; }
+  if (!source) { status.textContent = "来源不能为空；只作记录，不作核验。"; $("new-project-source").focus(); return; }
+  if (!rights) { status.textContent = "权利声明不能为空；只作记录，不作核验。"; $("new-project-rights").focus(); return; }
+  const submit = $("new-project-submit");
+  submit.disabled = true;
+  status.textContent = "正在建立项目…";
+  try {
+    const result = await api("/text/projects", {
+      title,
+      source_language: $("new-project-language").value,
+      target_language: "zh-CN",
+      provenance: {
+        author: $("new-project-author").value.trim(),
+        version: $("new-project-version").value.trim(),
+        source,
+        date: $("new-project-date").value.trim(),
+        rights,
+        scope: $("new-project-scope").value.trim(),
+      },
+    });
+    const created = result.project;
+    $("text-new-project-dialog").close();
+    $("text-new-project-form").reset();
+    textProjectId = created.id;
+    textBlockId = null;
+    textProject = null;
+    textBlock = null;
+    history.replaceState(null, "", textHash());
+    await loadText();
+    $("text-status").textContent = "项目已建立。请在「导入原文」选文件、预览，确认后导入。";
+    $("text-import").scrollIntoView({ block: "nearest" });
+  } catch (error) {
+    status.textContent = "建立失败：" + (error.body?.error || error.message);
+  } finally {
+    submit.disabled = false;
   }
 });
 $("text-import").addEventListener("change", async (e) => {
@@ -2701,8 +2792,8 @@ async function loadTextVersions() {
       : `<option value="">（尚无快照）</option>`;
     list.disabled = !textVersions.length;
     status.textContent = textVersions.length
-      ? `共 ${textVersions.length} 份快照；自动快照每个状态保留最新 3 份。`
-      : "尚无快照：保存草稿或准奏／定稿后自动出现；也可点「保存当前快照」。";
+      ? `共 ${textVersions.length} 份；自动快照每态留最新 3 份。`
+      : "尚无快照。保存草稿或准奏／定稿后留存，也可点「保存当前快照」。";
     diff.replaceChildren();
     renderVersionButtons();
   } catch (e) {
@@ -2719,7 +2810,7 @@ function renderVersionDiff(result) {
   host.replaceChildren();
   const changes = result.changes || [];
   $("version-status").textContent = changes.length
-    ? `${changes.length} 处差异（对比${result.against === "draft" ? "草稿" : "现行译稿"}）。标记差异只表示译文相同、标记有变。`
+    ? `${changes.length} 处差异（对比${result.against === "draft" ? "草稿" : "现行译稿"}；标记仅指译文相同、标记有变）。`
     : "没有差异。";
   for (const change of changes) {
     const row = document.createElement("p");
@@ -2761,11 +2852,11 @@ async function pruneTextVersions() {
   try {
     const preview = await api(`${versionBase()}/versions/prune`, { keep: 3, dry_run: true });
     if (!preview.candidates.length) {
-      $("version-status").textContent = "没有可清理的快照（自动快照每个状态保留最新 3 份，手工快照默认保留）。";
+      $("version-status").textContent = "没有可清理的快照（自动快照每态留最新 3 份，手工快照默认保留）。";
       return;
     }
     const ok = window.confirm(
-      `将删除 ${preview.candidates.length} 份旧快照（每个状态保留最新 3 份，手工快照默认保留）：\n\n` +
+      `将删除 ${preview.candidates.length} 份旧快照（自动快照每态留最新 3 份，手工快照默认保留）：\n\n` +
       preview.candidates.join("\n") + "\n\n继续删除？"
     );
     if (!ok) { $("version-status").textContent = "已取消清理，未删除任何快照。"; return; }
@@ -2878,6 +2969,8 @@ function renderTextNow() {
   renderN2bHints();
   renderImport();
   renderExport();
+  const newProject = $("text-new-project");
+  if (newProject) newProject.disabled = !state || !!state.viewer;
   const projects = textProjects || [];
   const select = $("text-project");
   select.innerHTML = projects.length
@@ -2888,7 +2981,7 @@ function renderTextNow() {
   const project = textProject && textProject.project;
   $("text-project-meta").textContent = project
     ? `${project.source_language} → ${project.target_language}；上下文 v${textProject.context.version}（已批准 ${textProject.context.versions.length} 版）`
-    : projects.length ? "" : "尚无文本项目：先用 ziyuan text init、ziyuan text import 建项目并导入原文。";
+    : projects.length ? "" : "尚无文本项目。点「新建项目」建一个，再导入原文。";
 
   // 章与块：状态由服务端回放事件簿得出，未建朝时为空。
   const byBlock = new Map(((textProject && textProject.statuses) || []).map((s) => [s.block, s]));

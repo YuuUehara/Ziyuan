@@ -1,6 +1,6 @@
 # 小说翻译：逐块初译、审校、朱批与御览
 
-本页按 1.13.0 说明译书流程（`ziyuan text`）与御笔札记（`ziyuan note`）。翻译闭环自 1.2.0 提供，译文记忆在 1.3.0 新增；1.4 补充原文预览与注音、成稿导出、显式参考、词证与逐段勘校及用量账本；1.13 增加译稿版本、DOCX／EPUB 回填、完整术语表字段、本地记忆／评论与 SRT。整理原文、导入分块和检查候选译稿见[文本工具](text-projects.md)；作品更新提醒见[关注 syosetu 作品更新](subscriptions.md)，最终工程与发行状态见[版本验收](acceptance/1.13.0.md)。
+本页按 1.13.1 说明译书流程（`ziyuan text`）与御笔札记（`ziyuan note`）。翻译闭环自 1.2.0 提供，译文记忆在 1.3.0 新增；1.4 补充原文预览与注音、成稿导出、显式参考、词证与逐段勘校及用量账本；1.13 增加译稿版本、DOCX／EPUB 回填、完整术语表字段、本地记忆／评论与 SRT。整理原文、导入分块和检查候选译稿见[文本工具](text-projects.md)；作品更新提醒见[关注 syosetu 作品更新](subscriptions.md)，最终工程与发行状态见[版本验收](acceptance/1.13.1.md)。
 
 完整参数以 `ziyuan text help`、`ziyuan note help` 和 `ziyuan follow help` 为准，本文说明顺序与容易出错的地方。
 

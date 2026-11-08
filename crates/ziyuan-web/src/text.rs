@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use ziyuan_app::notes::{NewNote, NoteEdit, NoteFilter, NoteKind, Notes};
-use ziyuan_app::text_project::{ImportOptions, ImportSource, Project};
+use ziyuan_app::text_project::{ImportOptions, ImportSource, NewProject, Project, TextProjects};
 use ziyuan_app::translation::{
     BlockState, BlockStatus, DraftSave, DraftView, EvidenceInput, ExportFormat, ExportLayout,
     ExportOptions, ReferenceRequest, ReferenceSubmission, TranslationError, Translations,
@@ -473,6 +473,41 @@ fn material_file(dir: &Path, name: &str) -> (Option<Value>, Option<String>, Stri
         }
         Err(e) => (None, Some(e.to_string()), text),
     }
+}
+
+/// 新建空文本项目：不导入原文，导入仍在既有预览／确认流程里完成。
+/// 来源与权利沿用 CLI 的要求（用户自述，不核验），避免建出无出处的项目。
+pub(crate) async fn create_project(
+    State(app): State<AppState>,
+    Json(mut body): Json<NewProject>,
+) -> Result<Json<Value>, ApiError> {
+    body.title = body.title.trim().to_owned();
+    body.provenance.source = body.provenance.source.trim().to_owned();
+    body.provenance.rights = body.provenance.rights.trim().to_owned();
+    body.target_language = "zh-CN".to_owned();
+    if body.title.is_empty() {
+        return Err(ApiError::bad("项目标题不能为空。"));
+    }
+    if !matches!(body.source_language.as_str(), "ja" | "en") {
+        return Err(ApiError::bad("原文语言只支持 ja 或 en。"));
+    }
+    if body.provenance.source.is_empty() || body.provenance.rights.is_empty() {
+        return Err(ApiError::bad(
+            "来源与权利声明不能为空；二者只是用户自述，不作核验。",
+        ));
+    }
+    let root = app.0.config.root.clone();
+    let view = blocking(move || {
+        let projects = TextProjects::new(&root);
+        let project = projects
+            .create(body)
+            .map_err(|e| material(TranslationError::from(e)))?;
+        let t = Translations::new(&root);
+        project_json(&t, &project)
+    })
+    .await?;
+    app.emit("changed", json!({}));
+    Ok(Json(json!({ "project": view })))
 }
 
 /// 全部文本项目；没有项目（或尚未建项目）时为空数组。

@@ -1332,10 +1332,15 @@ fn text_frontend_contract() {
         "人工版本失效：原文、上下文或朱批已变",
         "case \"zhupi_changed\": return \"朱批已变\";",
         "b.status.state.state === \"human_stale\"",
-        "ziyuan text init、ziyuan text import",
+        "尚无文本项目。点「新建项目」建一个",
+        "text-new-project-dialog",
+        "/text/projects",
+        "项目已建立。请在「导入原文」选文件、预览",
+        "只作记录，不作核验",
     ] {
         assert!(crate::INDEX_HTML.contains(expected), "missing {expected}");
     }
+    assert!(!crate::INDEX_HTML.contains("先用 ziyuan text init"));
     assert!(!crate::INDEX_HTML.contains("ziyuan text new"));
     assert!(!crate::INDEX_HTML.contains("的的"));
     // 写操作都经 textAction/api(路径, 体) 走 POST；没有以查询串改状态的路子。
@@ -2480,5 +2485,50 @@ async fn version_snapshots_list_compare_and_reject_viewer_writes() {
     assert_eq!(code, 200, "{preview}");
     assert_eq!(preview["dry_run"], true);
     assert_eq!(preview["candidates"].as_array().unwrap().len(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn web_creates_empty_text_project_without_cli() {
+    let (base, root) = start("create-project", false).await;
+    let body = json!({
+        "title": "网页新建",
+        "source_language": "ja",
+        "target_language": "zh-CN",
+        "provenance": {
+            "author": "自编",
+            "version": "1",
+            "source": "自编样章",
+            "date": "2026-11-09",
+            "rights": "自编，仅测试",
+            "scope": "测试"
+        }
+    });
+    let (code, view) = call(&base, "/text/projects", Some(TOKEN), Some(body.clone())).await;
+    assert_eq!(code, 200, "{view}");
+    let id = view["project"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(id.len(), 32);
+    assert_eq!(view["project"]["title"], "网页新建");
+    assert_eq!(view["project"]["chapters"], 0);
+    assert!(root.join(".ziyuan/text-projects").join(&id).is_dir());
+
+    let (code, list) = call(&base, "/text", Some(TOKEN), None).await;
+    assert_eq!(code, 200, "{list}");
+    assert!(
+        list["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == id)
+    );
+
+    // 观政只能看，不能创建。
+    let (code, _) = call(&base, "/text/projects", Some(VIEWER), Some(body.clone())).await;
+    assert_eq!(code, 403);
+    // 来源与权利仍照 CLI 的要求拒绝空值。
+    let mut missing = body;
+    missing["provenance"]["source"] = json!("");
+    let (code, error) = call(&base, "/text/projects", Some(TOKEN), Some(missing)).await;
+    assert_eq!(code, 400, "{error}");
     fs::remove_dir_all(root).unwrap();
 }
