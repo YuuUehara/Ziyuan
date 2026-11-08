@@ -13,6 +13,7 @@ mod tm;
 mod comments;
 mod docx;
 mod srt;
+mod epub;
 mod context;
 mod draft;
 mod export;

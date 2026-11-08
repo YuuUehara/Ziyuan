@@ -94,6 +94,7 @@ pub(crate) enum TextAction {
     ImportDocx(String, PathBuf),
     ImportSrt(String, PathBuf),
     ExportSrt(String, PathBuf),
+    ImportEpub(String, PathBuf),
     Preview(String, Vec<ImportSource>, ImportOptions),
     ImportPrepared(String, Vec<ImportSource>, ImportOptions, String),
     Show(String),
@@ -188,6 +189,12 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
         "help" => TextAction::Help,
         "init" => parse_init(rest)?,
         "import" => parse_import(rest, false)?,
+            "import-epub" => {
+                let [id, file] = rest else {
+                    return Err("用法: ziyuan text import-epub <项目ID> <文件.epub>".into());
+                };
+                TextAction::ImportEpub(id.clone(), PathBuf::from(file.clone()))
+            }
             "import-srt" => {
                 let [id, file] = rest else {
                     return Err("用法: ziyuan text import-srt <项目ID> <文件.srt>".into());
@@ -560,6 +567,15 @@ pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> 
                     println!("目录：{}", projects.project_dir(&project.id)?.display());
                     println!("下一步：ziyuan text import {} <章节.txt>...", project.id);
                 }
+            }
+        }
+        TextAction::ImportEpub(id, file) => {
+            let translations = ziyuan_app::translation::Translations::new(env::current_dir()?);
+            let chapters = translations.import_epub(&id, &file)?;
+            if json {
+                print_json(serde_json::json!({"project": id, "documents": chapters}))?;
+            } else {
+                println!("已从 EPUB 导入 {chapters} 个正文文档。");
             }
         }
         TextAction::ImportSrt(id, file) => {
