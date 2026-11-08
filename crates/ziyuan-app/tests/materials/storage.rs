@@ -380,3 +380,33 @@ fn termbase_csv_roundtrip_terms_and_persons() {
     let csv2 = t.export_termbase_csv(&f.project).unwrap();
     assert_eq!(csv, csv2);
 }
+
+#[test]
+fn tm_comments_and_tbx_roundtrip() {
+    let f = Fixture::new();
+    let t = f.service();
+    let entry = t.tm_add(&f.project, "夜", "夜晚").unwrap();
+    assert_eq!(t.tm_list(&f.project).unwrap().len(), 1);
+    let updated = t.tm_update(&f.project, &entry.id, "夜", "夜里").unwrap();
+    assert_eq!(updated.target, "夜里");
+    let adopted = t.tm_adopt(&f.project, &entry.id).unwrap();
+    assert_eq!(adopted.adopted, 1);
+    let comment = t.comment_add(&f.project, "c0001-b0001", "c0001-p0001", "这里再柔和些").unwrap();
+    assert_eq!(t.comment_list(&f.project, None).unwrap().len(), 1);
+    let resolved = t.comment_resolve(&f.project, &comment.id, true).unwrap();
+    assert!(resolved.resolved);
+    t.tm_delete(&f.project, &entry.id).unwrap();
+    assert!(t.tm_list(&f.project).unwrap().is_empty());
+
+    let material = serde_json::from_value(json!({
+        "format": 2,
+        "terms": [{"term_id":"t-1","source":"夜","category":"common","allowed":["夜晚"],"scope":{"kind":"project"},"evidence":[],"status":"confirmed"}],
+        "persons": [{"person_id":"p_1","name":"夜","aliases":[],"terms":[],"address_rules":[],"voice":{"description":"低"},"evidence":[],"status":"tentative"}]
+    })).unwrap();
+    t.save_material_draft(&f.project, &MaterialSave { request_id: "tbx-save".into(), expected_revision: None, material }).unwrap();
+    let tbx = t.export_termbase_tbx(&f.project).unwrap();
+    assert!(tbx.contains("<termEntry id=\"t-1\">"));
+    assert!(tbx.contains("<termEntry id=\"p_1\">"));
+    let receipt = t.import_termbase_tbx(&f.project, tbx.as_bytes()).unwrap();
+    assert!(!receipt.revision.is_empty());
+}

@@ -38,6 +38,17 @@ pub(crate) fn router() -> Router<AppState> {
             "/text/{project}/materials/termbase",
             get(termbase_export).post(termbase_import),
         )
+        .route(
+            "/text/{project}/materials/termbase-tbx",
+            get(termbase_tbx_export).post(termbase_tbx_import),
+        )
+        .route("/text/{project}/tm", get(tm_list).post(tm_add))
+        .route("/text/{project}/tm/{id}/adopt", post(tm_adopt))
+        .route("/text/{project}/comments", get(comment_list).post(comment_add))
+        .route(
+            "/text/{project}/comments/{id}/resolve",
+            post(comment_resolve),
+        )
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
 }
 
@@ -135,6 +146,57 @@ pub(crate) async fn diff(
             .map_err(MaterialError::Visibility)
     })
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct TmAddBody { source: String, target: String }
+#[derive(serde::Deserialize)]
+struct CommentAddBody { block: String, #[serde(default)] paragraph: String, body: String }
+
+async fn tm_list(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).tm_list(&project).map_err(MaterialError::Visibility)).await
+}
+async fn tm_add(State(app): State<AppState>, UrlPath(project): UrlPath<String>, Json(body): Json<TmAddBody>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).tm_add(&project, &body.source, &body.target).map_err(MaterialError::Visibility)).await
+}
+async fn tm_adopt(State(app): State<AppState>, UrlPath((project, tm_id)): UrlPath<(String, String)>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).tm_adopt(&project, &tm_id).map_err(MaterialError::Visibility)).await
+}
+async fn comment_list(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).comment_list(&project, None).map_err(MaterialError::Visibility)).await
+}
+async fn comment_add(State(app): State<AppState>, UrlPath(project): UrlPath<String>, Json(body): Json<CommentAddBody>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).comment_add(&project, &body.block, &body.paragraph, &body.body).map_err(MaterialError::Visibility)).await
+}
+async fn comment_resolve(State(app): State<AppState>, UrlPath((project, comment_id)): UrlPath<(String, String)>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).comment_resolve(&project, &comment_id, true).map_err(MaterialError::Visibility)).await
+}
+async fn termbase_tbx_export(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let root = app.0.config.root.clone();
+    match tokio::task::spawn_blocking(move || Translations::new(&root).export_termbase_tbx(&project)).await {
+        Ok(Ok(tbx)) => ([(header::CONTENT_TYPE, "application/xml; charset=utf-8")], tbx).into_response(),
+        Ok(Err(e)) => reply(&id, StatusCode::BAD_REQUEST, e.to_string(), None),
+        Err(e) => reply(&id, StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None),
+    }
+}
+async fn termbase_tbx_import(State(app): State<AppState>, UrlPath(project): UrlPath<String>, body: Result<Bytes, BytesRejection>) -> Response {
+    let id = match workspace(&app) { Ok(id) => id, Err(r) => return *r };
+    let body = match body { Ok(b) => b, Err(_) => return reply(&id, StatusCode::BAD_REQUEST, "TBX 读取失败".into(), None) };
+    let root = app.0.config.root.clone();
+    run(id, move || Translations::new(&root).import_termbase_tbx(&project, &body).map_err(MaterialError::Visibility)).await
 }
 
 async fn termbase_export(

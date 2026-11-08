@@ -908,6 +908,11 @@
                 <button class="small" id="materials-qa" type="button">确定性检查</button>
                 <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
                 <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
+                <button class="small" id="materials-tbx-export" type="button">导出 TBX</button>
+                <button class="small" id="materials-tbx-import" type="button">导入 TBX</button>
+                <input type="file" id="materials-tbx-file" accept=".tbx,.xml" hidden>
+                <button class="small" id="materials-tm-list" type="button">翻译记忆</button>
+                <button class="small" id="materials-comment-list" type="button">评论</button>
                 <button class="small" id="materials-wizard" type="button">向导式新建</button>
                 <input type="file" id="materials-termbase-file" accept=".csv,text/csv" hidden>
                 <button class="small" id="materials-preview-run" type="button">预览当前块</button>
@@ -922,6 +927,9 @@
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
               <div class="actions"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字</option><option value="term_inconsistent">术语</option><option value="person_inconsistent">人物名</option><option value="paragraph_id_mismatch">段号</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
               <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
+              <div id="materials-tm-result" class="materials-report" aria-live="polite"></div>
+              <div id="materials-comment-result" class="materials-report" aria-live="polite"></div>
+              <div class="row"><textarea id="materials-comment-text" data-keep rows="2" placeholder="针对当前块的评论（不修改译稿）"></textarea><button class="small" id="materials-comment-add" type="button">添加评论</button></div>
               <div class="actions">
                 <button class="small" id="materials-restore" type="button" hidden>恢复会话暂存</button>
                 <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
@@ -1604,6 +1612,57 @@ $("text-materials-editor")?.addEventListener("click", (e) => {
   if (e.target.closest('[data-role="add"]')) {
     $("materials-status").textContent = "第一步：填名称和译法；保存草稿后再按需补范围、证据或称谓。";
   }
+});
+$("materials-tbx-export")?.addEventListener("click", async () => {
+  if (!textProjectId) return;
+  const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx");
+  if (!r.ok) { $("materials-status").textContent = "导出 TBX 失败"; return; }
+  const blob = await r.blob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = "ziyuan-termbase-" + textProjectId + ".tbx"; a.click();
+});
+$("materials-tbx-import")?.addEventListener("click", () => $("materials-tbx-file")?.click());
+$("materials-tbx-file")?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0]; if (!file || !textProjectId) return;
+  const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx", { method: "POST", headers: { "Content-Type": "application/xml" }, body: await file.text() });
+  const data = await r.json().catch(() => ({}));
+  $("materials-status").textContent = r.ok ? "已合并 TBX 到本地草稿（未批准）。" : "导入 TBX 失败：" + (data.error || "");
+  e.target.value = "";
+});
+$("materials-tm-list")?.addEventListener("click", async () => {
+  if (!textProjectId) return;
+  const entries = await api("/text/" + encodeURIComponent(textProjectId) + "/tm");
+  const host = $("materials-tm-result"); host.replaceChildren();
+  if (!entries.length) { host.textContent = "翻译记忆为空。"; return; }
+  for (const entry of entries) {
+    const row = document.createElement("p"); row.className = "hint";
+    row.append(entry.id + " · " + entry.source + " → " + entry.target + " · 采纳 " + entry.adopted + " ");
+    const adopt = document.createElement("button"); adopt.type = "button"; adopt.className = "link-button"; adopt.textContent = "采纳";
+    adopt.addEventListener("click", async () => { await api("/text/" + encodeURIComponent(textProjectId) + "/tm/" + encodeURIComponent(entry.id) + "/adopt", {}); $("materials-status").textContent = "已记录采纳；不会自动替换译文。"; });
+    row.append(adopt); host.append(row);
+  }
+});
+$("materials-comment-list")?.addEventListener("click", async () => {
+  if (!textProjectId) return;
+  const comments = await api("/text/" + encodeURIComponent(textProjectId) + "/comments");
+  const host = $("materials-comment-result"); host.replaceChildren();
+  if (!comments.length) { host.textContent = "暂无评论。"; return; }
+  for (const c of comments) {
+    const row = document.createElement("p"); row.className = "hint";
+    row.textContent = c.id + " · " + c.block + (c.paragraph ? " / " + c.paragraph : "") + " · " + (c.resolved ? "已解决" : "未解决") + " · " + c.body + " ";
+    if (!c.resolved) {
+      const done = document.createElement("button"); done.type = "button"; done.className = "link-button"; done.textContent = "标记解决";
+      done.addEventListener("click", async () => { await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/resolve", {}); $("materials-status").textContent = "评论已标记解决；未修改译稿。"; });
+      row.append(done);
+    }
+    host.append(row);
+  }
+});
+$("materials-comment-add")?.addEventListener("click", async () => {
+  const body = $("materials-comment-text").value.trim();
+  if (!textProjectId || !textBlockId || !body) { $("materials-status").textContent = "请先选择块并写评论。"; return; }
+  await api("/text/" + encodeURIComponent(textProjectId) + "/comments", { block: textBlockId, paragraph: textPicked || "", body });
+  $("materials-comment-text").value = "";
+  $("materials-status").textContent = "评论已保存（不修改译稿）。";
 });
 $("materials-termbase-export")?.addEventListener("click", async () => {
   if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
