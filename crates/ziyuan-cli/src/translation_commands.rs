@@ -41,6 +41,8 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text tm delete <项目ID> <ID>                删除一条记忆
   ziyuan text tm adopt <项目ID> <ID>                 记录一次人工采纳
   ziyuan text tm build <项目ID>                      从现有译稿生成记忆（去重）
+  ziyuan text termbase export-tbx <项目ID> <文件.tbx>
+  ziyuan text termbase import-tbx <项目ID> <文件.tbx>
   ziyuan text context approve <项目ID>                 校验并批准 context/ 草稿为不可变快照
   ziyuan text status <项目ID>                          列出各块状态、失效原因与对账提示
   ziyuan text resume <项目ID> [--yes]                   为未开始的块下初译；--yes 同意重试失败/撤销
@@ -78,6 +80,8 @@ pub(crate) enum TranslationAction {
     TmDelete(String, String),
     TmAdopt(String, String),
     TmBuild(String),
+    TbxExport(String, PathBuf),
+    TbxImport(String, PathBuf),
     Status(String),
     Resume(String, bool),
     Zhupi {
@@ -190,6 +194,12 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
             TranslationAction::TmAdopt((*p).into(), (*id).into())
         }
         ["tm", "build", p] if positional(p) => TranslationAction::TmBuild((*p).into()),
+        ["termbase", "export-tbx", p, f] if positional(p) && positional(f) => {
+            TranslationAction::TbxExport((*p).into(), (*f).into())
+        }
+        ["termbase", "import-tbx", p, f] if positional(p) && positional(f) => {
+            TranslationAction::TbxImport((*p).into(), (*f).into())
+        },
         ["context", "approve", p] if positional(p) => {
             TranslationAction::ContextApprove((*p).into())
         }
@@ -281,6 +291,18 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
     let root = std::env::current_dir()?;
     let translations = Translations::new(&root);
     let action = match action {
+        TranslationAction::TbxExport(project, file) => {
+            let tbx = translations.export_termbase_tbx(&project)?;
+            std::fs::write(&file, tbx.as_bytes())?;
+            if !json { println!("已导出 TBX：{}（{} 字节）。", file.display(), tbx.len()); }
+            return Ok(());
+        }
+        TranslationAction::TbxImport(project, file) => {
+            let bytes = std::fs::read(&file)?;
+            let receipt = translations.import_termbase_tbx(&project, &bytes)?;
+            if !json { println!("已合并 TBX 到本地草稿（未批准）：修订 {}。", receipt.revision); }
+            return Ok(());
+        }
         TranslationAction::TmList(project) => {
             let entries = translations.tm_list(&project)?;
             if json {

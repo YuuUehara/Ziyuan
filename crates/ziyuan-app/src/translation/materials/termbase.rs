@@ -212,3 +212,99 @@ impl Translations {
         .map_err(|e| invalid(e.to_string()))
     }
 }
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn tag_value(block: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = block.find(&open)? + open.len();
+    let end = block[start..].find(&close)? + start;
+    Some(xml_unescape(&block[start..end]))
+}
+
+fn descrip(block: &str, kind: &str) -> Option<String> {
+    let marker = format!("<descrip type=\"{kind}\">");
+    let start = block.find(&marker)? + marker.len();
+    let end = block[start..].find("</descrip>")? + start;
+    Some(xml_unescape(&block[start..end]))
+}
+
+impl Translations {
+    pub fn export_termbase_tbx(&self, project: &str) -> Result<String> {
+        let draft = self
+            .material_draft(project)
+            .map_err(|e| invalid(e.to_string()))?
+            .ok_or_else(|| invalid("尚无本地资料草稿"))?;
+        let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tbx><body>\n");
+        for term in &draft.material.terms {
+            out.push_str(&format!(
+                "  <termEntry id=\"{}\"><descrip type=\"kind\">term</descrip><descrip type=\"allowed\">{}</descrip><descrip type=\"status\">{}</descrip><langSet><tig><term>{}</term></tig></langSet></termEntry>\n",
+                xml_escape(&term.term_id),
+                xml_escape(&term.allowed.join(";")),
+                match term.status { GlossaryStatus::Confirmed => "confirmed", _ => "tentative" },
+                xml_escape(&term.source),
+            ));
+        }
+        for person in &draft.material.persons {
+            out.push_str(&format!(
+                "  <termEntry id=\"{}\"><descrip type=\"kind\">person</descrip><descrip type=\"aliases\">{}</descrip><descrip type=\"status\">{}</descrip><langSet><tig><term>{}</term></tig></langSet></termEntry>\n",
+                xml_escape(&person.person_id),
+                xml_escape(&person.aliases.join(";")),
+                match person.status { GlossaryStatus::Confirmed => "confirmed", _ => "tentative" },
+                xml_escape(&person.name),
+            ));
+        }
+        out.push_str("</body></tbx>\n");
+        Ok(out)
+    }
+
+    pub fn import_termbase_tbx(&self, project: &str, bytes: &[u8]) -> Result<MaterialReceipt> {
+        let text = std::str::from_utf8(bytes).map_err(|_| invalid("TBX 不是 UTF-8"))?;
+        let mut csv = String::from(HEADER);
+        csv.push('\n');
+        let mut imported = 0;
+        for block in text.split("<termEntry").skip(1) {
+            let id_start = block.find("id=\"");
+            let Some(id_start) = id_start else { continue; };
+            let id_start = id_start + 4;
+            let Some(id_end) = block[id_start..].find('"') else { continue; };
+            let id = &block[id_start..id_start + id_end];
+            let kind = descrip(block, "kind").unwrap_or_else(|| "term".into());
+            let status = descrip(block, "status").unwrap_or_else(|| "tentative".into());
+            let term = tag_value(block, "term").unwrap_or_default();
+            if kind == "person" {
+                let aliases = descrip(block, "aliases").unwrap_or_default();
+                csv.push_str(&format!(
+                    "person,{},,{},,{},,{}\n",
+                    quote(id), quote(&term), quote(&aliases), status
+                ));
+            } else {
+                let allowed = descrip(block, "allowed").unwrap_or_default();
+                csv.push_str(&format!(
+                    "term,{},{},,{},,,{}\n",
+                    quote(id), quote(&term), quote(&allowed), status
+                ));
+            }
+            imported += 1;
+        }
+        if imported == 0 {
+            return Err(invalid("TBX 没有可导入的 termEntry"));
+        }
+        self.import_termbase_csv(project, csv.as_bytes())
+    }
+}
