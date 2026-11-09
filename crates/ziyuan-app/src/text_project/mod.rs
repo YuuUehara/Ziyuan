@@ -9,6 +9,7 @@ mod import;
 mod model;
 mod split;
 mod store;
+pub(crate) mod update;
 mod validate;
 
 pub use document::*;

@@ -15,6 +15,7 @@ pub enum ExportFormat {
     #[default]
     Txt,
     Markdown,
+    Html,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,6 +281,16 @@ impl<S: EventStore> Session<S> {
                         }
                     }
                     super::ApprovedTarget::Marked(candidate) => {
+                        if options.format == ExportFormat::Html {
+                            for para in &candidate.paragraphs {
+                                texts.insert(
+                                    para.id.clone(),
+                                    super::html_export::marked_html(para)?,
+                                );
+                            }
+                            blocks.push(record);
+                            continue;
+                        }
                         if options.format != ExportFormat::Markdown {
                             failures.push(format!(
                                 "{} / {}：译稿带注音、粗体、斜体或着重点等标记，TXT 不能无损表达；请改用 Markdown 导出（命令行加 --format md）",
@@ -326,12 +337,12 @@ impl<S: EventStore> Session<S> {
             ))
             .into());
         }
-        let ext = if options.format == ExportFormat::Txt {
-            "txt"
-        } else {
-            "md"
+        let ext = match options.format {
+            ExportFormat::Txt => "txt",
+            ExportFormat::Markdown => "md",
+            ExportFormat::Html => "html",
         };
-        let files = match options.layout {
+        let mut files = match options.layout {
             ExportLayout::Book => vec![ExportFile {
                 name: format!("book.{ext}"),
                 bytes: rendered
@@ -349,6 +360,14 @@ impl<S: EventStore> Session<S> {
                 })
                 .collect(),
         };
+        if options.format == ExportFormat::Html {
+            for file in &mut files {
+                file.bytes = super::html_export::document(
+                    std::str::from_utf8(&file.bytes).map_err(|_| invalid("成稿不是UTF-8"))?,
+                )
+                .into_bytes();
+            }
+        }
         warnings.sort();
         warnings.dedup();
         Ok(bundle(
@@ -410,6 +429,8 @@ fn translated_text(text: &str, inlines: &[Inline], format: ExportFormat) -> Resu
     let plain = |s: &str| {
         if format == ExportFormat::Txt {
             s.to_owned()
+        } else if format == ExportFormat::Html {
+            html_text(s)
         } else {
             markdown_text(s)
         }
@@ -492,6 +513,20 @@ fn render_chapter(
     format: ExportFormat,
     warnings: &mut Vec<String>,
 ) -> Result<String> {
+    if format == ExportFormat::Html {
+        if c.parsing
+            .as_ref()
+            .is_some_and(|p| p.format == SourceFormat::Markdown)
+        {
+            warnings.push("HTML 成稿保留批准译文的正文与文学标记；原件的代码、链接、图片及版式请另取归档原件。".into());
+        }
+        let mut html = format!("<section><h1>{}</h1>\n", html_text(title(c)));
+        for paragraph in &c.paragraphs {
+            html.push_str(&format!("<p>{}</p>\n", texts[&paragraph.id]));
+        }
+        html.push_str("</section>\n");
+        return Ok(html);
+    }
     let heading = title(c).replace(['\r', '\n'], " ");
     let mut out = if format == ExportFormat::Txt {
         format!("{heading}\n\n")

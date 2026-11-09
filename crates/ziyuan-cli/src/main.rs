@@ -4,6 +4,7 @@
 mod args;
 mod backend;
 mod commands;
+mod continuity_commands;
 mod help;
 mod memory_commands;
 mod note_commands;

@@ -1822,6 +1822,79 @@ mod approval {
         request
     }
 
+    #[test]
+    fn signed_off_srt_export_is_exact_and_refuses_overwrite_and_foreign_ids() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "srt-final");
+        submit(&f, &revision);
+        approve(&f).unwrap();
+        finalize(&f).unwrap();
+        let cues=f.project.chapters[0].paragraphs.iter().enumerate().map(|(i,p)|serde_json::json!({"index":i+1,"start":format!("00:00:{:02},000",i*2),"end":format!("00:00:{:02},000",i*2+1),"text":p.text})).collect::<Vec<_>>();
+        fs::write(
+            f.root
+                .join(".ziyuan/text-projects")
+                .join(&f.project.id)
+                .join("srt.json"),
+            serde_json::to_vec(&cues).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(f.service().tm_build(&f.project.id).unwrap(), 3);
+        let output = f.root.join("finished.srt");
+        assert_eq!(f.service().export_srt(&f.project.id, &output).unwrap(), 3);
+        let bytes = fs::read(&output).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("00:00:02,000 --> 00:00:03,000"));
+        assert!(text.contains("船长莲"));
+        assert!(f.service().export_srt(&f.project.id, &output).is_err());
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+        let path = f.service().block_dir(&f.project.id, BLOCK).join("zh.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["paragraphs"][0]["id"] = serde_json::json!("foreign");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            f.service()
+                .export_srt(&f.project.id, &f.root.join("bad.srt"))
+                .is_err()
+        );
+        assert!(!f.root.join("bad.srt").exists());
+    }
+
+    #[test]
+    fn finished_html_keeps_ruby_emphasis_dots_and_overlapping_styles_without_active_content() {
+        let f = Fixture::new();
+        let mut request = f.marked_request();
+        request.paragraphs[0].marks.push(TargetMark {
+            start: 3,
+            end: 9,
+            kind: TargetMarkKind::Strong {},
+        });
+        let revision = save(&f, request, "html-export");
+        submit(&f, &revision);
+        approve(&f).unwrap();
+        finalize(&f).unwrap();
+        let mut session = ziyuan_app::Session::open(EventLog::new(&f.root)).unwrap();
+        let options = ziyuan_app::translation::ExportOptions {
+            format: ziyuan_app::translation::ExportFormat::Html,
+            ..Default::default()
+        };
+        let bundle = session
+            .export_finished(&f.root, &f.project.id, &options)
+            .unwrap();
+        let text = String::from_utf8(bundle.files[0].bytes.clone()).unwrap();
+        assert!(bundle.files[0].name.ends_with(".html"));
+        assert!(text.contains("<ruby>"));
+        assert!(text.contains("<strong>"));
+        assert!(text.contains("text-emphasis"));
+        assert!(!text.contains("<script"));
+        assert!(
+            f.service()
+                .delivery_preflight(&f.project.id, &options)
+                .unwrap()
+                .export_ready
+        );
+    }
+
     fn save(f: &Fixture, mut request: DraftSave, id: &str) -> String {
         let view = f.service().human_draft(&f.project.id, BLOCK).unwrap();
         request.request_id = id.into();
@@ -1873,6 +1946,102 @@ mod approval {
         let guard = guard(f);
         f.service()
             .finalize_human_translation(&guard, &f.project.id, BLOCK)
+    }
+
+    #[test]
+    fn full_backup_preserves_marked_drafts_approvals_and_export_gate_after_migration() {
+        let f = Fixture::new();
+        let revision = save(&f, f.marked_request(), "backup-marked");
+        submit(&f, &revision);
+        approve(&f).unwrap();
+        finalize(&f).unwrap();
+        let bundle = f.service().backup_workspace().unwrap();
+        let destination = f.root.join("migrated");
+        ziyuan_app::translation::restore_backup(&bundle.bytes, &destination).unwrap();
+        let restored = Translations::new(&destination);
+        assert_eq!(
+            restored.human_draft(&f.project.id, BLOCK).unwrap().draft,
+            f.service().human_draft(&f.project.id, BLOCK).unwrap().draft
+        );
+        let mut session = ziyuan_app::Session::open(EventLog::new(&destination)).unwrap();
+        assert!(matches!(
+            session
+                .translation_status(&destination, &f.project.id)
+                .unwrap()[0]
+                .state,
+            ziyuan_app::translation::BlockState::HumanFinalized { .. }
+        ));
+        assert!(
+            session
+                .export_finished(&destination, &f.project.id, &Default::default())
+                .is_err(),
+            "不支持的文学标记仍须拒绝导出，不能因迁机丢失标记而放行"
+        );
+    }
+
+    #[test]
+    fn source_revision_keeps_approved_translation_but_invalidates_its_signoff() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "source-revision");
+        submit(&f, &revision);
+        approve(&f).unwrap();
+        finalize(&f).unwrap();
+        let before = target(&f).unwrap();
+        let original = f.project.chapters[0]
+            .paragraphs
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let input = ziyuan_app::translation::SourceUpdate {
+            chapter: Some("c0001".into()),
+            name: "revision.txt".into(),
+            text: original.replace("灯台", "港町"),
+        };
+        let preview = f
+            .service()
+            .preview_source_update(&f.project.id, &input)
+            .unwrap();
+        f.service()
+            .apply_source_update(&f.project.id, &input, &preview.fingerprint)
+            .unwrap();
+        assert_eq!(target(&f).unwrap(), before);
+        let session = ziyuan_app::Session::open(EventLog::new(&f.root)).unwrap();
+        assert!(matches!(
+            session.translation_status(&f.root, &f.project.id).unwrap()[0].state,
+            ziyuan_app::translation::BlockState::HumanStale { .. }
+        ));
+    }
+
+    #[test]
+    fn delivery_preflight_separates_signoff_from_open_and_stale_issues() {
+        let f = Fixture::new();
+        let revision = save(&f, plain_request(&f), "delivery");
+        submit(&f, &revision);
+        approve(&f).unwrap();
+        finalize(&f).unwrap();
+        let report = f
+            .service()
+            .delivery_preflight(&f.project.id, &Default::default())
+            .unwrap();
+        assert!(report.export_ready, "{:?}", report.blockers);
+        let list = f.service().issues(&f.project.id).unwrap();
+        let input = ziyuan_app::translation::IssueInput {
+            paragraph: "c0001-p0001".into(),
+            related: vec!["c0001-p0002".into()],
+            rule: "称呼".into(),
+            body: "自编待查".into(),
+        };
+        f.service()
+            .add_issue(&f.project.id, &input, &list.fingerprint)
+            .unwrap();
+        let report = f
+            .service()
+            .delivery_preflight(&f.project.id, &Default::default())
+            .unwrap();
+        assert!(report.export_ready);
+        assert_eq!(report.open_issues, 1);
+        assert!(!report.warnings.is_empty());
     }
 
     fn target(f: &Fixture) -> Option<Vec<u8>> {

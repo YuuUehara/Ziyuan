@@ -8,6 +8,7 @@
 //! 请求共用一个缓存的 [`Session`](ziyuan_app::Session)（每次只增量读取新事件），同时有多个请求时另开会话；
 //! 与 CLI 共用同一套多进程规则：写入以乐观并发提交，执行诏令前取得执行者锁。
 mod auth;
+mod continuity;
 mod edicts;
 mod json;
 mod materials;
@@ -112,6 +113,12 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "materials-model.mjs" => MATERIALS_MODEL,
         "materials-editor.mjs" => MATERIALS_EDITOR,
         "materials-preview.mjs" => MATERIALS_PREVIEW,
+        "continuity.mjs" => include_str!("continuity.mjs"),
+        "continuity-issues.mjs" => include_str!("continuity-issues.mjs"),
+        "continuity-reading.mjs" => include_str!("continuity-reading.mjs"),
+        "continuity-search.mjs" => include_str!("continuity-search.mjs"),
+        "continuity-memory.mjs" => include_str!("continuity-memory.mjs"),
+        "continuity-document.mjs" => include_str!("continuity-document.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (
@@ -239,7 +246,65 @@ fn router_for(app: AppState) -> Router {
         .route("/nominate", post(nominate))
         .route("/palace", post(palace))
         .route("/text", get(text::list))
+        .route("/text/backup", post(continuity::backup))
+        .route(
+            "/text/restore",
+            post(continuity::restore)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route("/text/projects", post(text::create_project))
+        .route(
+            "/text/{project}/source-update",
+            post(continuity::update).layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
+        )
+        .route(
+            "/text/{project}/issues",
+            get(continuity::issues).post(continuity::add_issue),
+        )
+        .route("/text/{project}/reading", get(continuity::reading))
+        .route("/text/{project}/search", get(continuity::search))
+        .route(
+            "/text/{project}/document/import",
+            post(continuity::document_import)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/text/{project}/document/export",
+            get(continuity::document_export),
+        )
+        .route("/text/{project}/tmx/export", get(continuity::tmx_export))
+        .route(
+            "/text/{project}/tmx/preview",
+            post(continuity::tmx_preview)
+                .layer(axum::extract::DefaultBodyLimit::max(17 * 1024 * 1024)),
+        )
+        .route(
+            "/text/{project}/tmx/import",
+            post(continuity::tmx_import)
+                .layer(axum::extract::DefaultBodyLimit::max(17 * 1024 * 1024)),
+        )
+        .route(
+            "/text/{project}/draft-replace",
+            post(continuity::draft_replace),
+        )
+        .route(
+            "/text/{project}/tm/{id}/update",
+            post(continuity::tm_update),
+        )
+        .route(
+            "/text/{project}/tm/{id}/delete",
+            post(continuity::tm_delete),
+        )
+        .route("/text/{project}/tm/build", post(continuity::tm_build))
+        .route(
+            "/text/{project}/comments/{id}/reopen",
+            post(continuity::comment_reopen),
+        )
+        .route("/text/{project}/delivery", get(continuity::delivery))
+        .route(
+            "/text/{project}/issues/{id}/review",
+            post(continuity::review_issue),
+        )
         .route("/text/{project}", get(text::project))
         .route("/text/{project}/export", get(text::export))
         .route("/text/{project}/import/preview", post(text::import_preview))

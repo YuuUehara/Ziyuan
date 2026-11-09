@@ -18,7 +18,7 @@
 
 **显式选用参考**：从译文记忆中主动选择参考，先预览完整参考外发文本，再确认初译或修订。默认不选；预览不发送，下诏只入队。Web 仅当前项目；所选原译文保存在事件簿，分享前须核对隐私与权利。详见[选择、确认与重试](docs/memory.md#unreleased--14-第三批-a显式选用参考)及[兼容边界](docs/stability.md#unreleased--14-第三批-a显式选用参考)。
 
-**术语表与双语检索**：`ziyuan text termbase export/import <项目ID> <文件.csv>` 与 `export-tbx/import-tbx` 导出或合并本地术语与人物；CSV／TBX 都保存类别、范围、可用起点、读音、证据、关联术语、声线与称谓规则，旧八列 CSV 仍可读。`ziyuan text concordance <项目ID> <原文片段>` 模糊检索本项目已有原文与译文。
+**术语表与双语检索**：`ziyuan text termbase export/import <项目ID> <文件.csv>` 与 `export-tbx/import-tbx` 导出或合并本地术语与人物；CSV／TBX 都保存类别、范围、可用起点、读音、证据、关联术语、声线与称谓规则，旧八列 CSV 仍可读。`ziyuan text concordance <项目ID> <原文片段>` 按原文字面相似度查找本项目已有原译文对。
 
 **译稿版本与格式回填**：保存草稿、准奏与定稿时自动写快照；`ziyuan text version list|save|compare|compare-draft|prune` 与 Web「译稿版本」面板可查看、对比现行译稿或人工草稿，并清理旧快照。`ziyuan text import-docx/import-epub` 会保留原件，`export-docx/export-epub` 按已定稿译稿回填文字，保留粗体、斜体、表格与图片。快照只是本地辅助材料，不批准、不外发。边界见[文本项目指南](docs/text-projects.md#113译稿版本与格式回填)。
 
@@ -27,6 +27,8 @@
 **向导式新建**：资料面板的「向导式新建」用三步对话框创建术语或人物；「临时关联」的人物/对象支持多选，选择结果以可移除标签显示。
 
 **确定性检查**：`ziyuan text qa <项目ID> <块ID>` 或 Web「确定性检查」只查空译、段号、数字、重复、术语/人物名等确定性问题；不调用模型，也不代表语义正确。
+
+**源码中的翻译定型补齐**：完整译书工作区备份、原文追加／修订、跨章待查、连续通读、全文检索与草稿替换、纯文本 TMX 交换，以及保留注音／着重／叠加样式的 HTML 成稿入口见[连续翻译指南](docs/translation-continuity.md)。这些新增入口尚不属于 1.13.1 发布包；保存、采纳、问题处置与准奏定稿仍分别记录。
 
 ### 第一次启动（不用命令行）
 

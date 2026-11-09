@@ -1,5 +1,7 @@
 # 1.4 第三批开发计划：有出处的参考与可复核的批次验收
 
+> 本页保留历史契约、分批设计及当时验收，状态描述适用于原记录时点，不作为当前能力或后续排期。当前操作与边界见[文本项目指南](text-projects.md)和[连续翻译指南](translation-continuity.md)。
+
 日期：2026-11-01。状态：**第三批 3A／3B／3C 均已纳入正式发布的 1.4.0，本页作为历史开发计划保留，不是下一批安排。** [最终六项 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41322504706)与[发布流程](https://github.com/YuuUehara/Ziyuan/actions/runs/41322805377)均通过；四种实际下载包原生验收成功，十一个 crate 均已核对可用。权威证据见 [1.4.0 验收汇总](acceptance/1.4.0.md)。分批证据保留在 [3A 记录](acceptance/1.4-third-batch-3a.md)、[3B 记录](acceptance/1.4-third-batch-3b.md)、[3C 记录](acceptance/1.4-third-batch-3c.md)，实际命令与边界见[文本工具](text-projects.md)。本次文档更新没有新增付费调用；历史实施依据为 [1.4 需求](novel-translation-1.4.md)与连续两章实测，不另起自动翻译系统。
 
 ## 1. 实测依据与结论边界

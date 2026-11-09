@@ -8,10 +8,13 @@
 //! 哈希一律为 SHA-256 小写十六进制（无前缀）：原文哈希是块 JSON（与项目内
 //! `blocks/<块>.json` 逐字节相同，即 [`PromptBlock::serialized`]）的哈希；
 //! 译稿哈希是 `zh.json` 文件字节的哈希。
+pub mod backup;
 mod comments;
 mod compare;
 mod concordance;
 mod context;
+mod delivery;
+mod document_delivery;
 mod docx;
 mod draft;
 mod epub;
@@ -20,9 +23,12 @@ mod export_package;
 mod finished;
 mod gate;
 mod glossary;
+mod html_export;
+mod issues;
 mod markup;
 pub mod materials;
 mod packages;
+mod reading;
 mod references;
 mod session;
 mod source;
@@ -30,7 +36,10 @@ mod srt;
 mod status;
 mod strict_json;
 mod target;
+mod text_search;
 mod tm;
+mod tmx;
+mod updates;
 mod usage;
 mod verification;
 mod versions;
@@ -40,11 +49,14 @@ mod zhupi;
 #[cfg(test)]
 mod tests;
 
+pub use crate::text_project::update::{SourceChange, SourceUpdate, SourceUpdatePreview};
+pub use backup::{BackupBundle, BackupManifest, inspect_backup, restore_backup};
 pub use compare::TranslationChange as VersionChange;
 pub use context::{
     ContextManifest, ContextSnapshot, GLOSSARY_FILE, GlossaryEntry, ManifestFile, STYLE_FILE,
     SUMMARIES_DIR, parse_glossary,
 };
+pub use delivery::DeliveryReport;
 pub use draft::{
     DraftBasis, DraftParagraph, DraftReceipt, DraftSave, DraftSubmit, DraftView, HumanDraft,
     HumanSubmission, ReviewCandidate, ReviewFormat, ReviewFormatCheck, UnsupportedTargetMark,
@@ -56,12 +68,14 @@ pub use glossary::{
     AddressRule, Glossary, GlossaryEvidence, GlossaryPosition, GlossaryScope, GlossarySpeaker,
     GlossaryStance, GlossaryStatus, Person, PersonVoice, StructuredGlossary, Term, TermCategory,
 };
+pub use issues::{IssueInput, IssueList, IssueRecord, IssueReview, IssueState, IssueView};
 pub use markup::{TargetMark, TargetMarkKind};
 pub use materials::{
     MAX_MATERIAL_BYTES, MaterialDraft, MaterialError, MaterialIssue, MaterialIssueCode,
     MaterialPathSegment, MaterialReceipt, MaterialSave, MaterialValidation,
     check_material_editable, validate_material,
 };
+pub use reading::{ReadingParagraph, ReadingView};
 pub use references::{
     MAX_REFERENCE_BYTES, MAX_REFERENCES, ReferencePreview, ReferenceRequest, ReferenceSelection,
     ReferenceSubmission, ReferenceTaskView,
@@ -73,6 +87,8 @@ pub use status::{
     block_states, resume_plan,
 };
 pub use target::{ApprovedTarget, TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN, read_approved_target};
+pub use text_search::{DraftReplace, DraftReplacePreview, TextSearch, TextSearchHit};
+pub use tmx::TmxPreview;
 pub use usage::{
     StageUsage, TranslationTaskUsage, TranslationUsage, UsageCharge, UsageRate, UsageTotals,
     translation_usage,

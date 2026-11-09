@@ -1,5 +1,7 @@
 # 1.4 小说翻译需求草案：章节读写、日文注音与参考译法
 
+> 本页保留历史契约、分批设计及当时验收，状态描述适用于原记录时点，不作为当前能力或后续排期。当前操作与边界见[文本项目指南](text-projects.md)和[连续翻译指南](translation-continuity.md)。
+
 状态：**本需求草案作为历史计划保留，第一、第二、第三批均已纳入正式发布的 1.4.0。** [最终六项 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41322504706)与[发布流程](https://github.com/YuuUehara/Ziyuan/actions/runs/41322805377)均通过；四种实际下载包原生验收成功，十一个 crate 均已核对可用。权威证据见 [1.4.0 验收汇总](acceptance/1.4.0.md)。下文的“首版建议”“须”“实施设计”等保留原计划语境，不是下一批安排。
 
 1.4.0 在 1.3.0 基础上包含 TXT／Markdown 章节导入导出、日文 ruby／振假名支持、人工选用参考、词证与逐段勘校、用量账本及重复材料精简，不包含远程记忆库或 Kakuyomu 接入。分批证据见[第一批](acceptance/1.4-first-batch.md)、[3A 工程验收](acceptance/1.4-third-batch-3a.md)及[第三批历史计划](novel-translation-1.4-third-batch.md)；实际用法见[文本工具](text-projects.md)与[翻译记忆](memory.md)。单批历史 CI 不替代最终版本 CI、实际下载包验收或文学质量评估；工程通过不证明文学收益。

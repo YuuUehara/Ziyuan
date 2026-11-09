@@ -505,7 +505,8 @@
   .text-para .pid { display: block; font: 11px/1.5 var(--mono); color: var(--muted); }
   .text-para .zhu { display: block; margin-top: 4px; padding-left: 8px; border-left: 2px solid var(--seal); font-family: var(--text); font-size: 12.5px; color: var(--tint-ink); }
   .text-para.changed { background: var(--add); }
-  .text-materials { display: grid; gap: 10px; margin-top: 14px; }
+  .text-materials { display: grid; gap: 10px; margin-top: 14px; min-width: 0; }
+  .text-materials > * { min-width: 0; max-width: 100%; }
   #text-human-editor { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
   #text-human-editor:empty { display: none; }
   .human-paragraph { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); min-width: 0; }
@@ -526,7 +527,8 @@
 .text-materials-assoc .bad { color: var(--bad); }
 .link-button { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline dotted; cursor: pointer; font: inherit; }
 .link-button:focus-visible { outline: 2px solid var(--line-strong); outline-offset: 2px; }
-.assoc-row { display: grid; grid-template-columns: 110px repeat(3, minmax(90px, 1fr)); gap: 8px; align-items: start; }
+.assoc-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(110px, 100%), 1fr)); gap: 8px; align-items: start; }
+.assoc-row > * { min-width: 0; overflow-wrap: anywhere; }
 .assoc-field { display: grid; gap: 4px; min-width: 0; }
 .assoc-field input, .assoc-field select { width: 100%; min-width: 0; box-sizing: border-box; }
 .assoc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -641,6 +643,19 @@
     header { padding: 10px 16px; }
     .header-actions { margin-left: 0; }
   }
+
+  #text-card .continuity-tools { min-width:0; margin:12px 0; }
+  #text-card .continuity-tools > summary { cursor:pointer; }
+  #text-card .continuity-tools .row { flex-wrap:wrap; }
+  #text-card .continuity-tools input, #text-card .continuity-tools select { min-width:0; max-width:100%; box-sizing:border-box; }
+  #text-card .continuity-tools p { white-space:pre-wrap; overflow-wrap:anywhere; }
+  #text-card .continuity-tools button { max-width:100%; overflow-wrap:anywhere; }
+  .continuity-change { border-top:1px solid var(--line); padding:12px 0; }
+  .continuity-history { border-left:2px solid var(--line); margin:10px 0; padding-left:12px; }
+  .continuity-columns, #continuity-reader .reading-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+  #continuity-reader .reading-row { border-top:1px solid var(--line); padding:16px 0; }
+  @media (max-width:700px) { .continuity-columns, #continuity-reader .reading-row { grid-template-columns:minmax(0,1fr); } }
+
 </style>
 </head>
 <body>
@@ -1177,6 +1192,8 @@ function deltaFor(id, version, side) {
   return deltaCache[key];
 }
 
+import("./assets/continuity.mjs").then(({ mount }) => mount({ api, getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }), refresh: () => loadTextProject(), navigate: async anchor => { textBlockId=anchor.block; invalidateReferences(true); await loadTextBlock(); textPick(anchor.paragraph); document.querySelector("#text-human-editor")?.scrollIntoView({block:"start"}); } })).catch(e => console.error(e));
+
 async function api(path, body) {
   const response = await fetch("api" + path, {
     method: body === undefined ? "GET" : "POST",
@@ -1681,41 +1698,49 @@ $("materials-tbx-file")?.addEventListener("change", async (e) => {
   e.target.value = "";
 });
 $("materials-tm-list")?.addEventListener("click", async () => {
-  if (!textProjectId) return;
-  const entries = await api("/text/" + encodeURIComponent(textProjectId) + "/tm");
-  const host = $("materials-tm-result"); host.replaceChildren();
-  if (!entries.length) { host.textContent = "翻译记忆为空。"; return; }
-  for (const entry of entries) {
-    const row = document.createElement("p"); row.className = "hint";
-    row.append(entry.id + " · " + entry.source + " → " + entry.target + " · 采纳 " + entry.adopted + " ");
-    const adopt = document.createElement("button"); adopt.type = "button"; adopt.className = "link-button"; adopt.textContent = "采纳";
-    adopt.addEventListener("click", async () => { await api("/text/" + encodeURIComponent(textProjectId) + "/tm/" + encodeURIComponent(entry.id) + "/adopt", {}); $("materials-status").textContent = "已记录采纳；不会自动替换译文。"; });
-    row.append(adopt); host.append(row);
+  const project=textProjectId;if(!project)return;
+  const entries=await api("/text/"+encodeURIComponent(project)+"/tm");if(project!==textProjectId)return;
+  const host=$("materials-tm-result");host.replaceChildren();
+  const check=()=>{if(project!==textProjectId)throw new Error("项目已变，请重新读取翻译记忆");};
+  const task=async(fn)=>{try{check();await fn();$("materials-status").textContent="翻译记忆已更新；未修改译稿。";if(project===textProjectId)$("materials-tm-list").click();}catch(e){$("materials-status").textContent=e.message;}};
+  const input=(label,value="")=>{const e=document.createElement("input");e.placeholder=label;e.setAttribute("aria-label",label);e.value=value;return e;};
+  const button=(label,fn)=>{const e=document.createElement("button");e.type="button";e.className="small write";e.textContent=label;e.onclick=()=>task(fn);return e;};
+  const form=document.createElement("div");form.className="row write";const source=input("记忆原文"),target=input("认可译法");
+  form.append(source,target,button("新增记忆",()=>api("/text/"+encodeURIComponent(project)+"/tm",{source:source.value,target:target.value})),button("从当前有效定稿建库",()=>api("/text/"+encodeURIComponent(project)+"/tm/build",{})));host.append(form);
+  if(!entries.length){const empty=document.createElement("p");empty.className="hint";empty.textContent="翻译记忆为空，可新增原译文对或从定稿建库。";host.append(empty);}
+  for(const entry of entries){
+    const row=document.createElement("article");row.className="continuity-change";const prose=document.createElement("p");prose.textContent=entry.source+" → "+entry.target+" · 采纳 "+entry.adopted;row.append(prose);
+    const controls=document.createElement("div");controls.className="row write";controls.append(button("采纳",()=>api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/adopt",{})));
+    const edit=document.createElement("details");edit.className="write";const summary=document.createElement("summary");summary.textContent="修改这条记忆";const original=input("记忆原文",entry.source),translation=input("认可译法",entry.target),actions=document.createElement("div");actions.className="row";
+    actions.append(button("保存记忆",()=>api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/update",{source:original.value,target:translation.value})),button("删除记忆",async()=>{if(!window.confirm("删除这条翻译记忆？译稿不受影响。"))return;await api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/delete",{});}));edit.append(summary,original,translation,actions);row.append(controls,edit);host.append(row);
   }
 });
 $("materials-comment-list")?.addEventListener("click", async () => {
-  if (!textProjectId) return;
-  const comments = await api("/text/" + encodeURIComponent(textProjectId) + "/comments");
+  const project=textProjectId;if(!project)return;
+  const comments = await api("/text/" + encodeURIComponent(project) + "/comments");
+  if(project!==textProjectId)return;
   const host = $("materials-comment-result"); host.replaceChildren();
   if (!comments.length) { host.textContent = "暂无评论。"; return; }
   for (const c of comments) {
     const row = document.createElement("p"); row.className = "hint";
     row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + c.block + (c.paragraph ? " / " + c.paragraph : "") + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
-    if (!c.resolved) {
-      const done = document.createElement("button"); done.type = "button"; done.className = "link-button"; done.textContent = "标记解决";
-      done.addEventListener("click", async () => { await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/resolve", {}); $("materials-status").textContent = "评论已标记解决；未修改译稿。"; });
+    {
+      const commentProject=project;
+      const done = document.createElement("button"); done.type = "button"; done.className = "link-button write"; done.textContent = c.resolved ? "重新打开" : "标记解决";
+      done.classList.add("write");
+      done.addEventListener("click", async () => { if(commentProject!==textProjectId)return; await api("/text/" + encodeURIComponent(commentProject) + "/comments/" + encodeURIComponent(c.id) + (c.resolved ? "/reopen" : "/resolve"), {}); $("materials-status").textContent = "评论状态已更新；未修改译稿。"; });
       row.append(done);
     }
-    const reply = document.createElement("button"); reply.type = "button"; reply.className = "link-button"; reply.textContent = "回复";
+    const reply = document.createElement("button"); reply.type = "button"; reply.className = "link-button write"; reply.textContent = "回复";
     reply.addEventListener("click", async () => {
-      const text = window.prompt("回复内容"); if (!text) return;
-      await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/reply", { body: text });
+      const text = window.prompt("回复内容"); if (!text || project!==textProjectId) return;
+      await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/reply", { body: text });
       $("materials-status").textContent = "已回复。"; 
     });
-    const assign = document.createElement("button"); assign.type = "button"; assign.className = "link-button"; assign.textContent = "指派";
+    const assign = document.createElement("button"); assign.type = "button"; assign.className = "link-button write"; assign.textContent = "指派";
     assign.addEventListener("click", async () => {
-      const who = window.prompt("负责人", c.assignee || ""); if (who === null) return;
-      await api("/text/" + encodeURIComponent(textProjectId) + "/comments/" + encodeURIComponent(c.id) + "/assign", { assignee: who });
+      const who = window.prompt("负责人", c.assignee || ""); if (who === null || project!==textProjectId) return;
+      await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/assign", { assignee: who });
       $("materials-status").textContent = "已指派（空字符串表示取消）。";
     });
     row.append(reply, assign);

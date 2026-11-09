@@ -96,6 +96,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
   以上命令均可加 --json，以 JSON 输出到标准输出。项目存于 .ziyuan/text-projects/<项目ID>/。"#;
 
 pub(crate) enum TextAction {
+    Continuity(crate::continuity_commands::Action),
     Help,
     Memory(crate::memory_commands::MemoryAction),
     Translation(crate::translation_commands::TranslationAction),
@@ -200,6 +201,10 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
         return Ok(TextAction::Help);
     };
     Ok(match action.as_str() {
+        "backup" | "restore" | "source-update" | "issue" | "read" | "preflight" | "search"
+        | "draft-replace" | "tmx" => {
+            TextAction::Continuity(crate::continuity_commands::parse(action, rest)?)
+        }
         "help" => TextAction::Help,
         "init" => parse_init(rest)?,
         "import" => parse_import(rest, false)?,
@@ -372,6 +377,7 @@ fn parse_export(args: &[String], originals: bool) -> Result<TextAction, Box<dyn 
                 options.format = match value.as_str() {
                     "txt" => ExportFormat::Txt,
                     "md" => ExportFormat::Markdown,
+                    "html" => ExportFormat::Html,
                     _ => return Err(usage.into()),
                 };
             }
@@ -570,15 +576,17 @@ fn parse_recovery(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
 pub(crate) fn run(action: TextAction, json: bool) -> Result<(), Box<dyn Error>> {
     if let TextAction::Help = action {
         println!(
-            "{TEXT_HELP}\n\n{}\n\n{}\n\n{}",
+            "{TEXT_HELP}\n\n{}\n\n{}\n\n{}\n\n{}",
             crate::translation_commands::TRANSLATION_HELP,
             crate::memory_commands::MEMORY_HELP,
-            crate::verification_commands::HELP
+            crate::verification_commands::HELP,
+            crate::continuity_commands::HELP
         );
         return Ok(());
     }
     let projects = TextProjects::new(env::current_dir()?);
     match action {
+        TextAction::Continuity(action) => return crate::continuity_commands::run(action, json),
         TextAction::Help => unreachable!("已在上面处理"),
         TextAction::Memory(action) => return crate::memory_commands::run(action, json),
         TextAction::Translation(action) => return crate::translation_commands::run(action, json),

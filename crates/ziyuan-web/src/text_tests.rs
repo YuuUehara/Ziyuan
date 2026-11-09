@@ -2532,3 +2532,96 @@ async fn web_creates_empty_text_project_without_cli() {
     assert_eq!(code, 400, "{error}");
     fs::remove_dir_all(root).unwrap();
 }
+#[tokio::test(flavor = "multi_thread")]
+async fn full_backup_is_owner_only_and_rechecks_preview() {
+    let (base, root) = start("full-backup", false).await;
+    let _ = project(&root, "备份自编项目", "原文。\n");
+    assert_eq!(
+        call(&base, "/text/backup", Some(VIEWER), Some(json!({})))
+            .await
+            .0,
+        403
+    );
+    let (code, preview) = call(&base, "/text/backup", Some(TOKEN), Some(json!({}))).await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(preview["manifest"]["projects"].as_array().unwrap().len(), 1);
+    assert!(preview["scope"].as_str().unwrap().contains("全部"));
+    assert_eq!(
+        call(
+            &base,
+            "/text/backup",
+            Some(TOKEN),
+            Some(json!({"fingerprint":"stale"}))
+        )
+        .await
+        .0,
+        400
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continuity_updates_issues_and_readonly_delivery_share_application_contracts() {
+    let (base, root) = start("continuity-workflow", false).await;
+    let p = project(&root, "自编连续样本", "第一段。\n\n第二段。\n");
+    let route = format!("/text/{}", p.id);
+    let request = json!({"chapter":null,"name":"next.txt","text":"第三段。\n"});
+    assert_eq!(
+        call(
+            &base,
+            &format!("{route}/source-update"),
+            Some(VIEWER),
+            Some(request.clone())
+        )
+        .await
+        .0,
+        403
+    );
+    let (status, preview) = call(
+        &base,
+        &format!("{route}/source-update"),
+        Some(TOKEN),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{preview}");
+    let mut confirmed = request;
+    confirmed["fingerprint"] = preview["fingerprint"].clone();
+    let (status, result) = call(
+        &base,
+        &format!("{route}/source-update"),
+        Some(TOKEN),
+        Some(confirmed),
+    )
+    .await;
+    assert_eq!(status, 200, "{result}");
+    let (status, reading) = call(&base, &format!("{route}/reading"), Some(VIEWER), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(reading["paragraphs"].as_array().unwrap().len(), 3);
+    let (_, list) = call(&base, &format!("{route}/issues"), Some(VIEWER), None).await;
+    let input = json!({"input":{"paragraph":"c0001-p0001","related":["c0002-p0001"],"rule":"称谓","body":"核对前后称呼"},"fingerprint":list["fingerprint"]});
+    assert_eq!(
+        call(
+            &base,
+            &format!("{route}/issues"),
+            Some(VIEWER),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        403
+    );
+    let (status, issue) = call(&base, &format!("{route}/issues"), Some(TOKEN), Some(input)).await;
+    assert_eq!(status, 200, "{issue}");
+    let (status, report) = call(
+        &base,
+        &format!("{route}/delivery?format=txt"),
+        Some(VIEWER),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["export_ready"], false);
+    assert_eq!(report["open_issues"], 1);
+    fs::remove_dir_all(root).unwrap();
+}

@@ -175,11 +175,11 @@ impl Translations {
                     .into_iter()
                     .map(|p| (p.id, p.text))
                     .collect::<Vec<_>>(),
-                super::ApprovedTarget::Marked(candidate) => candidate
-                    .paragraphs
-                    .into_iter()
-                    .map(|p| (p.id, p.text))
-                    .collect::<Vec<_>>(),
+                super::ApprovedTarget::Marked(_) => {
+                    return Err(invalid(
+                        "原件回填不能保留译文文学标记；请改用 HTML 成稿，不能静默删除标记",
+                    ));
+                }
             };
             if paragraphs.len() != block.paragraphs.len() {
                 return Err(invalid(format!(
