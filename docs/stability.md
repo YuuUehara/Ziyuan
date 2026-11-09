@@ -146,11 +146,11 @@
 - **发送的材料副本不改历史**：在旧 `abridge`（历史节略）之后，仅把本次运行中较早的、参数及完整返回字节均相同的成功 `read_file`（读取文件）输出替换成更短提示，保留最新完整副本及工具调用／输出配对；不同参数、变化重读、错误和其他工具保持原样，不把替换写回原始历史。不改变既有节略策略，本地固定 HTTP 场景的字节测量不外推真实 token、费率或小说收益。
 - **人工控制不变**：不减少词义核对、朱批、审校、手工分批，不增加定稿门槛或自动下一块；账本与请求体字节证据不能代替人工复核、文学质量或人工用时记录。
 
-## 开发中：人工译稿流程（未发布）
+## 人工译稿流程
 
-本批新增事件 `HumanTranslationApproved`（编码 `HUMANAPPROVED`），最低读取版本为预留的 `1.5.0-dev.2`（`RELEASES` 序号 25），会典标签随之为 `human-approvals-v1`。包版本仍为 1.4.1，该读本尚未发布；旧版打开含此事件的事件簿会拒绝并提示升级，`ziyuan migrate` 会指出首个要求新读本的事件。人工译稿入口当时只在命令行开放（Web 已于 N0 第 22.31 节开放，TUI 未开）。详见 [N0 第 22.2 节](novel-workbench-n0.md#222-本批-n1a-2c-1人工准奏事实内部契约)。
+人工译稿的 CLI 与 Web 入口已随后续版本发布；TUI 仍未接。新增事件 `HumanTranslationApproved`（编码 `HUMANAPPROVED`），最低读取版本为预留的 `1.5.0-dev.2`（`RELEASES` 序号 25），会典标签随之为 `human-approvals-v1`。含该事件的事件簿由当前版本读取；1.4.1 等旧二进制会拒绝并提示升级，`ziyuan migrate` 会指出首个要求新读本的事件。详见 [N0 第 22.2 节](novel-workbench-n0.md#222-本批-n1a-2c-1人工准奏事实内部契约)。
 
-应用层来源解析与状态页已能识别人工准奏；人工定稿事件已入簿并回放到签押，应用层持锁定稿 API 也已接通；Markdown 已能无损写出 ruby／粗体／斜体；着重点与同范围叠加仍拒绝。人工定稿可显示只读状态并进入本地记忆（来源标为人工，索引格式升第二版）；1.4.1 旧二进制对新事件与第二版恢复记录实测拒绝并提示升级。CLI 六个命令（`text human show`／`save`／`submit`／`approve`／`finalize`／`apply`）已开：`approve` 即准奏并落盘，自带第二版恢复记录，`apply` 只作只读核对。网页除显示 `human_approved`／`human_finalized`／`human_stale` 三种人工状态外，已开人工入口：`/api/text/{项目}/blocks/{块}/human`（查看）与 `…/human/draft｜submit｜approve｜finalize`（写），以及 `/api/text/{项目}/human/progress`；接口形状与静态模块 `/assets/editor-core.mjs`、`/assets/human-editor.mjs` 都属开发中，1.5.0 发布前可改。观政只读（四个写接口 403）是已冻结的安全约束。两份模块即界面与 `node --test` 共用的源码，改动须同时跑 Node 单测。TUI 入口未接，开放前仍须完成停写确认清单。详见 [N0 第 22.31 节](novel-workbench-n0.md#2231-本批web-人工译稿接口与标记编辑器)。
+应用层来源解析与状态页已能识别人工准奏；人工定稿事件已入簿并回放到签押，应用层持锁定稿 API 也已接通；Markdown 已能无损写出 ruby／粗体／斜体；着重点与同范围叠加仍拒绝。人工定稿可显示只读状态并进入本地记忆（来源标为人工，索引格式升第二版）；1.4.1 旧二进制对新事件与第二版恢复记录实测拒绝并提示升级。CLI 六个命令（`text human show`／`save`／`submit`／`approve`／`finalize`／`apply`）已开：`approve` 即准奏并落盘，自带第二版恢复记录，`apply` 只作只读核对。网页除显示 `human_approved`／`human_finalized`／`human_stale` 三种人工状态外，已开人工入口：`/api/text/{项目}/blocks/{块}/human`（查看）与 `…/human/draft｜submit｜approve｜finalize`（写），以及 `/api/text/{项目}/human/progress`；接口形状与静态模块 `/assets/editor-core.mjs`、`/assets/human-editor.mjs` 属内部 Web 接口，按页面与 `/api/*` 不冻结处理。观政只读（四个写接口 403）是已冻结的安全约束。两份模块即界面与 `node --test` 共用的源码，改动须同时跑 Node 单测。TUI 入口未接，开放前仍须完成停写确认清单。详见 [N0 第 22.31 节](novel-workbench-n0.md#2231-本批web-人工译稿接口与标记编辑器)。
 
 同批固定了译稿第二版（`zh-json/2`）的只读表示：含注音／着重等标记的译稿不再按纯文本读取，纯文本第一版字节不变；带标记稿已可按 `--format md` 无损导出，着重点与同范围叠加仍整批拒绝，详见 [N0 第 22.3 节](novel-workbench-n0.md#223-本批-n1a-2c-2批准目标表示内部契约)。
 
