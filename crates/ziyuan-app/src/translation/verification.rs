@@ -1,4 +1,6 @@
 //! Operator-owned lexical evidence and semantic checklists; never model input or signoff gates.
+mod hints;
+
 use super::{Result, Translations, find_block, invalid, sha256_hex};
 use crate::text_project::PromptBlock;
 use serde::{Deserialize, Serialize};
@@ -464,100 +466,18 @@ impl Translations {
                 }
             })
             .collect();
-        let mut hints = Vec::new();
-        if let (Some(context), Some(target)) = (&material.context, &material.translation) {
-            let applicable_rules = if associations.is_empty() {
-                None
-            } else {
-                let project_file = self.project(project)?;
-                let report = crate::translation::visibility::evaluate_context_visibility(
-                    &project_file,
+        let hints =
+            if let (Some(context), Some(target)) = (&material.context, &material.translation) {
+                hints::glossary_hints(
+                    &self.project(project)?,
                     &context.glossary,
-                    block,
+                    &material.source,
+                    target,
                     associations,
-                )?;
-                Some(
-                    report
-                        .applicable
-                        .address_rules
-                        .into_iter()
-                        .map(|r| (r.person_id, r.rule_index))
-                        .collect::<std::collections::HashSet<_>>(),
-                )
+                )?
+            } else {
+                Vec::new()
             };
-            for (source, target) in material.source.paragraphs.iter().zip(&target.paragraphs) {
-                match &context.glossary {
-                    crate::translation::Glossary::Legacy(entries) => {
-                        for entry in entries {
-                            if source.text.contains(&entry.source)
-                                && !entry.allowed.iter().any(|a| target.text.contains(a))
-                            {
-                                hints.push(GlossaryHint { paragraph: source.id.clone(), source: entry.source.clone(), allowed: entry.allowed.clone(), scope: entry.scope.clone(), note: entry.note.clone(),
-                                    message: if entry.scope.is_some() { "原文命中词条而译文未见允许译法；作用范围为自由文本，先人工核对是否适用" } else { "原文命中词条而译文未见允许译法；仅字面提示，不是语义错译判决" }.into() });
-                            }
-                        }
-                    }
-                    crate::translation::Glossary::Structured(data) => {
-                        for term in &data.terms {
-                            if source.text.contains(&term.source)
-                                && !term.allowed.iter().any(|a| target.text.contains(a))
-                            {
-                                hints.push(GlossaryHint {
-                                    paragraph: source.id.clone(),
-                                    source: term.source.clone(),
-                                    allowed: term.allowed.clone(),
-                                    scope: None,
-                                    note: term.note.clone(),
-                                    message: "第二版术语：原文命中而译文未见允许译法；作用范围与可用起点尚未并入勘校，先人工核对".into(),
-                                });
-                            }
-                        }
-                        for person in &data.persons {
-                            let names = std::iter::once(person.name.as_str())
-                                .chain(person.aliases.iter().map(String::as_str))
-                                .collect::<Vec<_>>();
-                            if names.iter().any(|n| source.text.contains(*n))
-                                && !names.iter().any(|n| target.text.contains(*n))
-                            {
-                                hints.push(GlossaryHint {
-                                    paragraph: source.id.clone(),
-                                    source: person.name.clone(),
-                                    allowed: names.iter().map(|n| (*n).to_owned()).collect(),
-                                    scope: None,
-                                    note: Some(person.reading.clone().unwrap_or_default()).filter(|s| !s.is_empty()),
-                                    message: "第二版人物：原文出现人物名或别名而译文未见该名；称谓条件、范围与可用起点尚未核，先人工核对".into(),
-                                });
-                            }
-                        }
-                        for person in &data.persons {
-                            for (rule_index, rule) in person.address_rules.iter().enumerate() {
-                                if let Some(set) = &applicable_rules
-                                    && !set.contains(&(person.person_id.clone(), rule_index))
-                                {
-                                    continue;
-                                }
-                                let Some(term) = data.terms.iter().find(|t| t.term_id == rule.term)
-                                else {
-                                    continue;
-                                };
-                                if source.text.contains(&term.source)
-                                    && !term.allowed.iter().any(|a| target.text.contains(a))
-                                {
-                                    hints.push(GlossaryHint {
-                                        paragraph: source.id.clone(),
-                                        source: term.source.clone(),
-                                        allowed: term.allowed.clone(),
-                                        scope: None,
-                                        note: rule.note.clone(),
-                                        message: format!("第二版称谓：原文命中称谓术语而译文未见允许译法；条件（说话人 {:?}，对象 {}）尚未核，先人工核对", rule.speaker, rule.target),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         if self.verification_materials(court, project, block)?.snapshot != material.snapshot {
             return Err(invalid("资料在读取期间变化，请重试"));
         }
@@ -696,38 +616,24 @@ impl Translations {
                         }
                     }
                 }
-                crate::translation::Glossary::Structured(data) => {
-                    for term in &data.terms {
-                        for (source_para, target_para) in source.iter().zip(target) {
-                            if source_para.text.contains(&term.source)
-                                && !term.allowed.iter().any(|a| target_para.text.contains(a))
-                            {
-                                issues.push(QaIssue {
-                                    paragraph: source_para.id.clone(),
-                                    code: "term_inconsistent",
-                                    message: format!("术语「{}」没有使用允许译法。", term.source),
-                                });
-                            }
-                        }
-                    }
-                    for person in &data.persons {
-                        let names: Vec<&str> = std::iter::once(person.name.as_str())
-                            .chain(person.aliases.iter().map(String::as_str))
-                            .collect();
-                        for (source_para, target_para) in source.iter().zip(target) {
-                            if names.iter().any(|n| source_para.text.contains(*n))
-                                && !names.iter().any(|n| target_para.text.contains(*n))
-                            {
-                                issues.push(QaIssue {
-                                    paragraph: source_para.id.clone(),
-                                    code: "person_inconsistent",
-                                    message: format!(
-                                        "人物「{}」的姓名或别名未在译文中出现。",
-                                        person.name
-                                    ),
-                                });
-                            }
-                        }
+                crate::translation::Glossary::Structured(_) => {
+                    // QA has no explicit person/speaker associations. The shared
+                    // evaluator therefore yields standalone term hints only.
+                    for hint in hints::glossary_hints(
+                        &self.project(project)?,
+                        &context.glossary,
+                        &material.source,
+                        translation,
+                        &[],
+                    )? {
+                        issues.push(QaIssue {
+                            paragraph: hint.paragraph,
+                            code: "term_inconsistent",
+                            message: format!(
+                                "术语「{}」未见允许译法。{}",
+                                hint.source, hint.message
+                            ),
+                        });
                     }
                 }
             }

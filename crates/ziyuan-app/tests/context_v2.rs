@@ -7,6 +7,9 @@ use ziyuan_app::notes::{NewNote, NoteKind, Notes};
 use ziyuan_app::text_project::{NewProject, Project, Provenance, TextProjects};
 use ziyuan_app::translation::{Translations, context_dir_rel};
 
+#[path = "context_v2/verification.rs"]
+mod verification;
+
 const V2_PERSON: &str = r#"{"format":2,"terms":[{"term_id":"t-1","source":"勇者","category":"common","allowed":["勇士"],"scope":{"kind":"project"},"evidence":[],"status":"confirmed"}],"persons":[{"person_id":"p_1","name":"勇者","aliases":["勇者大人"],"terms":[],"address_rules":[{"target":"p_1","speaker":{"kind":"person","person_id":"p_1"},"scope":{"kind":"project"},"term":"t-1","evidence":[]}],"voice":{"description":"庄重"},"evidence":[],"status":"confirmed"}]}"#;
 
 const V2: &str = "{\"format\":2,\"terms\":[],\"persons\":[]}\n";
@@ -19,6 +22,9 @@ struct Fx {
 
 impl Fx {
     fn new() -> Self {
+        Self::with_source("勇者は旅立った。\n\n城へ。\n")
+    }
+    fn with_source(body: &str) -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "ziyuan-context-v2-{}-{}",
@@ -36,7 +42,7 @@ impl Fx {
             })
             .unwrap();
         let source = root.join("a.txt");
-        fs::write(&source, "勇者は旅立った。\n\n城へ。\n").unwrap();
+        fs::write(&source, body).unwrap();
         let project = texts.import(&p.id, &[source]).unwrap();
         Self { root, project }
     }
@@ -266,8 +272,9 @@ fn structured_verification_reports_person_and_address_hints() {
     t.export(&f.project.id, f.block()).unwrap();
     let dir = t.block_dir(&f.project.id, f.block());
     fs::write(dir.join("zh.json"), target.serialized().unwrap()).unwrap();
+    let associations = [verification::association(&f, 0)];
     let messages = t
-        .verification(None, &f.project.id, f.block())
+        .verification_with_associations(None, &f.project.id, f.block(), &associations)
         .unwrap()
         .hints
         .into_iter()
