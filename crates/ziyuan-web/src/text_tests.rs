@@ -433,6 +433,8 @@ async fn start(name: &str, found: bool) -> (String, PathBuf) {
     let root = std::env::temp_dir().join(format!("ziyuan-web-text-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
+    // macOS temp_dir() can contain /var; security checks require a physical root.
+    let root = root.canonicalize().unwrap();
     if found {
         Session::found(EventLog::new(&root)).unwrap();
     }

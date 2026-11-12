@@ -21,6 +21,8 @@ impl Fx {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        // Pass a physical fixture path to operations that reject symlink ancestors.
+        let root = root.canonicalize().unwrap();
         let store = TextProjects::new(&root);
         let p = store
             .create(NewProject {

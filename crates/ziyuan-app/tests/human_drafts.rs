@@ -31,6 +31,8 @@ impl Fixture {
             N.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        // macOS temp_dir() can include a system symlink such as /var.
+        let root = root.canonicalize().unwrap();
         let texts = TextProjects::new(&root);
         let project = texts
             .create(NewProject {
