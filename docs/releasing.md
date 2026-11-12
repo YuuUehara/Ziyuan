@@ -1,6 +1,6 @@
 # 发布
 
-本页按 1.13.1 说明如何用标签发布紫垣，以及 crates.io 的发布流程。只描述仓库内已经配置的步骤，不含令牌、密钥或其他凭据；当前发行及注册表进度见 [CHANGELOG](../CHANGELOG.md)。历史首发记录保留在下文，不表示新版本还须重复首发。
+本页按 1.14.0 说明如何用标签发布紫垣，以及 crates.io 的发布流程。只描述仓库内已经配置的步骤，不含令牌、密钥或其他凭据；当前发行及注册表进度见[本版验收记录](acceptance/1.14.0.md)。历史首发记录保留在下文，不表示新版本还须重复首发。
 
 ## 触发条件
 
@@ -8,9 +8,11 @@
 - 带连字符的版本（如 `1.0.0-rc.1`）按预发布处理，不标为 latest。
 - 发布说明取自 `CHANGELOG.md` 中标题为 `## <版本>`（或版本后接空格及说明）的一节；找不到时由 GitHub 自动生成。发版前把该版本一节写进 CHANGELOG。
 
+本仓库用 Jujutsu 管理发布提交。候选提交的 CI 全部通过后，再将新标签指向该提交，例如：
+
 ```bash
-git tag v1.5.3
-git push origin v1.5.3
+jj tag set v1.14.0 -r <已通过检查的候选提交>
+jj git push --remote origin --tag v1.14.0
 ```
 
 以上仅说明标签与版本的对应关系；已存在的标签不得重复创建或覆盖。推送标签会触发 `.github/workflows/release.yml`。不要手工改已公开 Release 的资产来“修”构建问题；有缺陷应发新版本。
@@ -84,6 +86,7 @@ ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-runtime
 
 ## 发布前核对
 
+- 候选提交先推送至 `codex/**`、`work/**` 分支或通过 PR 运行 CI，逐项确认候选 SHA 的检查通过。标签工作流不会等待常规 CI，不能以标签构建成功替代测试验收。
 - `Cargo.toml` 与各 crate 的版本一致，标签与之相符。
 - `release.yml` 的循环已覆盖十一个 crate，`ziyuan-memory` 位于 `ziyuan-app` 之前；新 crate 手工首发成功、注册表版本可查询，且逐 crate 的可信发布配置已核对。新增包的登记由维护者确认，自动上传是否成功仍以实际工作流结果为准。
 - `CHANGELOG.md` 有对应版本的一节，措辞与实际改动一致；未验证的项目照实写在验收记录里。

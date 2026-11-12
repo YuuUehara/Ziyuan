@@ -2,7 +2,7 @@
 
 各版已完成的变化见 [CHANGELOG.md](../CHANGELOG.md)。
 
-**当前已发布 1.13.1。** 1.12.0 加入本地人物／术语资料、段旁提示、生产准备与复核关联；1.13.0 另加译稿三态快照与版本对比、DOCX／EPUB 标记回填、完整术语表字段、本地翻译记忆与审校评论、SRT 导入导出与版本清理；1.13.1 补 Web 新建项目入口并收紧界面文案。证据见 [1.13.0 验收记录](acceptance/1.13.0.md)与 [1.13.1 验收记录](acceptance/1.13.1.md)。版本变化见 [CHANGELOG](../CHANGELOG.md)，当前发布版以 README 与 CHANGELOG 为准。
+**本源码版本 1.14.0。** 本版补齐完整备份、原文更新、跨章待查、通读与 HTML 交稿、全文检索／草稿替换及 TMX 交换，验证和发行进度见 [1.14.0 验收记录](acceptance/1.14.0.md)。既有版本快照、DOCX／EPUB 回填、记忆与评论、SRT 及 Web 新建项目的历史结果见 [1.13.0](acceptance/1.13.0.md)与 [1.13.1](acceptance/1.13.1.md)。版本变化见 [CHANGELOG](../CHANGELOG.md)，已公开版本以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。
 
 以下 1.4.0／1.4.1 段落与更早的分批计划保留为历史记录，不再是当前排期或能力声明；当前发布版以 README 与 CHANGELOG 为准。
 

@@ -1,8 +1,8 @@
 # 文档目录
 
-当前已发布 **1.13.1**。本版新增译稿三态快照与版本对比、DOCX／EPUB 标记回填、完整术语表字段、本地翻译记忆与审校评论、SRT 导入导出、版本清理，以及 Web 新建项目入口；详见[文本项目指南](text-projects.md#113译稿版本与格式回填)。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录在 [验收记录](#验收记录)，只记录当时实际做过的检查。
+本文档对应 **1.14.0** 源码，涵盖完整备份、原文更新、跨章待查、通读交稿、全文检索／草稿替换及 TMX 交换。发布与验证进度见 [1.14.0 验收记录](acceptance/1.14.0.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
 
-源码新增能力见[翻译定型补齐（源码）](translation-continuity.md)：备份与恢复、原文更新、跨章待查、通读交稿、全文检索／草稿替换及记忆交换；发布包能力仍以版本记录为准。
+连续翻译操作与支持边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)；既有译稿版本、文档回填和人工译稿操作见[文本项目指南](text-projects.md)。
 
 ## 使用
 
