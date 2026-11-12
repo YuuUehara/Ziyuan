@@ -234,6 +234,13 @@ pub(crate) async fn export(
         }
         chapters
     };
+    if matches!(&query.kind, ExportKind::Original)
+        && (query.format != ExportFormat::Txt || query.layout != ExportLayout::Chapters)
+    {
+        return Err(ApiError::bad(
+            "原件按归档字节导出，不接受成稿格式或排版选项",
+        ));
+    }
     let options = ExportOptions {
         chapters,
         format: query.format,

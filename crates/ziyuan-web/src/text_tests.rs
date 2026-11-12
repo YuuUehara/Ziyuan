@@ -389,7 +389,7 @@ async fn export_read_only_originals_strict_queries_and_safe_errors() {
     assert!(!preview.to_string().contains(root.to_str().unwrap()));
     for query in [
         "kind=nope",
-        "format=html",
+        "format=pdf",
         "layout=flat",
         "unknown=true",
         "preview=yes",
@@ -2623,5 +2623,59 @@ async fn continuity_updates_issues_and_readonly_delivery_share_application_contr
     assert_eq!(status, 200, "{report}");
     assert_eq!(report["export_ready"], false);
     assert_eq!(report["open_issues"], 1);
+    fs::remove_dir_all(root).unwrap();
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_document_import_requires_owner_and_export_requires_signoff() {
+    let (base, root) = start("binary-document", false).await;
+    let p = ziyuan_app::text_project::TextProjects::new(&root)
+        .create(ziyuan_app::text_project::NewProject {
+            title: "字幕样本".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Default::default(),
+        })
+        .unwrap();
+    let path = format!("/text/{}/document/import?format=srt", p.id);
+    let post = |token: &str| {
+        let url = format!("{base}/api{path}");
+        let token = token.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            agent
+                .post(&url)
+                .header("Authorization", &format!("Bearer {token}"))
+                .send("1\n00:00:01,000 --> 00:00:02,000\n自编字幕。\n".as_bytes())
+                .unwrap()
+                .status()
+                .as_u16()
+        })
+    };
+    assert_eq!(post(VIEWER).await.unwrap(), 403);
+    assert_eq!(post(TOKEN).await.unwrap(), 200);
+    assert_eq!(post(TOKEN).await.unwrap(), 400);
+    let (status, reading) = call(
+        &base,
+        &format!("/text/{}/reading", p.id),
+        Some(VIEWER),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(reading["paragraphs"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        call(
+            &base,
+            &format!("/text/{}/document/export?format=srt", p.id),
+            Some(TOKEN),
+            None
+        )
+        .await
+        .0,
+        400
+    );
     fs::remove_dir_all(root).unwrap();
 }

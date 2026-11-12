@@ -86,3 +86,15 @@ ziyuan text preflight <项目ID> --format html --chapter c0001
 网页「文档与字幕」可向空项目导入 DOCX、EPUB 或 SRT，导入前须选择对应格式并确认。原件上限 16 MiB。导出使用有效定稿；目标格式无法保留译文标记时拒绝，避免下载看似成功却丢失标记。需要保留完整译文标记时，在原成稿导出入口选择 HTML。
 
 HTML 成稿是可离线打开的正文文件，保留译文注音、着重、粗斜体和同范围叠加样式。它不承诺照搬原 DOCX／EPUB 的分页、脚注或浮动对象；原排版仍保存在归档原件中。
+
+## 命令行检索与记忆交换
+
+```text
+ziyuan text search <项目ID> 片段 --scope all
+ziyuan text search <项目ID> 片段 --scope draft
+ziyuan text tmx export <项目ID> --output memory.tmx
+ziyuan text tmx preview <项目ID> memory.tmx
+ziyuan text tmx import <项目ID> memory.tmx --confirm <预览指纹>
+```
+
+检索范围可选 `all`、`source`、`translation`、`draft`、`history`，最多返回200处，结果截断时须缩小范围。命令行草稿替换用 `text draft-replace <项目ID> request.json`：请求含 `block`、`paragraph`、`from`、`to`；默认只预览，确认时补上预览返回的 `fingerprint` 与 `confirm: true`。替换只针对该段，不能修改批准稿；文学标记相交时须回编辑器手工核对。

@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 use ziyuan_app::translation::{Translations, inspect_backup, restore_backup};
-pub(crate) const HELP: &str = "text backup [--output <新文件.tar>]：预览或导出全部译书项目与共用审批历史（不含凭据）；text restore <备份.tar> <新目录> [--yes]：默认校验预览，加 --yes 恢复。text source-update <项目> <原文.txt> [--chapter <章>] [--confirm <指纹>]；text issue list|add|review；text read <项目> [--chapter <章>]；text preflight <项目> [--format txt|md] [--chapter <章>]";
+pub(crate) const HELP: &str = "text backup [--output <新文件.tar>]：预览或导出全部译书项目与共用审批历史（不含凭据）；text restore <备份.tar> <新目录> [--yes]：默认校验预览，加 --yes 恢复。text source-update <项目> <原文.txt> [--chapter <章>] [--confirm <指纹>]；text issue list|add|review；text read <项目> [--chapter <章>]；text preflight <项目> [--format txt|md|html] [--chapter <章>]";
 pub(crate) enum Action {
     Tmx(String, String, Option<PathBuf>, Option<String>),
     Search(String, String, String),
@@ -58,12 +58,13 @@ pub(crate) fn parse(action: &str, rest: &[String]) -> Result<Action, Box<dyn Err
                             "txt" => ziyuan_app::translation::ExportFormat::Txt,
                             "md" | "markdown" => ziyuan_app::translation::ExportFormat::Markdown,
                             "html" => ziyuan_app::translation::ExportFormat::Html,
-                            _ => return Err("预检格式仅支持txt/md".into()),
+                            _ => return Err("预检格式仅支持txt/md/html".into()),
                         }
                     }
                     _ => {
                         return Err(
-                            "用法: text preflight <项目> [--chapter <章>] [--format txt|md]".into(),
+                            "用法: text preflight <项目> [--chapter <章>] [--format txt|md|html]"
+                                .into(),
                         );
                     }
                 }

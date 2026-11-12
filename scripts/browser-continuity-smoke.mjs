@@ -94,6 +94,17 @@ try {
   await waitJs("document.querySelector('#continuity-reader [data-report]').textContent.includes('暂不能导出')",20000,"交稿门槛");
   await evaluate("(() => {const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='备份与恢复');d.open=true;d.querySelector('[data-preview]').click();})()");
   await waitJs("[...document.querySelectorAll('details')].some(d=>d.querySelector('[data-download]')?.disabled===false)",20000,"备份预览");
+
+  await evaluate("(async()=>{const b='/text/'+textProjectId+'/blocks/'+textBlockId+'/human/draft';const v=await api(b.replace('/human/draft','/human'));const r=await api('/text/'+textProjectId+'/reading');await api(b,{request_id:'browser-'+crypto.randomUUID(),expected_revision:v.draft?.revision||null,basis:v.basis,paragraphs:r.paragraphs.filter(p=>p.block===textBlockId).map((p,i)=>({id:p.paragraph,text:i===0?'旧译词':'夜晚。',marks:[]}))});const d=document.querySelector('#continuity-search');d.open=true;d.querySelector('[data-query]').value='旧译词';d.querySelector('[data-scope]').value='draft';d.querySelector('[data-search]').click();})()");
+  await waitJs("document.querySelector('#continuity-search [data-results]').textContent.includes('旧译词')",20000,"草稿检索");
+  await evaluate("(()=>{const d=document.querySelector('#continuity-search'),i=d.querySelector('[aria-label=替换文字]');i.value='新译词';i.dispatchEvent(new Event('input'));[...d.querySelectorAll('button')].find(b=>b.textContent==='预览本段替换').click();})()");
+  await waitJs("[...document.querySelectorAll('#continuity-search button')].some(b=>b.textContent==='确认保存草稿'&&!b.disabled)",20000,"替换预览");
+  await evaluate("[...document.querySelectorAll('#continuity-search button')].find(b=>b.textContent==='确认保存草稿').click()");
+  await waitJs("document.querySelector('#continuity-search [data-status]').textContent.includes('已保存人工草稿')",20000,"仅保存草稿");
+  await evaluate("(async()=>{await api('/text/'+textProjectId+'/tm',{source:'ブラウザ試験',target:'浏览器试验'});const response=await fetch('api/text/'+textProjectId+'/tmx/export');if(!response.ok)throw new Error('TMX导出失败');const xml=(await response.text()).replaceAll('ブラウザ試験','別の表現');const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='翻译记忆交换');d.open=true;const dt=new DataTransfer();dt.items.add(new File([xml],'sample.tmx',{type:'application/xml'}));d.querySelector('[data-file]').files=dt.files;d.querySelector('[data-file]').dispatchEvent(new Event('change'));d.querySelector('[data-preview]').click();})()");
+  await waitJs("[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='翻译记忆交换')?.querySelector('[data-import]')?.disabled===false",20000,"TMX预览");
+  await evaluate("[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='翻译记忆交换').querySelector('[data-import]').click()");
+  await waitJs("[...document.querySelectorAll('details')].some(d=>d.querySelector('[data-status]')?.textContent.includes('已合并'))",20000,"TMX合并");
   await evaluate("document.querySelector('#continuity-reader').scrollIntoView({block:'start'})");
   fs.writeFileSync(out,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));
   await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});await sleep(300);

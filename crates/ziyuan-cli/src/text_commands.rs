@@ -43,7 +43,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
   ziyuan text usage <项目ID>           只读汇总四阶段用量记录、状态与分币种估价；需已有朝廷，不调用模型
                                        缺失用量为未知；用量记录和工具调用不是 HTTP 请求数，估价不是账单
                                        未设本件预算不等于免费，也不取消朝廷或官员限额
-  ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md]
+  ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html]
                             [--layout chapters|book] [--output <new.tar>]
                                        导出有效定稿，默认 TXT、按章；缺块或失效则整批拒绝，需要朝廷
   ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]
@@ -166,7 +166,7 @@ const HUMAN_APPROVE_USAGE: &str =
 const HUMAN_FINALIZE_USAGE: &str = "用法: ziyuan text human finalize <项目ID> <块ID> [--json]（只记定稿事实；要求磁盘已是准奏目标）";
 const HUMAN_APPLY_USAGE: &str =
     "用法: ziyuan text human apply <项目ID> <块ID> [--json]（只读核对准奏时已落盘的 zh.json）";
-const EXPORT_FINISHED_USAGE: &str = "用法: ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md] [--layout chapters|book] [--output <new.tar>]";
+const EXPORT_FINISHED_USAGE: &str = "用法: ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html] [--layout chapters|book] [--output <new.tar>]";
 const EXPORT_ORIGINALS_USAGE: &str =
     "用法: ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]";
 const CHECK_USAGE: &str =

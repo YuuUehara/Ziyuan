@@ -1119,7 +1119,7 @@ fn export_usage_is_strict_and_finished_requires_court() {
             vec!["p", "--output", ""],
             vec!["p", "--output", "a", "--output", "b"],
             vec!["p", "extra"],
-            vec!["p", "--format", "html"],
+            vec!["p", "--format", "pdf"],
             vec!["p", "--layout", "wrong"],
             vec!["p", "--format", "txt", "--format", "md"],
             vec!["p", "--layout", "chapters", "--layout", "book"],
