@@ -350,8 +350,10 @@
   }
   textarea { min-height: 96px; resize: vertical; font-family: var(--serif); font-size: 15px; }
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--line-strong); box-shadow: 0 0 0 3px var(--tint); }
-  .row { display: flex; gap: 8px; align-items: center; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row > * { flex: 1; }
+  .row > input:not([type=checkbox]), .row > select { flex: 1 1 160px; min-width: 0; }
+  #recommend-office { flex-basis: 240px; }
   .row > .shrink { flex: 0 0 auto; width: auto; }
   .checks { display: flex; gap: 6px 14px; flex-wrap: wrap; }
   .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); font-size: 13px; font-family: var(--mono); }
@@ -650,6 +652,7 @@
   #text-card .continuity-tools input, #text-card .continuity-tools select { min-width:0; max-width:100%; box-sizing:border-box; }
   #text-card .continuity-tools p { white-space:pre-wrap; overflow-wrap:anywhere; }
   #text-card .continuity-tools button { max-width:100%; overflow-wrap:anywhere; }
+  #text-card .continuity-tools .row > button { flex:0 1 auto; white-space:normal; }
   .continuity-change { border-top:1px solid var(--line); padding:12px 0; }
   .continuity-history { border-left:2px solid var(--line); margin:10px 0; padding-left:12px; }
   .continuity-columns, #continuity-reader .reading-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
@@ -680,7 +683,7 @@
 </header>
 
 <div class="court">
-  <nav class="halls" aria-label="三殿">
+  <nav class="halls" aria-label="殿阁">
     <a href="#fengtian" data-hall="fengtian"><b>奉天殿</b><span>诏令</span><i id="hall-badge-fengtian" hidden></i></a>
     <a href="#huagai" data-hall="huagai"><b>华盖殿</b><span>朝堂</span><i id="hall-badge-huagai" hidden></i></a>
     <a href="#wenhua" data-hall="wenhua"><b>文华殿</b><span>百官</span></a>
@@ -701,7 +704,7 @@
         </div>
         <div class="edict-detail">
       <section class="card write" id="edict-sheet" hidden>
-        <h2>下诏 <small>皇帝颁布诏令</small><button type="button" class="small spacer" id="edict-close" data-view>收起</button></h2>
+        <h2>下诏 <small>交代任务与可用权限</small><button type="button" class="small spacer" id="edict-close" data-view>收起</button></h2>
         <form class="body" id="edict-form">
           <label for="edict-template">翰林院模板 <span>（选后填入内容与玉玺，可再改）</span></label>
           <select id="edict-template" data-keep></select>
@@ -927,7 +930,7 @@
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section class="text-materials" id="text-versions" aria-label="译稿版本快照">
               <h3>译稿版本 <small class="hint">三态自动留存；只读对比</small></h3>
-              <p class="hint">保存草稿、准奏、定稿各留一份；自动快照每态留最新 3 份，手工快照不自动删。只在本地，不批准、不外发。</p>
+              <p class="hint">保存草稿、准奏和定稿时会留下版本记录，各保留最近 3 份；手工保存的版本不会自动删除。版本记录只供本地查阅，不代替准奏。</p>
               <div class="actions">
                 <label class="hint" for="version-list">快照</label>
                 <select id="version-list" data-keep></select>
@@ -936,7 +939,7 @@
                 <button class="small" id="version-save" type="button">保存当前快照</button>
                 <button class="small" id="version-prune" type="button">清理旧快照</button>
               </div>
-              <p class="hint" id="version-status" role="status" aria-live="polite">选一个块后列出快照。</p>
+              <p class="hint" id="version-status" role="status" aria-live="polite">选中一块译文后，可查看它的版本记录。</p>
               <div id="version-diff" class="materials-report" aria-live="polite"></div>
             </section>
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
@@ -959,7 +962,7 @@
                   <li>点「新增术语」或「新增人物」，填名称和译法；不确定的字段留空。</li>
                   <li>点「保存草稿」；保存不等于批准。</li>
                   <li>点「校验」，通过后点「准备生产资料」。</li>
-                  <li>准备仍不是批准；批准可在译书操作区点「批准上下文」，或运行 `ziyuan text context approve`。</li>
+                  <li>准备好后，仍须在译书操作区点「批准上下文」。熟悉命令行时也可运行 ziyuan text context approve。</li>
                 </ol>
               </details>
               <div class="actions">
@@ -985,7 +988,7 @@
               </div>
               <p class="hint" id="materials-states" aria-live="polite">
                 <span id="materials-save-state">服务器：未载入</span> ·
-                <span id="materials-session-state">会话暂存：—</span> ·
+                <span id="materials-session-state">页面暂存：—</span> ·
                 <span id="materials-validate-state">校验：未校验</span>
               </p>
               <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（隐藏范围、证据、称谓等高级字段）</label></p>
@@ -997,7 +1000,7 @@
               <div id="materials-comment-result" class="materials-report" aria-live="polite"></div>
               <div class="row"><textarea id="materials-comment-text" data-keep rows="2" placeholder="针对当前块的评论（不修改译稿）"></textarea><button class="small" id="materials-comment-add" type="button">添加评论</button></div>
               <div class="actions">
-                <button class="small" id="materials-restore" type="button" hidden>恢复会话暂存</button>
+                <button class="small" id="materials-restore" type="button" hidden>恢复页面暂存</button>
                 <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
               </div>
               <ul class="text-problems" id="materials-issues" aria-live="polite"></ul>
@@ -1129,7 +1132,7 @@
     <h2 id="schedule-title">御定排程</h2>
     <div class="schedule-content">
       <p class="hint">分为 2–8 件。依赖填此表节点序号（如 1,2），不是诏令 ID；写任务自动补齐串行依赖。前件改动须准奏，后件才开工。</p>
-      <p class="hint">提交后排程不可改写；失败不自动重试。幂等键只标识本批节点与方案重试，不保证任意外部工具去重。</p>
+      <p class="hint">提交后不能修改这份分办安排，失败也不会自动重试。重试时沿用本批标识可避免重复登记；外部工具是否会重复执行，仍须另行确认。</p>
       <div id="schedule-nodes"></div>
       <p id="schedule-error" role="alert"></p>
     </div>
@@ -1609,7 +1612,7 @@ async function loadMaterialsView() {
     renderMaterialsAssociations();
     renderMaterialsState();
     setMaterialState("save", view.draft ? "服务器：已载入" : "服务器：无草稿");
-    setMaterialState("session", materialsEditor.recovery() ? "会话暂存：有" : "会话暂存：无");
+    setMaterialState("session", materialsEditor.recovery() ? "页面暂存：有" : "页面暂存：无");
     if (!view.draft) {
       $("materials-status").textContent = "尚无本地资料草稿。第一次使用：1) 新增一条术语或人物；2）保存草稿；3）准备生产资料（准备不是批准）。";
     }
@@ -1647,8 +1650,8 @@ $("materials-validate")?.addEventListener("click", async () => {
     }
     setMaterialState("validate", issues.length ? "校验：未通过（" + issues.length + " 处）" : "校验：通过（非批准）");
     $("materials-status").textContent = issues.length
-      ? "校验未通过（" + issues.length + " 处）；未通过不是批准，也不会自动修改资料。"
-      : "校验通过；通过仍不是批准，保存也不授予批准。";
+      ? "校验未通过（" + issues.length + " 处），请按提示修改后重新校验。"
+      : "校验通过。请保存草稿、准备资料，再由你单独批准。";
   } catch (e) {
     $("materials-status").textContent = "校验失败：" + materialAdvice(e.body?.error || e.message);
   }
@@ -1900,24 +1903,24 @@ function renderMaterialsState() {
   const bits = [];
   bits.push("服务器修订：" + (state.revision ? state.revision.slice(0, 12) + "…" : "无草稿"));
   bits.push("本地未保存：" + (state.dirty ? "是" : "否"));
-  if (state.mirrorError) bits.push("会话暂存不可用");
+  if (state.mirrorError) bits.push("页面暂存不可用");
   const recovery = materialsEditor?.recovery?.();
-  if (recovery) bits.push("有会话暂存可恢复");
+  if (recovery) bits.push("有页面暂存可恢复");
   $("materials-status").textContent = bits.join("｜");
 }
 $("materials-restore")?.addEventListener("click", () => {
-  if (!materialsEditor?.restoreRecovery()) { $("materials-status").textContent = "没有可恢复的会话暂存。"; return; }
+  if (!materialsEditor?.restoreRecovery()) { $("materials-status").textContent = "没有可恢复的页面暂存。"; return; }
   hideMaterialsRecovery();
   renderMaterialsState();
-  setMaterialState("session", "会话暂存：已恢复");
-  $("materials-status").textContent = "已恢复会话暂存（未保存、未批准）；请核对后保存。";
+  setMaterialState("session", "页面暂存：已恢复");
+  $("materials-status").textContent = "已恢复页面暂存（未保存、未批准）；请核对后保存。";
 });
 $("materials-discard")?.addEventListener("click", async () => {
   if (!materialsEditor) return;
   materialsEditor.discardLocal();
   hideMaterialsRecovery();
   await loadMaterialsView();
-  setMaterialState("session", "会话暂存：已放弃本地");
+  setMaterialState("session", "页面暂存：已放弃本地");
   $("materials-status").textContent = "已放弃本地改动并载入服务器版本（未批准）；如仍需旧输入，请从复制恢复 JSON 取回。";
 });
 let materialsAssoc = new Map();
@@ -2378,7 +2381,7 @@ function renderImport() {
       const rubyCount = (c.paragraphs || []).reduce((n, para) => n + (para.inlines || []).filter((i) => i.kind === "ruby").length, 0);
       return `<div class="text-material"><label>章 ${i + 1} 标题 <input type="text" data-import-title="${i}" value="${esc(d.titles[i] ?? p.title ?? c.source_name)}" ${disabled}></label><p>${esc(c.source_name)} · ${esc(p.format)} · 字节 [${esc(p.byte_start)}, ${esc(p.byte_end)}) · ${(c.paragraphs || []).length} 段 · ${(c.blocks || []).length} 块 · ${rubyCount} 处注音 · ${(p.warnings || []).length} 条警告</p>${(p.warnings || []).map((w) => `<p class="hint">警告 [${esc(w.byte_start)}, ${esc(w.byte_end)})：${esc(w.message)}</p>`).join("")}${(c.paragraphs || []).map((p) => `<p class="text-para">${sourceInlineHtml(p)}</p>`).join("")}</div>`;
     }).join("") : ""}</div>
-    <button type="button" id="import-confirm" ${d.busy || !d.preview || d.dirty ? "disabled" : ""}>确认以上精确预览并导入一次</button>`;
+    <button type="button" id="import-confirm" ${d.busy || !d.preview || d.dirty ? "disabled" : ""}>确认预览并导入</button>`;
   if (files) {
     files.disabled = d.busy;
     $("import-files").replaceWith(files);
@@ -2802,7 +2805,7 @@ async function loadTextVersions() {
     textVersions = [];
     list.innerHTML = "";
     list.disabled = true;
-    status.textContent = "选一个块后列出快照。";
+    status.textContent = "选中一块译文后，可查看它的版本记录。";
     diff.replaceChildren();
     renderVersionButtons();
     return;
@@ -4136,7 +4139,7 @@ function addScheduleNode() {
       <label>期限（本地时间）<input name="deadline" type="datetime-local" step="1"></label>
       <label>度支（tokens）<input name="budget" type="number" min="1" step="1" placeholder="沿用上级限额"></label>
       <label>约定产出<input name="artifact" type="text" placeholder="如 docs/report.md"></label>
-      <label>节点幂等键<input name="idempotency_key" type="text" placeholder="可选；本批内唯一"></label>
+      <label>本件重试标识<input name="idempotency_key" type="text" placeholder="可选；本批内唯一"></label>
     </div>
     <label class="check"><input name="approval_required" type="checkbox">内阁制下另行批红</label>
   </fieldset>`);

@@ -1,6 +1,8 @@
 # 文档目录
 
-本文档对应 **1.14.1** 源码，涵盖完整备份、原文更新、跨章待查、通读交稿、全文检索／草稿替换及 TMX 交换；1.14.1 补齐网页章节导出的 HTML 选项，并校正成稿说明与命令帮助。发布与验证进度见 [1.14.1 验收记录](acceptance/1.14.1.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
+本文档对应 **1.14.1** 源码。初次使用先看[使用指南](guide.md)，译书操作看[文本项目指南](text-projects.md)和[小说翻译指南](novel-translation.md)。本版补齐网页章节导出的 HTML 选项，并校正文案与命令帮助。
+
+发布与验证进度见 [1.14.1 验收记录](acceptance/1.14.1.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
 
 连续翻译操作与支持边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)；既有译稿版本、文档回填和人工译稿操作见[文本项目指南](text-projects.md)。
 
@@ -9,7 +11,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [使用指南](guide.md) | 命令、Web、终端界面和常见操作 |
-| [文本整理与检查](text-projects.md) | 导入原文、分块、检查候选译稿 |
+| [文本整理与检查](text-projects.md) | 导入原文、编辑人工译稿、检查并导出成稿 |
+| [连续翻译与交稿](translation-continuity.md) | 备份与恢复、更新原文、跨章待查、通读、检索替换及记忆交换 |
 | [作品更新提醒](subscriptions.md) | 关注 syosetu 作品、检查新章节 |
 | [小说翻译指南](novel-translation.md) | 逐块初译、审校、朱批、修订与御览 |
 | [译文记忆](memory.md) | 本地建库、查询与人工选用参考 |
@@ -29,7 +32,7 @@
 
 ## 验收记录（历史归档）
 
-每份只记录当时实际做过的检查和未测项目，不代表当前版本。
+每份只记录当时实际做过的检查和未测项目。最新一份可能仍在验收，是否已公开发行请看记录中的状态；历史版本的结果不代替当前版本检查。
 
 - [1.14.1](acceptance/1.14.1.md)
 - [1.14.0](acceptance/1.14.0.md)

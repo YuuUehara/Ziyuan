@@ -362,7 +362,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
     const values = valueAt(current(), rel);
     box.append(wrap);
     if (!Array.isArray(values)) {
-      wrap.append(make("p", { className: "hint", textContent: "（不是数组，无法在此编辑）" }));
+      wrap.append(make("p", { className: "hint", textContent: "（这份资料的格式无法在此编辑，请检查导入文件）" }));
       return;
     }
     const pageState = state().pages;
@@ -436,7 +436,7 @@ export function mountMaterialEditor(host, { storage, confirm = globalThis.confir
 
   function idWarning(box) {
     box.append(make("p", { className: "hint warning", dataset: { role: "id-warning" },
-      textContent: "修改 ID 会使其他条目中引用旧 ID 的位置失效；编辑器不会自动更新这些引用。" }));
+      textContent: "修改编号（ID）后，引用旧编号的条目需要逐一更新，编辑器不会代为修改。" }));
   }
 
   function termForm(box) {

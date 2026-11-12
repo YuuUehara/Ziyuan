@@ -15,6 +15,6 @@ test("failed project switch clears old issue state before any mutation",async()=
     await section.querySelector("[data-load]").onclick();project="B";
     await section.querySelector("[data-load]").onclick();
     await section.querySelector("[data-add]").onclick();
-    assert.equal(writes,0);assert.match(section.querySelector("[data-status]").textContent,/重新读取/);
+    assert.equal(writes,0);assert.match(section.querySelector("[data-status]").textContent,/载入当前项目的待查记录/);
   }finally{globalThis.document=original;}
 });

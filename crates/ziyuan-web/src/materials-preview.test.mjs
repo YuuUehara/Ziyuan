@@ -322,7 +322,7 @@ test("range controls use concrete block and paragraph IDs and four-state speaker
   assert.deepEqual(reportEntries(ctx.host, "automatic", "persons").map((node) => node.dataset.id),
     ["woman", "ren-captain", "ren-healer"]);
   const moon = reportEntries(ctx.host, "applicable", "terms").find((node) => node.dataset.id === "moon-lantern");
-  assert.match(moon.textContent, /tentative/);
+  assert.match(moon.textContent, /暂定/);
   assert.match(moon.textContent, /p08, p09/);
   assert.equal(reportEntries(ctx.host, "automatic", "terms").some((node) => node.dataset.id === "moon-lantern"), false);
   assert.equal(Object.hasOwn(ctx.requests[0].associations[0], "speaker"), true);
@@ -461,7 +461,7 @@ test("project hash changes invalidate old reports and invalid responses never re
     results.push(value, response("b03", hex("2")));
     assert.equal(await ctx.preview.run(), false);
     assert.equal(maybeRole(ctx.host, "identity-report"), undefined);
-    assert.match(role(ctx.host, "preview-status").textContent, /无效|不匹配/);
+    assert.match(role(ctx.host, "preview-status").textContent, /与当前输入不一致/);
     assert.equal(await ctx.preview.run(), true, "a valid later response must still render");
     assert.equal(role(ctx.host, "identity-report").dataset.block, "b03");
   }

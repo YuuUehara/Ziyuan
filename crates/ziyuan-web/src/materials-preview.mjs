@@ -78,20 +78,20 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
   });
   const text = (tag, textContent, dataset = {}) => make(tag, { textContent, dataset });
   const root = make("section", { className: "materials-preview", dataset: { role: "materials-preview" } });
-  const localWarning = text("p", "完整本地资料卡仅用于当前编辑；预览不是批准，不会保存资料或拼装提示词。",
+  const localWarning = text("p", "完整本地资料卡供你在当前页面核对；预览不是批准，也不会保存资料或发送给模型。",
     { role: "local-warning" });
   const card = make("pre", { dataset: { role: "material-card" } });
   const blockSelect = make("select", { dataset: { role: "block" } });
   const paragraphs = make("div", { dataset: { role: "paragraphs" } });
   const associationHost = make("div", { dataset: { role: "associations" } });
-  const runButton = text("button", "运行身份预览", { role: "run" });
+  const runButton = text("button", "预览资料适用范围", { role: "run" });
   runButton.type = "button";
   const refreshButton = text("button", "刷新并清空临时关联", { role: "refresh" });
   refreshButton.type = "button";
   const statusNode = make("p", { dataset: { role: "preview-status" } });
   statusNode.setAttribute("role", "status");
   const projectHash = text("p", "", { role: "preview-project-hash" });
-  const previewWarning = text("p", "报告仅绑定本次输入与 project_hash；外部磁盘变化后必须重新核验，不代表持续有效。",
+  const previewWarning = text("p", "报告只对应本次输入。项目文件或资料变化后，请重新载入并预览。",
     { role: "preview-warning" });
   const reportHost = make("div", { dataset: { role: "report-host" } });
   root.append(localWarning, card, blockSelect, paragraphs, associationHost, runButton, refreshButton,
@@ -233,14 +233,17 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
   }
 
   function renderSelection(parent, group, selection) {
+    const groupLabels = { applicable: "适用于本段", automatic: "可进入自动候选" };
+    const kindLabels = { terms: "术语", persons: "人物", address_rules: "称谓规则" };
+    const statusLabels = { confirmed: "已确认", tentative: "暂定" };
     for (const kind of ["terms", "persons", "address_rules"]) {
       const section = make("div", { dataset: { role: `${group}-${kind}` } });
-      section.append(text("h4", `${group} ${kind}`));
+      section.append(text("h4", `${groupLabels[group]} · ${kindLabels[kind]}`));
       for (const entry of selection[kind]) {
         const id = kind === "terms" ? entry.term_id : entry.person_id;
         const detail = kind === "address_rules"
-          ? `${id} · rule_index=${entry.rule_index} · ${entry.person_status}/${entry.term_status} · ${entry.paragraphs.join(", ")}`
-          : `${id} · ${entry.status} · ${entry.paragraphs.join(", ")}`;
+          ? `${id} · 规则序号 ${entry.rule_index} · 人物${statusLabels[entry.person_status]}／词条${statusLabels[entry.term_status]} · ${entry.paragraphs.join(", ")}`
+          : `${id} · ${statusLabels[entry.status]} · ${entry.paragraphs.join(", ")}`;
         section.append(text("div", detail, { role: "report-entry", reportGroup: group, reportKind: kind, id }));
       }
       parent.append(section);
@@ -249,11 +252,11 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
 
   function renderReport() {
     reportHost.replaceChildren();
-    projectHash.textContent = success ? `project_hash: ${success.value.binding.project_hash}` : "";
+    projectHash.textContent = success ? `本次项目材料校验码：${success.value.binding.project_hash}` : "";
     if (!success) return;
     const { report } = success.value;
     const reportNode = make("article", { dataset: { role: "identity-report", block: report.block } });
-    reportNode.append(text("h3", `身份可见性报告 · ${report.project} · ${report.block}`));
+    reportNode.append(text("h3", `资料适用范围报告 · ${report.project} · ${report.block}`));
     renderSelection(reportNode, "applicable", report.applicable);
     renderSelection(reportNode, "automatic", report.automatic);
     const diagnostics = make("div", { dataset: { role: "diagnostics" } });
@@ -381,12 +384,12 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
     running = false;
     if (!validResponse(value, initial)) {
       success = null;
-      message = "预览响应无效或输入绑定不匹配；旧结果不会复用。";
+      message = "预览结果与当前输入不一致，请重新载入资料后预览。";
       render();
       return false;
     }
     success = { value: clone(value), key: initialKey };
-    message = "预览完成；结果仅属于本次完整输入。";
+    message = "预览完成；项目资料或临时关联变化后，请重新预览。";
     lastKey = key();
     render();
     return true;

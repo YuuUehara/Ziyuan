@@ -2,7 +2,8 @@
 """校验文档内的相对链接与 GitHub 风格锚点是否可解析。
 
 用法：python scripts/check-doc-links.py [文件 ...]
-省略文件时校验 README.md、CHANGELOG.md 与 docs/ 下的 Markdown。
+省略文件时校验 README.md、CHANGELOG.md 与 docs/ 下随仓库发布的 Markdown，
+跳过 docs/superpowers/ 中不发布的本地计划；显式指定文件时仍按指定范围检查。
 只检查相对路径与锚点；外部 http(s) 链接不访问网络。
 """
 
@@ -66,7 +67,9 @@ def main(argv: list[str]) -> int:
     if argv:
         files = [pathlib.Path(a).resolve() for a in argv]
     else:
-        files = sorted(ROOT.glob("docs/**/*.md")) + [ROOT / "README.md", ROOT / "CHANGELOG.md"]
+        local_plans = ROOT / "docs" / "superpowers"
+        files = sorted(p for p in ROOT.glob("docs/**/*.md") if not p.is_relative_to(local_plans))
+        files += [ROOT / "README.md", ROOT / "CHANGELOG.md"]
     cache: dict[pathlib.Path, set[str]] = {}
     bad: list[str] = []
     checked = 0

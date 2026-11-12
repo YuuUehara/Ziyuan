@@ -1,6 +1,6 @@
 export function mountMemoryExchange(host,{api,getSelection}){
  const section=document.createElement('details');section.className='continuity-tools';
- section.innerHTML=`<summary>翻译记忆交换</summary><p class="hint">TMX 交换纯文本原译文对。先核对语种、重复项与导入数量，再确认合并；不覆盖译稿、不批准，也不自动把候选放入模型请求。</p><div class="row"><button type="button" data-export>导出 TMX</button><input type="file" accept=".tmx,.xml" data-file aria-label="TMX文件"><button type="button" data-preview class="write">预览导入</button><button type="button" data-import class="write" disabled>确认合并</button></div><p role="status" data-status></p><div data-result></div>`;
+ section.innerHTML=`<summary>翻译记忆交换</summary><p class="hint">TMX 用于交换纯文本的原文与译文对。先核对语种、重复项和数量，再确认导入记忆库。导入只保存本地记忆，译稿的准奏与定稿状态保持原样；发送给模型时，仍须另行选择并确认。</p><div class="row"><button type="button" data-export>导出 TMX</button><input type="file" accept=".tmx,.xml" data-file aria-label="TMX文件"><button type="button" data-preview class="write">预览导入</button><button type="button" data-import class="write" disabled>确认合并</button></div><p role="status" data-status></p><div data-result></div>`;
  host.after(section);const el=k=>section.querySelector(`[data-${k}]`);let proposed,busy=false;
  const run=async task=>{if(busy)return;busy=true;try{el('status').textContent='处理中…';await task();}catch(e){el('status').textContent=e.message;}finally{busy=false;}};
  const text=(tag,value)=>{const e=document.createElement(tag);e.textContent=value;return e;};

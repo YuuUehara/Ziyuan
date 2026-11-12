@@ -5,7 +5,7 @@ import { mountMemoryExchange } from "./continuity-memory.mjs";
 import { mountDocuments } from "./continuity-document.mjs";
 export function mount({ api, getSelection, refresh, navigate }) {
   const host = document.createElement("details");host.className="continuity-tools";
-  host.innerHTML = `<summary>备份与恢复</summary><p class="hint">完整备份包含全部文本项目及共用朝廷历史，可能包含代码任务；不含登录令牌和模型凭据。恢复到当前工作区内的新目录。</p><div class="row write"><button type="button" data-preview>预览完整备份</button><button type="button" data-download disabled>确认下载</button></div><div class="row write"><input type="file" accept=".tar" data-file aria-label="备份文件"><input data-destination placeholder="恢复到新目录（英文名称）" aria-label="恢复目录"><button type="button" data-check>校验备份</button><button type="button" data-restore disabled>确认恢复</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  host.innerHTML = `<summary>备份与恢复</summary><p class="hint">完整备份包含全部译书项目和共用朝廷记录，其中可能有代码任务正文；登录令牌和模型凭据配置不会打包。恢复时会在当前工作区内新建目录，请勿把这份备份直接当作单本书的分享包。</p><div class="row write"><button type="button" data-preview>预览完整备份</button><button type="button" data-download disabled>确认下载</button></div><div class="row write"><input type="file" accept=".tar" data-file aria-label="备份文件"><input data-destination placeholder="新目录名，如 books-restored（英文）" aria-label="恢复目录"><button type="button" data-check>校验备份</button><button type="button" data-restore disabled>确认恢复</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   document.querySelector("#text-card > .body").prepend(host);
   const el = (key) => host.querySelector(`[data-${key}]`);
   let preview, checked, upload;
@@ -22,10 +22,10 @@ export function mount({ api, getSelection, refresh, navigate }) {
     const value = await response.json(); if (!response.ok) throw new Error(value.error); return value;
   };
   el("file").onchange = () => { checked = null; el("restore").disabled = true; };
-  el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过256 MiB"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
+  el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
   el("restore").onclick = () => run(async () => { if (!checked) throw new Error("请先校验备份"); show(await send(`?destination=${encodeURIComponent(el("destination").value)}&fingerprint=${encodeURIComponent(checked.fingerprint)}`)); el("restore").disabled = true; });
   const updates=document.createElement("details");updates.className="continuity-tools";
-  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">选择 TXT 文件；勾选后修订当前块所在章，否则追加新章。先预览差异，再确认；旧原件和旧译保留。段数或分块变化、证据无法继承时拒绝。</p><div class="row write"><input type="file" accept=".txt" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">选取 TXT 文件，默认追加新章；勾选「修订当前章」则更新当前块所在章。请先预览差异，再确认更新，旧原件和旧译都会保留。本入口不处理段落拆合、重新分块或破坏已批准引用的改动。</p><div class="row write"><input type="file" accept=".txt" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
   const reading=mountReading(issues,{api,getSelection,navigate});
@@ -38,8 +38,8 @@ export function mount({ api, getSelection, refresh, navigate }) {
   u("source").onchange=u("revise").onchange=()=>{proposed=null;u("apply").disabled=true;};
   u("preview").onclick=()=>change(async()=>{
     const {project,block}=getSelection(); if(!project)throw new Error("请先选择项目");
-    const file=u("source").files[0];if(!file)throw new Error("请选择TXT文件");if(file.size>8*1024*1024)throw new Error("原文超过8 MiB");
-    if(u("revise").checked&&!block)throw new Error("请先选择要修订的章块");
+    const file=u("source").files[0];if(!file)throw new Error("请选择TXT文件");if(file.size>8*1024*1024)throw new Error("原文超过 8 MiB，请选用大小符合要求的文件");
+    if(u("revise").checked&&!block)throw new Error("请选择要修订章节中的一个块");
     const input={chapter:u("revise").checked?block.split("-")[0]:null,name:file.name,text:new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer())};
     proposed=null;u("apply").disabled=true;
     const preview=await api(`/text/${encodeURIComponent(project)}/source-update`,input);if(project!==getSelection().project||u("source").files[0]!==file||u("revise").checked!==!!input.chapter)throw new Error("项目或原文选项已变，请重新预览");proposed={project,input,preview};renderChanges(u("result"),preview);u("apply").disabled=preview.blockers.length>0;
@@ -66,6 +66,6 @@ function renderChanges(host,preview) {
     const row=document.createElement("article");row.className="continuity-change";
     row.append(text("h4",`${change.before===null?"新增":change.after===null?"删除":"修订"} · ${change.paragraph}`));
     const columns=document.createElement("div");columns.className="continuity-columns";
-    for(const [label,value] of [["原文旧稿",change.before],["原文新稿",change.after]]) {const column=document.createElement("div");column.append(text("p",label,"hint"),text("p",value??"—"));columns.append(column);}row.append(columns);host.append(row);
+    for(const [label,value] of [["更新前的原文",change.before],["更新后的原文",change.after]]) {const column=document.createElement("div");column.append(text("p",label,"hint"),text("p",value??"—"));columns.append(column);}row.append(columns);host.append(row);
   }
 }

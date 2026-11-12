@@ -2,21 +2,23 @@
 
 [![CI](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/YuuUehara/Ziyuan/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/YuuUehara/Ziyuan)](https://github.com/YuuUehara/Ziyuan/releases/latest)
 
-> 用 Rust 编写的多智能体协作工具：你提出任务、分配权限、审阅结果，再决定是否把改动写入文件。界面和角色借用了中国古代朝廷的称呼。
+> 你下诏安排任务，官员协作办理；回奏后由你审阅，准奏后才把改动写入文件。紫垣用中国古代朝廷的称呼组织这套流程，也可以用来逐块翻译和审校小说。
 
-**本源码版本 1.14.1**：在 1.14.0 的完整备份、原文追加与修订、跨章待查、连续通读、全文检索与草稿替换、TMX 交换，以及保留文学标记的 HTML 成稿之上，补齐网页「章节导出」的 HTML 选项，并校正命令帮助与成稿说明。版本变化见 [CHANGELOG](CHANGELOG.md)，验证范围见 [1.14.1 验收记录](docs/acceptance/1.14.1.md)，已公开的下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。保留初译、双路审校、朱批、修订、御览与人工分批，不自动推进整部小说；工程验收不等于文学质量保证。也可用命令行、Web 或终端界面管理代码任务，查看执行记录，并在批准前审阅文件差异。
+**本源码版本 1.14.1**：在 1.14.0 的完整备份、原文追加与修订、跨章待查、连续通读、全文检索与草稿替换、TMX 交换，以及保留文学标记的 HTML 成稿之上，补齐网页「章节导出」的 HTML 选项，并校正命令帮助与成稿说明。
+
+版本变化见 [CHANGELOG](CHANGELOG.md)，验证范围见 [1.14.1 验收记录](docs/acceptance/1.14.1.md)，已公开的下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。翻译仍按初译、双路审校、朱批、修订、御览逐块办理，由你决定何时继续；测试通过不代表译文已达到文学或出版质量。
 
 - **先试用，不必先配置模型**：未设置 `ZIYUAN_LLM_MODEL` 时只演示派工，不会真的分析或修改文件。
 - **接入模型后才执行真实工作**：支持 OpenAI 兼容接口，已有 DeepSeek 实测。默认只能读取项目；修改文件和运行测试要另行授权。
 - **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅后执行 `apply`。
-- **逐块翻译小说**：导入日文或英文原文后，按块下诏初译、请只读审校、逐段朱批、修订并御览定稿；所有译稿仍须准奏才落盘，长篇文学质量须人审。另可记下自己的认可译法（御笔札记），不必先建朝廷。
-- **找回定稿译法（1.3）**：显式设置 `ZIYUAN_MEMORY_PROVIDER=local` 后，用 `ziyuan text memory status|build|search` 或 Web 武英殿译书卡片的「译文记忆」查看、建库与查询。CLI 跨项目须逐个给出 `--project`，Web 仅当前项目。本地字符哈希只比较字面，不理解文意；没有远程嵌入，也不承诺文学质量提升。
+- **逐块翻译小说**：导入日文或英文原文后，按块下诏初译、请只读审校、逐段朱批、修订并御览定稿；初译和修订稿须准奏后才写入正式译文，译文质量仍须人审。另可记下自己的认可译法（御笔札记），不必先建朝廷。
+- **找回定稿译法**：设置 `ZIYUAN_MEMORY_PROVIDER=local` 后，用 `ziyuan text memory status|build|search` 或 Web 武英殿译书卡片的「译文记忆」查看、建库与查询。CLI 跨项目须逐个给出 `--project`，Web 仅当前项目。它按文字相似程度寻找参考，不理解文意；没有远程嵌入，也不承诺文学质量提升。
 
-**原文预览与注音**：TXT／Markdown 导入前先检查章序、正文、注音与警告，再确认导入；旧的纯 TXT 命令不变。见[导入指南](docs/text-projects.md#unreleased--14-第一批源码预览与确认导入)。新写入的文本项目使用 schema 2，旧 1.3 无法读取，须升级。
+**原文预览与注音**：TXT／Markdown 导入前先检查章序、正文、注音与警告，再确认导入；旧的纯 TXT 命令不变。见[导入指南](docs/text-projects.md#unreleased--14-第一批源码预览与确认导入)。当前新建的文本项目采用新版格式，1.3 及更早版本无法读取，请先升级紫垣。
 
 **成稿导出**：`text export-originals` 取回归档原件，`text export-finished` 将有效定稿与校验清单打包为 TAR。CLI 默认预览，Web 确认后下载；缺块或失效整批拒绝，不改变审批、不覆盖文件。Markdown 行内代码无法定位回填时明确拒绝，见[导出指南](docs/text-projects.md#unreleased--14-第二批源码原件与成稿导出)。
 
-**显式选用参考**：从译文记忆中主动选择参考，先预览完整参考外发文本，再确认初译或修订。默认不选；预览不发送，下诏只入队。Web 仅当前项目；所选原译文保存在事件簿，分享前须核对隐私与权利。详见[选择、确认与重试](docs/memory.md#unreleased--14-第三批-a显式选用参考)及[兼容边界](docs/stability.md#unreleased--14-第三批-a显式选用参考)。
+**选用参考译法**：从译文记忆中主动选择参考，先预览完整参考外发文本，再确认初译或修订。默认不选；预览不发送，下诏只入队。Web 仅当前项目；所选原译文保存在事件簿，分享前须核对隐私与权利。详见[选择、确认与重试](docs/memory.md#unreleased--14-第三批-a显式选用参考)及[兼容边界](docs/stability.md#unreleased--14-第三批-a显式选用参考)。
 
 **术语表与双语检索**：`ziyuan text termbase export/import <项目ID> <文件.csv>` 与 `export-tbx/import-tbx` 导出或合并本地术语与人物；CSV／TBX 都保存类别、范围、可用起点、读音、证据、关联术语、声线与称谓规则，旧八列 CSV 仍可读。`ziyuan text concordance <项目ID> <原文片段>` 按原文字面相似度查找本项目已有原译文对。
 
@@ -24,7 +26,7 @@
 
 **翻译记忆、评论与字幕**：`ziyuan text tm ...` 可按项目维护本地原译文记忆，`text comment ...` 记录审校评论；两者都不自动改稿、不批准。`text import-srt`／`export-srt` 导入或导出字幕文字，时间轴存于 `srt.json`。详见[文本项目指南](docs/text-projects.md#翻译记忆审校评论与字幕)。
 
-**向导式新建**：资料面板的「向导式新建」用三步对话框创建术语或人物；「临时关联」的人物/对象支持多选，选择结果以可移除标签显示。
+**向导式新建**：在资料面板点「向导式新建」，选择术语或人物，填好名称、译法或别名后添加；「临时关联」的人物和对象可多选，选中的标签可随时移除。
 
 **确定性检查**：`ziyuan text qa <项目ID> <块ID>` 或 Web「确定性检查」只查空译、段号、数字、重复、术语/人物名等确定性问题；不调用模型，也不代表语义正确。
 
@@ -56,7 +58,7 @@
 **本地资料与段旁提示**
 - 译书页可保存独立的人物/术语资料草稿；未批准，不进入生产译文。
 - 在「临时关联」填写本段人物、称呼对象与说话人，点「刷新段旁提示」；段旁提示按当前关联显示术语、人物与称谓条件。
-- 「对比草稿与生产」只读列出新增/删除/改动；保存草稿不等于批准；「准备生产资料」只写 `context/glossary.json`，仍需 `ziyuan text context approve`。
+- 「对比草稿与生产」只读列出新增/删除/改动；保存草稿不等于批准；「准备生产资料」将资料整理到 `context/glossary.json`，供翻译使用前仍需 `ziyuan text context approve`。
 - 复核可带关联：`ziyuan text verification show <项目ID> <块ID> --associations <关联.json>`。
 - 详见 [N0 第 26 节](docs/novel-workbench-n0.md#26-n2c-生产批准第二版资料)。
 

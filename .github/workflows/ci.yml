@@ -22,6 +22,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      - name: 文档链接与标题定位
+        run: python3 scripts/check-doc-links.py
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # 人工译稿标记逻辑与本地资料编辑/模型/预览的纯函数单测。
       # 用 Node 内置测试器，不引第三方依赖；浏览器侧同一份文件。

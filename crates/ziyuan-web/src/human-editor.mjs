@@ -88,7 +88,7 @@ export class HumanDraft {
     }
     if(changed) {
       this.conflict=true;
-      this.message="磁盘修订或材料基准已改变。请明确加载磁盘，或保留本地后取最新基准重存。";
+      this.message="已保存的稿件或参考材料有变化。请选择载入最新稿件，或保留页面中的文字，核对后重新保存。";
     }
     return false;
   }
@@ -105,7 +105,7 @@ export class HumanDraft {
     if(this.composing || this.viewer || this.recovery) return;
     try {
       this.storage?.setItem(this.key,JSON.stringify({paragraphs:this.paragraphs,basis:this.basis,revision:this.revision}));
-    } catch { this.message="会话镜像失败（存储空间或权限不足）；请勿关闭页面，先保存到磁盘。"; }
+    } catch { this.message="浏览器暂存失败，可能是空间或权限不足。请先保存草稿，再关闭页面。"; }
   }
   restore() {
     if(!this.recovery || this.locked || this.composing || this.busy) return false;
@@ -113,7 +113,7 @@ export class HumanDraft {
     if(!Array.isArray(r.paragraphs) || r.paragraphs.length!==this.source.length ||
       r.paragraphs.some((p,i)=>!p || p.id!==this.source[i].id || typeof p.text!=="string" || !Array.isArray(p.marks) ||
         p.marks.some(m=>!m || typeof m!=="object")) || !r.basis || typeof r.basis!=="object") {
-      this.message="镜像段落与当前原文不一致，未恢复。"; return false;
+      this.message="页面暂存的段落与当前原文不一致，无法恢复。"; return false;
     }
     this.paragraphs=copy(r.paragraphs);
     this.conflict=r.revision!==this.revision || !equal(r.basis,this.basis);
@@ -130,7 +130,7 @@ export class HumanDraft {
     this.basis=copy(this.remote.basis); this.revision=this.remote.revision ?? null;
     this.conflict=false; this.conflictCurrent=null; this.pendingSave=null;
     // Even identical text needs saving when rebased onto changed source material.
-    this.saved=""; this.message="已保留本地并取得最新基准；请核对后保存，再送审。"; this.mirror(); return true;
+    this.saved=""; this.message="已保留页面中的文字并载入最新参考材料，请核对后重新保存，再送审。"; this.mirror(); return true;
   }
   beginComposition() { this.composing=true; }
   endComposition(index,text) { this.composing=false; this.editText(index,text); }
@@ -196,7 +196,7 @@ export class HumanDraft {
     this.busy=true; this.epoch++;
     try {
       const receipt=await api(this.base+"/"+action,{});
-      this.message=receipt.message||"操作完成；状态由服务端核验。"; return true;
+      this.message=receipt.message||"操作完成，已按当前稿件核对状态。"; return true;
     } catch(e) { this.fail(e); return false; } finally { this.busy=false; }
   }
 }
@@ -212,10 +212,10 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     const d=entry.draft;
     if(d.composing) return;
     const stats=d.stats;
-    entry.status.textContent=`${STATE_LABELS[d.state]} · 修订 ${d.revision ?? "尚无"} · 正文字素 ${stats.counts.body} · 读音字素 ${stats.counts.reading} · ${stats.marks}/4096 标记 · ${stats.bytes}/262144 字节`;
+    entry.status.textContent=`${STATE_LABELS[d.state]} · 修订 ${d.revision ?? "尚无"} · 正文字符 ${stats.counts.body} · 读音字符 ${stats.counts.reading} · ${stats.marks}/4096 标记 · ${stats.bytes}/262144 字节`;
     entry.message.textContent=[
-      !d.storage && !d.viewer ? "会话存储不可用；离开页面前务必保存到磁盘。" : "",
-      d.recovery && !d.viewer ? "发现此项目／块的会话镜像；请明确恢复或忽略后再编辑。" : "",
+      !d.storage && !d.viewer ? "浏览器无法暂存编辑内容，请在离开页面前保存草稿。" : "",
+      d.recovery && !d.viewer ? "发现本块上次留在页面中的暂存内容，请先选择恢复或忽略，再继续编辑。" : "",
       d.message,...stats.problems,
     ].filter(Boolean).join("\n");
     entry.recovery.hidden=!d.recovery || d.viewer;
@@ -298,13 +298,13 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
   function create(context) {
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
-    root.innerHTML=`<h3>人工译稿 · ${escape(context.block)}</h3><p class="hint">逐段编辑译文，选区后添加标记；正文使用浏览器原生撤销。标记撤销单独计数，文本变化即清空标记历史。保存 → 明确送审 → 准奏 → 定稿（服务端核验当前修订）。</p><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
+    root.innerHTML=`<h3>人工译稿 · ${escape(context.block)}</h3><p class="hint">逐段编辑译文，选中文字后可加注音、着重或粗斜体。正文用浏览器的撤销功能；标记可单独撤销，修改正文后会清空标记撤销记录。完成后依次保存、送审、准奏，再御览定稿，每一步都会核对当前稿件。</p><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
     const entry={draft:d,root,rows:[],buttons:new Map(),request:0,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};
-    button("恢复会话镜像（不会自动保存）","restore",entry.recovery);
-    button("忽略会话镜像","dismiss",entry.recovery);
-    button("加载磁盘（替换本地）","disk",entry.conflict);
+    button("恢复页面暂存（恢复后仍须保存）","restore",entry.recovery);
+    button("忽略页面暂存","dismiss",entry.recovery);
+    button("载入已保存稿件（替换页面内容）","disk",entry.conflict);
     button("确认保留本地，取最新基准","rebase",entry.conflict);
     const actions=root.querySelector(".human-actions");
     for(const [action,label] of [["save","保存人工草稿"],["submit","送审当前已保存修订"],["approve","人工准奏"],["finalize","人工御览定稿"],["undo","撤销标记"],["redo","重做标记"]]) {
@@ -317,10 +317,10 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
       d.viewer=!!isViewer();
       if(action==="refresh") { await pull(entry); return; }
       if(d.viewer) return;
-      if(action==="restore") { if(confirm("用会话镜像替换当前编辑内容？不会自动覆盖磁盘。")) { d.restore(); syncText(entry); } }
+      if(action==="restore") { if(confirm("用页面暂存替换当前编辑内容？恢复后仍须点击保存，才会写入草稿。")) { d.restore(); syncText(entry); } }
       else if(action==="dismiss") { d.dismissRecovery(); notify(entry); }
       else if(action==="disk" || action==="rebase") {
-        if(!confirm(action==="disk" ? "丢弃本地编辑并加载最新磁盘稿？" : "保留本地全文，取最新基准后重存？请先核对外部改动，保存将替换最新磁盘稿。")) return;
+        if(!confirm(action==="disk" ? "丢弃页面中尚未保存的编辑，载入最新稿件？" : "保留页面全文，并载入最新参考材料？请先核对其他窗口的改动；再次保存会用页面内容替换最新草稿。")) return;
         // Resolve from a fresh GET, never from 409's possibly revision-only current.
         if(!await pull(entry)) return;
         if(action==="disk") d.loadDisk(); else d.keepLocal();
@@ -367,7 +367,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     entry.draft.viewer=!!isViewer();
     entry.draft.source=copy(context.source);
     entry.rows.forEach(row=>{
-      row.source.textContent=context.source.find(p=>p.id===row.id)?.text || "（原文段落已变，请核对磁盘）";
+      row.source.textContent=context.source.find(p=>p.id===row.id)?.text || "（原文段落已变，请重新载入并核对）";
     });
     // Retain the exact node (and textarea undo state) across polling and block navigation.
     if(active!==entry) { active=entry; stage.replaceChildren(entry.root); }
