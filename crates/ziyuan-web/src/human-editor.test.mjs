@@ -26,6 +26,8 @@ test("page imports the actual editor, uses a persistent host and retains API con
   assert.match(html,/error\.current = data\.current/);
   assert.ok(!html.includes("Web 尚未开放人工"));
   assert.match(html,/humanEditor\.update\(/);
+  assert.match(html,/定稿可选 TXT、Markdown 或 HTML/);
+  assert.match(html,/value="html"[^>]*>HTML（保留文学标记）/);
 });
 test("whole draft limits include readings and every paragraph", () => {
   const paragraphs = ["a", "b"].map((id) => ({ id, text: "字", marks: Array.from({ length: 2049 }, () => ({start:0,end:1,kind:"strong"})) }));

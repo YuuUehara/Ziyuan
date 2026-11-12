@@ -2276,10 +2276,10 @@ function renderExport() {
   const d = exportState(), outline = textProject.outline || [];
   const prefix = `export-${textProjectId}`;
   host.innerHTML = `<h3>章节导出</h3>
-    <p class="hint">下载为 TAR 归档包，内含所选文件和 manifest.json 校验清单。原件保留原始文件；定稿可选 TXT 或 Markdown。章节按项目顺序导出；任何一章未定稿或已失效，整批定稿都不会导出。</p>
+    <p class="hint">下载为 TAR 归档包，内含所选文件和 manifest.json 校验清单。原件保留原始文件；定稿可选 TXT、Markdown 或 HTML。HTML 保留注音、着重、粗斜体和同范围叠加样式。章节按项目顺序导出；任何一章未定稿或已失效，整批定稿都不会导出。</p>
     <div class="actions"><button type="button" class="small" data-view data-export-all ${d.busy ? "disabled" : ""}>全选章节</button></div>
     <div class="text-note-list checks" role="group" aria-label="导出章节">${outline.map((c, i) => `<label><input type="checkbox" data-view data-keep data-export-chapter="${esc(c.chapter)}" id="${esc(prefix)}-chapter-${i}" ${d.chapters === null || d.chapters.includes(c.chapter) ? "checked" : ""} ${d.busy ? "disabled" : ""}> ${esc(c.title || c.chapter)}</label>`).join("")}</div>
-    <div class="row"><label for="${esc(prefix)}-format">定稿格式<select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option></select></label>
+    <div class="row"><label for="${esc(prefix)}-format">定稿格式<select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option><option value="html" ${d.format === "html" ? "selected" : ""}>HTML（保留文学标记）</option></select></label>
     <label for="${esc(prefix)}-layout">定稿编排<select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></label></div>
     <p class="hint">格式与编排不影响原件。先查看文件列表和格式转换警告，再确认下载；下载时仍会重新检查定稿和材料。同一原件若包含多章，只打包一次，取回时可能包含未选章节。</p>
     <div class="actions"><button type="button" class="small" data-view data-export-kind="original" ${d.busy || !outline.length ? "disabled" : ""}>取回原件 TAR</button><button type="button" class="small" data-view data-export-kind="finished" ${d.busy || !outline.length ? "disabled" : ""}>导出定稿 TAR</button></div>

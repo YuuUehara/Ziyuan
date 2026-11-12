@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 use ziyuan_app::translation::{Translations, inspect_backup, restore_backup};
-pub(crate) const HELP: &str = "text backup [--output <新文件.tar>]：预览或导出全部译书项目与共用审批历史（不含凭据）；text restore <备份.tar> <新目录> [--yes]：默认校验预览，加 --yes 恢复。text source-update <项目> <原文.txt> [--chapter <章>] [--confirm <指纹>]；text issue list|add|review；text read <项目> [--chapter <章>]；text preflight <项目> [--format txt|md|html] [--chapter <章>]";
+pub(crate) const HELP: &str = "text backup [--output <新文件.tar>]：预览或导出全部译书项目与共用审批历史（不含凭据）；text restore <备份.tar> <新目录> [--yes]：默认校验预览，加 --yes 恢复。text source-update <项目> <原文.txt> [--chapter <章>] [--confirm <指纹>]；text issue list|add|review；text read <项目> [--chapter <章>]；text preflight <项目> [--format txt|md|html] [--chapter <章>]；text search <项目> <片段> [--scope all|source|translation|draft|history]：字面检索，默认 all；text draft-replace <项目> <request.json>：默认只预览人工草稿替换，确认时在请求中带预览 fingerprint 与 confirm:true；text tmx export <项目> [--output <文件.tmx>]；text tmx preview <项目> <文件.tmx>；text tmx import <项目> <文件.tmx> --confirm <预览指纹>";
 pub(crate) enum Action {
     Tmx(String, String, Option<PathBuf>, Option<String>),
     Search(String, String, String),
@@ -244,4 +244,23 @@ fn read_json(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn Error>
         return Err("输入JSON超过64 KiB".into());
     }
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HELP;
+
+    #[test]
+    fn help_lists_search_draft_replace_and_tmx() {
+        for needle in [
+            "text search",
+            "--scope all|source|translation|draft|history",
+            "text draft-replace",
+            "text tmx export",
+            "text tmx preview",
+            "text tmx import",
+        ] {
+            assert!(HELP.contains(needle), "帮助缺少 {needle}");
+        }
+    }
 }

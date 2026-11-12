@@ -1,6 +1,6 @@
 # 紫垣使用指南
 
-从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。本文对应 **1.14.0** 源码；完整备份、原文更新、跨章待查、通读与 HTML 交稿、检索替换和 TMX 交换见[连续翻译指南](translation-continuity.md)。版本变化见 [CHANGELOG](../CHANGELOG.md)，发行与验证进度见[验收记录](acceptance/1.14.0.md)，兼容范围见[稳定性约定](stability.md)。
+从 README 的[快速开始](../README.md#快速开始)进入后，可按需要查阅本指南。本文对应 **1.14.1** 源码；完整备份、原文更新、跨章待查、通读与 HTML 交稿、检索替换和 TMX 交换见[连续翻译指南](translation-continuity.md)。版本变化见 [CHANGELOG](../CHANGELOG.md)，发行与验证进度见[验收记录](acceptance/1.14.1.md)，兼容范围见[稳定性约定](stability.md)。
 
 先记住四个对应关系：**诏令是任务，玉玺是权限设置，回奏是执行结果，准奏是批准把改动写入文件**。界面保留这些名称，操作步骤会同时说明实际作用。
 
@@ -534,8 +534,12 @@ jj new main                     # 在 main 上开始新改动
 jj describe -m "feat: ..."      # 随时写/改提交说明；工作区自动快照
 jj commit -m "refactor: ..."    # 结束当前改动并开启下一个
 jj git fetch && jj rebase -d main@origin
-jj bookmark set my-feature -r @- && jj git push -b my-feature
+jj bookmark set work/my-feature -r @- && jj git push --remote origin -b work/my-feature
 ```
+
+常规 CI 在推送到 `main`、`work/**`、`codex/**`，或打开拉取请求时运行，见 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)。书签名须带 `work/` 或 `codex/` 前缀，例如 `work/my-feature`；推到其他名字的书签不会触发这些检查。拉取请求本身仍会跑 CI，不依赖书签前缀。
+
+合并或发版之后，已合并的书签若已在远端删除，本地执行 `jj git fetch` 即可同步。若本地书签与这次远端删除冲突，用 `jj bookmark forget --include-remotes <书签>` 忘掉它。不要用 `jj bookmark delete`：后者会把删除记成待推送的变更，可能误把远端书签再删一次。
 
 提交前请运行 README 中[开发与发布](../README.md#开发与发布)列出的格式检查、编译与测试；`scripts/smoke.sh` 需要 Bash 环境。
 

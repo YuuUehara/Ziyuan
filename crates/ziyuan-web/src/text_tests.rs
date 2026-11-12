@@ -1339,6 +1339,9 @@ fn text_frontend_contract() {
         "/text/projects",
         "项目已建立。请在「导入原文」选文件、预览",
         "只作记录，不作核验",
+        "定稿可选 TXT、Markdown 或 HTML",
+        "HTML（保留文学标记）",
+        "value=\"html\"",
     ] {
         assert!(crate::INDEX_HTML.contains(expected), "missing {expected}");
     }

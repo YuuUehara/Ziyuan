@@ -1,10 +1,10 @@
 # 整理原文与检查译稿
 
-1.14.0 新增连续翻译入口，范围和边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)。
+1.14.0 新增连续翻译入口，范围和边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)。1.14.1 在网页「章节导出」补上已有的 HTML 成稿选项，并按该能力改正下文的格式说明。
 
 本页对应 1.1.0 起的 `ziyuan text` 基础命令，1.0.0 没有这组命令；1.2.0 新增的翻译、审校、朱批与御览见[小说翻译指南](novel-translation.md)。
 
-本页按 **1.14.0** 更新，涵盖基础 TXT、Markdown／注音预览、成稿导出、词证与逐段勘校、用量账本、本地术语／人物资料、确定性检查、译稿版本、DOCX／EPUB 回填、翻译记忆、审校评论与 SRT，以及**人工译稿**（CLI 与 Web；TUI 未开放）。本版验证范围见 [1.14.0 验收记录](acceptance/1.14.0.md)；既有能力的历史结果见 [1.13.1](acceptance/1.13.1.md)、[1.13.0](acceptance/1.13.0.md)和 [1.12.0](acceptance/1.12.0.md)。
+本页按 **1.14.1** 更新，涵盖基础 TXT、Markdown／注音预览、成稿导出、词证与逐段勘校、用量账本、本地术语／人物资料、确定性检查、译稿版本、DOCX／EPUB 回填、翻译记忆、审校评论与 SRT，以及**人工译稿**（CLI 与 Web；TUI 未开放）。本版验证范围见 [1.14.1 验收记录](acceptance/1.14.1.md)；既有能力的历史结果见 [1.14.0](acceptance/1.14.0.md)、[1.13.1](acceptance/1.13.1.md)、[1.13.0](acceptance/1.13.0.md)和 [1.12.0](acceptance/1.12.0.md)。
 
 **1.4.1 补丁已发布：** 下文主图采用较小的注音字号，并明确区分注音与普通括号；解析及操作步骤不变。版本 CI、四平台下载包与十一个 crate 的结果见[1.4.1 验收记录](acceptance/1.4.1.md)。
 
@@ -191,12 +191,12 @@ Markdown 使用 CommonMark 解析器的默认语法，而非任意站点方言�
 
 ```text
 ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>] [--json]
-ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md] [--layout chapters|book] [--output <new.tar>] [--json]
+ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html] [--layout chapters|book] [--output <new.tar>] [--json]
 ```
 
 `export-originals` 取回归档原件，不要求译文定稿，不做格式转换；同一归档路径只输出一次，字节（含 BOM／行尾）不变。**一个 MD 源文件可能分成多章，选择其中一章仍会取回整个源文件，含其他章**，分享前须核对权利与范围。它不是按正文裁剪的“原件”。
 
-`export-finished` 导出有效定稿，默认 `txt`、`chapters`。逐章输出 `<章ID>.txt`／`.md`，`book` 合并为 `book.txt`／`book.md`；两种编排都保留章名和章界。章名仍为导入时标题，不自动生成译题。两个入口最终都输出**一个 TAR**，内含材料文件及 `manifest.json`，不是向目录逐章写文件，也不是旧的逐块模型材料导出。
+`export-finished` 导出有效定稿，默认 `txt`、`chapters`。逐章输出 `<章ID>.txt`／`.md`／`.html`，`book` 合并为 `book.txt`／`book.md`／`book.html`；两种编排都保留章名和章界。章名仍为导入时标题，不自动生成译题。两个入口最终都输出**一个 TAR**，内含材料文件及 `manifest.json`，不是向目录逐章写文件，也不是旧的逐块模型材料导出。
 
 不传 `--chapter` 选全部；重复参数选子集，但输出始终依项目顺序，不以参数顺序重排。未知或重复章 ID 拒绝。请从 `text show` 取得自己的 ID，不照抄别人的编号。
 
@@ -232,7 +232,8 @@ ziyuan text export-finished $project --format txt --layout chapters --output exp
 - MD 原件导出 MD 时，以原件字节范围为模板回填定稿段落，保留块级代码（围栏／缩进）、分隔线等非翻译节点的原位置；分章标题作为生成的章名，不再当正文重复输出。正文标题保留层级，CRLF 可整理为 LF，不宣称成稿与原件逐字节相同。
 - 译文的 Markdown 符号／HTML 安全转义，不把译文解释成可执行标签、图片或链接；不套用源文行内强调、注音或图像／链接目的地址。取回原件才保留原记法，导出不是自动下载外链资源。
 - **原段含行内代码时，MD 成稿导出拒绝**：现有已批准逐段译稿没有代码相对于译文的位置锚点，不能猜位置，也不能悄悄丢代码。可取回原件自行整理，或明确选 TXT：只导出定稿正文与章名，并警告代码、分隔线、链接目标及排版等损失。
-- 不从日文源头复制 ruby 到中文。仅当**批准译文自身**已有结构化 `inlines`、拼接基底与 `text` 正文完全一致、注音可安全表示时，TXT 输出 `｜基底《读音》`，MD 生成安全的 `<ruby>…<rt>…</rt></ruby>`；不一致或含无法安全表示的注音则拒绝。不新增译文注音编辑器，常规候选仍写 `id`／`text`，不复制源注音或偏移。
+- 不从日文源头复制 ruby 到中文。仅当**批准译文自身**已有结构化 `inlines`、拼接基底与 `text` 正文完全一致、注音可安全表示时，TXT 输出 `｜基底《读音》`，MD 与 HTML 生成安全的 `<ruby>…<rt>…</rt></ruby>`；不一致或含无法安全表示的注音则拒绝。不新增译文注音编辑器，常规候选仍写 `id`／`text`，不复制源注音或偏移。
+- **HTML 成稿**（`--format html`，1.14.0 起；网页「章节导出」自 1.14.1 可选）：可离线打开的正文，保留译文注音、着重、粗斜体和同范围叠加样式。不承诺照搬原 DOCX／EPUB 的分页、脚注或浮动对象；原排版仍在归档原件中。Markdown 仍不能无损表达着重号和同一范围叠加的标记，遇到时整批拒绝。TXT 遇带标记稿整批拒绝，提示改用 Markdown；这两类 Markdown 不能表达的标记须改用 HTML。
 
 ### CLI 文件发布边界
 
@@ -242,9 +243,9 @@ ziyuan text export-finished $project --format txt --layout chapters --output exp
 
 ### Web：预览警告，确认后下载
 
-武英殿译书卡片「章节导出」选择章节、TXT／Markdown 和逐章／合并编排，分别点击「取回原件 TAR」或「导出定稿 TAR」。先显示文件、清单与转换警告，再确认下载；取消不下载。实际下载重新核对材料，预览成功不保证之后一定成功。viewer 只读令牌也可预览与下载，不因此获得写入或审批权限。
+武英殿译书卡片「章节导出」选择章节、TXT／Markdown／HTML 和逐章／合并编排，分别点击「取回原件 TAR」或「导出定稿 TAR」。先显示文件、清单与转换警告，再确认下载；取消不下载。实际下载重新核对材料，预览成功不保证之后一定成功。viewer 只读令牌也可预览与下载，不因此获得写入或审批权限。
 
-内部只读接口为 `GET /api/text/{id}/export`：`kind=original|finished`（默认 finished）、`format=txt|markdown`（注意 CLI 写 `md`）、`layout=chapters|book`、`chapters=章ID,章ID`（省略／空值选全部）、`preview=true`。预览 JSON 含 `manifest`、`warnings`、`files`（`name`／`length`）；非预览返回 `application/x-tar` 附件，安全生成文件名并设置 `Cache-Control: no-store`。页面确认时附 `snapshot=<预览清单的 snapshot_sha256>`，服务端重新生成并比较，变化则拒绝并要求重预览；直接调用 API 可省略此参数，但仍核对当次一致性。原件忽略格式与编排。Web 不接受服务器输出路径；此内部 API 与页面不冻结。
+内部只读接口为 `GET /api/text/{id}/export`：`kind=original|finished`（默认 finished）、`format=txt|markdown|html`（注意 CLI 的 Markdown 写 `md`，HTML 在网页与接口都写 `html`）、`layout=chapters|book`、`chapters=章ID,章ID`（省略／空值选全部）、`preview=true`。预览 JSON 含 `manifest`、`warnings`、`files`（`name`／`length`）；非预览返回 `application/x-tar` 附件，安全生成文件名并设置 `Cache-Control: no-store`。页面确认时附 `snapshot=<预览清单的 snapshot_sha256>`，服务端重新生成并比较，变化则拒绝并要求重预览；直接调用 API 可省略此参数，但仍核对当次一致性。原件按归档字节导出，不接受成稿格式或排版选项。Web 不接受服务器输出路径；此内部 API 与页面不冻结。
 
 导出不改变参考选择规则，也不证明文学质量提高。参考须另行[选择与确认](memory.md#unreleased--14-第三批-a显式选用参考)。
 
@@ -506,7 +507,7 @@ ziyuan text recovery abandon <操作ID> --yes
 2. 在译文里选中一段文字，点“注音”（再输入读音）、“着重号”“粗体”或“斜体”。下方预览即时显示效果，结构表列出每条标记的种类、UTF-8 字节范围与读音，可逐条删除。“撤销标记／重做标记”只管标记，改了文字就清空。
 3. 点“保存人工草稿”。状态显示未保存／保存中／已保存／冲突／不合规；不合规时会逐条列出原因，不能保存。
 4. 依次点“送审当前已保存修订”“人工准奏”（即写入 `zh.json`）“人工御览定稿”，每步都要确认。有未保存改动时这三步不可用，已定稿后编辑锁定。
-5. 定稿后仍用 `ziyuan text export-finished` 导出；含注音／粗体／斜体加 `--format md`。编辑器能录入着重号，但带着重号或同范围叠加标记的定稿目前不能导出，导出前须改去。
+5. 定稿后仍用 `ziyuan text export-finished` 导出。注音、粗体或斜体且范围不重叠时加 `--format md`。着重号或同一范围叠加的标记不能用 Markdown 导出，须改用 `--format html`（网页「章节导出」选 HTML）。TXT 遇带标记稿整批拒绝。
 
 **冲突。** 另一个标签页或命令行先存了新修订，或原文、上下文、朱批变了，本页的未保存内容不会被覆盖：选“加载磁盘（替换本地）”放弃本地，或选“确认保留本地，取最新基准”后再保存。本页没有未保存改动时直接跟随磁盘。
 
@@ -520,7 +521,7 @@ ziyuan text recovery abandon <操作ID> --yes
 
 ### 导出成品
 
-定稿后用 `ziyuan text export-finished <项目ID>` 打包；人工定稿块在清单里记 `source: human` 并带准奏操作身份，资格与校验规则同模型定稿。带注音等标记的译稿必须加 `--format md`（Markdown 走受限 HTML），TXT 会整批拒绝并提示改用 Markdown；着重点与同一范围叠加的标记两种格式都拒绝。详见[原件与成稿导出](#unreleased--14-第二批源码原件与成稿导出)。
+定稿后用 `ziyuan text export-finished <项目ID>` 打包；人工定稿块在清单里记 `source: human` 并带准奏操作身份，资格与校验规则同模型定稿。带注音、粗体或斜体且范围不重叠的译稿可加 `--format md`（Markdown 走受限 HTML）。TXT 遇带标记稿整批拒绝。着重号和同一范围叠加的标记在 Markdown 下整批拒绝，`--format html` 保留注音、着重、粗斜体及同范围叠加样式。HTML 不承诺照搬原 DOCX／EPUB 的分页、脚注或浮动对象。详见[原件与成稿导出](#unreleased--14-第二批源码原件与成稿导出)。
 
 ## 1.13：译稿版本与格式回填
 

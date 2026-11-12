@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// 1.13 版本面板真实浏览器烟测：登录 → 武英殿 → 选项目 → 等快照 → 对比 → 截图（含窄屏）。
-// 用法: node scripts/browser-versions-smoke.mjs <工作区> <ziyuan.exe> <输出.png> [端口]
+// 连续翻译网页烟测：登录 → 武英殿 → 选项目 → 双语通读、跨章待查、交稿预检、备份预览、
+// 草稿检索与替换、TMX 预览合并，并检查三套主题在 390／768／1440 CSS 像素下是否横向溢出。
+// 用法: node scripts/browser-continuity-smoke.mjs <工作区> <ziyuan.exe> <输出.png> [端口]
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,7 +12,7 @@ const bin = process.argv[3];
 const out = process.argv[4];
 const port = Number(process.argv[5] || 18083);
 if (!root || !bin || !out) {
-  console.error("用法: node scripts/browser-versions-smoke.mjs <root> <ziyuan.exe> <out.png> [port]");
+  console.error("用法: node scripts/browser-continuity-smoke.mjs <root> <ziyuan.exe> <out.png> [port]");
   process.exit(2);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -1,6 +1,6 @@
 # 文档目录
 
-本文档对应 **1.14.0** 源码，涵盖完整备份、原文更新、跨章待查、通读交稿、全文检索／草稿替换及 TMX 交换。发布与验证进度见 [1.14.0 验收记录](acceptance/1.14.0.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
+本文档对应 **1.14.1** 源码，涵盖完整备份、原文更新、跨章待查、通读交稿、全文检索／草稿替换及 TMX 交换；1.14.1 补齐网页章节导出的 HTML 选项，并校正成稿说明与命令帮助。发布与验证进度见 [1.14.1 验收记录](acceptance/1.14.1.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
 
 连续翻译操作与支持边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)；既有译稿版本、文档回填和人工译稿操作见[文本项目指南](text-projects.md)。
 
@@ -31,6 +31,8 @@
 
 每份只记录当时实际做过的检查和未测项目，不代表当前版本。
 
+- [1.14.1](acceptance/1.14.1.md)
+- [1.14.0](acceptance/1.14.0.md)
 - [1.13.1](acceptance/1.13.1.md)
 - [1.13.0](acceptance/1.13.0.md)
 - [1.12.0](acceptance/1.12.0.md)

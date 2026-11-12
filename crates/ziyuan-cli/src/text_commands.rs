@@ -49,7 +49,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
   ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]
                                        原件按原字节导出，不依赖朝廷，不接受 --format/--layout
     导出不调用模型或网络；不加 --output 只读预览文件名称、大小、警告与清单（--json 也不输出字节）。
-    加 --output 重新核验后写单个 TAR：内含 TXT/MD 定稿或原件及 manifest 清单；不覆盖现有路径，
+    加 --output 重新核验后写单个 TAR：内含 TXT/MD/HTML 定稿或原件及 manifest 清单；不覆盖现有路径，
     不创建父目录。未选章时按项目章序导出全部；--chapter 可重复选择不同章节。
   ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]
                                        检查候选译稿的结构（漏段、重复、顺序、陌生段号、空文本）；
@@ -2280,6 +2280,35 @@ mod tests {
             match parse(args) {
                 Ok(TextAction::Translation(_)) => {}
                 _ => panic!("译书子命令未路由"),
+            }
+        }
+    }
+
+    #[test]
+    fn export_and_continuity_help_match_the_commands() {
+        assert!(TEXT_HELP.contains("--format txt|md|html"));
+        assert!(TEXT_HELP.contains("TXT/MD/HTML"));
+        let help = crate::continuity_commands::HELP;
+        for needle in [
+            "text search",
+            "text draft-replace",
+            "text tmx export",
+            "text tmx preview",
+            "text tmx import",
+        ] {
+            assert!(help.contains(needle), "帮助缺少 {needle}");
+        }
+        for args in [
+            vec!["search", "p", "片段"],
+            vec!["draft-replace", "p", "request.json"],
+            vec!["tmx", "export", "p"],
+            vec!["tmx", "preview", "p", "memory.tmx"],
+            vec!["tmx", "import", "p", "memory.tmx", "--confirm", "fp"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            match parse(args) {
+                Ok(TextAction::Continuity(_)) => {}
+                _ => panic!("连续翻译子命令未路由"),
             }
         }
     }
