@@ -140,11 +140,18 @@ fn selected(name: &str) -> bool {
 }
 pub(super) fn plain_parents(path: &Path) -> Result<()> {
     let mut current = std::path::PathBuf::new();
-    for component in path.components() {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
         if matches!(component, Component::ParentDir) {
             return Err(invalid("路径不能含 .."));
         }
         current.push(component);
+        // A Windows prefix such as \\?\C: is not a directory until its root slash.
+        if matches!(component, Component::Prefix(_))
+            && matches!(components.peek(), Some(Component::RootDir))
+        {
+            continue;
+        }
         let meta = fs::symlink_metadata(&current)?;
         if meta.file_type().is_symlink() || !meta.is_dir() {
             return Err(invalid("父路径须为普通目录"));
@@ -152,6 +159,7 @@ pub(super) fn plain_parents(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
 fn collect(root: &Path, path: &Path, files: &mut Files, total: &mut usize) -> Result<()> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -280,5 +288,37 @@ impl Translations {
         };
         let bytes = archive::encode(&manifest, &files)?;
         Ok(BackupBundle { manifest, bytes })
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_directory_is_a_valid_parent() {
+        let directory = std::env::temp_dir().canonicalize().unwrap();
+        assert!(matches!(
+            directory.components().next(),
+            Some(Component::Prefix(_))
+        ));
+        plain_parents(&directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn physical_root_does_not_allow_a_symlinked_descendant() {
+        let directory = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("ziyuan-backup-parent-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        fs::create_dir(directory.join("real")).unwrap();
+        fs::create_dir(directory.join("real/nested")).unwrap();
+        std::os::unix::fs::symlink(directory.join("real"), directory.join("linked")).unwrap();
+        let result = plain_parents(&directory.join("linked/nested"));
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(result.is_err());
     }
 }
