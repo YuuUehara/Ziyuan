@@ -28,6 +28,11 @@ test("page imports the actual editor, uses a persistent host and retains API con
   assert.match(html,/humanEditor\.update\(/);
   assert.match(html,/定稿可选 TXT、Markdown 或 HTML/);
   assert.match(html,/value="html"[^>]*>HTML（保留文学标记）/);
+  assert.match(html,/格式与编排只用于导出定稿/);
+  assert.match(html,/取回原件固定按归档字节、逐章请求/);
+  assert.match(html,/kind === "original" \? "txt" : d\.format/);
+  assert.match(html,/kind === "original" \? "chapters" : d\.layout/);
+  assert.ok(!html.includes("格式与编排不影响原件"));
 });
 test("whole draft limits include readings and every paragraph", () => {
   const paragraphs = ["a", "b"].map((id) => ({ id, text: "字", marks: Array.from({ length: 2049 }, () => ({start:0,end:1,kind:"strong"})) }));

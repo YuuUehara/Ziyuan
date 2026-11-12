@@ -243,7 +243,7 @@ ziyuan text export-finished $project --format txt --layout chapters --output exp
 
 ### Web：预览警告，确认后下载
 
-武英殿译书卡片「章节导出」选择章节、TXT／Markdown／HTML 和逐章／合并编排，分别点击「取回原件 TAR」或「导出定稿 TAR」。先显示文件、清单与转换警告，再确认下载；取消不下载。实际下载重新核对材料，预览成功不保证之后一定成功。viewer 只读令牌也可预览与下载，不因此获得写入或审批权限。
+武英殿译书卡片「章节导出」选择章节，以及只用于定稿的 TXT／Markdown／HTML 和逐章／合并编排，分别点击「取回原件 TAR」或「导出定稿 TAR」。取回原件不沿用这两项，页面固定按归档字节、逐章请求。先显示文件、清单与警告，再确认下载；取消不下载。实际下载重新核对材料，预览成功不保证之后一定成功。viewer 只读令牌也可预览与下载，不因此获得写入或审批权限。
 
 内部只读接口为 `GET /api/text/{id}/export`：`kind=original|finished`（默认 finished）、`format=txt|markdown|html`（注意 CLI 的 Markdown 写 `md`，HTML 在网页与接口都写 `html`）、`layout=chapters|book`、`chapters=章ID,章ID`（省略／空值选全部）、`preview=true`。预览 JSON 含 `manifest`、`warnings`、`files`（`name`／`length`）；非预览返回 `application/x-tar` 附件，安全生成文件名并设置 `Cache-Control: no-store`。页面确认时附 `snapshot=<预览清单的 snapshot_sha256>`，服务端重新生成并比较，变化则拒绝并要求重预览；直接调用 API 可省略此参数，但仍核对当次一致性。原件按归档字节导出，不接受成稿格式或排版选项。Web 不接受服务器输出路径；此内部 API 与页面不冻结。
 

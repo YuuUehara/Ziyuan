@@ -1342,9 +1342,14 @@ fn text_frontend_contract() {
         "定稿可选 TXT、Markdown 或 HTML",
         "HTML（保留文学标记）",
         "value=\"html\"",
+        "格式与编排只用于导出定稿",
+        "取回原件固定按归档字节、逐章请求",
+        "kind === \"original\" ? \"txt\" : d.format",
+        "kind === \"original\" ? \"chapters\" : d.layout",
     ] {
         assert!(crate::INDEX_HTML.contains(expected), "missing {expected}");
     }
+    assert!(!crate::INDEX_HTML.contains("格式与编排不影响原件"));
     assert!(!crate::INDEX_HTML.contains("先用 ziyuan text init"));
     assert!(!crate::INDEX_HTML.contains("ziyuan text new"));
     assert!(!crate::INDEX_HTML.contains("的的"));
