@@ -701,7 +701,11 @@ fn human_tab_edits_a_draft_and_confirms_before_submit_or_approval() {
         .join("c0001-b0001/zh.json");
     assert!(!translation.exists(), "保存草稿不能写入正式译稿");
     press(&mut app, "u");
-    assert!(screen(&app).contains("只冻结当前草稿"), "{}", screen(&app));
+    assert!(
+        screen(&app).contains("不会写入正式译稿"),
+        "{}",
+        screen(&app)
+    );
     press(&mut app, "n");
     assert!(app.modal.is_none());
     assert!(!screen(&app).contains("已送审"), "{}", screen(&app));

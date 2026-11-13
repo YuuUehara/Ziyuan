@@ -896,7 +896,7 @@ impl App {
         let mut lines = vec![
             Line::from(format!("项目 {project}")),
             Line::from(format!("块 {block}　修订 {revision}")),
-            Line::from("保存不改正式译稿。送审、准奏、定稿都要再按 y 确认。").dim(),
+            Line::from("保存只改草稿。送审、准奏、定稿都要再按 y。").dim(),
             Line::default(),
         ];
         if self.human.paragraphs.is_empty() {
@@ -1112,14 +1112,14 @@ impl App {
                         let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
                         format!("廷杖官员 #{} {name}？降一级留用，收回写权。", agent.0)
                     }
-                    ConfirmKind::HumanSubmit { project, block } => format!(
-                        "送审 {project} / {block}？只冻结当前草稿，不写入正式译稿，也不准奏。"
-                    ),
+                    ConfirmKind::HumanSubmit { project, block } => {
+                        format!("送审 {project} / {block}？现在不会写入正式译稿，也不准奏。")
+                    }
                     ConfirmKind::HumanApprove { project, block } => format!(
-                        "准奏并落盘 {project} / {block}？请确认没有旧版程序正在写入。不会自动定稿。"
+                        "准奏并落盘 {project} / {block}？请确认没有旧版紫垣正在写这个目录。这一步不会定稿。"
                     ),
                     ConfirmKind::HumanFinalize { project, block } => format!(
-                        "为 {project} / {block} 记定稿？磁盘译稿须已是准奏目标，此步不改写正文。"
+                        "把 {project} / {block} 定为定稿？正式译稿必须已经是这次准奏写下的内容。这一步不改译文。"
                     ),
                 };
                 let paragraph = Paragraph::new(vec![

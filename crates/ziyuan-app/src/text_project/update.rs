@@ -70,7 +70,7 @@ impl TextProjects {
             SourceKind::Docx | SourceKind::Epub => {
                 if old.chapters.iter().any(|c| c.parsing.is_some()) {
                     return Err(invalid(
-                        "此项目按 TXT 或 Markdown 解析保存，不能用 DOCX／EPUB 追加或修订；请改用同格式文本，或另建项目",
+                        "这个项目是按 TXT 或 Markdown 导入的，不能用 DOCX 或 EPUB 追加、修订。请改用同样的文本，或另建项目",
                     ));
                 }
                 (
@@ -264,17 +264,19 @@ fn update_warnings(kind: SourceKind, revision: bool, chapters: usize) -> Vec<Str
         vec!["旧原件和旧译保留；受影响块的送审、勘校与定稿须重新核对；不自动批准".into()];
     if matches!(kind, SourceKind::Docx | SourceKind::Epub) {
         if revision && chapters == 1 {
-            warnings
-                .push("单章修订会替换同格式归档原件，供日后回填；不会自动改写已有译稿。".into());
+            warnings.push(
+                "这一章的归档原件会换成新的 DOCX 或 EPUB，方便以后回填。已有译稿不会自动改。"
+                    .into(),
+            );
         } else {
             warnings.push(
-                "归档原件不随本次更新替换；DOCX／EPUB 回填仍使用导入时的原件。本次只更新项目正文。"
+                "这次不更换已经保存的归档原件。DOCX／EPUB 回填仍用导入时的那份，这次只改项目里的正文。"
                     .into(),
             );
         }
     }
     if kind == SourceKind::Markdown && !revision {
-        warnings.push("追加的 Markdown 整文件作为一章，不按标题再拆章。".into());
+        warnings.push("追加的 Markdown 整份算一章，不会按标题再拆。".into());
     }
     warnings
 }

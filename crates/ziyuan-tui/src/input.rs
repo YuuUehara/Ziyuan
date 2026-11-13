@@ -474,7 +474,9 @@ impl App {
         };
         if matches!(kind, InputKind::HumanEdit) {
             self.set_human_paragraph(text);
-            self.info("已写入当前段，按 s 保存草稿。改字后本段注音等标记会清除，标记编辑仍用网页");
+            self.info(
+                "这一段已改，按 s 保存。改过的字会去掉本段的注音和着重，那些标记请到网页里改",
+            );
             return;
         }
         let text = text.trim().to_owned();

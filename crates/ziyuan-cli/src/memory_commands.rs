@@ -7,15 +7,15 @@ pub(crate) const MEMORY_HELP: &str = r#"翻译记忆（均支持 --json）：
   ziyuan text memory build <项目ID> [--project <其他项目ID>]... [--provider local|deterministic|remote]
                                                     从当前有效定稿重建索引，不改原文或译稿
   ziyuan text memory search <项目ID> --query <原文> [--project <其他项目ID>]... [--limit 5] [--provider ...]
-                                                    查找参考译法，最多 50 条；只供参考，不自动插入或批准
+                                                    查找参考译法，最多 50 条。只供参考，不自动写入译稿，也不自动批准
   ziyuan text memory authorize <项目ID> --endpoint <URL> --model <模型> --revision <修订> --dim <维度> [--project <其他项目ID>]... [--confirm <指纹>]
-                                                    预览或确认远程嵌入授权。未确认不写文件、不联网
+                                                    预览或确认远程嵌入。不确认就不写授权、不联网
     默认只查当前项目；其他项目必须逐个给出 --project，不支持 --all。
     搜索 JSON 的 hits[].selection 可放入选择文件的 selections 数组；不要复制参考正文。
-    使用跨项目参考还须在选择文件 authorized_projects 中显式授权；搜索授权不代替下诏授权。
-    默认不启用。ZIYUAN_MEMORY_PROVIDER=local 或 deterministic 只在本机计算。
-    remote 还须 ZIYUAN_MEMORY_EMBED_URL、MODEL、REVISION、DIM，密钥用 ZIYUAN_MEMORY_EMBED_KEY。
-    不读取 ZIYUAN_LLM_*。未授权的项目不会发送原文。命中不会自动写入译稿。"#;
+    使用跨项目参考还须在选择文件 authorized_projects 中显式授权；搜索时允许的项目不代替下诏授权。
+    默认不启用。local 与 deterministic 只在本机计算，都不理解意思。
+    remote 还要设置 ZIYUAN_MEMORY_EMBED_URL、MODEL、REVISION、DIM；密钥是 ZIYUAN_MEMORY_EMBED_KEY。
+    这些都不从 ZIYUAN_LLM_* 读取。没授权的项目不会把原文发出去。"#;
 
 pub(crate) struct MemoryAction {
     pub command: String,

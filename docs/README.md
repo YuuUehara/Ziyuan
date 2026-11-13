@@ -1,6 +1,6 @@
 # 文档目录
 
-本文档对应 **1.15.0** 源码。初次使用先看[使用指南](guide.md)，译书操作看[文本项目指南](text-projects.md)和[小说翻译指南](novel-translation.md)。本版扩展原文更新格式，开放终端人工译稿，并让向量记忆的远程嵌入先经项目授权。
+本文档对应 **1.15.0** 源码。初次使用先看[使用指南](guide.md)，译书操作看[文本项目指南](text-projects.md)和[小说翻译指南](novel-translation.md)。本版可以追加、修订 Markdown、DOCX 和 EPUB，终端可以写人工译稿，远程嵌入须先按项目授权。
 
 发布与验证进度见 [1.15.0 验收记录](acceptance/1.15.0.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
 

@@ -42,7 +42,7 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text tm adopt <项目ID> <ID>                 记录一次人工采纳
   ziyuan text tm build <项目ID>                      从现有译稿生成记忆（去重）
   ziyuan text tm suggest <项目ID> --query <原文> [--limit N]
-                                                    用译文记忆的向量检索给参考，不写入 tm.json，不自动采纳
+                                                    从译文记忆查参考。不写入本地记忆，也不自动采纳
   ziyuan text termbase export-tbx <项目ID> <文件.tbx>
   ziyuan text termbase import-tbx <项目ID> <文件.tbx>
   ziyuan text comment list <项目ID> [块ID]
@@ -678,7 +678,7 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                 }))?;
             } else {
                 println!(
-                    "向量参考 {} 条。只供核对，不会写入 tm.json，也不会自动插入或批准。",
+                    "参考译法 {} 条。只供核对，不会写入本地记忆，也不会自动插入或批准。",
                     hits.len()
                 );
                 for hit in &hits {
