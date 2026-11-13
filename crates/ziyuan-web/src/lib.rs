@@ -114,6 +114,7 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "materials-editor.mjs" => MATERIALS_EDITOR,
         "materials-preview.mjs" => MATERIALS_PREVIEW,
         "continuity.mjs" => include_str!("continuity.mjs"),
+        "translation-workspace.mjs" => include_str!("translation-workspace.mjs"),
         "continuity-issues.mjs" => include_str!("continuity-issues.mjs"),
         "continuity-reading.mjs" => include_str!("continuity-reading.mjs"),
         "continuity-search.mjs" => include_str!("continuity-search.mjs"),

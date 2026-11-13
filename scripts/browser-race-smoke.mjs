@@ -77,10 +77,10 @@ try {
   await waitFor(async () => !!(await a.evaluate("!!document.querySelector('#login-token')")), 10000, "A 登录");
   await a.evaluate("document.querySelector('#login-token').value = " + JSON.stringify(token) + "; document.querySelector('#login-form').requestSubmit();");
   await sleep(1200);
-  await a.evaluate("document.querySelector('[data-hall=\"wuying\"]').click()");
+  await a.evaluate("document.querySelector('[data-hall=\"translation\"]').click()");
   await sleep(800);
   await waitFor(async () => !!(await a.evaluate("document.querySelectorAll('#text-project option').length > 0")), 20000, "A 项目");
-  await a.evaluate("document.querySelector('#materials-load').click()");
+  await a.evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load').click()");
   await waitFor(async () => !!(await a.evaluate("!!document.querySelector('#text-materials-editor .materials-editor')")), 20000, "A 编辑器");
 
   // B：同 profile 新页面，cookie 共享。
@@ -91,10 +91,10 @@ try {
   await b.send("Page.navigate", { url: base + "/" });
   await waitFor(async () => !!(await b.evaluate("document.readyState === 'complete'")), 15000, "B 首页");
   await sleep(1200);
-  await b.evaluate("document.querySelector('[data-hall=\"wuying\"]').click()");
+  await b.evaluate("document.querySelector('[data-hall=\"translation\"]').click()");
   await sleep(800);
   await waitFor(async () => !!(await b.evaluate("document.querySelectorAll('#text-project option').length > 0")), 20000, "B 项目");
-  await b.evaluate("document.querySelector('#materials-load').click()");
+  await b.evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load').click()");
   await waitFor(async () => !!(await b.evaluate("!!document.querySelector('#text-materials-editor .materials-editor')")), 20000, "B 编辑器");
 
   const add = async (page, id, source) => {

@@ -1244,7 +1244,7 @@ fn text_frontend_contract() {
         "data-text-action=\"${action}\"",
         "data-note-action=\"promote\"",
         "data-goto-task",
-        "#wuying/text",
+        "#translation/text",
         "textHash()",
         "textDrafts",
         "sessionStorage",
@@ -1363,18 +1363,16 @@ fn text_frontend_contract() {
     ] {
         assert!(crate::INDEX_HTML.contains(write), "missing {write}");
     }
-    // 卡片排在武英殿的兵部驿站之后，不与作品关注混在一处。
-    let wuying = crate::INDEX_HTML
-        .split("id=\"hall-wuying\"")
+    // 译书独立成页，不再埋在实录与驿站中。
+    let translation = crate::INDEX_HTML
+        .split("id=\"hall-translation\"")
         .nth(1)
         .unwrap()
-        .split("id=\"hall-qiju\"")
+        .split("id=\"hall-wuying\"")
         .next()
         .unwrap();
-    assert!(
-        wuying.find("id=\"text-card\"").unwrap()
-            < wuying.find("id=\"subscription-panel\"").unwrap()
-    );
+    assert!(translation.contains("id=\"text-card\""));
+    assert!(!translation.contains("id=\"subscription-panel\""));
 }
 
 /// 子进程独占提供方配置，避免并行测试修改进程环境。

@@ -4,7 +4,7 @@ import { mountSearch } from "./continuity-search.mjs";
 import { mountMemoryExchange } from "./continuity-memory.mjs";
 import { mountDocuments } from "./continuity-document.mjs";
 export function mount({ api, getSelection, refresh, navigate }) {
-  const host = document.createElement("details");host.className="continuity-tools";
+  const host = document.createElement("details");host.className="continuity-tools";host.dataset.workspaceTool="backup";
   host.innerHTML = `<summary>备份与恢复</summary><p class="hint">完整备份包含全部译书项目和共用朝廷记录，其中可能有代码任务正文；登录令牌和模型凭据配置不会打包。恢复时会在当前工作区内新建目录，请勿把这份备份直接当作单本书的分享包。</p><div class="row write"><button type="button" data-preview>预览完整备份</button><button type="button" data-download disabled>确认下载</button></div><div class="row write"><input type="file" accept=".tar" data-file aria-label="备份文件"><input data-destination placeholder="新目录名，如 books-restored（英文）" aria-label="恢复目录"><button type="button" data-check>校验备份</button><button type="button" data-restore disabled>确认恢复</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   document.querySelector("#text-card > .body").prepend(host);
   const el = (key) => host.querySelector(`[data-${key}]`);
@@ -24,14 +24,15 @@ export function mount({ api, getSelection, refresh, navigate }) {
   el("file").onchange = () => { checked = null; el("restore").disabled = true; };
   el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
   el("restore").onclick = () => run(async () => { if (!checked) throw new Error("请先校验备份"); show(await send(`?destination=${encodeURIComponent(el("destination").value)}&fingerprint=${encodeURIComponent(checked.fingerprint)}`)); el("restore").disabled = true; });
-  const updates=document.createElement("details");updates.className="continuity-tools";
+  const updates=document.createElement("details");updates.className="continuity-tools";updates.dataset.workspaceTool="source-update";
   updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
   const reading=mountReading(issues,{api,getSelection,navigate});
   const search=mountSearch(reading,{api,getSelection,navigate,refresh});
   const memory=mountMemoryExchange(search,{api,getSelection});
-  mountDocuments(memory,{getSelection,refresh});
+  const documents=mountDocuments(memory,{getSelection,refresh});
+  issues.dataset.workspaceTool="issues";reading.dataset.workspaceTool="reading";search.dataset.workspaceTool="search";memory.dataset.workspaceTool="tmx";
   const u=(name)=>updates.querySelector(`[data-${name}]`);
   let proposed;
   const change=async(task)=>{try{u("status").textContent="处理中…";await task();u("status").textContent="完成";}catch(e){u("status").textContent=e.message;u("apply").disabled=true;}};

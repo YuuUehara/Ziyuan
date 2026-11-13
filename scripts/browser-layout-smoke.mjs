@@ -92,18 +92,34 @@ try {
     }
   };
   await send("Page.enable");
-  await send("Page.navigate", { url: base });
+  await send("Page.navigate", { url: base + "/#translation" });
   await until(() => evaluate("!!document.querySelector('#login-token')"), "登录页");
   await viewport(320);
   await evaluate("document.fonts.ready");
   await inspect("登录 / 320px");
   await evaluate(`document.querySelector('#login-token').value=${JSON.stringify(token)};document.querySelector('#login-form').requestSubmit()`);
   await until(() => evaluate("!!document.querySelector('#edict-new') && !document.querySelector('#locked').classList.contains('show')"), "入朝");
-  await evaluate("location.hash='wuying';showHall()");
+  await until(() => evaluate("!document.querySelector('#hall-translation').hidden"), "登录后直接进入译书");
   await until(() => evaluate("document.querySelector('#text-project')?.options.length>0"), "译书项目");
-  await evaluate("const project=document.querySelector('#text-project');project.value=project.options[0].value;project.dispatchEvent(new Event('change',{bubbles:true}))");
+  await evaluate("(async()=>{const books=await api('/text');const project=document.querySelector('#text-project');project.value=books.projects.find(p=>p.blocks>0).id;project.dispatchEvent(new Event('change',{bubbles:true}))})()");
   await until(() => evaluate("textBlockId!==null && !!document.querySelector('#continuity-reader')"), "译书页面");
-  await evaluate("document.querySelectorAll('#text-card details').forEach(e=>e.open=true);document.querySelector('#materials-load')?.click();document.querySelector('#continuity-reader [data-load]').click()");
+  await evaluate("location.hash='#wuying/text/'+textProjectId+'/'+textBlockId;showHall()");
+  await until(() => evaluate("!document.querySelector('#hall-translation').hidden && textBlockId!==null"), "旧译书链接");
+  if(await evaluate("document.querySelector('#hall-wuying').contains(document.querySelector('#text-card'))")) throw new Error("译书仍混在武英殿中");
+  await evaluate("document.querySelector('[data-workspace-tab=draft]').click()");
+  await until(() => evaluate("!!document.querySelector('#text-human-editor textarea')"), "人工编辑器");
+  await evaluate("window.layoutDraft=document.querySelector('#text-human-editor textarea');layoutDraft.value='未保存的排版检查草稿';layoutDraft.dispatchEvent(new Event('input',{bubbles:true}))");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('[data-workspace-tab=draft]').click()");
+  if(!await evaluate("document.querySelector('#text-human-editor textarea')===layoutDraft && layoutDraft.value==='未保存的排版检查草稿'")) throw new Error("切换工作区丢失草稿或重建了编辑器");
+  await evaluate("localStorage.setItem(referenceKey(),'{}');onTextAction('translate')");
+  if(!await evaluate("document.querySelector('[data-workspace-tab=materials]').getAttribute('aria-selected')==='true'")) throw new Error("参考确认仍藏在隐藏页签");
+  await evaluate("localStorage.removeItem(referenceKey());referenceSelections=[{}];referenceKind='revise';selectWorkspaceTab('draft');onTextAction('translate')");
+  if(!await evaluate("document.querySelector('[data-workspace-tab=materials]').getAttribute('aria-selected')==='true'")) throw new Error("更改参考用途后未显示资料页签");
+  await evaluate("window.__qaIssues=[{code:'untranslated',paragraph:document.querySelector('[data-text-para]').dataset.textPara,message:'自编定位检查'}];renderQaIssues();document.querySelector('#materials-qa-result button').click()");
+  if(!await evaluate("document.querySelector('[data-workspace-tab=draft]').getAttribute('aria-selected')==='true'")) throw new Error("检查问题无法定位到译稿页签");
+  await evaluate("window.__qaIssues=[];renderQaIssues()");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click()");
+  await evaluate("document.querySelectorAll('#text-card details').forEach(e=>e.open=true);document.querySelector('#materials-load')?.click();document.querySelector('[data-workspace-tab=delivery]').click();document.querySelector('#continuity-reader [data-load]').click()");
   await until(() => evaluate("document.querySelectorAll('#continuity-reader .reading-row').length===2"), "长文通读");
   await sleep(300);
   // 如已挂载资料预览卡，附加长校验码；正文和长 URL 由前面的自编原文提供。
@@ -113,15 +129,15 @@ try {
     await evaluate(`setTheme(${JSON.stringify(theme)})`);
     for (const width of widths) {
       await viewport(width);
-      for (const hall of ["fengtian", "huagai", "wenhua", "wuying", "qiju"]) {
+      for (const hall of ["fengtian", "huagai", "wenhua", "wuying", "qiju", "translation"]) {
         await evaluate(`location.hash=${JSON.stringify(hall)};showHall()`);
         await sleep(50);
-        if (hall === "wuying") await evaluate("document.querySelectorAll('#text-card details').forEach(e=>e.open=true)");
+        if (hall === "translation") { for(const tab of ["draft","materials","delivery","manage"]) { await evaluate(`document.querySelector('[data-workspace-tab=${tab}]').click();document.querySelectorAll('#text-card details').forEach(e=>e.open=true)`); await inspect(`${theme} / ${width}px / translation / ${tab}`); } continue; }
         await inspect(`${theme} / ${width}px / ${hall}`);
       }
     }
   }
-  await evaluate("location.hash='wuying';showHall()");
+  await evaluate("location.hash='translation';showHall()");
   for (const width of [320, 640]) {
     await viewport(width);
     for (const id of ["text-new-project-dialog", "material-wizard", "schedule-dialog"]) {
@@ -138,10 +154,17 @@ try {
     console.error(JSON.stringify({ ok: false, cases, failedCases: failures.length, failures: failures.slice(0, 12) }));
     process.exitCode = 1;
   } else {
+    await evaluate("document.querySelector('[data-workspace-tab=draft]').click();window.scrollTo(0,0)");
+    await viewport(1440);
+    fs.writeFileSync(output.replace(/\.png$/, '-wide.png'), Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));
     await viewport(390);
-    await evaluate("document.querySelector('#continuity-reader').scrollIntoView({block:'start'})");
+    await evaluate("window.scrollTo(0,0)");
     fs.writeFileSync(output, Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));
-    console.log(JSON.stringify({ ok: true, cases, themes, widths, halls: 5, dialogs: 3, longText: true, zoomEquivalent: "200%" }));
+    await evaluate("window.confirm=()=>true;document.querySelector('#text-new-project').click();document.querySelector('#new-project-title').value='自编空白入口检查';document.querySelector('#new-project-source').value='自编';document.querySelector('#new-project-rights').value='仅作测试';document.querySelector('#text-new-project-form').requestSubmit()");
+    await until(() => evaluate("document.querySelector('[data-workspace-tab=manage]').getAttribute('aria-selected')==='true' && !document.querySelector('#text-new-project-dialog').open && textProject?.project?.title==='自编空白入口检查'"), "空项目直接进入导入");
+    await evaluate("(()=>{const tool=document.querySelector('[data-workspace-tool=document-import]');if(!tool.closest('[data-workspace-panel=manage]'))throw new Error('文档导入不在项目管理');tool.open=true;tool.querySelector('[data-format]').value='srt';const files=new DataTransfer();files.items.add(new File(['1\\n00:00:01,000 --> 00:00:02,000\\n自编字幕原文。\\n'],'sample.srt',{type:'text/plain'}));tool.querySelector('[data-file]').files=files.files;tool.querySelector('[data-import]').click()})()");
+    await until(() => evaluate("document.querySelector('[data-workspace-tab=draft]').getAttribute('aria-selected')==='true' && textBlockId!==null && document.querySelector('#text-source').textContent.includes('自编字幕原文')"), "网页导入后开始译稿");
+    console.log(JSON.stringify({ ok: true, cases, themes, widths, halls: 6, workspaceTabs:4, directEntry:true, emptyProjectToImport:true, documentImportToDraft:true, legacyDeepLink:true, draftPreserved:true, crossPanelNavigation:true, dialogs: 3, longText: true, zoomEquivalent: "200%" }));
   }
 } catch (error) {
   console.error(error.message); process.exitCode = 1;

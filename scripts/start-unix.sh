@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+START_URL="http://127.0.0.1:18080/"
+if [ "${1:-}" = --translation ]; then START_URL="http://127.0.0.1:18080/#translation"; fi
 cd "$(dirname "$0")"
 if [ ! -x ./ziyuan ]; then
   echo "未找到可执行的 ./ziyuan。请把本脚本放在解压后的目录里。"
@@ -25,8 +27,8 @@ if command -v pbcopy >/dev/null 2>&1; then printf '%s' "$TOKEN" | pbcopy; COPIED
 elif command -v xclip >/dev/null 2>&1; then printf '%s' "$TOKEN" | xclip -selection clipboard; COPIED=1
 elif command -v wl-copy >/dev/null 2>&1; then printf '%s' "$TOKEN" | wl-copy; COPIED=1
 else COPIED=0; fi
-if command -v open >/dev/null 2>&1; then open "http://127.0.0.1:18080/"
-elif command -v xdg-open >/dev/null 2>&1; then xdg-open "http://127.0.0.1:18080/"
+if command -v open >/dev/null 2>&1; then open "$START_URL"
+elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$START_URL"
 fi
 echo
 if [ "$COPIED" = 1 ]; then

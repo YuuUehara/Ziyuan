@@ -659,6 +659,11 @@
   #continuity-reader .reading-row { border-top:1px solid var(--line); padding:16px 0; }
   @media (max-width:700px) { .continuity-columns, #continuity-reader .reading-row { grid-template-columns:minmax(0,1fr); } }
 
+  .workspace-tabs { display:flex; flex-wrap:wrap; gap:6px; padding:0 0 12px; margin-bottom:12px; border-bottom:1px solid var(--line); }
+  .workspace-tabs button { flex:1 1 100px; min-width:0; white-space:normal; font-family:var(--serif); }
+  .workspace-tabs button[aria-selected="true"] { color:var(--sheet); background:var(--ink); }
+  [data-workspace-panel] { min-width:0; }
+  [data-workspace-panel] > .hint:first-child { margin:0 0 16px; }
 </style>
 </head>
 <body>
@@ -684,6 +689,7 @@
 
 <div class="court">
   <nav class="halls" aria-label="殿阁">
+    <a href="#translation" data-hall="translation"><b>译书</b><span>翰林院 · 项目与译稿</span></a>
     <a href="#fengtian" data-hall="fengtian"><b>奉天殿</b><span>诏令</span><i id="hall-badge-fengtian" hidden></i></a>
     <a href="#huagai" data-hall="huagai"><b>华盖殿</b><span>朝堂</span><i id="hall-badge-huagai" hidden></i></a>
     <a href="#wenhua" data-hall="wenhua"><b>文华殿</b><span>百官</span></a>
@@ -845,38 +851,11 @@
     </section>
     </div>
 
-    <div class="hall" id="hall-wuying" hidden>
-    <section class="card full">
-      <h2>翰林院实录 · 礼部 · 兵部驿站 <small>检索旧案、修 CHANGELOG、收 GitHub 来件</small></h2>
-      <div class="body officials-layout">
-        <div>
-          <form class="row" id="records-form">
-            <input type="text" id="records-q" data-keep placeholder="检索实录：诏令、承办人、回奏摘要（留空为全部）">
-            <button class="small shrink" type="submit" data-view>检索</button>
-            <span class="hint shrink" id="records-count"></span>
-          </form>
-          <ol class="records-list" id="records-list"><li class="hint">办结的诏令即入实录，承办新诏前也会参照；点「检索」查看。</li></ol>
-        </div>
-        <div class="write">
-          <h3>礼部修 CHANGELOG</h3>
-          <div class="row"><input type="text" id="changelog-version" data-keep placeholder="版本（默认 Unreleased）"></div>
-          <div class="row" style="margin-top:6px">
-            <input type="text" id="changelog-since" data-keep placeholder="起点（默认上个 tag）">
-            <button class="small shrink" id="changelog-btn" title="据 git log 下一件礼部诏令，只入队">修</button>
-          </div>
-          <h3>兵部驿站 · GitHub</h3>
-          <p class="hint" id="github-state"></p>
-          <div class="row" id="github-row" hidden>
-            <input type="text" id="github-label" data-keep placeholder="标签（默认 ziyuan）">
-            <button class="small shrink" id="github-pull">收来件</button>
-          </div>
-        </div>
-      </div>
-    </section>
+    <div class="hall" id="hall-translation" hidden>
     <section class="card full" id="text-card">
-      <h2>翰林院 · 译书 <small>项目 · 章 · 块；原文 / 已准奏译文 / 待准修订</small><span class="viewer-badge">只读：不能下诏、朱批、定稿或改札记</span></h2>
+      <h2>翰林院 · 译书 <small>选项目 → 选章节 → 写译稿</small><span class="viewer-badge">只读：不能下诏、朱批、定稿或改札记</span></h2>
       <div class="body">
-        <p class="hint">译书与御笔札记不依赖朝廷；块进度、待准修订与御览须先建朝（ziyuan init）。驳回的改动不会落盘，已准奏的译稿也不会被自动覆盖。</p>
+        <p class="hint">从左侧选项目和章节即可继续；第一次使用请点「新建项目」，再到「项目管理」导入原文。编辑、资料和交稿分开办理，准奏与定稿仍由你确认。</p>
         <div class="text-layout">
           <div class="text-side">
             <label for="text-project">项目</label>
@@ -1076,6 +1055,35 @@
         </div>
       </div>
     </section>
+    </div>
+    <div class="hall" id="hall-wuying" hidden>
+    <section class="card full">
+      <h2>翰林院实录 · 礼部 · 兵部驿站 <small>检索旧案、修 CHANGELOG、收 GitHub 来件</small></h2>
+      <div class="body officials-layout">
+        <div>
+          <form class="row" id="records-form">
+            <input type="text" id="records-q" data-keep placeholder="检索实录：诏令、承办人、回奏摘要（留空为全部）">
+            <button class="small shrink" type="submit" data-view>检索</button>
+            <span class="hint shrink" id="records-count"></span>
+          </form>
+          <ol class="records-list" id="records-list"><li class="hint">办结的诏令即入实录，承办新诏前也会参照；点「检索」查看。</li></ol>
+        </div>
+        <div class="write">
+          <h3>礼部修 CHANGELOG</h3>
+          <div class="row"><input type="text" id="changelog-version" data-keep placeholder="版本（默认 Unreleased）"></div>
+          <div class="row" style="margin-top:6px">
+            <input type="text" id="changelog-since" data-keep placeholder="起点（默认上个 tag）">
+            <button class="small shrink" id="changelog-btn" title="据 git log 下一件礼部诏令，只入队">修</button>
+          </div>
+          <h3>兵部驿站 · GitHub</h3>
+          <p class="hint" id="github-state"></p>
+          <div class="row" id="github-row" hidden>
+            <input type="text" id="github-label" data-keep placeholder="标签（默认 ziyuan）">
+            <button class="small shrink" id="github-pull">收来件</button>
+          </div>
+        </div>
+      </div>
+    </section>
     <div id="subscription-panel">
       <section class="card full" id="subscription-card">
         <h2>兵部驿站 · 作品关注 <small>syosetu · 只查询作品信息</small><span class="viewer-badge">只读：不能添加、检查或改设置</span></h2>
@@ -1195,7 +1203,12 @@ function deltaFor(id, version, side) {
   return deltaCache[key];
 }
 
-import("./assets/continuity.mjs").then(({ mount }) => mount({ api, getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }), refresh: () => loadTextProject(), navigate: async anchor => { textBlockId=anchor.block; invalidateReferences(true); await loadTextBlock(); textPick(anchor.paragraph); document.querySelector("#text-human-editor")?.scrollIntoView({block:"start"}); } })).catch(e => console.error(e));
+let translationWorkspace = null;
+let translationRoutes = null;
+function selectWorkspaceTab(panel) { translationWorkspace?.select(panel); }
+import("./assets/translation-workspace.mjs").then(({ mountWorkspace, parseTextRoute, textRoute }) => { translationRoutes = {parseTextRoute, textRoute}; translationWorkspace = mountWorkspace($("text-card")); translationWorkspace.update({project:textProjectId,hasSource:!!textProject?.outline?.some(c=>c.blocks.length)}); }).catch(e=>console.error(e));
+
+import("./assets/continuity.mjs").then(({ mount }) => mount({ api, getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }), refresh: () => loadTextProject(), navigate: async anchor => { selectWorkspaceTab("draft"); textBlockId=anchor.block; invalidateReferences(true); await loadTextBlock(); textPick(anchor.paragraph); document.querySelector("#text-human-editor")?.scrollIntoView({block:"start"}); } })).catch(e => console.error(e));
 
 async function api(path, body) {
   const response = await fetch("api" + path, {
@@ -1816,7 +1829,7 @@ function renderQaIssues() {
       go.type = "button"; go.className = "link-button"; go.textContent = "定位";
       go.addEventListener("click", () => {
         const target = document.querySelector('[data-text-para="' + CSS.escape(issue.paragraph) + '"]');
-        if (target) target.scrollIntoView({ block: "center" });
+        if (target) { selectWorkspaceTab("draft"); target.scrollIntoView({ block: "center" }); }
       });
       row.append(go);
     }
@@ -2051,7 +2064,7 @@ async function renderN2bHints() {
           button.addEventListener("click", () => {
             const first = (item.paragraphs || [])[0];
             const target = first && document.querySelector('[data-text-para="' + CSS.escape(first) + '"]');
-            if (target) target.scrollIntoView({ block: "center" });
+            if (target) { selectWorkspaceTab("draft"); target.scrollIntoView({ block: "center" }); }
           });
           hint.append(button, "（" + (item.paragraphs || []).join("、") + "）");
         });
@@ -2518,12 +2531,14 @@ const noteFilters = { search: "", kind: "" };
 
 // 地址栏记下所在的项目与块，刷新或书签都能回到原处。
 function textSelection() {
+  if (translationRoutes) return translationRoutes.parseTextRoute(location.hash);
   const parts = location.hash.slice(1).split("/");
-  if (parts[0] !== "wuying" || parts[1] !== "text") return null;
+  if (!["translation", "wuying"].includes(parts[0]) || parts[1] !== "text") return null;
   return { project: parts[2] || null, block: parts[3] || null };
 }
 function textHash() {
-  return "#wuying/text" + (textProjectId ? "/" + textProjectId : "") + (textBlockId ? "/" + textBlockId : "");
+  if (translationRoutes) return translationRoutes.textRoute(textProjectId, textBlockId);
+  return "#translation/text" + (textProjectId ? "/" + textProjectId : "") + (textBlockId ? "/" + textBlockId : "");
 }
 async function loadText() {
   try {
@@ -3026,6 +3041,7 @@ function renderTextNow() {
         .join("")
     : `<p class="hint">${projects.length ? "此项目还没有导入原文。" : "建好项目并导入 TXT 后在此列出章与块。"}</p>`;
 
+  translationWorkspace?.update({project:textProjectId, hasSource:!!textProject?.outline?.some(c => c.blocks.length)});
   const b = textBlock;
   const statusLine = [];
   if (textError) statusLine.push(`<span class="error">${esc(textError)}</span>`);
@@ -3181,14 +3197,18 @@ async function onTextAction(action) {
   const b = textBlock;
   if (!b || !state || state.viewer) return;
   if (["translate", "revise"].includes(action) && referencePending()) {
+    selectWorkspaceTab("materials");
     $("reference-panel").scrollIntoView({block: "nearest"});
     textMessage("已有保存的参考确认；请先查询／重试同一次确认，不要重复下诏。", true);
     return;
   }
   if (["translate", "revise"].includes(action) && referenceSelections.length) {
+    selectWorkspaceTab("materials");
     if (action !== referenceKind) {
       referenceKind = action;
       invalidateReferences(true);
+      referenceMessage = "用途已变化，已清除旧选择；请重新选择参考并预览。";
+      renderReferences();
       textMessage("用途已变化，已清除旧选择；请重新选择参考并预览。", true);
     } else {
       $("reference-panel").scrollIntoView({block: "nearest"});
@@ -3776,12 +3796,12 @@ $("subscription-settings-form").addEventListener("submit", (event) => {
 });
 
 // ---- 分殿：随地址栏的 # 切换 ----
-const HALLS = ["fengtian", "huagai", "wenhua", "wuying", "qiju"];
+const HALLS = ["translation", "fengtian", "huagai", "wenhua", "wuying", "qiju"];
 let hall = "fengtian";
 function showHall() {
-  // 译书用 #wuying/text/<项目>/<块> 记住位置，仍落在武英殿。
+  // 译书独立成页；保留旧武英殿深链接。
   const text = textSelection();
-  let want = text ? "wuying" : location.hash.slice(1);
+  let want = text ? "translation" : location.hash.slice(1);
   // 作品关注已并入武英殿的兵部驿站；旧书签仍可用。
   if (want === "subscriptions") {
     history.replaceState(null, "", "#wuying");
@@ -3793,7 +3813,7 @@ function showHall() {
   if (hall === "qiju" && state) loadHistory().catch((e) => toast(e.message, true));
   if (hall === "wuying" && state) loadRecords().catch((e) => toast(e.message, true));
   if (hall === "wuying") loadSubscriptions();
-  if (hall === "wuying") loadText();
+  if (hall === "translation") loadText();
 }
 window.addEventListener("hashchange", showHall);
 showHall();
@@ -3934,7 +3954,7 @@ async function refresh() {
     if (hall === "qiju") loadHistory();
     if (hall === "wuying") loadSubscriptions();
     // 译书材料随「changed」重置（朱批、下诏、准奏都改状态），输入由重绘时保留。
-    if (hall === "wuying" && textLoaded) loadTextProject();
+    if (hall === "translation" && textLoaded) loadTextProject();
   } catch (e) {
     if (!$("locked").classList.contains("show")) toast(e.message, true);
   }

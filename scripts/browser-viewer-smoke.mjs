@@ -75,10 +75,10 @@ try {
   await waitJs("!!document.querySelector('#login-token')", 10000, "登录表单");
   await evaluate("document.querySelector('#login-token').value = " + JSON.stringify(token) + "; document.querySelector('#login-form').requestSubmit();");
   await sleep(900);
-  await evaluate("document.querySelector('[data-hall=\"wuying\"]').click()");
+  await evaluate("document.querySelector('[data-hall=\"translation\"]').click()");
   await sleep(900);
   await waitJs("document.querySelectorAll('#text-project option').length > 0", 20000, "项目下拉");
-  await evaluate("document.querySelector('#materials-load').click()");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load').click()");
   await waitJs("!!document.querySelector('#text-materials-editor .materials-editor')", 20000, "编辑器挂载");
 
   const viewerState = await evaluate("JSON.stringify({ viewer: !!state?.viewer, addHidden: !!document.querySelector('#text-materials-editor [data-role=\"add\"]')?.hidden, readOnly: [...document.querySelectorAll('#text-materials-editor input')].every((i) => i.readOnly || i.disabled), savePresent: !!document.querySelector('#materials-save') })");

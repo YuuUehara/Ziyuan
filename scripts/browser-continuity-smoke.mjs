@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 连续翻译网页烟测：登录 → 武英殿 → 选项目 → 双语通读、跨章待查、交稿预检、备份预览、
+// 连续翻译网页烟测：登录 → 译书 → 选项目 → 双语通读、跨章待查、交稿预检、备份预览、
 // 草稿检索与替换、TMX 预览合并，并检查三套主题在 390／768／1440 CSS 像素下是否横向溢出。
 // 用法: node scripts/browser-continuity-smoke.mjs <工作区> <ziyuan.exe> <输出.png> [端口]
 import { spawn, execFileSync } from "node:child_process";
@@ -80,37 +80,49 @@ try {
   await waitJs("document.readyState === 'complete'", 15000, "首页");
   await waitJs("!!document.querySelector('#login-token')", 10000, "登录表单");
   await evaluate("document.querySelector('#login-token').value = " + JSON.stringify(token) + "; document.querySelector('#login-form').requestSubmit();");
-  await evaluate("document.querySelector('[data-hall=\\'wuying\\']').click()");
+  await evaluate("document.querySelector('[data-hall=\\'translation\\']').click()");
   await waitJs("!!document.querySelector('#text-project') && document.querySelectorAll('#text-project option').length > 0", 20000, "项目下拉");
   await evaluate("(() => { const s = document.querySelector('#text-project'); s.value = s.options[0].value; s.dispatchEvent(new Event('change', { bubbles: true })); })()");
 
   await waitJs("textBlockId !== null && !!document.querySelector('#continuity-reader')",20000,"工作区模块");
+  await evaluate("document.querySelector('[data-workspace-tab=delivery]').click()");
   await evaluate("document.querySelector('#continuity-reader').open=true; document.querySelector('#continuity-reader [data-load]').click()");
   await waitJs("document.querySelectorAll('#continuity-reader .reading-row').length===2",20000,"双语通读");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click()");
   await evaluate("(() => {const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='跨章待查');d.open=true;d.querySelector('[data-load]').click();})()");
   await waitJs("[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='跨章待查')?.querySelector('[data-source]')?.options.length===2",20000,"待查段落");
   await evaluate("(() => {const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='跨章待查');d.querySelector('[data-rule]').value='称谓';d.querySelector('[data-body]').value='浏览器自编待查';d.querySelector('[data-related]').options[1].selected=true;d.querySelector('[data-add]').click();})()");
   await waitJs("[...document.querySelectorAll('details')].some(d=>d.querySelector('[data-list]')?.textContent.includes('浏览器自编待查'))",20000,"登记待查");
+  await evaluate("document.querySelector('[data-workspace-tab=delivery]').click()");
   await evaluate("document.querySelector('#continuity-reader [data-check]').click()");
   await waitJs("document.querySelector('#continuity-reader [data-report]').textContent.includes('暂不能导出')",20000,"交稿门槛");
+  await evaluate("document.querySelector('[data-workspace-tab=manage]').click()");
   await evaluate("(() => {const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='备份与恢复');d.open=true;d.querySelector('[data-preview]').click();})()");
   await waitJs("[...document.querySelectorAll('details')].some(d=>d.querySelector('[data-download]')?.disabled===false)",20000,"备份预览");
 
+  await evaluate("document.querySelector('[data-workspace-tab=draft]').click()");
   await evaluate("(async()=>{const b='/text/'+textProjectId+'/blocks/'+textBlockId+'/human/draft';const v=await api(b.replace('/human/draft','/human'));const r=await api('/text/'+textProjectId+'/reading');await api(b,{request_id:'browser-'+crypto.randomUUID(),expected_revision:v.draft?.revision||null,basis:v.basis,paragraphs:r.paragraphs.filter(p=>p.block===textBlockId).map((p,i)=>({id:p.paragraph,text:i===0?'旧译词':'夜晚。',marks:[]}))});const d=document.querySelector('#continuity-search');d.open=true;d.querySelector('[data-query]').value='旧译词';d.querySelector('[data-scope]').value='draft';d.querySelector('[data-search]').click();})()");
   await waitJs("document.querySelector('#continuity-search [data-results]').textContent.includes('旧译词')",20000,"草稿检索");
   await evaluate("(()=>{const d=document.querySelector('#continuity-search'),i=d.querySelector('[aria-label=替换文字]');i.value='新译词';i.dispatchEvent(new Event('input'));[...d.querySelectorAll('button')].find(b=>b.textContent==='预览本段替换').click();})()");
   await waitJs("[...document.querySelectorAll('#continuity-search button')].some(b=>b.textContent==='确认保存草稿'&&!b.disabled)",20000,"替换预览");
   await evaluate("[...document.querySelectorAll('#continuity-search button')].find(b=>b.textContent==='确认保存草稿').click()");
   await waitJs("document.querySelector('#continuity-search [data-status]').textContent.includes('人工草稿已保存')",20000,"仅保存草稿");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click()");
   await evaluate("(async()=>{await api('/text/'+textProjectId+'/tm',{source:'ブラウザ試験',target:'浏览器试验'});const response=await fetch('api/text/'+textProjectId+'/tmx/export');if(!response.ok)throw new Error('TMX导出失败');const xml=(await response.text()).replaceAll('ブラウザ試験','別の表現');const d=[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='翻译记忆交换');d.open=true;const dt=new DataTransfer();dt.items.add(new File([xml],'sample.tmx',{type:'application/xml'}));d.querySelector('[data-file]').files=dt.files;d.querySelector('[data-file]').dispatchEvent(new Event('change'));d.querySelector('[data-preview]').click();})()");
   await waitJs("[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='翻译记忆交换')?.querySelector('[data-import]')?.disabled===false",20000,"TMX预览");
   await evaluate("[...document.querySelectorAll('details')].find(d=>d.querySelector('summary')?.textContent==='翻译记忆交换').querySelector('[data-import]').click()");
   await waitJs("[...document.querySelectorAll('details')].some(d=>d.querySelector('[data-status]')?.textContent.includes('已合并'))",20000,"TMX合并");
+  await evaluate("document.querySelector('[data-workspace-tab=delivery]').click()");
   await evaluate("document.querySelector('#continuity-reader').scrollIntoView({block:'start'})");
   fs.writeFileSync(out,Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));
   await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});await sleep(300);
+  await evaluate("document.querySelector('[data-workspace-tab=delivery]').click()");
   await evaluate("document.querySelector('#continuity-reader').scrollIntoView({block:'start'})");
   const overflow=await evaluate('window.innerWidth!==390 || document.documentElement.scrollWidth>391');
   fs.writeFileSync(out.replace(/\.png$/,'-narrow.png'),Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));
   if(overflow){console.error(JSON.stringify(await evaluate("({inner:innerWidth,scroll:document.documentElement.scrollWidth,bad:[...document.querySelectorAll('body *')].map(e=>({tag:e.tagName,id:e.id,cls:e.className,left:e.getBoundingClientRect().left,right:e.getBoundingClientRect().right,width:e.getBoundingClientRect().width})).filter(e=>e.width>0&&(e.right>391||e.left<0)).slice(0,12)})")));throw new Error('窄屏横向溢出');}for(const theme of ['tianqing','mo','qinglv']){for(const width of [390,768,1440]){await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});await evaluate('setTheme('+JSON.stringify(theme)+')');await sleep(100);const bad=await evaluate('document.documentElement.scrollWidth>window.innerWidth+1');if(bad)throw new Error(theme+' / '+width+'px 溢出');}}console.log(JSON.stringify({ok:true,reading:true,issues:true,preflight:true,backup:true,overflow,themes:3,widths:[390,768,1440]}));
+  await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+  await evaluate("setTheme('tianqing');document.querySelector('[data-workspace-tab=draft]').click();window.scrollTo(0,0)");
+  await sleep(150);
+  fs.writeFileSync(out.replace(/\.png$/,'-workspace.png'),Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));
 }catch(error){console.error(error.message);if(serverErr)console.error(serverErr.slice(-1200));process.exitCode=1;}finally{try{chrome?.kill();}catch{}try{server.kill();}catch{}}

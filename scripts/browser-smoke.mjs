@@ -80,7 +80,7 @@ try {
   // 登录：令牌输入框只读由服务器种 Cookie；页面脚本不经手 token，这里模拟用户填写。
   await waitJs("!!document.querySelector('#login-token')", 10000, "登录表单");
   await evaluate("document.querySelector('#login-token').value = " + JSON.stringify(token) + "; document.querySelector('#login-form').requestSubmit();");
-  await evaluate("document.querySelector('[data-hall=\\'wuying\\']').click()");
+  await evaluate("document.querySelector('[data-hall=\\'translation\\']').click()");
   await sleep(1200);
   console.error("DEBUG after login:", await evaluate("JSON.stringify({hall: location.hash, opts: document.querySelectorAll('#text-project option').length, state: typeof state})"));
   await waitJs("!!document.querySelector('#text-project') && document.querySelectorAll('#text-project option').length > 0", 20000, "登录后项目下拉");
@@ -92,8 +92,8 @@ try {
   if (!project) throw new Error("没有可选项目");
   await evaluate("const s = document.querySelector('#text-project'); s.value = " + JSON.stringify(project) + "; s.dispatchEvent(new Event('change', { bubbles: true }));");
   await sleep(1000);
-  await waitJs("!!document.querySelector('#materials-load')", 10000, "本地资料入口");
-  await evaluate("document.querySelector('#materials-load').click()");
+  await waitJs("!!document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load')", 10000, "本地资料入口");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load').click()");
   await waitJs("!!document.querySelector('#text-materials-editor .materials-editor')", 20000, "本地资料读取");
   const status = await evaluate("document.querySelector('#materials-status').textContent");
   await evaluate("document.querySelector('#materials-validate').click()");
@@ -147,13 +147,13 @@ try {
   await send("Page.reload", { ignoreCache: true });
   await sleep(1200);
   await waitJs("document.readyState === 'complete'", 15000, "刷新加载");
-  await evaluate("document.querySelector('[data-hall=\"wuying\"]')?.click()");
+  await evaluate("document.querySelector('[data-hall=\"translation\"]')?.click()");
   await sleep(900);
-  await evaluate("document.querySelector('#materials-load')?.click()");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load')?.click()");
   await waitJs("!document.querySelector('#materials-restore').hidden", 20000, "恢复按钮");
   const restoreVisible = true;
   await evaluate("document.querySelector('#materials-restore').click()");
-  await waitJs("document.querySelector('#materials-status').textContent.includes('已恢复会话暂存')", 15000, "恢复会话");
+  await waitJs("document.querySelector('#materials-status').textContent.includes('已恢复页面暂存')", 15000, "恢复会话");
   const recovered = await evaluate("document.querySelector('[data-field=\"term_id\"]')?.value || ''");
   const recoveredContains = await evaluate("document.querySelector('#text-materials-editor').innerText.includes('browser-smoke-recover')");
   // 409：页面外保存空资料推进 revision，再在页面保存本地术语，应冲突并保留输入。

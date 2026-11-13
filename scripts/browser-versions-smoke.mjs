@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 1.13 版本面板真实浏览器烟测：登录 → 武英殿 → 选项目 → 等快照 → 对比 → 截图（含窄屏）。
+// 1.13 版本面板真实浏览器烟测：登录 → 译书 → 选项目 → 等快照 → 对比 → 截图（含窄屏）。
 // 用法: node scripts/browser-versions-smoke.mjs <工作区> <ziyuan.exe> <输出.png> [端口]
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -73,12 +73,12 @@ try {
   await waitJs("document.readyState === 'complete'", 15000, "首页");
   await waitJs("!!document.querySelector('#login-token')", 10000, "登录表单");
   await evaluate("document.querySelector('#login-token').value = " + JSON.stringify(token) + "; document.querySelector('#login-form').requestSubmit();");
-  await evaluate("document.querySelector('[data-hall=\\'wuying\\']').click()");
+  await evaluate("document.querySelector('[data-hall=\\'translation\\']').click()");
   await waitJs("!!document.querySelector('#text-project') && document.querySelectorAll('#text-project option').length > 0", 20000, "项目下拉");
   await evaluate("(() => { const s = document.querySelector('#text-project'); s.value = s.options[0].value; s.dispatchEvent(new Event('change', { bubbles: true })); })()");
   await waitJs("document.querySelectorAll('#version-list option').length > 0 && document.querySelector('#version-list option').value !== ''", 20000, "版本列表");
   const listed = await evaluate("document.querySelector('#version-list').innerText");
-  await evaluate("document.querySelector('#version-compare-current').click()");
+  await evaluate("document.querySelector('[data-workspace-tab=manage]').click();document.querySelector('#version-compare-current').click()");
   await waitJs("document.querySelector('#version-diff').children.length > 0", 20000, "对比结果");
   const diff = await evaluate("document.querySelector('#version-diff').innerText.slice(0, 500)");
   const status = await evaluate("document.querySelector('#version-status').innerText");

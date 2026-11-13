@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
 setlocal
+set "START_URL=http://127.0.0.1:18080/"
+if /I "%~1"=="--translation" set "START_URL=http://127.0.0.1:18080/#translation"
 cd /d "%~dp0"
 if not exist "ziyuan.exe" (
   echo 未找到 ziyuan.exe。请把本脚本放在解压后的目录里。
@@ -27,7 +29,7 @@ pause
 exit /b 1
 :ready
 type "%TOKEN_FILE%" | clip
-start "" "http://127.0.0.1:18080/"
+start "" "%START_URL%"
 echo.
 echo 已把登录令牌复制到剪贴板：在浏览器登录框按 Ctrl+V 粘贴。
 echo “紫垣服务”窗口请勿关闭；关闭窗口即停止服务。

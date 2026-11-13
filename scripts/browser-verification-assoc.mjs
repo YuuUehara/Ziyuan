@@ -80,7 +80,7 @@ try {
   // 登录：令牌输入框只读由服务器种 Cookie；页面脚本不经手 token，这里模拟用户填写。
   await waitJs("!!document.querySelector('#login-token')", 10000, "登录表单");
   await evaluate("document.querySelector('#login-token').value = " + JSON.stringify(token) + "; document.querySelector('#login-form').requestSubmit();");
-  await evaluate("document.querySelector('[data-hall=\\'wuying\\']').click()");
+  await evaluate("document.querySelector('[data-hall=\\'translation\\']').click()");
   await sleep(1200);
   console.error("DEBUG after login:", await evaluate("JSON.stringify({hall: location.hash, opts: document.querySelectorAll('#text-project option').length, state: typeof state})"));
   await waitJs("!!document.querySelector('#text-project') && document.querySelectorAll('#text-project option').length > 0", 20000, "登录后项目下拉");
@@ -121,7 +121,7 @@ try {
   await send("Page.navigate", { url: base + "/#wuying/text/" + projectId + "/" + blockId });
   await waitJs("document.readyState === 'complete'", 15000, "重载");
   await sleep(2000);
-  await evaluate("document.querySelector('#materials-load').click()");
+  await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('#materials-load').click()");
   await waitJs("!!document.querySelector('#text-materials-editor .materials-editor')", 20000, "资料读取");
   await evaluate(`(() => {
     const set = (field, value) => {

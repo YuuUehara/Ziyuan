@@ -30,7 +30,7 @@ jobs:
       - name: 前端标记逻辑单测
         run: |
           node --version
-          node --test crates/ziyuan-web/src/editor-core.test.mjs crates/ziyuan-web/src/human-editor.test.mjs crates/ziyuan-web/src/materials-model.test.mjs crates/ziyuan-web/src/materials-editor.test.mjs crates/ziyuan-web/src/materials-preview.test.mjs crates/ziyuan-web/src/continuity-issues.test.mjs crates/ziyuan-web/src/continuity-search.test.mjs
+          node --test crates/ziyuan-web/src/editor-core.test.mjs crates/ziyuan-web/src/human-editor.test.mjs crates/ziyuan-web/src/materials-model.test.mjs crates/ziyuan-web/src/materials-editor.test.mjs crates/ziyuan-web/src/materials-preview.test.mjs crates/ziyuan-web/src/continuity-issues.test.mjs crates/ziyuan-web/src/continuity-search.test.mjs crates/ziyuan-web/src/translation-workspace.test.mjs
       # 号舍：装 bubblewrap 与 socat（按域名放行），并放开 Ubuntu 对非特权用户命名空间的限制，号舍的测试才真跑。
       - run: |
           sudo apt-get install -y -q bubblewrap socat
