@@ -213,6 +213,9 @@ impl<T> JsonFile<T> {
 
     /// 写入同目录的唯一临时文件、刷盘，再改名覆盖状态文件。失败时删掉临时文件，旧文件不动。
     fn replace(&self, bytes: &[u8]) -> Result<(), JsonFileError> {
+        if FAIL_NEXT_REPLACE.with(|flag| flag.replace(false)) {
+            return Err(io::Error::other("注入故障 Replace").into());
+        }
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let dir = self.dir();
         let name = self.path.file_name().expect("状态文件路径含文件名");
@@ -260,6 +263,16 @@ impl<T> JsonFile<T> {
         sync_dir(dir);
         Ok(())
     }
+}
+
+thread_local! {
+    static FAIL_NEXT_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 下一次状态文件替换直接失败，用来核对「清单没写上时，旁边的临时文件会被删掉」。
+#[doc(hidden)]
+pub fn fail_next_replace_for_test() {
+    FAIL_NEXT_REPLACE.with(|flag| flag.set(true));
 }
 
 /// 改名后刷目录项，使替换在断电后也持久。只是尽力而为：此时新内容已就位，报错会让调用者误以为没有保存。

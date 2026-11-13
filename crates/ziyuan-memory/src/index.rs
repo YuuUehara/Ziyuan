@@ -72,6 +72,12 @@ struct Envelope<'a> {
     integrity: Integrity,
 }
 
+/// 只读版本号。旧文件可以没有后来的字段，不能在这里用 `deny_unknown_fields`。
+#[derive(Deserialize)]
+struct FormatHeader {
+    format_version: u64,
+}
+
 /// 读进来的整个对象。字段形状与写出去的相同，`deny_unknown_fields` 防止夹带。
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -162,20 +168,23 @@ impl MemoryIndex {
     /// 除摘要之外还显式核对记录顺序：摘要算在规范顺序的字节上，乱序文件的摘要照样对得上，
     /// 只比摘要就会读出一份与 `encode` 产出不再逐字节相同的对象。
     pub fn decode(bytes: &[u8]) -> Result<Self, MemoryError> {
-        let raw: RawEnvelope = serde_json::from_slice(bytes)
+        // 先只读版本。旧索引没有 vectors 字段，整份反序列化会报缺字段，盖住「请重建」。
+        let header: FormatHeader = serde_json::from_slice(bytes)
             .map_err(|e| MemoryError::Corrupt(format!("无法解码: {e}")))?;
-        if raw.format_version == 0 {
+        if header.format_version == 0 {
             return Err(MemoryError::Corrupt("索引格式 0 不受支持".into()));
         }
-        if raw.format_version < FORMAT_VERSION {
+        if header.format_version < FORMAT_VERSION {
             return Err(MemoryError::Corrupt("索引格式过旧，请重建".into()));
         }
-        if raw.format_version > FORMAT_VERSION {
+        if header.format_version > FORMAT_VERSION {
             return Err(MemoryError::Newer {
-                found: raw.format_version,
+                found: header.format_version,
                 supported: FORMAT_VERSION,
             });
         }
+        let raw: RawEnvelope = serde_json::from_slice(bytes)
+            .map_err(|e| MemoryError::Corrupt(format!("无法解码: {e}")))?;
         raw.signature
             .validate()
             .map_err(|reason| MemoryError::Corrupt(format!("信封签名不合规: {reason}")))?;
@@ -1042,6 +1051,25 @@ mod tests {
             }
             other => panic!("预期重复身份被拒，得到 {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_rejects_a_version_two_file_without_vectors() {
+        let dir = temp_dir("v2-index");
+        let path = index_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = br#"{"format_version":2,"signature":{"provider":"local","model":"char-hash-v1","revision":"1","dim":256,"metric":"cosine"},"records":[]}"#;
+        fs::write(&path, bytes).unwrap();
+        match MemoryIndex::load(&dir) {
+            Err(MemoryError::Corrupt(reason)) => {
+                assert!(reason.contains("索引格式过旧，请重建"), "{reason}");
+                assert!(!reason.contains("vectors"), "{reason}");
+                assert!(!reason.contains("missing field"), "{reason}");
+            }
+            other => panic!("预期旧索引请重建，得到 {other:?}"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// 格式 0 从来不存在：显式拒收，而不是让它顺着「不比 1 新」被放进来。

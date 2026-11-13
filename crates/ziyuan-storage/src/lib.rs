@@ -11,7 +11,7 @@ pub mod json_file;
 pub mod recovery;
 pub mod workspace;
 
-pub use json_file::{JsonFile, JsonFileError, Stored};
+pub use json_file::{JsonFile, JsonFileError, Stored, fail_next_replace_for_test};
 pub use recovery::{RecordState, RecoveryError, RecoveryRecord};
 pub use workspace::{LockScope, Untouched, Workspace, WorkspaceError, WriteGuard};
 

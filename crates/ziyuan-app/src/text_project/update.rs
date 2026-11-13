@@ -188,7 +188,6 @@ impl TextProjects {
         mut candidate: Project,
         input: &SourceUpdate,
         chapter: &str,
-        finish: impl FnOnce() -> Result<()>,
     ) -> Result<Project> {
         let protocol = self.project_protocol(&old.id)?;
         let directory = self.project_dir(&old.id)?;
@@ -249,7 +248,6 @@ impl TextProjects {
                 if serde_json::to_vec(&candidate)?.len() as u64 + 1024 > self.manifest_bytes {
                     return Err(invalid("更新后项目清单过大"));
                 }
-                finish()?;
                 Ok((candidate.clone(), ()))
             })?;
         self.show(&old.id)

@@ -1,5 +1,8 @@
 use super::*;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use ziyuan_governance::{Court, TaskStatus};
 use ziyuan_storage::{EventLog, EventStore, LockScope, Workspace};
 
@@ -139,24 +142,23 @@ impl Translations {
             return Err(invalid(preview.blockers.join("；")));
         }
         let mut published = None;
+        // 先把新原件写到临时文件。清单发布成功后再改名盖上；清单失败则删掉临时文件，旧原件不动。
+        let mut staged = None;
         EventLog::new(self.root())
             .append_if_unchanged_then(&history, &[], || {
-                published = Some(self.texts().publish_update(
-                    &old,
-                    candidate,
-                    &body,
-                    &preview.chapter,
-                    || {
-                        self.replace_saved_package(
-                            id,
-                            input.chapter.is_some() && old.chapters.len() == 1,
-                            &package,
-                        )
-                        .map_err(|error| {
-                            crate::text_project::TextProjectError::Invalid(error.to_string())
-                        })
-                    },
-                )?);
+                staged = self.stage_saved_package(
+                    id,
+                    input.chapter.is_some() && old.chapters.len() == 1,
+                    &package,
+                )?;
+                published =
+                    Some(
+                        self.texts()
+                            .publish_update(&old, candidate, &body, &preview.chapter)?,
+                    );
+                if let Some(swap) = staged.take() {
+                    swap.commit()?;
+                }
                 Ok::<_, TranslationError>(())
             })
             .map_err(|e| invalid(e.to_string()))??;
@@ -188,7 +190,10 @@ impl Translations {
                     extension.to_uppercase()
                 ));
             }
-            _ => {
+            Some(_) => {
+                preview.warnings.push("已有原件保留，这次只改正文。".into());
+            }
+            None => {
                 preview.warnings.push(
                     "项目里没有可替换的同格式归档原件，这次只改正文，不会新建 DOCX 或 EPUB 原件。"
                         .into(),
@@ -212,20 +217,20 @@ impl Translations {
             (None, None) => Ok(None),
         }
     }
-    fn replace_saved_package(
+    fn stage_saved_package(
         &self,
         project: &str,
         revision: bool,
         package: &Option<ExtractedPackage>,
-    ) -> Result<()> {
+    ) -> Result<Option<StagedPackage>> {
         let Some(package) = package else {
-            return Ok(());
+            return Ok(None);
         };
         if !revision {
-            return Ok(());
+            return Ok(None);
         }
         let Some((extension, previous)) = self.saved_package(project)? else {
-            return Ok(());
+            return Ok(None);
         };
         if extension != package.extension {
             return Err(invalid(format!(
@@ -240,14 +245,61 @@ impl Translations {
         if !archived.is_file() {
             super::write_plain(&archived, &previous)?;
         }
-        // 这里正持有项目清单的锁，不能再打开同一把锁。目录已经存在，直接覆盖同名原件。
         let package_dir = self.store_dir(project)?.join("source-docs");
-        super::write_plain(
-            &package_dir.join(format!("source.{extension}")),
-            &package.bytes,
-        )?;
+        let destination = package_dir.join(format!("source.{extension}"));
+        let temporary =
+            write_new_temp(&package_dir, &format!("source.{extension}"), &package.bytes)?;
+        Ok(Some(StagedPackage {
+            temporary,
+            destination,
+            committed: false,
+        }))
+    }
+}
+
+/// 新原件先落在临时文件上。清单发布成功后才改名覆盖；未提交时丢弃临时文件。
+struct StagedPackage {
+    temporary: PathBuf,
+    destination: PathBuf,
+    committed: bool,
+}
+
+impl StagedPackage {
+    fn commit(mut self) -> Result<()> {
+        fs::rename(&self.temporary, &self.destination)
+            .map_err(|error| invalid(error.to_string()))?;
+        self.committed = true;
         Ok(())
     }
+}
+
+impl Drop for StagedPackage {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+fn write_new_temp(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let path = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| invalid(error.to_string()))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&path);
+        return Err(error.into());
+    }
+    Ok(path)
 }
 
 struct ExtractedPackage {
@@ -759,6 +811,118 @@ mod tests {
                 .text
                 .contains("海")
         );
+        let temps: Vec<_> = std::fs::read_dir(saved.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(temps.is_empty(), "{temps:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_package_on_a_multi_chapter_project_is_kept() {
+        let (root, id) = workspace();
+        let service = Translations::new(&root);
+        let original = docx_with(&["朝だ。", "雨だ。"], None);
+        let path = root.join("book.docx");
+        std::fs::write(&path, &original).unwrap();
+        service.import_docx(&id, &path).unwrap();
+        let saved = root
+            .join(".ziyuan/text-projects")
+            .join(&id)
+            .join("source-docs/source.docx");
+        let append = Translations::source_update_from_bytes(
+            None,
+            "next.docx".into(),
+            &docx_with(&["次の章。"], None),
+        )
+        .unwrap();
+        let preview = service.preview_source_update(&id, &append).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|item| item == "已有原件保留，这次只改正文。"),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .all(|item| !item.contains("没有可替换"))
+        );
+        service
+            .apply_source_update(&id, &append, &preview.fingerprint)
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+        let revise = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "book.docx".into(),
+            &docx_with(&["海だ。", "雪だ。"], None),
+        )
+        .unwrap();
+        let preview = service.preview_source_update(&id, &revise).unwrap();
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|item| item == "已有原件保留，这次只改正文。"),
+            "{:?}",
+            preview.warnings
+        );
+        service
+            .apply_source_update(&id, &revise, &preview.fingerprint)
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+        assert!(
+            service.project(&id).unwrap().chapters[0].paragraphs[0]
+                .text
+                .contains("海")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_failure_after_staging_keeps_the_old_package() {
+        let (root, id) = workspace();
+        let service = Translations::new(&root);
+        let original = docx_with(&["朝だ。", "雨だ。"], None);
+        let path = root.join("book.docx");
+        std::fs::write(&path, &original).unwrap();
+        service.import_docx(&id, &path).unwrap();
+        let saved = root
+            .join(".ziyuan/text-projects")
+            .join(&id)
+            .join("source-docs/source.docx");
+        let project_file = root
+            .join(".ziyuan/text-projects")
+            .join(&id)
+            .join("project.json");
+        let before = std::fs::read(&project_file).unwrap();
+        let revise = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "book.docx".into(),
+            &docx_with(&["这是一段明显更长的修订，用来撑大清单。", "雪だ。"], None),
+        )
+        .unwrap();
+        let preview = service.preview_source_update(&id, &revise).unwrap();
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        ziyuan_storage::fail_next_replace_for_test();
+        assert!(
+            service
+                .apply_source_update(&id, &revise, &preview.fingerprint)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+        assert_eq!(std::fs::read(&project_file).unwrap(), before);
+        let temps: Vec<_> = std::fs::read_dir(saved.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(temps.is_empty(), "{temps:?}");
         let _ = std::fs::remove_dir_all(root);
     }
 
