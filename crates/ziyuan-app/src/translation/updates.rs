@@ -277,7 +277,7 @@ fn b64_decode(text: &str) -> Result<Vec<u8>> {
         })
     }
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(invalid("原件编码无效"));
     }
     let mut out = Vec::new();
