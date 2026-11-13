@@ -411,27 +411,29 @@ mod tests {
         use std::time::{Duration, Instant};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_bg = hits.clone();
         let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            hits_bg.fetch_add(1, Ordering::SeqCst);
+            sock.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = sock.write_all(response.as_bytes());
+            // 若还去跟随重定向，这里会再接到一次。Windows 上非阻塞 accept 的错误种类不稳定，
+            // 所以只把超时内的成功连接算进去，其余错误继续等。
+            listener.set_nonblocking(true).unwrap();
             let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(2) {
+            while start.elapsed() < Duration::from_millis(400) {
                 match listener.accept() {
-                    Ok((mut sock, _)) => {
+                    Ok((extra, _)) => {
                         hits_bg.fetch_add(1, Ordering::SeqCst);
-                        sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
-                        let mut buf = [0u8; 4096];
-                        let _ = sock.read(&mut buf);
-                        let response = format!(
-                            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        );
-                        let _ = sock.write_all(response.as_bytes());
+                        let _ = extra.shutdown(std::net::Shutdown::Both);
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
+                    Err(_) => thread::sleep(Duration::from_millis(20)),
                 }
             }
         });
