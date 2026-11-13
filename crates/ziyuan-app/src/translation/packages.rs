@@ -141,16 +141,44 @@ pub(crate) fn rewrite_zip(template: &[u8], replaced: &[(String, Vec<u8>)]) -> Re
     Ok(buffer.into_inner())
 }
 
-/// 从 ZIP 中读取一个 UTF-8 文本条目。
+const MAX_ZIP_ENTRIES: usize = 4096;
+const MAX_ZIP_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+
+pub(crate) fn zip_within_limits(
+    archive: &zip::ZipArchive<impl std::io::Read + std::io::Seek>,
+) -> Result<()> {
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err(invalid("原件里的文件过多"));
+    }
+    Ok(())
+}
+
+/// 从 ZIP 中读取一个 UTF-8 文本条目。解压后超过 32 MiB 即拒绝。
 pub(crate) fn read_zip_text(bytes: &[u8], name: &str) -> Result<String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| invalid(format!("原件不是有效 ZIP：{e}")))?;
+    zip_within_limits(&archive)?;
+    read_limited_entry(&mut archive, name)
+}
+
+pub(crate) fn read_limited_entry(
+    archive: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
+    name: &str,
+) -> Result<String> {
     let mut file = archive
         .by_name(name)
         .map_err(|e| invalid(format!("原件缺少 {name}：{e}")))?;
+    if file.size() > MAX_ZIP_ENTRY_BYTES {
+        return Err(invalid(format!("{name} 解压后超过 32 MiB")));
+    }
     let mut text = String::new();
-    file.read_to_string(&mut text)
+    file.by_ref()
+        .take(MAX_ZIP_ENTRY_BYTES + 1)
+        .read_to_string(&mut text)
         .map_err(|e| invalid(format!("读取 {name} 失败：{e}")))?;
+    if text.len() as u64 > MAX_ZIP_ENTRY_BYTES {
+        return Err(invalid(format!("{name} 解压后超过 32 MiB")));
+    }
     Ok(text)
 }
 

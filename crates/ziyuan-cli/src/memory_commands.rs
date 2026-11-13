@@ -15,7 +15,8 @@ pub(crate) const MEMORY_HELP: &str = r#"翻译记忆（均支持 --json）：
     使用跨项目参考还须在选择文件 authorized_projects 中显式授权；搜索时允许的项目不代替下诏授权。
     默认不启用。local 与 deterministic 只在本机计算，都不理解意思。
     remote 还要设置 ZIYUAN_MEMORY_EMBED_URL、MODEL、REVISION、DIM；密钥是 ZIYUAN_MEMORY_EMBED_KEY。
-    这些都不从 ZIYUAN_LLM_* 读取。没授权的项目不会把原文发出去。"#;
+    这些都不从 ZIYUAN_LLM_* 读取。没授权的项目不会把原文发出去。
+    建库时发送已授权项目里已定稿段落的原文；每次查询只发送这一次的查询文字。译文留在本机。"#;
 
 pub(crate) struct MemoryAction {
     pub command: String,

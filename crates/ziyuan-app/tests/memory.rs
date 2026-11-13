@@ -618,3 +618,62 @@ fn non_utf8_workspace_is_not_given_a_lossy_identity() {
     assert!(error.to_string().contains("UTF-8"), "{error}");
     assert!(!f.root.join(".ziyuan/memory/index.json").exists());
 }
+
+struct RecordingProvider {
+    local: LocalProvider,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+impl EmbeddingProvider for RecordingProvider {
+    fn signature(&self) -> &ModelSignature {
+        self.local.signature()
+    }
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Embedding>, MemoryError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(texts.iter().map(|text| (*text).to_owned()).collect());
+        self.local.embed(texts)
+    }
+}
+
+#[test]
+fn build_sends_finalized_source_and_search_sends_only_the_query() {
+    let f = Fixture::new();
+    let session = f.finalized();
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        local: LocalProvider::new(),
+        calls: calls.clone(),
+    };
+    session
+        .memory_build(&f.root, &f.projects(), &provider)
+        .unwrap();
+    let built = calls.lock().unwrap().clone();
+    assert_eq!(built.len(), 1, "{built:?}");
+    assert!(built[0].contains(&"夜が明けた。".to_owned()), "{built:?}");
+    assert!(built[0].contains(&"猫が来た。".to_owned()), "{built:?}");
+    assert!(
+        built[0]
+            .iter()
+            .all(|text| !text.contains("天亮") && !text.contains("猫来")),
+        "{built:?}"
+    );
+    let index = ziyuan_memory::MemoryIndex::load(&f.root).unwrap().unwrap();
+    assert_eq!(index.vectors.len(), index.records.len());
+    assert!(index.vectors.iter().all(|vector| !vector.is_empty()));
+    calls.lock().unwrap().clear();
+    session
+        .memory_search(
+            &f.root,
+            &BTreeSet::new(),
+            &f.project,
+            "这一次的查询",
+            5,
+            &provider,
+        )
+        .unwrap();
+    assert_eq!(
+        calls.lock().unwrap().clone(),
+        vec![vec!["这一次的查询".to_owned()]]
+    );
+}

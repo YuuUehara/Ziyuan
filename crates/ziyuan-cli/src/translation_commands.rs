@@ -42,7 +42,8 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text tm adopt <项目ID> <ID>                 记录一次人工采纳
   ziyuan text tm build <项目ID>                      从现有译稿生成记忆（去重）
   ziyuan text tm suggest <项目ID> --query <原文> [--limit N]
-                                                    从译文记忆查参考。不写入本地记忆，也不自动采纳
+                                                    从译文记忆查参考。不写入本地记忆，也不自动采纳。
+                                                    远程嵌入时，建库发送已定稿原文，查询只发送这一次的查询文字
   ziyuan text termbase export-tbx <项目ID> <文件.tbx>
   ziyuan text termbase import-tbx <项目ID> <文件.tbx>
   ziyuan text comment list <项目ID> [块ID]
@@ -671,10 +672,31 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                 provider.as_ref(),
             )?;
             if json {
+                let listed: Vec<_> = hits
+                    .iter()
+                    .map(|hit| {
+                        serde_json::json!({
+                            "identity": hit.record.identity,
+                            "origin": hit.record.origin,
+                            "source": hit.record.source,
+                            "target": hit.record.target,
+                            "selection": {
+                                "identity": hit.record.identity,
+                                "digests": hit.record.digests,
+                                "origin": hit.record.origin,
+                            },
+                            "score": hit.score,
+                            "keyword_score": hit.keyword_score,
+                            "cosine_score": hit.cosine_score,
+                            "keyword_rank": hit.keyword_rank,
+                            "vector_rank": hit.vector_rank,
+                        })
+                    })
+                    .collect();
                 print_json(serde_json::json!({
                     "project": project,
-                    "hits": hits.len(),
-                    "note": "只供参考，不写入翻译记忆或译稿，也不自动批准"
+                    "hits": listed,
+                    "note": "只供参考，不写入本地记忆，也不自动插入或批准"
                 }))?;
             } else {
                 println!(

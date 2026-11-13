@@ -303,6 +303,8 @@ impl EmbedTransport for HttpTransport {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
             .build()
             .into();
         let payload = serde_json::to_vec(&serde_json::json!({
@@ -344,6 +346,14 @@ impl EmbedTransport for HttpTransport {
         }
         let payload: Payload = serde_json::from_slice(&body)
             .map_err(|_| MemoryError::Config("远程嵌入响应无法解析，未记录响应正文".into()))?;
+        let mut indexes: Vec<_> = payload.data.iter().map(|item| item.index).collect();
+        indexes.sort_unstable();
+        let expected: Vec<_> = (0..request.texts.len()).collect();
+        if indexes != expected {
+            return Err(MemoryError::Config(
+                "远程嵌入响应的序号不完整，未记录响应正文".into(),
+            ));
+        }
         let mut data = payload.data;
         data.sort_by_key(|item| item.index);
         Ok(data.into_iter().map(|item| item.embedding).collect())
@@ -392,5 +402,191 @@ mod tests {
         assert!(!error.to_string().contains("secret"), "{error}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn run_redirect_probe() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_bg = hits.clone();
+        let server = thread::spawn(move || {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(2) {
+                match listener.accept() {
+                    Ok((mut sock, _)) => {
+                        hits_bg.fetch_add(1, Ordering::SeqCst);
+                        sock.set_read_timeout(Some(Duration::from_secs(1))).ok();
+                        let mut buf = [0u8; 4096];
+                        let _ = sock.read(&mut buf);
+                        let response = format!(
+                            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = sock.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        thread::sleep(Duration::from_millis(20));
+        let endpoint = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let error = HttpTransport
+            .post_embeddings(&EmbedCall {
+                endpoint: &endpoint,
+                model: "m",
+                api_key: "secret",
+                texts: &["查询文字"],
+            })
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("302"), "{message}");
+        assert!(!message.contains("查询文字"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "不得跟随重定向");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_transport_redirect_worker() {
+        if std::env::var("ZIYUAN_EMBED_REDIRECT_CHILD").is_err() {
+            return;
+        }
+        run_redirect_probe();
+    }
+
+    #[test]
+    fn http_transport_does_not_follow_redirects_or_proxy() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "memory_provider::tests::http_transport_redirect_worker",
+                "--nocapture",
+            ])
+            .env("ZIYUAN_EMBED_REDIRECT_CHILD", "1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("http_transport_redirect_worker"),
+            "{stdout}\n{stderr}"
+        );
+    }
+
+    #[test]
+    fn remote_request_sends_only_the_given_texts_and_requires_exact_indexes() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::Mutex;
+        use std::thread;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let recorded = bodies.clone();
+        let server = thread::spawn(move || {
+            for response in [
+                r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#,
+                r#"{"data":[{"index":0,"embedding":[1.0,0.0]},{"index":0,"embedding":[0.0,1.0]}]}"#,
+                r#"{"data":[{"index":2,"embedding":[1.0,0.0]}]}"#,
+            ] {
+                let (mut sock, _) = listener.accept().unwrap();
+                sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .ok();
+                let mut buf = [0u8; 8192];
+                let mut got = Vec::new();
+                let mut header_end = None;
+                loop {
+                    match sock.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            got.extend_from_slice(&buf[..n]);
+                            if header_end.is_none() {
+                                header_end = got
+                                    .windows(4)
+                                    .position(|window| window == b"\r\n\r\n")
+                                    .map(|index| index + 4);
+                            }
+                            if let Some(end) = header_end {
+                                let header = String::from_utf8_lossy(&got[..end]);
+                                let length = header.lines().find_map(|line| {
+                                    line.split_once(':')
+                                        .filter(|(name, _)| {
+                                            name.eq_ignore_ascii_case("content-length")
+                                        })
+                                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                                });
+                                if length.is_none_or(|length| got.len() >= end + length) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&got).into_owned());
+                let payload = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                );
+                sock.write_all(payload.as_bytes()).unwrap();
+            }
+        });
+        let endpoint = format!("http://127.0.0.1:{port}/v1/embeddings");
+        let ok = HttpTransport
+            .post_embeddings(&EmbedCall {
+                endpoint: &endpoint,
+                model: "m",
+                api_key: "",
+                texts: &["只这一次的查询"],
+            })
+            .unwrap();
+        assert_eq!(ok, vec![vec![1.0, 0.0]]);
+        let duplicate = HttpTransport
+            .post_embeddings(&EmbedCall {
+                endpoint: &endpoint,
+                model: "m",
+                api_key: "",
+                texts: &["甲", "乙"],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate.contains("序号不完整"), "{duplicate}");
+        assert!(!duplicate.contains("embedding"), "{duplicate}");
+        assert!(!duplicate.contains('甲'), "{duplicate}");
+        let gap = HttpTransport
+            .post_embeddings(&EmbedCall {
+                endpoint: &endpoint,
+                model: "m",
+                api_key: "",
+                texts: &["丙"],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(gap.contains("序号不完整"), "{gap}");
+        assert!(!gap.contains('丙'), "{gap}");
+        server.join().unwrap();
+        let requests = bodies.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("只这一次的查询"), "{}", requests[0]);
+        assert!(!requests[0].contains("定稿原文"), "{}", requests[0]);
+        assert!(
+            requests[0].contains(r#""input":["只这一次的查询"]"#)
+                || requests[0].contains("只这一次的查询")
+        );
     }
 }

@@ -524,8 +524,8 @@ impl<S: EventStore> Session<S> {
                 watermark: watermark.clone(),
             })
             .collect::<Vec<_>>();
-        // Validate the provider even for an empty build. No network fallback exists.
-        provider
+        // 建库时把已定稿原文交给提供方，向量写入索引。空库也要调用一次，以便发现没有提供方。
+        let embedded = provider
             .embed(
                 &records
                     .iter()
@@ -533,11 +533,13 @@ impl<S: EventStore> Session<S> {
                     .collect::<Vec<_>>(),
             )
             .map_err(failure)?;
+        let vectors = embedded.into_iter().map(|item| item.vector).collect();
         let index = MemoryIndex {
             format_version: ziyuan_memory::FORMAT_VERSION,
             signature,
             watermark: watermark.clone(),
             records,
+            vectors,
         };
         let recheck = || -> Result<Watermark, MemoryError> {
             check_cache_path(root).map_err(|_| MemoryError::Io {
@@ -634,9 +636,18 @@ impl<S: EventStore> Session<S> {
                 "memory_index_missing; rebuild_required".into(),
             ))
         })?;
-        index
-            .records
-            .retain(|record| eligible.pairs.iter().any(|pair| pair_matches(pair, record)));
+        let records = std::mem::take(&mut index.records);
+        let vectors = std::mem::take(&mut index.vectors);
+        if records.len() != vectors.len() {
+            return Err(failure(MemoryError::Corrupt("向量条数与记录不符".into())));
+        }
+        let (records, vectors): (Vec<_>, Vec<_>) = records
+            .into_iter()
+            .zip(vectors)
+            .filter(|(record, _)| eligible.pairs.iter().any(|pair| pair_matches(pair, record)))
+            .unzip();
+        index.records = records;
+        index.vectors = vectors;
         let scope = ziyuan_memory::search::SearchScope {
             workspace_id: workspace_id(root)?,
             current_project: current_project.into(),

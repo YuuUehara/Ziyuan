@@ -724,3 +724,46 @@ fn human_tab_edits_a_draft_and_confirms_before_submit_or_approval() {
     assert!(screen(&app).contains("已定稿"), "{}", screen(&app));
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn human_save_uses_a_fresh_id_after_the_panel_reopens() {
+    let (mut app, _messages, root) = temp_app("human-restart");
+    let texts = ziyuan_app::text_project::TextProjects::new(&root);
+    let project = texts
+        .create(ziyuan_app::text_project::NewProject {
+            title: "再开".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: ziyuan_app::text_project::Provenance::default(),
+        })
+        .unwrap();
+    let source = root.join("chapter.txt");
+    std::fs::write(&source, "朝だ。\n").unwrap();
+    texts
+        .import(&project.id, std::slice::from_ref(&source))
+        .unwrap();
+    press(&mut app, "4");
+    press(&mut app, "\n清晨。\n");
+    press(&mut app, "s");
+    assert!(screen(&app).contains("已保存人工草稿"), "{}", screen(&app));
+    drop(app);
+    let (mut app, _messages) = App::new(Config {
+        root: root.clone(),
+        backend: Arc::new(DemoBackend),
+        limits: Limits {
+            max_concurrent: 2,
+            timeout: Duration::from_secs(10),
+        },
+    })
+    .unwrap();
+    press(&mut app, "4");
+    press(&mut app, "\n傍晚。\n");
+    press(&mut app, "s");
+    let shown = screen(&app);
+    assert!(shown.contains("已保存人工草稿"), "{shown}");
+    assert!(
+        !shown.contains("人工草稿请求身份已被不同内容使用"),
+        "{shown}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

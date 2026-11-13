@@ -6,7 +6,7 @@ use super::packages::{distribute, rewrite_zip, write_new_file};
 use super::{Result, Translations, invalid};
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 const BLOCKS: [&[u8]; 10] = [
     b"p",
@@ -46,13 +46,8 @@ fn is_hidden_end(event: &quick_xml::events::BytesEnd) -> bool {
 }
 
 fn read_entry(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<String> {
-    let mut file = zip
-        .by_name(name)
-        .map_err(|e| invalid(format!("EPUB 缺少 {name}：{e}")))?;
-    let mut out = String::new();
-    file.read_to_string(&mut out)
-        .map_err(|e| invalid(format!("读取 {name} 失败：{e}")))?;
-    Ok(out)
+    super::packages::read_limited_entry(zip, name)
+        .map_err(|error| invalid(error.to_string().replacen("原件缺少", "EPUB 缺少", 1)))
 }
 
 fn opf_path(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Result<String> {
@@ -301,6 +296,7 @@ fn rewrite(xml: &str, path: &str, allocations: &[Vec<String>]) -> Result<String>
 pub(crate) fn epub_plain_text(bytes: &[u8]) -> Result<(String, usize)> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| invalid(format!("EPUB 不是有效 ZIP：{e}")))?;
+    super::packages::zip_within_limits(&zip)?;
     let opf = opf_path(&mut zip)?;
     let files = spine(&mut zip, &opf)?;
     let mut parts = Vec::new();
@@ -346,6 +342,7 @@ impl Translations {
         let (_, template) = self.source_package(project, "epub")?;
         let mut archive = zip::ZipArchive::new(Cursor::new(template.as_slice()))
             .map_err(|e| invalid(format!("EPUB 不是有效 ZIP：{e}")))?;
+        super::packages::zip_within_limits(&archive)?;
         let opf = opf_path(&mut archive)?;
         let files = spine(&mut archive, &opf)?;
         let mut docs = Vec::new();

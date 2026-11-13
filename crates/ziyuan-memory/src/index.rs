@@ -7,15 +7,16 @@
 //!
 //! ```text
 //! {
-//!   "format_version": 1,
+//!   "format_version": 3,
 //!   "signature": { "provider": …, "model": …, "revision": …, "dim": …, "metric": … },
 //!   "watermark":  { "events": …, "history_sha256": …, "history_bytes": …, "generation": … },
 //!   "records": [ … ],
+//!   "vectors": [ … ],
 //!   "integrity": { "count": …, "sha256": … }
 //! }
 //! ```
 //!
-//! `integrity.sha256` 是**记录数组规范编码**的摘要：`serde_json::to_vec` 的结果，且记录
+//! `integrity.sha256` 覆盖排序后的记录和与之对齐的向量。记录数组用 `serde_json::to_vec`，且记录
 //! 必须先按身份排序（`project`、`chapter`、`block`、`paragraph`，全同则按 `workspace_id`
 //! 兜底，再全同则按记录的规范编码兜底，使排序成为全序）。排序**是格式的一部分**：同一组
 //! 记录无论以什么顺序交进来，都必须编出同一串字节。
@@ -40,8 +41,8 @@ use crate::embed::ModelSignature;
 use crate::record::{Identity, MemoryRecord, Watermark, sha256_hex};
 use crate::watermark::{WatermarkReader, require_publishable};
 
-/// 本版认识的索引格式版本。
-pub const FORMAT_VERSION: u64 = 2;
+/// 本版认识的索引格式版本。第 3 版起把向量写进索引，查询时不再重发原文。
+pub const FORMAT_VERSION: u64 = 3;
 
 /// `.ziyuan/` 下的记忆库目录（相对工作区根）。
 const MEMORY_DIR: [&str; 2] = [".ziyuan", "memory"];
@@ -67,6 +68,7 @@ struct Envelope<'a> {
     signature: &'a ModelSignature,
     watermark: &'a Watermark,
     records: &'a [MemoryRecord],
+    vectors: &'a [Vec<f32>],
     integrity: Integrity,
 }
 
@@ -78,18 +80,39 @@ struct RawEnvelope {
     signature: ModelSignature,
     watermark: Watermark,
     records: Vec<MemoryRecord>,
+    vectors: Vec<Vec<f32>>,
     integrity: Integrity,
 }
 
-/// 一份索引：信封签名与水位，加记录。
+/// 一份索引：信封签名、水位、记录，以及建库时算好的向量。
 ///
-/// 不存向量：向量由提供方在检索时现算，索引里只留签名与输入摘要。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 向量与记录一一对应，顺序相同。查询只把当次查询文字交给嵌入服务。
+#[derive(Clone, Debug)]
 pub struct MemoryIndex {
     pub format_version: u64,
     pub signature: ModelSignature,
     pub watermark: Watermark,
     pub records: Vec<MemoryRecord>,
+    pub vectors: Vec<Vec<f32>>,
+}
+
+impl PartialEq for MemoryIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.format_version == other.format_version
+            && self.signature == other.signature
+            && self.watermark == other.watermark
+            && self.records == other.records
+            && vectors_eq(&self.vectors, &other.vectors)
+    }
+}
+
+impl Eq for MemoryIndex {}
+
+fn vectors_eq(left: &[Vec<f32>], right: &[Vec<f32>]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+        })
 }
 
 impl MemoryIndex {
@@ -109,16 +132,23 @@ impl MemoryIndex {
         // 的两条记录悄悄共存，且谁先谁后由输入顺序决定。设计中重新定稿是换掉现行版本，
         // 因此重复就是调用方的错，宁可编不出来。
         require_unique_identities(&self.records).map_err(MemoryError::Invalid)?;
+        self.check_vectors()?;
         let records = sorted_records(&self.records)?;
+        let order = record_order(&self.records)?;
+        let vectors = order
+            .iter()
+            .map(|index| self.vectors[*index].clone())
+            .collect::<Vec<_>>();
         let integrity = Integrity {
             count: records.len(),
-            sha256: sha256_hex(&canonical_record_bytes(&records)?),
+            sha256: sha256_hex(&integrity_bytes(&records, &vectors)?),
         };
         let envelope = Envelope {
             format_version: self.format_version,
             signature: &self.signature,
             watermark: &self.watermark,
             records: &records,
+            vectors: &vectors,
             integrity,
         };
         let mut bytes = serde_json::to_vec_pretty(&envelope)
@@ -137,6 +167,9 @@ impl MemoryIndex {
         if raw.format_version == 0 {
             return Err(MemoryError::Corrupt("索引格式 0 不受支持".into()));
         }
+        if raw.format_version < FORMAT_VERSION {
+            return Err(MemoryError::Corrupt("索引格式过旧，请重建".into()));
+        }
         if raw.format_version > FORMAT_VERSION {
             return Err(MemoryError::Newer {
                 found: raw.format_version,
@@ -153,7 +186,15 @@ impl MemoryIndex {
                 raw.records.len()
             )));
         }
-        let canonical = canonical_record_bytes(&raw.records)?;
+        if raw.vectors.len() != raw.records.len() {
+            return Err(MemoryError::Corrupt("向量条数与记录不符".into()));
+        }
+        for vector in &raw.vectors {
+            if vector.len() != raw.signature.dim || vector.iter().any(|value| !value.is_finite()) {
+                return Err(MemoryError::Corrupt("向量维度或数值不合规".into()));
+            }
+        }
+        let canonical = integrity_bytes(&raw.records, &raw.vectors)?;
         if raw.integrity.sha256 != sha256_hex(&canonical) {
             return Err(MemoryError::Corrupt(
                 "integrity.sha256 与记录内容不符".into(),
@@ -192,6 +233,7 @@ impl MemoryIndex {
             signature: raw.signature,
             watermark: raw.watermark,
             records: raw.records,
+            vectors: raw.vectors,
         })
     }
 
@@ -319,6 +361,44 @@ fn require_unique_identities(records: &[MemoryRecord]) -> Result<(), String> {
 }
 
 /// 记录的规范编码：先排序，再 `serde_json::to_vec`。`integrity.sha256` 就是这个摘要。
+fn record_order(records: &[MemoryRecord]) -> Result<Vec<usize>, MemoryError> {
+    let mut keyed = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        keyed.push((record_bytes(record)?, index));
+    }
+    keyed.sort_by(|(left_bytes, left), (right_bytes, right)| {
+        sort_key(&records[*left].identity)
+            .cmp(&sort_key(&records[*right].identity))
+            .then_with(|| left_bytes.cmp(right_bytes))
+    });
+    Ok(keyed.into_iter().map(|(_, index)| index).collect())
+}
+
+fn integrity_bytes(records: &[MemoryRecord], vectors: &[Vec<f32>]) -> Result<Vec<u8>, MemoryError> {
+    let mut bytes = canonical_record_bytes(records)?;
+    for vector in vectors {
+        bytes.extend((vector.len() as u32).to_le_bytes());
+        for value in vector {
+            bytes.extend(value.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+impl MemoryIndex {
+    fn check_vectors(&self) -> Result<(), MemoryError> {
+        if self.vectors.len() != self.records.len() {
+            return Err(MemoryError::Invalid("向量条数与记录不符".into()));
+        }
+        for vector in &self.vectors {
+            if vector.len() != self.signature.dim || vector.iter().any(|value| !value.is_finite()) {
+                return Err(MemoryError::Invalid("向量维度或数值不合规".into()));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn canonical_record_bytes(records: &[MemoryRecord]) -> Result<Vec<u8>, MemoryError> {
     serde_json::to_vec(&sorted_records(records)?)
         .map_err(|e| MemoryError::Corrupt(format!("记录无法序列化: {e}")))
@@ -506,21 +586,44 @@ mod tests {
     }
 
     fn index() -> MemoryIndex {
+        paired(vec![
+            record("p0001", "c0001-p0001"),
+            record("p0001", "c0001-p0002"),
+        ])
+    }
+
+    fn paired(records: Vec<MemoryRecord>) -> MemoryIndex {
+        let vectors = records
+            .iter()
+            .map(|record| {
+                let mut vector = vec![0.0; signature().dim];
+                vector[0] = record
+                    .identity
+                    .project
+                    .bytes()
+                    .fold(0u8, |acc, byte| acc.wrapping_add(byte))
+                    as f32;
+                vector[1] = 1.0;
+                vector
+            })
+            .collect();
         MemoryIndex {
             format_version: FORMAT_VERSION,
             signature: signature(),
             watermark: watermark(),
-            records: vec![
-                record("p0001", "c0001-p0001"),
-                record("p0001", "c0001-p0002"),
-            ],
+            records,
+            vectors,
         }
+    }
+
+    fn blank_vectors(count: usize) -> Vec<Vec<f32>> {
+        vec![vec![0.0; signature().dim]; count]
     }
 
     fn good_integrity(records: &[MemoryRecord]) -> Integrity {
         Integrity {
             count: records.len(),
-            sha256: sha256_hex(&canonical_record_bytes(records).unwrap()),
+            sha256: sha256_hex(&integrity_bytes(records, &blank_vectors(records.len())).unwrap()),
         }
     }
 
@@ -532,11 +635,13 @@ mod tests {
         records: &[MemoryRecord],
         integrity: Integrity,
     ) -> Vec<u8> {
+        let vectors = blank_vectors(records.len());
         serde_json::to_vec(&Envelope {
             format_version,
             signature,
             watermark,
             records,
+            vectors: &vectors,
             integrity,
         })
         .unwrap()
@@ -715,24 +820,18 @@ mod tests {
     /// 排序是格式的一部分：乱序交进来，编出的字节按身份升序，解码保持该顺序。
     #[test]
     fn encode_sorts_records_by_identity() {
-        let shuffled = MemoryIndex {
-            records: vec![
-                record("p0003", "c0001-p0001"),
-                record("p0001", "c0001-p0002"),
-                record("p0002", "c0001-p0001"),
-                record("p0001", "c0001-p0001"),
-            ],
-            ..index()
-        };
-        let sorted = MemoryIndex {
-            records: vec![
-                record("p0001", "c0001-p0001"),
-                record("p0001", "c0001-p0002"),
-                record("p0002", "c0001-p0001"),
-                record("p0003", "c0001-p0001"),
-            ],
-            ..index()
-        };
+        let shuffled = paired(vec![
+            record("p0003", "c0001-p0001"),
+            record("p0001", "c0001-p0002"),
+            record("p0002", "c0001-p0001"),
+            record("p0001", "c0001-p0001"),
+        ]);
+        let sorted = paired(vec![
+            record("p0001", "c0001-p0001"),
+            record("p0001", "c0001-p0002"),
+            record("p0002", "c0001-p0001"),
+            record("p0003", "c0001-p0001"),
+        ]);
         // 与交入顺序无关：两串字节完全相同。
         assert_eq!(shuffled.encode().unwrap(), sorted.encode().unwrap());
 
@@ -822,7 +921,13 @@ mod tests {
     fn integrity_digest_covers_the_compact_record_array() {
         let index = index();
         let text = String::from_utf8(index.encode().unwrap()).unwrap();
-        let expected = sha256_hex(&canonical_record_bytes(&index.records).unwrap());
+        let records = sorted_records(&index.records).unwrap();
+        let order = record_order(&index.records).unwrap();
+        let vectors: Vec<_> = order
+            .iter()
+            .map(|position| index.vectors[*position].clone())
+            .collect();
+        let expected = sha256_hex(&integrity_bytes(&records, &vectors).unwrap());
         assert!(
             text.contains(&format!("\"sha256\": \"{expected}\"")),
             "{text}"
@@ -942,10 +1047,7 @@ mod tests {
     /// 格式 0 从来不存在：显式拒收，而不是让它顺着「不比 1 新」被放进来。
     #[test]
     fn decode_rejects_format_version_zero() {
-        let index = MemoryIndex {
-            records: Vec::new(),
-            ..index()
-        };
+        let index = paired(Vec::new());
         let bytes = envelope_bytes(
             0,
             &index.signature,
@@ -965,10 +1067,7 @@ mod tests {
     /// 不能把它当成损坏。
     #[test]
     fn decode_accepts_a_valid_empty_index() {
-        let index = MemoryIndex {
-            records: Vec::new(),
-            ..index()
-        };
+        let index = paired(Vec::new());
         let bytes = index.encode().unwrap();
         let decoded = MemoryIndex::decode(&bytes).unwrap();
         assert_eq!(decoded, index);
@@ -978,20 +1077,14 @@ mod tests {
     /// 字节同一性：解码再编码必须逐字节相同。这条钉住「读出来的对象就是规范形态」——
     /// 任何一处顺序、排版或字段序列化不唯一，都会在这里露出来。
     ///
-    /// **注意**：本用例隐含「`MemoryRecord` 里没有浮点字段」。`serde_json` 对浮点的往返
-    /// 不保证逐字节相同（`1.0` 与 `1`、精度截断、`-0.0` 都是坑）。Task 5 若要给
-    /// `MemoryRecord` 加浮点字段，必须先重审这条用例，而不是把它改成 `unwrap` 了就算。
-    /// 向量不属于记录（向量由提供方现算），因此暂时没有这个风险。
+    /// 向量是 `f32`。本用例只用能稳定往返的有限值；任意浮点不能指望逐字节相同。
     #[test]
     fn encode_is_byte_identical_after_a_decode_round_trip() {
-        let index = MemoryIndex {
-            records: vec![
-                record("p0002", "c0001-p0001"),
-                record("p0001", "c0001-p0002"),
-                record("p0001", "c0001-p0001"),
-            ],
-            ..index()
-        };
+        let index = paired(vec![
+            record("p0002", "c0001-p0001"),
+            record("p0001", "c0001-p0002"),
+            record("p0001", "c0001-p0001"),
+        ]);
         let first = index.encode().unwrap();
         let second = MemoryIndex::decode(&first).unwrap().encode().unwrap();
         assert_eq!(first, second);
@@ -1024,10 +1117,7 @@ mod tests {
         let dir = temp_dir("no-dir-on-failure");
         let mut broken = record("p0001", "c0001-p0001");
         broken.source = Text::new("");
-        let index = MemoryIndex {
-            records: vec![broken],
-            ..index()
-        };
+        let index = paired(vec![broken]);
         assert!(index.publish(&dir).is_err());
         assert!(!memory_dir(&dir).exists());
         fs::remove_dir_all(dir).unwrap();
@@ -1065,10 +1155,7 @@ mod tests {
         moved.events += 1;
         let reader = || Ok(moved.clone());
 
-        let newer = MemoryIndex {
-            records: vec![record("p0009", "c0001-p0009")],
-            ..index()
-        };
+        let newer = paired(vec![record("p0009", "c0001-p0009")]);
         match newer.publish_checked(&dir, &reader) {
             Err(MemoryError::Stale { reason }) => {
                 assert!(reason.contains("events 12→13"), "{reason}");
@@ -1113,10 +1200,7 @@ mod tests {
     fn publish_checked_reports_unfinished_writes_at_either_end() {
         let dir = temp_dir("publish-checked-generation");
 
-        let mut odd_before = MemoryIndex {
-            records: vec![record("p0001", "c0001-p0001")],
-            ..index()
-        };
+        let mut odd_before = paired(vec![record("p0001", "c0001-p0001")]);
         odd_before.watermark.generation = 9;
         for record in &mut odd_before.records {
             record.watermark = odd_before.watermark.clone();
@@ -1128,10 +1212,7 @@ mod tests {
             Err(MemoryError::RecoveryPending { generation: 9 })
         );
 
-        let even = MemoryIndex {
-            records: vec![record("p0001", "c0001-p0001")],
-            ..index()
-        };
+        let even = paired(vec![record("p0001", "c0001-p0001")]);
         let mut odd_after = even.watermark.clone();
         odd_after.generation = 11;
         let reader = || Ok(odd_after.clone());

@@ -24,7 +24,6 @@ pub(crate) struct HumanPanel {
     pub selected: usize,
     pub revision: Option<String>,
     pub basis: Option<ziyuan_core::DraftBasis>,
-    pub saves: u64,
     loaded: bool,
 }
 
@@ -162,9 +161,15 @@ impl App {
             self.error("还没有读到这一块，请按 r 重新读取");
             return;
         };
-        self.human.saves += 1;
+        let request_id = match fresh_save_id() {
+            Ok(id) => id,
+            Err(error) => {
+                self.error(error);
+                return;
+            }
+        };
         let save = DraftSave {
-            request_id: format!("tui-save-{}", self.human.saves),
+            request_id,
             expected_revision: self.human.revision.clone(),
             basis,
             paragraphs: self
@@ -346,4 +351,17 @@ fn shift(index: usize, len: usize, delta: isize) -> usize {
 
 fn invalid_text(message: String) -> ziyuan_app::translation::TranslationError {
     ziyuan_app::translation::TranslationError::Invalid(message)
+}
+
+fn fresh_save_id() -> Result<String, String> {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| "无法生成保存编号".to_owned())?;
+    let mut id = String::from("tui-save-");
+    for byte in bytes {
+        id.push_str(&format!("{byte:02x}"));
+    }
+    Ok(id)
 }

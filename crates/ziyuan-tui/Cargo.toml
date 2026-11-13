@@ -15,6 +15,7 @@ ziyuan-core.workspace = true
 ziyuan-governance.workspace = true
 ziyuan-runtime.workspace = true
 ziyuan-storage.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 # 已随 ratatui 进入依赖树；测试用它判断宽度有歧义的字符。

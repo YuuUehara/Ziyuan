@@ -150,7 +150,7 @@
 
 人工译稿的命令行、网页和终端都已接上。新增事件 `HumanTranslationApproved`（编码 `HUMANAPPROVED`），最低读取版本为预留的 `1.5.0-dev.2`（`RELEASES` 序号 25），会典标签随之为 `human-approvals-v1`。含该事件的事件簿由当前版本读取；1.4.1 等旧二进制会拒绝并提示升级，`ziyuan migrate` 会指出首个要求新读本的事件。详见 [N0 第 22.2 节](novel-workbench-n0.md#222-本批-n1a-2c-1人工准奏事实内部契约)。
 
-应用层来源解析与状态页已能识别人工准奏；人工定稿事件已入簿并回放到签押，应用层持锁定稿 API 也已接通；Markdown 已能无损写出 ruby／粗体／斜体；着重点与同范围叠加仍拒绝。人工定稿可显示只读状态并进入本地记忆（来源标为人工，索引格式升第二版）；1.4.1 旧二进制对新事件与第二版恢复记录实测拒绝并提示升级。CLI 六个命令（`text human show`／`save`／`submit`／`approve`／`finalize`／`apply`）已开：`approve` 即准奏并落盘，自带第二版恢复记录，`apply` 只作只读核对。网页除显示 `human_approved`／`human_finalized`／`human_stale` 三种人工状态外，已开人工入口：`/api/text/{项目}/blocks/{块}/human`（查看）与 `…/human/draft｜submit｜approve｜finalize`（写），以及 `/api/text/{项目}/human/progress`；接口形状与静态模块 `/assets/editor-core.mjs`、`/assets/human-editor.mjs` 属内部 Web 接口，按页面与 `/api/*` 不冻结处理。观政只读（四个写接口 403）是已冻结的安全约束。两份模块即界面与 `node --test` 共用的源码，改动须同时跑 Node 单测。终端「人工译稿」可查看、保存、送审、准奏和定稿，确认方式与命令行相同。在终端改字会去掉该段注音和着重，标记仍在网页里改。准奏确认只是提醒不要让旧版同时写入，软件不检查进程是否已停。详见 [N0 第 22.31 节](novel-workbench-n0.md#2231-本批web-人工译稿接口与标记编辑器)。
+应用层来源解析与状态页已能识别人工准奏；人工定稿事件已入簿并回放到签押，应用层持锁定稿 API 也已接通；Markdown 已能无损写出 ruby／粗体／斜体；着重点与同范围叠加仍拒绝。人工定稿可显示只读状态并进入本地记忆（来源标为人工，索引格式升第二版）；1.4.1 旧二进制对新事件与第二版恢复记录实测拒绝并提示升级。CLI 六个命令（`text human show`／`save`／`submit`／`approve`／`finalize`／`apply`）已开：`approve` 即准奏并落盘，自带第二版恢复记录，`apply` 只作只读核对。网页除显示 `human_approved`／`human_finalized`／`human_stale` 三种人工状态外，已开人工入口：`/api/text/{项目}/blocks/{块}/human`（查看）与 `…/human/draft｜submit｜approve｜finalize`（写），以及 `/api/text/{项目}/human/progress`；接口形状与静态模块 `/assets/editor-core.mjs`、`/assets/human-editor.mjs` 属内部 Web 接口，按页面与 `/api/*` 不冻结处理。观政只读（四个写接口 403）是已冻结的安全约束。两份模块即界面与 `node --test` 共用的源码，改动须同时跑 Node 单测。终端「人工译稿」可查看、保存、送审、准奏和定稿，确认方式与命令行相同。在终端改字会去掉该段注音、着重、粗体和斜体，标记仍在网页里改。准奏确认只是提醒不要让旧版同时写入，软件不检查进程是否已停。详见 [N0 第 22.31 节](novel-workbench-n0.md#2231-本批web-人工译稿接口与标记编辑器)。
 
 同批固定了译稿第二版（`zh-json/2`）的只读表示：含注音／着重等标记的译稿不再按纯文本读取，纯文本第一版字节不变；带标记稿已可按 `--format md` 无损导出，着重点与同范围叠加仍整批拒绝，详见 [N0 第 22.3 节](novel-workbench-n0.md#223-本批-n1a-2c-2批准目标表示内部契约)。
 
@@ -183,9 +183,9 @@
 
 1.15.0 不新增朝廷事件，不提高最低读取版本，也不改已有命令的含义。
 
-- **原文更新**：`text source-update` 与网页「追加与修订原文」接受 UTF-8 TXT、Markdown、DOCX、EPUB。TXT 和 Markdown 不超过 8 MiB；DOCX 和 EPUB 不超过 16 MiB，抽出来的正文超过 8 MiB 也会拒绝。修订时段落数和所属的块必须不变，拆段、合段或重排会拒绝。按 TXT 或 Markdown 导入的项目，不能再用 DOCX 或 EPUB 更新。只有一章、且用同一种 DOCX 或 EPUB 修订时，会换掉归档原件；追加不换已有的归档原件。旧译和批准不会被改掉。
-- **终端人工译稿**：可查看、改段、保存草稿、送审、准奏、核对和定稿。送审、准奏、定稿都要再按 `y`。保存不改正式译稿。改字会去掉该段注音和着重。
-- **译文记忆**：默认仍不启用、不联网。`local` 仍是 `char-hash-v1`。`deterministic` 是另一套只在本机计算的固定算法，结果可以重复，同样不理解意思。`remote` 要先 `text memory authorize`，确认地址、模型、修订、维度和项目；只会发送已授权项目的原文。没授权、地址或模型变了、项目不在名单里，都会拒绝，并且不联网。不读取 `ZIYUAN_LLM_*`。查到的结果只供参考，不写入本地记忆，不自动插入，也不自动批准。换了算法或维度之后要重新 `text memory build`。
+- **原文更新**：`text source-update` 与网页「追加与修订原文」接受 UTF-8 TXT、Markdown、DOCX、EPUB。TXT 和 Markdown 不超过 8 MiB；DOCX 和 EPUB 不超过 16 MiB，抽出来的正文超过 8 MiB 也会拒绝。修订时段落数和所属的块必须不变，拆段、合段或重排会拒绝。按 TXT 或 Markdown 导入的项目，不能再用 DOCX 或 EPUB 更新。命令行 `text import` 的纯 TXT 没有归档原件，修订时不会新建。已经有 DOCX 原件的，单章修订只接受 DOCX；已经有 EPUB 原件的，只接受 EPUB。覆盖前按内容摘要把旧原件放进原文历史。追加不换已有的归档原件。旧译和批准不会被改掉。
+- **终端人工译稿**：可查看、改段、保存草稿、送审、准奏、核对和定稿。送审、准奏、定稿都要再按 `y`。保存不改正式译稿。改字会去掉该段注音、着重、粗体和斜体。
+- **译文记忆**：默认仍不启用、不联网。`local` 仍是 `char-hash-v1`。`deterministic` 是另一套只在本机计算的固定算法，结果可以重复，同样不理解意思。`remote` 要先 `text memory authorize`，确认地址、模型、修订、维度和项目。建库时发送已授权项目里已定稿段落的原文，每次查询只发送这一次的查询文字。没授权、地址或模型变了、项目不在名单里，都会拒绝，并且不联网。不读取 `ZIYUAN_LLM_*`。查到的结果只供参考，不写入本地记忆，不自动插入，也不自动批准。索引从这一版起保存向量，旧索引要重新 `text memory build`。换了算法或维度之后也要重建。
 
 ## 实验性
 

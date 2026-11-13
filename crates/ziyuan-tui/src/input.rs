@@ -475,7 +475,7 @@ impl App {
         if matches!(kind, InputKind::HumanEdit) {
             self.set_human_paragraph(text);
             self.info(
-                "这一段已改，按 s 保存。改过的字会去掉本段的注音和着重，那些标记请到网页里改",
+                "这一段已改，按 s 保存。改过的字会去掉本段的注音、着重、粗体和斜体，那些标记请到网页里改",
             );
             return;
         }

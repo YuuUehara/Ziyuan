@@ -63,8 +63,9 @@ impl Translations {
         SourceUpdatePreview,
         Vec<ziyuan_core::CourtEvent>,
     )> {
-        let (body, _package) = canonical_source(input)?;
+        let (body, package) = canonical_source(input)?;
         let (old, candidate, mut preview) = self.texts().prepare_update(id, &body)?;
+        self.note_package(id, input, &package, &mut preview)?;
         let mut bindings = Vec::new();
         let context = self.store_dir(id)?.join("context");
         if context.exists() {
@@ -104,6 +105,7 @@ impl Translations {
                 }
             }
         }
+        let package_sha = package.as_ref().map(|item| sha256_hex(&item.bytes));
         preview.fingerprint = sha256_hex(&serde_json::to_vec(&(
             &preview.fingerprint,
             bindings,
@@ -111,6 +113,7 @@ impl Translations {
                 .iter()
                 .map(ziyuan_storage::encode_event_line)
                 .collect::<Vec<_>>(),
+            package_sha,
         ))?);
         Ok((old, candidate, preview, history))
     }
@@ -138,35 +141,111 @@ impl Translations {
         let mut published = None;
         EventLog::new(self.root())
             .append_if_unchanged_then(&history, &[], || {
-                published =
-                    Some(
-                        self.texts()
-                            .publish_update(&old, candidate, &body, &preview.chapter)?,
-                    );
+                published = Some(self.texts().publish_update(
+                    &old,
+                    candidate,
+                    &body,
+                    &preview.chapter,
+                    || {
+                        self.replace_saved_package(
+                            id,
+                            input.chapter.is_some() && old.chapters.len() == 1,
+                            &package,
+                        )
+                        .map_err(|error| {
+                            crate::text_project::TextProjectError::Invalid(error.to_string())
+                        })
+                    },
+                )?);
                 Ok::<_, TranslationError>(())
             })
             .map_err(|e| invalid(e.to_string()))??;
-        let project = published.ok_or_else(|| invalid("原文发布未完成"))?;
-        if let Some(ExtractedPackage { extension, bytes }) = package
-            && input.chapter.is_some()
-            && project.chapters.len() == 1
-        {
-            self.archive_previous_package(id, &extension)?;
-            self.store_source_package(id, &extension, &bytes)?;
-        }
-        Ok(project)
+        published.ok_or_else(|| invalid("原文发布未完成"))
     }
-    fn archive_previous_package(&self, project: &str, extension: &str) -> Result<()> {
-        let Ok((_, bytes)) = self.source_package(project, extension) else {
+    fn note_package(
+        &self,
+        project: &str,
+        input: &SourceUpdate,
+        package: &Option<ExtractedPackage>,
+        preview: &mut SourceUpdatePreview,
+    ) -> Result<()> {
+        let Some(package) = package else {
             return Ok(());
         };
-        let history = self.store_dir(project)?.join("source-history");
-        fs::create_dir_all(&history)?;
-        let path = history.join(format!("{}.{}", sha256_hex(&bytes), extension));
-        if path.is_file() {
+        let saved = self.saved_package(project)?;
+        let single = input.chapter.is_some() && self.project(project)?.chapters.len() == 1;
+        match saved {
+            Some((extension, _)) if extension != package.extension && single => {
+                preview.blockers.push(format!(
+                    "已有归档原件是 {}，不能改成 {}",
+                    extension.to_uppercase(),
+                    package.extension.to_uppercase()
+                ));
+            }
+            Some((extension, _)) if extension == package.extension && single => {
+                preview.warnings.push(format!(
+                    "会换掉已有的 {} 归档原件，旧文件按内容摘要留在原文历史里。已有译稿不会自动改。",
+                    extension.to_uppercase()
+                ));
+            }
+            _ => {
+                preview.warnings.push(
+                    "项目里没有可替换的同格式归档原件，这次只改正文，不会新建 DOCX 或 EPUB 原件。"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+    fn saved_package(&self, project: &str) -> Result<Option<(String, Vec<u8>)>> {
+        let dir = self
+            .root()
+            .join(".ziyuan/text-projects")
+            .join(project)
+            .join("source-docs");
+        let docx = super::read_plain_opt(&dir.join("source.docx"))?;
+        let epub = super::read_plain_opt(&dir.join("source.epub"))?;
+        match (docx, epub) {
+            (Some(_), Some(_)) => Err(invalid("归档原件不能同时有 DOCX 和 EPUB")),
+            (Some(bytes), None) => Ok(Some(("docx".into(), bytes))),
+            (None, Some(bytes)) => Ok(Some(("epub".into(), bytes))),
+            (None, None) => Ok(None),
+        }
+    }
+    fn replace_saved_package(
+        &self,
+        project: &str,
+        revision: bool,
+        package: &Option<ExtractedPackage>,
+    ) -> Result<()> {
+        let Some(package) = package else {
+            return Ok(());
+        };
+        if !revision {
             return Ok(());
         }
-        super::write_plain(&path, &bytes)?;
+        let Some((extension, previous)) = self.saved_package(project)? else {
+            return Ok(());
+        };
+        if extension != package.extension {
+            return Err(invalid(format!(
+                "已有归档原件是 {}，不能改成 {}",
+                extension.to_uppercase(),
+                package.extension.to_uppercase()
+            )));
+        }
+        let history = self.store_dir(project)?.join("source-history");
+        fs::create_dir_all(&history)?;
+        let archived = history.join(format!("{}.{extension}", sha256_hex(&previous)));
+        if !archived.is_file() {
+            super::write_plain(&archived, &previous)?;
+        }
+        // 这里正持有项目清单的锁，不能再打开同一把锁。目录已经存在，直接覆盖同名原件。
+        let package_dir = self.store_dir(project)?.join("source-docs");
+        super::write_plain(
+            &package_dir.join(format!("source.{extension}")),
+            &package.bytes,
+        )?;
         Ok(())
     }
 }
@@ -316,6 +395,7 @@ mod tests {
     use super::*;
     use crate::text_project::{NewProject, Provenance, TextProjects};
     use std::io::{Cursor, Write};
+    use ziyuan_storage::EventStore;
 
     fn workspace() -> (std::path::PathBuf, String) {
         let root = std::env::temp_dir().join(format!(
@@ -456,11 +536,18 @@ mod tests {
                 .contains("海")
         );
         assert!(
-            plain_root
+            !plain_root
                 .join(".ziyuan/text-projects")
                 .join(&plain_id)
                 .join("source-docs/source.docx")
-                .is_file()
+                .is_file(),
+            "纯文本项目没有归档原件，修订不得新建"
+        );
+        assert!(
+            preview
+                .warnings
+                .iter()
+                .any(|item| item.contains("不会新建"))
         );
 
         let epub = zip_bytes(&[
@@ -499,5 +586,268 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(plain_root);
+    }
+
+    fn docx_with(paragraphs: &[&str], extra: Option<(&str, &str)>) -> Vec<u8> {
+        let body: String = paragraphs
+            .iter()
+            .map(|text| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"))
+            .collect();
+        let xml = format!("<w:document><w:body>{body}</w:body></w:document>");
+        let mut files = vec![("word/document.xml".to_owned(), xml)];
+        if let Some((name, text)) = extra {
+            files.push((name.to_owned(), text.to_owned()));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+        zip_bytes(&refs)
+    }
+
+    #[test]
+    fn swapping_paragraphs_in_one_block_is_rejected() {
+        let (root, id) = workspace();
+        let source = root.join("chapter.txt");
+        std::fs::write(&source, "朝だ。\n\n雨だ。\n").unwrap();
+        TextProjects::new(&root).import(&id, &[source]).unwrap();
+        let service = Translations::new(&root);
+        let block = service.project(&id).unwrap().chapters[0].blocks[0]
+            .block_id
+            .clone();
+        let zh = service.block_dir(&id, &block).join("zh.json");
+        std::fs::create_dir_all(zh.parent().unwrap()).unwrap();
+        std::fs::write(&zh, b"kept-bytes").unwrap();
+        let swapped = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "chapter.txt".into(),
+            "雨だ。\n\n朝だ。\n".as_bytes(),
+        )
+        .unwrap();
+        let preview = service.preview_source_update(&id, &swapped).unwrap();
+        assert!(
+            preview
+                .blockers
+                .iter()
+                .any(|item| item.contains("段落顺序")),
+            "{:?}",
+            preview.blockers
+        );
+        assert!(
+            service
+                .apply_source_update(&id, &swapped, &preview.fingerprint)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&zh).unwrap(), b"kept-bytes");
+        let project = service.project(&id).unwrap();
+        assert!(project.chapters[0].paragraphs[0].text.contains("朝"));
+        assert!(project.chapters[0].paragraphs[1].text.contains("雨"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docx_and_epub_cannot_replace_each_other_and_bytes_change_the_fingerprint() {
+        let (root, id) = workspace();
+        let service = Translations::new(&root);
+        let original = docx_with(&["朝だ。", "雨だ。"], None);
+        let path = root.join("book.docx");
+        std::fs::write(&path, &original).unwrap();
+        service.import_docx(&id, &path).unwrap();
+        let saved = root
+            .join(".ziyuan/text-projects")
+            .join(&id)
+            .join("source-docs/source.docx");
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+
+        let epub = zip_bytes(&[
+            (
+                "META-INF/container.xml",
+                r#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+            ),
+            (
+                "content.opf",
+                r#"<package><manifest><item id="c" href="chap.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c"/></spine></package>"#,
+            ),
+            (
+                "chap.xhtml",
+                "<html><body><p>海だ。</p><p>雪だ。</p></body></html>",
+            ),
+        ]);
+        let epub_update =
+            Translations::source_update_from_bytes(Some("c0001".into()), "book.epub".into(), &epub)
+                .unwrap();
+        let preview = service.preview_source_update(&id, &epub_update).unwrap();
+        assert!(
+            preview
+                .blockers
+                .iter()
+                .any(|item| item.contains("不能改成")),
+            "{:?}",
+            preview.blockers
+        );
+        assert!(
+            service
+                .apply_source_update(&id, &epub_update, &preview.fingerprint)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&saved).unwrap(), original);
+        assert!(!saved.with_file_name("source.epub").is_file());
+
+        let same_text = docx_with(
+            &["朝だ。", "雨だ。"],
+            Some(("extra.txt", "different-bytes")),
+        );
+        let same = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "book.docx".into(),
+            &same_text,
+        )
+        .unwrap();
+        let again = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "book.docx".into(),
+            &original,
+        )
+        .unwrap();
+        let left = service.preview_source_update(&id, &same).unwrap();
+        let right = service.preview_source_update(&id, &again).unwrap();
+        assert_ne!(left.fingerprint, right.fingerprint);
+        assert!(left.blockers.is_empty(), "{:?}", left.blockers);
+
+        let revised = docx_with(&["海だ。", "雪だ。"], None);
+        let update = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "book.docx".into(),
+            &revised,
+        )
+        .unwrap();
+        let preview = service.preview_source_update(&id, &update).unwrap();
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        service
+            .apply_source_update(&id, &update, &preview.fingerprint)
+            .unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), revised);
+        let archived = root
+            .join(".ziyuan/text-projects")
+            .join(&id)
+            .join("source-history")
+            .join(format!("{}.docx", sha256_hex(&original)));
+        assert_eq!(std::fs::read(archived).unwrap(), original);
+
+        let history = root
+            .join(".ziyuan/text-projects")
+            .join(&id)
+            .join("source-history");
+        let current = std::fs::read(&saved).unwrap();
+        std::fs::create_dir(history.join(format!("{}.docx", sha256_hex(&current)))).unwrap();
+        let blocked = docx_with(&["夜だ。", "雪だ。"], None);
+        let blocked_update = Translations::source_update_from_bytes(
+            Some("c0001".into()),
+            "book.docx".into(),
+            &blocked,
+        )
+        .unwrap();
+        let preview = service.preview_source_update(&id, &blocked_update).unwrap();
+        assert!(
+            service
+                .apply_source_update(&id, &blocked_update, &preview.fingerprint)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&saved).unwrap(), current);
+        assert!(
+            service.project(&id).unwrap().chapters[0].paragraphs[0]
+                .text
+                .contains("海")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pending_and_assigned_model_tasks_block_changed_blocks() {
+        for assigned in [false, true] {
+            let (root, id) = workspace();
+            crate::Session::found(ziyuan_storage::EventLog::new(&root)).unwrap();
+            let source = root.join("chapter.txt");
+            std::fs::write(&source, "朝だ。\n\n雨だ。\n").unwrap();
+            TextProjects::new(&root).import(&id, &[source]).unwrap();
+            let mut session = crate::Session::open(ziyuan_storage::EventLog::new(&root)).unwrap();
+            let edict = session
+                .issue_translation(&root, &id, "c0001-b0001")
+                .unwrap();
+            if assigned {
+                let worker = session.court().route(&edict).unwrap().worker;
+                ziyuan_storage::EventLog::new(&root)
+                    .append(
+                        session.event_count(),
+                        &[ziyuan_core::CourtEvent::TaskAssigned {
+                            task: edict.id,
+                            worker,
+                            model: None,
+                        }],
+                    )
+                    .unwrap();
+            }
+            let service = Translations::new(&root);
+            let update = Translations::source_update_from_bytes(
+                Some("c0001".into()),
+                "chapter.txt".into(),
+                "海だ。\n\n雨だ。\n".as_bytes(),
+            )
+            .unwrap();
+            let preview = service.preview_source_update(&id, &update).unwrap();
+            assert!(
+                preview
+                    .blockers
+                    .iter()
+                    .any(|item| item.contains("尚未完成")),
+                "assigned={assigned} {:?}",
+                preview.blockers
+            );
+            assert!(
+                service
+                    .apply_source_update(&id, &update, &preview.fingerprint)
+                    .is_err()
+            );
+            assert!(
+                service.project(&id).unwrap().chapters[0].paragraphs[0]
+                    .text
+                    .contains("朝")
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn zip_rejects_too_many_entries_and_oversized_decompression() {
+        let mut files = Vec::new();
+        for index in 0..4097 {
+            files.push((format!("f{index}"), String::new()));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+        let crowded = zip_bytes(&refs);
+        let error = super::packages::read_zip_text(&crowded, "f0").unwrap_err();
+        assert!(error.to_string().contains("文件过多"), "{error}");
+        let epub_error = super::epub::epub_plain_text(&crowded).unwrap_err();
+        assert!(epub_error.to_string().contains("文件过多"), "{epub_error}");
+
+        let mut cursor = Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(&mut cursor);
+        archive
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        let chunk = vec![b'a'; 1024 * 1024];
+        for _ in 0..33 {
+            archive.write_all(&chunk).unwrap();
+        }
+        archive.finish().unwrap();
+        let error =
+            super::packages::read_zip_text(&cursor.into_inner(), "word/document.xml").unwrap_err();
+        assert!(error.to_string().contains("超过 32 MiB"), "{error}");
     }
 }

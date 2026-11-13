@@ -32,7 +32,8 @@ pub struct SearchHit<'a> {
 /// 在授权候选集上分别排序后，用 `1/(60+名次)` 的和融合，最后取 `limit` 条。
 ///
 /// `limit` 须在 1..=50；空查询与未授权的当前项目均报错。无候选时仍检查提供方，
-/// 默认的不可用提供方绝不会被当成「没有命中」。只把范围内的原文交给提供方。
+/// 默认的不可用提供方绝不会被当成「没有命中」。查询只发送这一次的查询文字；
+/// 候选向量用建库时写入索引的结果，不再把原文交给提供方。
 /// 同分按项目、章节、块、段落、工作区的身份顺序排列，与索引输入顺序无关。
 pub fn search<'a>(
     index: &'a MemoryIndex,
@@ -69,7 +70,7 @@ pub fn search<'a>(
         ));
     }
 
-    // 先调用查询嵌入：Unavailable 的占位签名并不合法，但真正原因是没有提供方。
+    // 只嵌入当次查询。候选向量在建库时写入索引，查询不再把原文发给提供方。
     let query_vectors = provider.embed(&[query])?;
     let signature = provider.signature();
     signature.validate().map_err(MemoryError::Config)?;
@@ -86,10 +87,14 @@ pub fn search<'a>(
     let query_vectors = checked_vectors(query_vectors, 1, signature.dim)?;
     let query_vector = &query_vectors[0];
 
+    if index.vectors.len() != index.records.len() {
+        return Err(MemoryError::Corrupt("向量条数与记录不符".into()));
+    }
     let mut candidates: Vec<_> = index
         .records
         .iter()
-        .filter(|record| {
+        .zip(index.vectors.iter())
+        .filter(|(record, _)| {
             record.identity.workspace_id == scope.workspace_id
                 && scope.authorized_projects.contains(&record.identity.project)
                 && record.source_language == scope.source_language
@@ -97,29 +102,40 @@ pub fn search<'a>(
                 && record.content_type == scope.content_type
         })
         .collect();
-    candidates.sort_by_key(|record| identity_key(record));
-    for (i, record) in candidates.iter().enumerate() {
+    candidates.sort_by_key(|(record, _)| identity_key(record));
+    for (i, (record, vector)) in candidates.iter().enumerate() {
         record.validate_format()?;
         record.verify_digests()?;
+        if vector.len() != signature.dim || vector.iter().any(|value| !value.is_finite()) {
+            return Err(MemoryError::Corrupt("候选向量不合规".into()));
+        }
         if !signature.matches(&record.embedding) {
             return Err(MemoryError::Corrupt(
                 "候选记录的嵌入签名与索引不一致".into(),
             ));
         }
-        if i > 0 && record.identity == candidates[i - 1].identity {
+        if i > 0 && record.identity == candidates[i - 1].0.identity {
             return Err(MemoryError::Corrupt("候选记录的段落身份重复".into()));
         }
     }
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
-    let texts: Vec<_> = candidates.iter().map(|r| r.source.text.as_str()).collect();
-    let vectors = checked_vectors(provider.embed(&texts)?, texts.len(), signature.dim)?;
+    let stored = checked_vectors(
+        candidates
+            .iter()
+            .map(|(_, vector)| Embedding {
+                vector: (*vector).clone(),
+            })
+            .collect(),
+        candidates.len(),
+        signature.dim,
+    )?;
     let query_terms = bigrams(query);
     let mut hits: Vec<_> = candidates
         .into_iter()
-        .zip(vectors)
-        .map(|(record, vector)| SearchHit {
+        .zip(stored)
+        .map(|((record, _), vector)| SearchHit {
             record,
             keyword_score: jaccard(&query_terms, &bigrams(&record.source.text)),
             cosine_score: cosine(query_vector, &vector),
@@ -343,12 +359,25 @@ mod tests {
         }
     }
 
+    fn stored_vector(source: &str) -> Vec<f32> {
+        if source.starts_with('远') {
+            vec![-1.0, 0.0]
+        } else {
+            vec![1.0, 0.0]
+        }
+    }
+
     fn index(records: Vec<MemoryRecord>) -> MemoryIndex {
+        let vectors = records
+            .iter()
+            .map(|record| stored_vector(&record.source.text))
+            .collect();
         MemoryIndex {
             format_version: FORMAT_VERSION,
             signature: Provider::new().signature,
             watermark: record("p1", "a", "原文").watermark,
             records,
+            vectors,
         }
     }
 
@@ -371,7 +400,7 @@ mod tests {
         assert_eq!(hits[0].record.identity.paragraph, "b");
         assert_eq!(hits[0].keyword_score, 0.0);
         assert_eq!(hits[0].cosine_score, -1.0); // 没有质量阈值。
-        assert_eq!(*provider.calls.borrow(), vec![vec!["查询"], vec!["远方"]]);
+        assert_eq!(*provider.calls.borrow(), vec![vec!["查询"]]);
         let mut cross_project = scope();
         cross_project.authorized_projects.insert("p2".into());
         let hits = search(&index, &Provider::new(), "查询", &cross_project, 1).unwrap();
@@ -436,6 +465,7 @@ mod tests {
         };
         let before = snapshot(&index);
         index.records.reverse();
+        index.vectors.reverse();
         assert_eq!(before, snapshot(&index));
         assert_eq!(
             before.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(),
@@ -487,6 +517,12 @@ mod tests {
         };
         let mut index = index(vec![record]);
         index.signature = signature.clone();
+        index.vectors = provider
+            .embed(&["夜が明けた"])
+            .unwrap()
+            .into_iter()
+            .map(|item| item.vector)
+            .collect();
         let hits = search(&index, &provider, "夜が明けた", &scope(), 1).unwrap();
         assert_eq!(hits[0].keyword_score, 1.0);
         assert!((hits[0].cosine_score - 1.0).abs() < 1e-12);
@@ -501,33 +537,32 @@ mod tests {
     #[test]
     fn query_and_candidate_bad_vectors_or_counts_are_rejected() {
         let index = index(vec![record("p1", "a", "原文")]);
-        for call in [1, 2] {
-            for vectors in [
-                vec![],
-                vec![Embedding { vector: vec![1.0] }],
-                vec![Embedding {
-                    vector: vec![0.0, 0.0],
-                }],
-                vec![Embedding {
-                    vector: vec![f32::NAN, 1.0],
-                }],
-                vec![Embedding {
-                    vector: vec![1.0, f32::INFINITY],
-                }],
-                vec![
-                    Embedding {
-                        vector: vec![1.0, 0.0]
-                    };
-                    2
-                ],
-            ] {
-                let mut provider = Provider::new();
-                provider.bad_on_call = Some((call, vectors));
-                assert!(matches!(
-                    search(&index, &provider, "查询", &scope(), 1),
-                    Err(MemoryError::Invalid(_))
-                ));
-            }
+        let call = 1;
+        for vectors in [
+            vec![],
+            vec![Embedding { vector: vec![1.0] }],
+            vec![Embedding {
+                vector: vec![0.0, 0.0],
+            }],
+            vec![Embedding {
+                vector: vec![f32::NAN, 1.0],
+            }],
+            vec![Embedding {
+                vector: vec![1.0, f32::INFINITY],
+            }],
+            vec![
+                Embedding {
+                    vector: vec![1.0, 0.0]
+                };
+                2
+            ],
+        ] {
+            let mut provider = Provider::new();
+            provider.bad_on_call = Some((call, vectors));
+            assert!(matches!(
+                search(&index, &provider, "查询", &scope(), 1),
+                Err(MemoryError::Invalid(_))
+            ));
         }
         // f32 的最大值也不应使范数溢出；余弦在 f64 中归一化。
         let vectors = checked_vectors(
@@ -551,14 +586,12 @@ mod tests {
             );
         }
         let index = index(vec![record("p1", "a", "原文")]);
-        for call in [1, 2] {
-            let mut provider = Provider::new();
-            provider.fail_on_call = Some(call);
-            assert_eq!(
-                search(&index, &provider, "查询", &scope(), 1),
-                Err(MemoryError::Unavailable)
-            );
-        }
+        let mut provider = Provider::new();
+        provider.fail_on_call = Some(1);
+        assert_eq!(
+            search(&index, &provider, "查询", &scope(), 1),
+            Err(MemoryError::Unavailable)
+        );
         assert!(
             search(&self::index(vec![]), &Provider::new(), "查询", &scope(), 1)
                 .unwrap()

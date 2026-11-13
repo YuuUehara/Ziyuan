@@ -11,8 +11,8 @@
 本仓库用 Jujutsu 管理发布提交。候选提交的 CI 全部通过后，再将新标签指向该提交，例如：
 
 ```bash
-jj tag set v1.14.1 -r <已通过检查的候选提交>
-jj git push --remote origin --tag v1.14.1
+jj tag set v1.15.0 -r <已通过检查的候选提交>
+jj git push --remote origin --tag v1.15.0
 ```
 
 以上仅说明标签与版本的对应关系；已存在的标签不得重复创建或覆盖。推送标签会触发 `.github/workflows/release.yml`。不要手工改已公开 Release 的资产来“修”构建问题；有缺陷应发新版本。

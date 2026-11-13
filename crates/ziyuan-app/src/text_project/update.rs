@@ -103,6 +103,23 @@ impl TextProjects {
                     "段数或分块归属发生变化，不能安全继承旧译；请拆分此次修订或另建项目".into(),
                 );
             }
+            let old_text: Vec<_> = previous
+                .paragraphs
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect();
+            let new_text: Vec<_> = paragraphs.iter().map(|p| p.text.as_str()).collect();
+            if old_text.len() == new_text.len() && old_text != new_text {
+                let mut old_sorted = old_text.clone();
+                let mut new_sorted = new_text.clone();
+                old_sorted.sort();
+                new_sorted.sort();
+                if old_sorted == new_sorted {
+                    blockers.push(
+                        "段落顺序变了，不能安全继承旧译；请保持原来的先后，或另建项目".into(),
+                    );
+                }
+            }
         }
         let changes = paragraphs
             .iter()
@@ -171,6 +188,7 @@ impl TextProjects {
         mut candidate: Project,
         input: &SourceUpdate,
         chapter: &str,
+        finish: impl FnOnce() -> Result<()>,
     ) -> Result<Project> {
         let protocol = self.project_protocol(&old.id)?;
         let directory = self.project_dir(&old.id)?;
@@ -231,6 +249,7 @@ impl TextProjects {
                 if serde_json::to_vec(&candidate)?.len() as u64 + 1024 > self.manifest_bytes {
                     return Err(invalid("更新后项目清单过大"));
                 }
+                finish()?;
                 Ok((candidate.clone(), ()))
             })?;
         self.show(&old.id)
@@ -259,22 +278,9 @@ fn source_kind(name: &str) -> Result<SourceKind> {
     }
 }
 
-fn update_warnings(kind: SourceKind, revision: bool, chapters: usize) -> Vec<String> {
+fn update_warnings(kind: SourceKind, revision: bool, _chapters: usize) -> Vec<String> {
     let mut warnings =
         vec!["旧原件和旧译保留；受影响块的送审、勘校与定稿须重新核对；不自动批准".into()];
-    if matches!(kind, SourceKind::Docx | SourceKind::Epub) {
-        if revision && chapters == 1 {
-            warnings.push(
-                "这一章的归档原件会换成新的 DOCX 或 EPUB，方便以后回填。已有译稿不会自动改。"
-                    .into(),
-            );
-        } else {
-            warnings.push(
-                "这次不更换已经保存的归档原件。DOCX／EPUB 回填仍用导入时的那份，这次只改项目里的正文。"
-                    .into(),
-            );
-        }
-    }
     if kind == SourceKind::Markdown && !revision {
         warnings.push("追加的 Markdown 整份算一章，不会按标题再拆。".into());
     }
