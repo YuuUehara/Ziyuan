@@ -1999,6 +1999,7 @@ mod approval {
             chapter: Some("c0001".into()),
             name: "revision.txt".into(),
             text: original.replace("灯台", "港町"),
+            package_base64: None,
         };
         let preview = f
             .service()

@@ -297,25 +297,30 @@ fn rewrite(xml: &str, path: &str, allocations: &[Vec<String>]) -> Result<String>
     String::from_utf8(writer.into_inner()).map_err(|_| invalid("EPUB 写出结果不是 UTF-8"))
 }
 
+/// 与导入相同：按 spine 取出正文，段落之间空一行。不含图片与样式。
+pub(crate) fn epub_plain_text(bytes: &[u8]) -> Result<(String, usize)> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e| invalid(format!("EPUB 不是有效 ZIP：{e}")))?;
+    let opf = opf_path(&mut zip)?;
+    let files = spine(&mut zip, &opf)?;
+    let mut parts = Vec::new();
+    for file in files {
+        let xml = read_entry(&mut zip, &file)?;
+        let text = html_text(&file, &xml)?;
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    if parts.is_empty() {
+        return Err(invalid("EPUB 没有可导入的正文"));
+    }
+    Ok((parts.join("\n\n") + "\n", parts.len()))
+}
+
 impl Translations {
     pub fn import_epub(&self, project: &str, path: &std::path::Path) -> Result<usize> {
         let bytes = std::fs::read(path).map_err(|e| invalid(format!("读取 EPUB 失败：{e}")))?;
-        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.as_slice()))
-            .map_err(|e| invalid(format!("EPUB 不是有效 ZIP：{e}")))?;
-        let opf = opf_path(&mut zip)?;
-        let files = spine(&mut zip, &opf)?;
-        let mut parts = Vec::new();
-        for file in files {
-            let xml = read_entry(&mut zip, &file)?;
-            let text = html_text(&file, &xml)?;
-            if !text.is_empty() {
-                parts.push(text);
-            }
-        }
-        if parts.is_empty() {
-            return Err(invalid("EPUB 没有可导入的正文"));
-        }
-        let body = parts.join("\n\n") + "\n";
+        let (body, parts) = epub_plain_text(&bytes)?;
         let temp = std::env::temp_dir().join(format!(
             "ziyuan-epub-{}-{}.txt",
             std::process::id(),
@@ -332,7 +337,7 @@ impl Translations {
         let _ = std::fs::remove_file(&temp);
         result?;
         self.store_source_package(project, "epub", &bytes)?;
-        Ok(parts.len())
+        Ok(parts)
     }
 
     /// 把现行译稿写回 EPUB：保留 spine、图片、表格与行内粗斜体。

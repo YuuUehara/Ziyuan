@@ -155,6 +155,7 @@ impl App {
             Tab::Edicts => self.draw_edicts(frame, body),
             Tab::Officials => self.draw_officials(frame, body),
             Tab::History => self.draw_history(frame, body),
+            Tab::Human => self.draw_human(frame, body),
         }
         self.draw_footer(frame, footer);
         if let Some(modal) = &self.modal {
@@ -878,6 +879,51 @@ impl App {
         );
     }
 
+    pub(crate) fn draw_human(&self, frame: &mut Frame, area: Rect) {
+        let project = self
+            .human
+            .projects
+            .get(self.human.project)
+            .map(String::as_str)
+            .unwrap_or("（尚无文本项目）");
+        let block = self
+            .human
+            .blocks
+            .get(self.human.block)
+            .map(String::as_str)
+            .unwrap_or("（无块）");
+        let revision = self.human.revision.as_deref().unwrap_or("尚无草稿（只读）");
+        let mut lines = vec![
+            Line::from(format!("项目 {project}")),
+            Line::from(format!("块 {block}　修订 {revision}")),
+            Line::from("保存不改正式译稿。送审、准奏、定稿都要再按 y 确认。").dim(),
+            Line::default(),
+        ];
+        if self.human.paragraphs.is_empty() {
+            lines.push(Line::from(
+                "没有可读的段落。请先导入原文，或按 r 重新读取。",
+            ));
+        }
+        for (index, paragraph) in self.human.paragraphs.iter().enumerate() {
+            let mark = if index == self.human.selected {
+                "▶ "
+            } else {
+                "  "
+            };
+            let draft = if paragraph.text.is_empty() {
+                "（空）"
+            } else {
+                paragraph.text.as_str()
+            };
+            lines.push(Line::from(format!(
+                "{mark}{}　原文 {}",
+                paragraph.id, paragraph.source
+            )));
+            lines.push(Line::from(format!("    译文 {draft}")));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    }
+
     pub(crate) fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let [status, keys] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
@@ -943,6 +989,19 @@ impl App {
                 ("q", "退出"),
             ],
             (None, Tab::History) => &[("↑↓", "浏览"), ("Tab", "切换"), ("q", "退出")],
+            (None, Tab::Human) => &[
+                ("[ ]", "换项目"),
+                (", .", "换块"),
+                ("Enter", "改当前段"),
+                ("s", "保存"),
+                ("u", "送审"),
+                ("a", "准奏"),
+                ("f", "定稿"),
+                ("p", "核对"),
+                ("r", "重读"),
+                ("Tab", "切换"),
+                ("q", "退出"),
+            ],
         };
         let spans: Vec<Span> = hints
             .iter()
@@ -979,6 +1038,7 @@ impl App {
                     InputKind::Skip(_) => ("逐段准奏", "驳回第几段（如 1,3）：", false),
                     InputKind::Records => ("翰林院实录", "检索词（留空看最近）：", false),
                     InputKind::Rename(_) => ("易名", "姓名 字 号：", false),
+                    InputKind::HumanEdit => ("人工译文", "这一段的译文：", false),
                 };
                 let title = match kind {
                     InputKind::Review(task, _) | InputKind::Skip(task) => {
@@ -1052,6 +1112,15 @@ impl App {
                         let name = self.court().agent(*agent).map_or("", |a| a.name.as_str());
                         format!("廷杖官员 #{} {name}？降一级留用，收回写权。", agent.0)
                     }
+                    ConfirmKind::HumanSubmit { project, block } => format!(
+                        "送审 {project} / {block}？只冻结当前草稿，不写入正式译稿，也不准奏。"
+                    ),
+                    ConfirmKind::HumanApprove { project, block } => format!(
+                        "准奏并落盘 {project} / {block}？请确认没有旧版程序正在写入。不会自动定稿。"
+                    ),
+                    ConfirmKind::HumanFinalize { project, block } => format!(
+                        "为 {project} / {block} 记定稿？磁盘译稿须已是准奏目标，此步不改写正文。"
+                    ),
                 };
                 let paragraph = Paragraph::new(vec![
                     Line::from(text),

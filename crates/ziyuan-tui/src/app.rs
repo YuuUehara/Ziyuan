@@ -56,11 +56,13 @@ pub(crate) enum Tab {
     Edicts,
     Officials,
     History,
+    Human,
 }
-pub(crate) const TABS: [(Tab, &str); 3] = [
+pub(crate) const TABS: [(Tab, &str); 4] = [
     (Tab::Edicts, "诏令"),
     (Tab::Officials, "百官"),
     (Tab::History, "起居注"),
+    (Tab::Human, "人工译稿"),
 ];
 
 pub(crate) enum Modal {
@@ -80,10 +82,13 @@ pub(crate) enum Modal {
     Notice(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum ConfirmKind {
     Purge(AgentId),
     Cane(AgentId),
+    HumanSubmit { project: String, block: String },
+    HumanApprove { project: String, block: String },
+    HumanFinalize { project: String, block: String },
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +102,8 @@ pub(crate) enum InputKind {
     Records,
     /// 易名：预填「姓名 字 号」，改哪项就改哪项。
     Rename(AgentId),
+    /// 人工译稿的当前段。原文不改，标记在文字变化后清除。
+    HumanEdit,
 }
 
 #[derive(Clone, Copy)]
@@ -171,6 +178,7 @@ impl App {
             detail_width: Default::default(),
             delta_cache: Default::default(),
             quit: false,
+            human: Default::default(),
         };
         Ok((app, receiver))
     }
@@ -230,6 +238,9 @@ impl App {
     pub(crate) fn switch_tab(&mut self, step: usize) {
         let index = TABS.iter().position(|(t, _)| *t == self.tab).unwrap_or(0);
         self.tab = TABS[(index + step) % TABS.len()].0;
+        if self.tab == Tab::Human {
+            self.ensure_human();
+        }
     }
 
     /// 新到旧排列的诏令。
@@ -262,6 +273,9 @@ impl App {
                 let index = self.selected_event.unwrap_or(len.saturating_sub(1));
                 let next = step(index, len);
                 self.selected_event = (next + 1 < len).then_some(next);
+            }
+            Tab::Human => {
+                self.human.selected = step(self.human.selected, self.human.paragraphs.len());
             }
         }
     }

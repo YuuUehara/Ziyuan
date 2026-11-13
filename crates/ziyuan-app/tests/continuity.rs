@@ -205,6 +205,7 @@ fn source_revision_refuses_to_break_approved_evidence() {
         chapter: Some("c0001".into()),
         name: "source.txt".into(),
         text: "勇者は海へ。\n\n夜だった。\n".into(),
+        package_base64: None,
     };
     let preview = f.t().preview_source_update(&f.project.id, &update).unwrap();
     assert!(preview.blockers.iter().any(|b| b.contains("证据")));
@@ -235,6 +236,7 @@ fn source_append_and_revision_preserve_previous_translation_and_originals() {
         chapter: None,
         name: "next.txt".into(),
         text: "次の章。\n".into(),
+        package_base64: None,
     };
     let preview = f.t().preview_source_update(&f.project.id, &append).unwrap();
     assert!(preview.blockers.is_empty());
@@ -258,6 +260,7 @@ fn source_append_and_revision_preserve_previous_translation_and_originals() {
         chapter: Some("c0001".into()),
         name: "source.txt".into(),
         text: "勇者は海へ。\n\n夜だった。\n".into(),
+        package_base64: None,
     };
     let preview = f
         .t()
@@ -283,6 +286,7 @@ fn source_revision_rejects_segment_remapping_before_writing() {
         chapter: Some("c0001".into()),
         name: "source.txt".into(),
         text: "全く別の一段。\n".into(),
+        package_base64: None,
     };
     let preview = f.t().preview_source_update(&f.project.id, &update).unwrap();
     assert!(!preview.blockers.is_empty());
@@ -302,6 +306,7 @@ fn cross_chapter_issue_keeps_history_and_requires_explicit_recheck_after_edit() 
         chapter: None,
         name: "second.txt".into(),
         text: "勇者は帰った。".into(),
+        package_base64: None,
     };
     let preview = f.t().preview_source_update(&f.project.id, &update).unwrap();
     f.t()

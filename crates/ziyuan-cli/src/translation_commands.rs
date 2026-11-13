@@ -41,6 +41,8 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text tm delete <项目ID> <ID>                删除一条记忆
   ziyuan text tm adopt <项目ID> <ID>                 记录一次人工采纳
   ziyuan text tm build <项目ID>                      从现有译稿生成记忆（去重）
+  ziyuan text tm suggest <项目ID> --query <原文> [--limit N]
+                                                    用译文记忆的向量检索给参考，不写入 tm.json，不自动采纳
   ziyuan text termbase export-tbx <项目ID> <文件.tbx>
   ziyuan text termbase import-tbx <项目ID> <文件.tbx>
   ziyuan text comment list <项目ID> [块ID]
@@ -92,6 +94,7 @@ pub(crate) enum TranslationAction {
     TmDelete(String, String),
     TmAdopt(String, String),
     TmBuild(String),
+    TmSuggest(String, String, usize),
     TbxExport(String, PathBuf),
     TbxImport(String, PathBuf),
     CommentList(String, Option<String>),
@@ -223,6 +226,18 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
             TranslationAction::TmAdopt((*p).into(), (*id).into())
         }
         ["tm", "build", p] if positional(p) => TranslationAction::TmBuild((*p).into()),
+        ["tm", "suggest", p, "--query", q] if positional(p) && positional(q) => {
+            TranslationAction::TmSuggest((*p).into(), (*q).into(), 5)
+        }
+        ["tm", "suggest", p, "--query", q, "--limit", n] if positional(p) && positional(q) => {
+            let limit = n
+                .parse::<usize>()
+                .map_err(|_| "--limit 须为 1 到 50 的整数")?;
+            if !(1..=50).contains(&limit) {
+                return Err("--limit 须为 1 到 50 的整数".into());
+            }
+            TranslationAction::TmSuggest((*p).into(), (*q).into(), limit)
+        }
         ["termbase", "export-tbx", p, f] if positional(p) && positional(f) => {
             TranslationAction::TbxExport((*p).into(), (*f).into())
         }
@@ -637,6 +652,44 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                 print_json(serde_json::json!(entry))?;
             } else {
                 println!("已记录采纳 {}（{} 次）。", entry.id, entry.adopted);
+            }
+            return Ok(());
+        }
+        TranslationAction::TmSuggest(project, query, limit) => {
+            let root = std::env::current_dir()?;
+            let selection = ziyuan_app::memory_provider::selection_from_env(None)?;
+            let projects = std::collections::BTreeSet::from([project.clone()]);
+            let provider = ziyuan_app::memory_provider::open(&root, &projects, selection)?;
+            provider.embed(&[])?;
+            let session = ziyuan_app::Session::open(ziyuan_storage::EventLog::new(&root))?;
+            let hits = session.memory_search(
+                &root,
+                &projects,
+                &project,
+                &query,
+                limit,
+                provider.as_ref(),
+            )?;
+            if json {
+                print_json(serde_json::json!({
+                    "project": project,
+                    "hits": hits.len(),
+                    "note": "只供参考，不写入翻译记忆或译稿，也不自动批准"
+                }))?;
+            } else {
+                println!(
+                    "向量参考 {} 条。只供核对，不会写入 tm.json，也不会自动插入或批准。",
+                    hits.len()
+                );
+                for hit in &hits {
+                    println!(
+                        "{} / {}\n原文：{}\n译文：{}",
+                        hit.record.identity.block,
+                        hit.record.identity.paragraph,
+                        hit.record.source.text,
+                        hit.record.target.text
+                    );
+                }
             }
             return Ok(());
         }

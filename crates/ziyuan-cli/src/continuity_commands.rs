@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 use ziyuan_app::translation::{Translations, inspect_backup, restore_backup};
-pub(crate) const HELP: &str = "text backup [--output <新文件.tar>]：预览或导出全部译书项目与共用审批历史（不含凭据）；text restore <备份.tar> <新目录> [--yes]：默认校验预览，加 --yes 恢复。text source-update <项目> <原文.txt> [--chapter <章>] [--confirm <指纹>]；text issue list|add|review；text read <项目> [--chapter <章>]；text preflight <项目> [--format txt|md|html] [--chapter <章>]；text search <项目> <片段> [--scope all|source|translation|draft|history]：字面检索，默认 all；text draft-replace <项目> <request.json>：默认只预览人工草稿替换，确认时在请求中带预览 fingerprint 与 confirm:true；text tmx export <项目> [--output <文件.tmx>]；text tmx preview <项目> <文件.tmx>；text tmx import <项目> <文件.tmx> --confirm <预览指纹>";
+pub(crate) const HELP: &str = "text backup [--output <新文件.tar>]：预览或导出全部译书项目与共用审批历史（不含凭据）；text restore <备份.tar> <新目录> [--yes]：默认校验预览，加 --yes 恢复。text source-update <项目> <原文.txt|md|docx|epub> [--chapter <章>] [--confirm <指纹>]；text issue list|add|review；text read <项目> [--chapter <章>]；text preflight <项目> [--format txt|md|html] [--chapter <章>]；text search <项目> <片段> [--scope all|source|translation|draft|history]：字面检索，默认 all；text draft-replace <项目> <request.json>：默认只预览人工草稿替换，确认时在请求中带预览 fingerprint 与 confirm:true；text tmx export <项目> [--output <文件.tmx>]；text tmx preview <项目> <文件.tmx>；text tmx import <项目> <文件.tmx> --confirm <预览指纹>";
 pub(crate) enum Action {
     Tmx(String, String, Option<PathBuf>, Option<String>),
     Search(String, String, String),
@@ -85,7 +85,7 @@ pub(crate) fn parse(action: &str, rest: &[String]) -> Result<Action, Box<dyn Err
                 match flag {
                     [key,value] if key == "--chapter" && chapter.is_none() => chapter=Some(value.clone()),
                     [key,value] if key == "--confirm" && confirm.is_none() => confirm=Some(value.clone()),
-                    _ => return Err("用法: text source-update <项目> <新原文.txt> [--chapter <修订章ID>] [--confirm <预览指纹>]；不指定章节则追加".into()),
+                    _ => return Err("用法: text source-update <项目> <新原文.txt|md|docx|epub> [--chapter <修订章ID>] [--confirm <预览指纹>]；不指定章节则追加".into()),
                 }
             }
             Action::Update(project.clone(), file.into(), chapter, confirm)
@@ -195,17 +195,16 @@ pub(crate) fn run(action: Action, _json: bool) -> Result<(), Box<dyn Error>> {
             use std::io::Read;
             let mut bytes = Vec::new();
             std::fs::File::open(&file)?
-                .take(8 * 1024 * 1024 + 1)
+                .take(16 * 1024 * 1024 + 1)
                 .read_to_end(&mut bytes)?;
-            let input = ziyuan_app::translation::SourceUpdate {
-                chapter,
-                name: file
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .ok_or("文件名不是UTF-8")?
-                    .into(),
-                text: String::from_utf8(bytes)?,
-            };
+            let name = file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or("文件名不是UTF-8")?
+                .to_owned();
+            let input = ziyuan_app::translation::Translations::source_update_from_bytes(
+                chapter, name, &bytes,
+            )?;
             let t = Translations::new(&root);
             let result = if let Some(confirm) = confirm {
                 serde_json::to_value(t.apply_source_update(&project, &input, &confirm)?)?

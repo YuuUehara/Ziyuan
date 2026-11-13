@@ -131,6 +131,10 @@ pub fn from_env() -> Result<Box<dyn EmbeddingProvider>, MemoryError> {
     match raw.trim() {
         "" | "none" => Ok(Box::new(Unavailable)),
         "local" => Ok(Box::new(crate::local::LocalProvider::new())),
+        "deterministic" => Ok(Box::new(crate::deterministic::DeterministicProvider::new())),
+        "remote" => Err(MemoryError::Config(format!(
+            "{PROVIDER_ENV} 为 \"remote\"，须先按项目授权后由应用层装配；仅设置该变量不会联网"
+        ))),
         other => Err(MemoryError::Config(format!(
             "{PROVIDER_ENV} 为 {other:?}，无法识别"
         ))),
@@ -319,16 +323,31 @@ mod tests {
             }
             "remote" => match from_env() {
                 Err(MemoryError::Config(reason)) => {
-                    // 原因点名变量与不被接受的值；可接受的取值由 Display 统一给出。
-                    assert!(reason.contains(PROVIDER_ENV), "{reason}");
-                    assert!(reason.contains("remote"), "{reason}");
+                    assert!(reason.contains("授权"), "{reason}");
+                    assert!(reason.contains("不会联网"), "{reason}");
                     let message = MemoryError::Config(reason).to_string();
                     assert!(message.contains("none"), "{message}");
                     assert!(message.contains("local"), "{message}");
+                    assert!(message.contains("deterministic"), "{message}");
+                    assert!(message.contains("remote"), "{message}");
                 }
-                Err(other) => panic!("预期不接受的提供方被拒，得到错误 {other}"),
-                Ok(_) => panic!("预期不接受的提供方被拒，却选出了一个提供方"),
+                Err(other) => panic!("预期远程提供方在未装配时被拒，得到错误 {other}"),
+                Ok(_) => panic!("仅设置 remote 不得选出提供方"),
             },
+            "mystery" => match from_env() {
+                Err(MemoryError::Config(reason)) => {
+                    assert!(reason.contains(PROVIDER_ENV), "{reason}");
+                    assert!(reason.contains("mystery"), "{reason}");
+                }
+                Ok(_) => panic!("预期无法识别的提供方被拒，却选出了一个提供方"),
+                Err(other) => panic!("预期无法识别的提供方被拒，得到错误 {other}"),
+            },
+            "deterministic" => {
+                let provider = from_env().map_err(|e| e.to_string()).unwrap();
+                assert_eq!(provider.signature().provider, "deterministic");
+                assert_eq!(provider.signature().dim, 32);
+                assert_eq!(provider.embed(&["夜が明けた"]).unwrap()[0].vector.len(), 32);
+            }
             other => panic!("未知的子进程情形 {other}"),
         }
     }
@@ -378,6 +397,8 @@ mod tests {
     #[test]
     fn from_env_rejects_unknown_provider() {
         run_env_case("remote", &[(PROVIDER_ENV, "remote")], &[]);
+        run_env_case("mystery", &[(PROVIDER_ENV, "mystery")], &[]);
+        run_env_case("deterministic", &[(PROVIDER_ENV, "deterministic")], &[]);
     }
 
     /// `local` 选中确定性本地提供方。

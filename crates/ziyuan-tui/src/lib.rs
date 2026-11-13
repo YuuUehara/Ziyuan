@@ -7,6 +7,7 @@
 //! 测试用 ratatui 的 `TestBackend` 即可驱动。
 mod actions;
 mod app;
+mod human;
 mod input;
 mod render;
 
@@ -26,6 +27,7 @@ use ziyuan_runtime::{CancelToken, Limits, WorkerBackend};
 use ziyuan_storage::EventLog;
 
 use crate::app::{DiffView, Modal, Tab};
+use crate::human::HumanPanel;
 use ratatui::text::Line;
 use std::cell::{Cell, RefCell};
 pub struct Config {
@@ -112,6 +114,7 @@ pub struct App {
     /// git-delta 渲染过的改动：(诏令, 改动版本, 并排, 宽) → 逐段的行；渲染失败为 `None`。
     delta_cache: RefCell<HashMap<DeltaKey, Option<Vec<Vec<Line<'static>>>>>>,
     quit: bool,
+    human: HumanPanel,
 }
 
 type DeltaKey = (TaskId, String, bool, u16);

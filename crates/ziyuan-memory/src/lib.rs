@@ -8,14 +8,17 @@
 
 use std::fmt;
 
+pub mod deterministic;
 pub mod embed;
 pub mod index;
 pub mod local;
 pub mod pair;
 pub mod record;
+pub mod remote;
 pub mod search;
 pub mod watermark;
 
+pub use deterministic::DeterministicProvider;
 pub use embed::{Embedding, EmbeddingProvider, ModelSignature, Unavailable};
 pub use index::{FORMAT_VERSION, MemoryIndex};
 pub use local::LocalProvider;
@@ -25,6 +28,7 @@ pub use record::{
     Digests, EmbeddingSignature, Identity, MemoryRecord, Origin, Text, Watermark, sha256_hex,
     workspace_id_from_canonical_text,
 };
+pub use remote::{EmbedCall, EmbedTransport, RemoteProvider};
 pub use search::{SearchHit, SearchScope, search};
 pub use watermark::{WatermarkReader, require_publishable};
 
@@ -67,7 +71,7 @@ impl fmt::Display for MemoryError {
             Self::Invalid(reason) => write!(f, "记忆库记录不合规: {reason}"),
             Self::Config(reason) => write!(
                 f,
-                "嵌入提供方配置有误: {reason}；可用值：none（默认，不联网）、local（本地确定性模型）"
+                "嵌入提供方配置有误: {reason}；可用值：none（默认，不联网）、local（本地确定性模型）、deterministic（离线固定向量）、remote（须先按项目授权，默认不外发）"
             ),
             Self::Unavailable => write!(
                 f,
@@ -123,7 +127,7 @@ mod tests {
         assert_eq!(
             MemoryError::Config("ZIYUAN_MEMORY_PROVIDER 为 \"remote\"，无法识别".into())
                 .to_string(),
-            "嵌入提供方配置有误: ZIYUAN_MEMORY_PROVIDER 为 \"remote\"，无法识别；可用值：none（默认，不联网）、local（本地确定性模型）"
+            "嵌入提供方配置有误: ZIYUAN_MEMORY_PROVIDER 为 \"remote\"，无法识别；可用值：none（默认，不联网）、local（本地确定性模型）、deterministic（离线固定向量）、remote（须先按项目授权，默认不外发）"
         );
         assert_eq!(
             MemoryError::Unavailable.to_string(),

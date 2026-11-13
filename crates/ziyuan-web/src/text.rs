@@ -546,8 +546,15 @@ pub(crate) async fn memory_status(
     let result = app
         .session_result(move |s| {
             Translations::new(&root).project(&id)?;
-            let available =
-                ziyuan_memory::embed::from_env().is_ok_and(|provider| provider.signature().dim > 0);
+            let available = ziyuan_app::memory_provider::selection_from_env(None)
+                .and_then(|selection| {
+                    ziyuan_app::memory_provider::open(
+                        &root,
+                        &BTreeSet::from([id.clone()]),
+                        selection,
+                    )
+                })
+                .is_ok_and(|provider| provider.signature().dim > 0);
             let status = match s.memory_status(&root) {
                 Ok(status) => status,
                 // 缓存坏了也保留重建入口；不把文件路径或底层解析内容传给浏览器。
@@ -574,17 +581,28 @@ pub(crate) async fn memory_status(
 fn memory_error(error: AppError) -> ApiError {
     match error {
         AppError::NotFounded => ApiError::bad("译文记忆须先建朝（ziyuan init）。"),
+        AppError::External(message)
+            if message.contains("授权")
+                || message.contains("不会")
+                || message.contains("未联网") =>
+        {
+            ApiError::bad(message)
+        }
         _ => ApiError::bad(
             "译文记忆暂不可用：请检查项目、已定稿材料与本地配置；索引缺失或过期时请重建。",
         ),
     }
 }
 
-fn memory_provider() -> Result<Box<dyn ziyuan_memory::EmbeddingProvider>, AppError> {
-    let provider = ziyuan_memory::embed::from_env()
-        .map_err(|_| AppError::External("本地记忆配置不可用".into()))?;
+fn memory_provider(
+    root: &std::path::Path,
+    project: &str,
+) -> Result<Box<dyn ziyuan_memory::EmbeddingProvider>, AppError> {
+    let selection = ziyuan_app::memory_provider::selection_from_env(None)?;
+    let provider =
+        ziyuan_app::memory_provider::open(root, &BTreeSet::from([project.to_owned()]), selection)?;
     if provider.signature().dim == 0 {
-        return Err(AppError::External("未启用本地记忆".into()));
+        return Err(AppError::External("未启用嵌入提供方；默认不外发。".into()));
     }
     Ok(provider)
 }
@@ -596,7 +614,7 @@ pub(crate) async fn memory_build(
     let root = app.0.config.root.clone();
     let result = app
         .session_result(move |s| {
-            let provider = memory_provider()?;
+            let provider = memory_provider(&root, &id)?;
             let build = s.memory_build(&root, &BTreeSet::from([id]), provider.as_ref())?;
             Ok(json!({ "records": build.records, "skipped": build.skipped.len() }))
         })
@@ -620,7 +638,7 @@ pub(crate) async fn memory_search(
     let root = app.0.config.root.clone();
     let result = app
         .session_result(move |s| {
-            let provider = memory_provider()?;
+            let provider = memory_provider(&root, &id)?;
             let hits = s.memory_search(&root, &BTreeSet::new(), &id, &q, 8, provider.as_ref())?;
             Ok(
                 json!({ "project": id, "hits": hits.into_iter().map(|hit| json!({

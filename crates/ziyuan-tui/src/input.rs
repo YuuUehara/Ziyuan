@@ -143,7 +143,13 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab | KeyCode::Right => self.switch_tab(1),
             KeyCode::BackTab | KeyCode::Left => self.switch_tab(TABS.len() - 1),
-            KeyCode::Char(c @ '1'..='3') => self.tab = TABS[c as usize - '1' as usize].0,
+            KeyCode::Char(c @ '1'..='4') => {
+                self.tab = TABS[c as usize - '1' as usize].0;
+                if self.tab == Tab::Human {
+                    self.ensure_human();
+                }
+            }
+            _ if self.tab == Tab::Human => self.human_key(key),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(5),
@@ -208,7 +214,7 @@ impl App {
             code => match self.tab {
                 Tab::Edicts => self.edict_key(code),
                 Tab::Officials => self.official_key(code),
-                Tab::History => {}
+                Tab::History | Tab::Human => {}
             },
         }
     }
@@ -409,8 +415,10 @@ impl App {
                 self.modal = None;
                 return;
             }
-            Some(Modal::Confirm(kind)) => {
-                self.modal = None;
+            Some(Modal::Confirm(_)) => {
+                let Some(Modal::Confirm(kind)) = self.modal.take() else {
+                    return;
+                };
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
                     self.confirm(kind);
                 }
@@ -464,6 +472,11 @@ impl App {
         else {
             return;
         };
+        if matches!(kind, InputKind::HumanEdit) {
+            self.set_human_paragraph(text);
+            self.info("已写入当前段，按 s 保存草稿。改字后本段注音等标记会清除，标记编辑仍用网页");
+            return;
+        }
         let text = text.trim().to_owned();
         let department = Department::ALL[department];
         match kind {
@@ -575,6 +588,7 @@ impl App {
                     },
                 );
             }
+            InputKind::HumanEdit => {}
         }
     }
 
@@ -593,7 +607,62 @@ impl App {
                     self.modal = Some(Modal::Notice(note));
                 }
             }
+            ConfirmKind::HumanSubmit { .. } => self.submit_human(),
+            ConfirmKind::HumanApprove { .. } => self.approve_human(),
+            ConfirmKind::HumanFinalize { .. } => self.finalize_human(),
         }
+    }
+
+    pub(crate) fn human_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('[') => self.shift_human_project(-1),
+            KeyCode::Char(']') => self.shift_human_project(1),
+            KeyCode::Char(',') => self.shift_human_block(-1),
+            KeyCode::Char('.') => self.shift_human_block(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Enter => {
+                let text = self
+                    .human
+                    .paragraphs
+                    .get(self.human.selected)
+                    .map(|paragraph| paragraph.text.clone())
+                    .unwrap_or_default();
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::HumanEdit,
+                    text,
+                    department: 0,
+                });
+            }
+            KeyCode::Char('s') => self.save_human(),
+            KeyCode::Char('u') => self.confirm_human(ConfirmKind::HumanSubmit {
+                project: self.current_human_project().unwrap_or_default(),
+                block: self.current_human_block().unwrap_or_default(),
+            }),
+            KeyCode::Char('a') => self.confirm_human(ConfirmKind::HumanApprove {
+                project: self.current_human_project().unwrap_or_default(),
+                block: self.current_human_block().unwrap_or_default(),
+            }),
+            KeyCode::Char('f') => self.confirm_human(ConfirmKind::HumanFinalize {
+                project: self.current_human_project().unwrap_or_default(),
+                block: self.current_human_block().unwrap_or_default(),
+            }),
+            KeyCode::Char('p') => self.apply_human(),
+            KeyCode::Char('r') => self.reload_human(),
+            _ => {}
+        }
+    }
+
+    fn confirm_human(&mut self, kind: ConfirmKind) {
+        if self.current_human_project().is_none() {
+            self.error("尚无文本项目");
+            return;
+        }
+        if self.current_human_block().is_none() {
+            self.error("这一项目还没有块");
+            return;
+        }
+        self.modal = Some(Modal::Confirm(kind));
     }
 
     pub(crate) fn submit_choice(&mut self) {

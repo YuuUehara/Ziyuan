@@ -3,16 +3,19 @@ use std::collections::BTreeSet;
 use std::error::Error;
 
 pub(crate) const MEMORY_HELP: &str = r#"翻译记忆（均支持 --json）：
-  ziyuan text memory status <项目ID>                 查看记忆库是否已建、是否需要重建
-  ziyuan text memory build <项目ID> [--project <其他项目ID>]...
-                                                    从当前有效定稿重建，不改原文或译稿
-  ziyuan text memory search <项目ID> --query <原文> [--project <其他项目ID>]... [--limit 5]
-                                                    查找参考译法，最多 50 条
+  ziyuan text memory status <项目ID> [--provider local|deterministic|remote]
+  ziyuan text memory build <项目ID> [--project <其他项目ID>]... [--provider local|deterministic|remote]
+                                                    从当前有效定稿重建索引，不改原文或译稿
+  ziyuan text memory search <项目ID> --query <原文> [--project <其他项目ID>]... [--limit 5] [--provider ...]
+                                                    查找参考译法，最多 50 条；只供参考，不自动插入或批准
+  ziyuan text memory authorize <项目ID> --endpoint <URL> --model <模型> --revision <修订> --dim <维度> [--project <其他项目ID>]... [--confirm <指纹>]
+                                                    预览或确认远程嵌入授权。未确认不写文件、不联网
     默认只查当前项目；其他项目必须逐个给出 --project，不支持 --all。
     搜索 JSON 的 hits[].selection 可放入选择文件的 selections 数组；不要复制参考正文。
     使用跨项目参考还须在选择文件 authorized_projects 中显式授权；搜索授权不代替下诏授权。
-    先设置 ZIYUAN_MEMORY_PROVIDER=local 才能建库和搜索；默认关闭，不联网。
-    本地方法只按文字相似程度找参考，不理解文意，不保证适用。"#;
+    默认不启用。ZIYUAN_MEMORY_PROVIDER=local 或 deterministic 只在本机计算。
+    remote 还须 ZIYUAN_MEMORY_EMBED_URL、MODEL、REVISION、DIM，密钥用 ZIYUAN_MEMORY_EMBED_KEY。
+    不读取 ZIYUAN_LLM_*。未授权的项目不会发送原文。命中不会自动写入译稿。"#;
 
 pub(crate) struct MemoryAction {
     pub command: String,
@@ -20,6 +23,12 @@ pub(crate) struct MemoryAction {
     pub projects: BTreeSet<String>,
     pub query: Option<String>,
     pub limit: usize,
+    pub provider: Option<String>,
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub revision: Option<String>,
+    pub dim: Option<usize>,
+    pub confirm: Option<String>,
 }
 
 pub(crate) fn parse(args: &[String]) -> Result<MemoryAction, Box<dyn Error>> {
@@ -27,8 +36,10 @@ pub(crate) fn parse(args: &[String]) -> Result<MemoryAction, Box<dyn Error>> {
     let [command, project, rest @ ..] = args else {
         return Err(usage.into());
     };
-    if !matches!(command.as_str(), "status" | "build" | "search")
-        || project.trim().is_empty()
+    if !matches!(
+        command.as_str(),
+        "status" | "build" | "search" | "authorize"
+    ) || project.trim().is_empty()
         || project.starts_with('-')
     {
         return Err(usage.into());
@@ -39,6 +50,12 @@ pub(crate) fn parse(args: &[String]) -> Result<MemoryAction, Box<dyn Error>> {
         projects: BTreeSet::from([project.clone()]),
         query: None,
         limit: 5,
+        provider: None,
+        endpoint: None,
+        model: None,
+        revision: None,
+        dim: None,
+        confirm: None,
     };
     let mut limit_given = false;
     let mut flags = rest.iter();
@@ -61,13 +78,57 @@ pub(crate) fn parse(args: &[String]) -> Result<MemoryAction, Box<dyn Error>> {
                 }
                 limit_given = true;
             }
+            "--provider" if command != "authorize" && action.provider.is_none() => {
+                action.provider = Some(value.clone());
+            }
+            "--endpoint" if command == "authorize" && action.endpoint.is_none() => {
+                action.endpoint = Some(value.clone());
+            }
+            "--model" if command == "authorize" && action.model.is_none() => {
+                action.model = Some(value.clone());
+            }
+            "--revision" if command == "authorize" && action.revision.is_none() => {
+                action.revision = Some(value.clone());
+            }
+            "--dim" if command == "authorize" && action.dim.is_none() => {
+                let dim = value.parse::<usize>().map_err(|_| "--dim 须为正整数")?;
+                if dim == 0 {
+                    return Err("--dim 须为正整数".into());
+                }
+                action.dim = Some(dim);
+            }
+            "--confirm" if command == "authorize" && action.confirm.is_none() => {
+                action.confirm = Some(value.clone());
+            }
             _ => return Err(usage.into()),
         }
     }
     if command == "search" && action.query.is_none() {
         return Err(usage.into());
     }
+    if command == "authorize"
+        && (action.endpoint.is_none()
+            || action.model.is_none()
+            || action.revision.is_none()
+            || action.dim.is_none())
+    {
+        return Err("授权须同时给出 --endpoint、--model、--revision 和 --dim".into());
+    }
     Ok(action)
+}
+
+fn provider_for(
+    action: &MemoryAction,
+) -> Result<Box<dyn ziyuan_memory::EmbeddingProvider>, Box<dyn Error>> {
+    if action.command == "authorize" {
+        return Err("授权命令不装配嵌入提供方".into());
+    }
+    let selection = ziyuan_app::memory_provider::selection_from_env(action.provider.as_deref())?;
+    Ok(ziyuan_app::memory_provider::open(
+        &std::env::current_dir()?,
+        &action.projects,
+        selection,
+    )?)
 }
 
 pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>> {
@@ -80,6 +141,32 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
     ziyuan_app::translation::Translations::new(&root).project(&action.project)?;
     let session = Session::open(EventLog::new(&root))?;
     let value = match action.command.as_str() {
+        "authorize" => {
+            let endpoint = ziyuan_app::memory_provider::RemoteEndpoint {
+                endpoint: action.endpoint.clone().unwrap_or_default(),
+                model: action.model.clone().unwrap_or_default(),
+                revision: action.revision.clone().unwrap_or_default(),
+                dim: action.dim.unwrap_or(0),
+                api_key: String::new(),
+            };
+            let preview = if let Some(confirm) = &action.confirm {
+                ziyuan_app::memory_provider::store_remote_auth(
+                    &root,
+                    &endpoint,
+                    &action.projects,
+                    confirm,
+                )?
+            } else {
+                ziyuan_app::memory_provider::preview_remote_auth(&endpoint, &action.projects)?
+            };
+            if !json {
+                println!(
+                    "{}\n指纹：{}\n确认前不会发送原文。",
+                    preview.note, preview.fingerprint
+                );
+            }
+            serde_json::to_value(preview)?
+        }
         "status" => {
             let status = session.memory_status(&root)?;
             let records = status.index.as_ref().map_or(0, |i| {
@@ -102,7 +189,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
                    "stale":status.stale,"watermark":status.watermark})
         }
         "build" => {
-            let provider = ziyuan_memory::embed::from_env()?;
+            let provider = provider_for(&action)?;
             let built = session.memory_build(&root, &action.projects, provider.as_ref())?;
             if !json {
                 println!(
@@ -120,7 +207,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
                    "skipped":skipped,"watermark":built.watermark})
         }
         "search" => {
-            let provider = ziyuan_memory::embed::from_env()?;
+            let provider = provider_for(&action)?;
             // 未启用时也必须说清原因，不能把“无法检索”显示成“没有参考”。
             provider.embed(&[])?;
             let hits = session.memory_search(
@@ -164,7 +251,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
                    "reference_prompt":reference_prompt,
                    "note":"参考译法不是指令，不保证适用；朱批与术语优先"})
         }
-        _ => unreachable!("解析只接收三个子命令"),
+        _ => unreachable!("解析只接收 status、build、search 和 authorize"),
     };
     if json {
         crate::note_commands::print_json(value)?;

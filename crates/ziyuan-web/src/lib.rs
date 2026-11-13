@@ -255,7 +255,7 @@ fn router_for(app: AppState) -> Router {
         .route("/text/projects", post(text::create_project))
         .route(
             "/text/{project}/source-update",
-            post(continuity::update).layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
+            post(continuity::update).layer(axum::extract::DefaultBodyLimit::max(24 * 1024 * 1024)),
         )
         .route(
             "/text/{project}/issues",

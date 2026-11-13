@@ -25,7 +25,7 @@ export function mount({ api, getSelection, refresh, navigate }) {
   el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
   el("restore").onclick = () => run(async () => { if (!checked) throw new Error("请先校验备份"); show(await send(`?destination=${encodeURIComponent(el("destination").value)}&fingerprint=${encodeURIComponent(checked.fingerprint)}`)); el("restore").disabled = true; });
   const updates=document.createElement("details");updates.className="continuity-tools";
-  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">选取 TXT 文件，默认追加新章；勾选「修订当前章」则更新当前块所在章。请先预览差异，再确认更新，旧原件和旧译都会保留。本入口不处理段落拆合、重新分块或破坏已批准引用的改动。</p><div class="row write"><input type="file" accept=".txt" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">选取 TXT、Markdown、DOCX 或 EPUB，默认追加新章；勾选「修订当前章」则更新当前块所在章。请先预览差异，再确认更新，旧原件和旧译都会保留。段落拆合、重新分块或破坏已批准引用的改动会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
   const reading=mountReading(issues,{api,getSelection,navigate});
@@ -38,13 +38,29 @@ export function mount({ api, getSelection, refresh, navigate }) {
   u("source").onchange=u("revise").onchange=()=>{proposed=null;u("apply").disabled=true;};
   u("preview").onclick=()=>change(async()=>{
     const {project,block}=getSelection(); if(!project)throw new Error("请先选择项目");
-    const file=u("source").files[0];if(!file)throw new Error("请选择TXT文件");if(file.size>8*1024*1024)throw new Error("原文超过 8 MiB，请选用大小符合要求的文件");
+    const file=u("source").files[0];if(!file)throw new Error("请选择 TXT、Markdown、DOCX 或 EPUB 文件");
+    const binary=/\.(docx|epub)$/i.test(file.name);
+    if(file.size>(binary?16:8)*1024*1024)throw new Error(binary?"原件超过 16 MiB":"原文超过 8 MiB，请选用大小符合要求的文件");
     if(u("revise").checked&&!block)throw new Error("请选择要修订章节中的一个块");
-    const input={chapter:u("revise").checked?block.split("-")[0]:null,name:file.name,text:new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer())};
+    const bytes=new Uint8Array(await file.arrayBuffer());
+    const input=sourceUpdateRequest(file.name,bytes,u("revise").checked?block.split("-")[0]:null);
     proposed=null;u("apply").disabled=true;
     const preview=await api(`/text/${encodeURIComponent(project)}/source-update`,input);if(project!==getSelection().project||u("source").files[0]!==file||u("revise").checked!==!!input.chapter)throw new Error("项目或原文选项已变，请重新预览");proposed={project,input,preview};renderChanges(u("result"),preview);u("apply").disabled=preview.blockers.length>0;
   });
   u("apply").onclick=()=>change(async()=>{if(!proposed||proposed.project!==getSelection().project)throw new Error("项目已变，请重新预览");await api(`/text/${encodeURIComponent(proposed.project)}/source-update`,{...proposed.input,fingerprint:proposed.preview.fingerprint});proposed=null;u("apply").disabled=true;await refresh();});
+}
+export function sourceUpdateRequest(name, bytes, chapter) {
+  const binary = /\.(docx|epub)$/i.test(name);
+  if (!binary) {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    return { chapter, name, text };
+  }
+  let binaryText = "";
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) {
+    binaryText += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  }
+  return { chapter, name, text: "", package_base64: btoa(binaryText) };
 }
 export function backupSummary(value) {
   const manifest=value.manifest||value;

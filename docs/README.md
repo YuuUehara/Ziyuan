@@ -1,8 +1,8 @@
 # 文档目录
 
-本文档对应 **1.14.1** 源码。初次使用先看[使用指南](guide.md)，译书操作看[文本项目指南](text-projects.md)和[小说翻译指南](novel-translation.md)。本版补齐网页章节导出的 HTML 选项，并校正文案与命令帮助。
+本文档对应 **1.15.0** 源码。初次使用先看[使用指南](guide.md)，译书操作看[文本项目指南](text-projects.md)和[小说翻译指南](novel-translation.md)。本版扩展原文更新格式，开放终端人工译稿，并让向量记忆的远程嵌入先经项目授权。
 
-发布与验证进度见 [1.14.1 验收记录](acceptance/1.14.1.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
+发布与验证进度见 [1.15.0 验收记录](acceptance/1.15.0.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
 
 连续翻译操作与支持边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)；既有译稿版本、文档回填和人工译稿操作见[文本项目指南](text-projects.md)。
 
@@ -34,6 +34,7 @@
 
 每份只记录当时实际做过的检查和未测项目。最新一份可能仍在验收，是否已公开发行请看记录中的状态；历史版本的结果不代替当前版本检查。
 
+- [1.15.0](acceptance/1.15.0.md)
 - [1.14.1](acceptance/1.14.1.md)
 - [1.14.0](acceptance/1.14.0.md)
 - [1.13.1](acceptance/1.13.1.md)

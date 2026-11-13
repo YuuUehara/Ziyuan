@@ -15,6 +15,7 @@ mod follow;
 mod history;
 mod huidian;
 pub mod memory;
+pub mod memory_provider;
 pub mod notes;
 mod personnel;
 mod preview;

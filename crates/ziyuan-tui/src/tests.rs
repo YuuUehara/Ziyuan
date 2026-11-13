@@ -189,8 +189,8 @@ async fn issue_run_and_review_from_the_keyboard() {
     );
     press(&mut app, " ");
     assert!(app.modal.is_none());
-    // 三个标签页上都没有宽度有歧义的字符（边框线与方块字符除外），中文终端里不会挤开或盖住邻字。
-    for tab in ["1", "2", "3"] {
+    // 四个标签页上都没有宽度有歧义的字符（边框线与方块字符除外），中文终端里不会挤开或盖住邻字。
+    for tab in ["1", "2", "3", "4"] {
         press(&mut app, tab);
         let shown = screen(&app);
         let ambiguous: String = shown
@@ -667,5 +667,56 @@ async fn translation_line_shows_kind_project_block_and_state() {
         shown.contains("译书　初译 · 01234567… · c0001-b0001 · 已准奏"),
         "{shown}"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn human_tab_edits_a_draft_and_confirms_before_submit_or_approval() {
+    let (mut app, _messages, root) = temp_app("human-draft");
+    let texts = ziyuan_app::text_project::TextProjects::new(&root);
+    let project = texts
+        .create(ziyuan_app::text_project::NewProject {
+            title: "终端译稿".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: ziyuan_app::text_project::Provenance::default(),
+        })
+        .unwrap();
+    let source = root.join("chapter.txt");
+    std::fs::write(&source, "朝だ。\n").unwrap();
+    texts
+        .import(&project.id, std::slice::from_ref(&source))
+        .unwrap();
+    press(&mut app, "4");
+    let shown = screen_at(&app, 120, 40);
+    assert!(shown.contains(&project.id), "{shown}");
+    assert!(shown.contains("朝だ"), "{shown}");
+    assert!(shown.contains("尚无草稿"), "{shown}");
+    press(&mut app, "\n清晨。\n");
+    press(&mut app, "s");
+    assert!(screen(&app).contains("已保存人工草稿"), "{}", screen(&app));
+    let translation = root
+        .join("translations")
+        .join(&project.id)
+        .join("c0001-b0001/zh.json");
+    assert!(!translation.exists(), "保存草稿不能写入正式译稿");
+    press(&mut app, "u");
+    assert!(screen(&app).contains("只冻结当前草稿"), "{}", screen(&app));
+    press(&mut app, "n");
+    assert!(app.modal.is_none());
+    assert!(!screen(&app).contains("已送审"), "{}", screen(&app));
+    press(&mut app, "uy");
+    assert!(screen(&app).contains("已送审"), "{}", screen(&app));
+    press(&mut app, "a");
+    assert!(screen(&app).contains("准奏并落盘"), "{}", screen(&app));
+    press(&mut app, "n");
+    assert!(!translation.exists(), "未确认不能准奏落盘");
+    press(&mut app, "ay");
+    assert!(translation.is_file(), "确认后才写入正式译稿");
+    assert!(screen(&app).contains("已准奏并落盘"), "{}", screen(&app));
+    press(&mut app, "p");
+    assert!(screen(&app).contains("只作核对"), "{}", screen(&app));
+    press(&mut app, "fy");
+    assert!(screen(&app).contains("已定稿"), "{}", screen(&app));
     let _ = std::fs::remove_dir_all(root);
 }

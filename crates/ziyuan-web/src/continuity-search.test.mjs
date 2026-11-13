@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mountSearch,replacementReady } from './continuity-search.mjs';
-import { backupSummary } from './continuity.mjs';
+import { backupSummary, sourceUpdateRequest } from './continuity.mjs';
 class Element {
  constructor(tag='div'){this.tagName=tag;this.children=[];this.elements=new Map();this.value='';this.textContent='';}
  querySelector(key){if(!this.elements.has(key))this.elements.set(key,new Element());return this.elements.get(key);}
@@ -12,6 +12,13 @@ test('replacement confirmation requires real unblocked occurrences',()=>{
  assert.equal(replacementReady(null),false);assert.equal(replacementReady({occurrences:0}),false);assert.equal(replacementReady({occurrences:2,blocked:'标记冲突'}),false);assert.equal(replacementReady({occurrences:2}),true);
 });
 test('backup summary presents counts without leaking raw metadata',()=>{assert.deepEqual(backupSummary({manifest:{projects:['a'],files:[{bytes:20},{bytes:30}]}}),{projects:1,files:2,bytes:50});});
+test('source update keeps text formats as UTF-8 and binaries as package bytes',()=>{
+ const text=sourceUpdateRequest('chapter.md',new TextEncoder().encode('朝。\n'),null);
+ assert.equal(text.text,'朝。\n'); assert.equal(text.package_base64,undefined);
+ const binary=sourceUpdateRequest('book.docx',Uint8Array.from([0,255,10]),'c0001');
+ assert.equal(binary.text,''); assert.equal(binary.chapter,'c0001');
+ assert.equal(Buffer.from(binary.package_base64,'base64').toString('hex'),'00ff0a');
+});
 test('old project search cannot confirm a draft replacement after project switch',async()=>{
  const previous=globalThis.document;globalThis.document={createElement:tag=>new Element(tag)};
  try{

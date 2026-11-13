@@ -144,7 +144,7 @@ fn rewrite(xml: &str, allocations: &[Option<Vec<String>>]) -> Result<String> {
     String::from_utf8(writer.into_inner()).map_err(|_| invalid("DOCX 写出结果不是 UTF-8"))
 }
 
-fn docx_text(bytes: &[u8]) -> Result<String> {
+pub(crate) fn docx_text(bytes: &[u8]) -> Result<String> {
     let xml = read_zip_text(bytes, "word/document.xml")?;
     let paragraphs: Vec<String> = segments(&xml)?
         .into_iter()

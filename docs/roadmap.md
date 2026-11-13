@@ -2,7 +2,7 @@
 
 各版已完成的变化见 [CHANGELOG.md](../CHANGELOG.md)。
 
-**本源码版本 1.14.1。** 1.14.0 补齐完整备份、原文更新、跨章待查、通读与 HTML 交稿、全文检索／草稿替换及 TMX 交换；1.14.1 把网页章节导出、命令帮助和指南与这些能力对齐。验证和发行进度见 [1.14.1 验收记录](acceptance/1.14.1.md)，1.14.0 的正式发行见 [当版验收](acceptance/1.14.0.md)。既有版本快照、DOCX／EPUB 回填、记忆与评论、SRT 及 Web 新建项目的历史结果见 [1.13.0](acceptance/1.13.0.md)与 [1.13.1](acceptance/1.13.1.md)。版本变化见 [CHANGELOG](../CHANGELOG.md)，已公开版本以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。
+**本源码版本 1.15.0。** 1.15.0 让原文更新接受 Markdown、DOCX 与 EPUB，在终端开放人工译稿，并为译文记忆加上须先授权的远程嵌入；默认仍不联网。验证进度见 [1.15.0 验收记录](acceptance/1.15.0.md)。1.14.0 补齐完整备份、原文更新、跨章待查、通读与 HTML 交稿、全文检索／草稿替换及 TMX 交换；1.14.1 把网页章节导出、命令帮助和指南与这些能力对齐，正式发行见 [当版验收](acceptance/1.14.1.md)。版本变化见 [CHANGELOG](../CHANGELOG.md)，已公开版本以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。
 
 以下 1.4.0／1.4.1 段落与更早的分批计划保留为历史记录，不再是当前排期或能力声明；当前发布版以 README 与 CHANGELOG 为准。
 
