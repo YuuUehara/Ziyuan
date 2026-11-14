@@ -101,7 +101,7 @@ try {
   await until(() => evaluate("!!document.querySelector('#edict-new') && !document.querySelector('#locked').classList.contains('show')"), "入朝");
   await until(() => evaluate("!document.querySelector('#hall-translation').hidden"), "登录后直接进入译书");
   await until(() => evaluate("document.querySelector('#text-project')?.options.length>0"), "译书项目");
-  await evaluate("(async()=>{const books=await api('/text');const project=document.querySelector('#text-project');project.value=books.projects.find(p=>p.blocks>0).id;project.dispatchEvent(new Event('change',{bubbles:true}))})()");
+  await evaluate("(async()=>{const books=await api('/text');const project=document.querySelector('#text-project');project.value=books.projects.find(p=>p.title.startsWith('自编排版样章')).id;project.dispatchEvent(new Event('change',{bubbles:true}))})()");
   await until(() => evaluate("textBlockId!==null && !!document.querySelector('#continuity-reader')"), "译书页面");
   await evaluate("location.hash='#wuying/text/'+textProjectId+'/'+textBlockId;showHall()");
   await until(() => evaluate("!document.querySelector('#hall-translation').hidden && textBlockId!==null"), "旧译书链接");
