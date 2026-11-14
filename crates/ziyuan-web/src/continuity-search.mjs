@@ -1,3 +1,4 @@
+import { textLocation } from "./translation-workspace.mjs";
 const scopes={all:'全部',source:'原文',translation:'当前译文',draft:'人工草稿',history:'历史译稿'};
 function node(tag,text,className){const e=document.createElement(tag);e.textContent=text;if(className)e.className=className;return e;}
 export function replacementReady(preview){return !!preview&&!preview.blocked&&Number(preview.occurrences)>0;}
@@ -11,7 +12,7 @@ export function mountSearch(host,{api,getSelection,navigate,refresh}){
   const result=await api(`/text/${encodeURIComponent(project)}/search?query=${encodeURIComponent(query)}&scope=${encodeURIComponent(el('scope').value)}`);if(project!==getSelection().project)throw new Error('项目已变，请重新查找');
   el('status').textContent=`找到 ${result.hits.length} 处${result.truncated?'；结果较多，请缩小检索范围':''}`;
   for(const hit of result.hits){
-   const item=node('article','','continuity-change');item.append(node('h4',`${scopes[hit.kind]||hit.kind} · ${hit.chapter}${hit.version?' · '+hit.version:''}`),node('p',hit.text));
+   const item=node('article','','continuity-change');item.append(node('h4',`${scopes[hit.kind]||hit.kind} · ${textLocation(hit.paragraph || hit.chapter)}${hit.version?' · '+hit.version:''}`),node('p',hit.text));
    const locate=node('button','回到本段编辑','small');locate.type='button';locate.onclick=()=>run(async()=>{if(project!==getSelection().project)throw new Error('项目已变，请重新查找');await navigate(hit);el('status').textContent='已定位';});item.append(locate);
    if(hit.kind==='draft'){
     const controls=node('div','','row write'),replacement=document.createElement('input');replacement.placeholder='替换为';replacement.setAttribute('aria-label','替换文字');

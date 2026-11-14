@@ -108,6 +108,7 @@ try {
   if(await evaluate("document.querySelector('#hall-wuying').contains(document.querySelector('#text-card'))")) throw new Error("译书仍混在武英殿中");
   await evaluate("document.querySelector('[data-workspace-tab=draft]').click()");
   await until(() => evaluate("!!document.querySelector('#text-human-editor textarea')"), "人工编辑器");
+  if(!await evaluate("document.querySelector('[data-hall=translation] b').textContent==='翰林院' && document.querySelector('#text-book-title').textContent===textProject.project.title && document.querySelector('#text-human-editor h4').textContent==='第1章 · 第1段' && document.querySelector('#text-human-editor textarea').getAttribute('aria-label')==='第1章 · 第1段 人工译文' && document.querySelector('#text-source .pid').textContent==='第1章 · 第1段' && document.querySelector('[data-text-block] .id').textContent==='译稿第1组'")) throw new Error("书名、章节与段落仍显示技术编号或入口名称不符");
   await evaluate("window.layoutDraft=document.querySelector('#text-human-editor textarea');layoutDraft.value='未保存的排版检查草稿';layoutDraft.dispatchEvent(new Event('input',{bubbles:true}))");
   await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('[data-workspace-tab=draft]').click()");
   if(!await evaluate("document.querySelector('#text-human-editor textarea')===layoutDraft && layoutDraft.value==='未保存的排版检查草稿'")) throw new Error("切换工作区丢失草稿或重建了编辑器");
@@ -164,7 +165,24 @@ try {
     await until(() => evaluate("document.querySelector('[data-workspace-tab=manage]').getAttribute('aria-selected')==='true' && !document.querySelector('#text-new-project-dialog').open && textProject?.project?.title==='自编空白入口检查'"), "空项目直接进入导入");
     await evaluate("(()=>{const tool=document.querySelector('[data-workspace-tool=document-import]');if(!tool.closest('[data-workspace-panel=manage]'))throw new Error('文档导入不在项目管理');tool.open=true;tool.querySelector('[data-format]').value='srt';const files=new DataTransfer();files.items.add(new File(['1\\n00:00:01,000 --> 00:00:02,000\\n自编字幕原文。\\n'],'sample.srt',{type:'text/plain'}));tool.querySelector('[data-file]').files=files.files;tool.querySelector('[data-import]').click()})()");
     await until(() => evaluate("document.querySelector('[data-workspace-tab=draft]').getAttribute('aria-selected')==='true' && textBlockId!==null && document.querySelector('#text-source').textContent.includes('自编字幕原文')"), "网页导入后开始译稿");
-    console.log(JSON.stringify({ ok: true, cases, themes, widths, halls: 6, workspaceTabs:4, directEntry:true, emptyProjectToImport:true, documentImportToDraft:true, legacyDeepLink:true, draftPreserved:true, crossPanelNavigation:true, dialogs: 3, longText: true, zoomEquivalent: "200%" }));
+    await evaluate("document.querySelector('#text-new-project').click();document.querySelector('#new-project-title').value='自编整本TXT导入检查';document.querySelector('#new-project-source').value='自编';document.querySelector('#new-project-rights').value='仅作测试';document.querySelector('#text-new-project-form').requestSubmit()");
+    await until(() => evaluate("textProject?.project?.title==='自编整本TXT导入检查' && !!document.querySelector('#import-files')"), "TXT空项目");
+    if(!await evaluate("document.querySelector('#import-paragraphs').value==='lines' && document.querySelector('#import-split-long').checked")) throw new Error("TXT导入默认选项不适合小说排版");
+    await evaluate("(()=>{const head='第一段原文。\\r\\n第二段原文。\\r\\n';const mid='「今日も静かな朝だ。」と主人公は窓を開けた。\\r\\n'.repeat(35000);const long='長い段落を確かめる。'.repeat(2000);const files=new DataTransfer();files.items.add(new File([head+mid+long],'novel.txt',{type:'text/plain'}));const input=document.querySelector('#import-files');input.files=files.files;input.dispatchEvent(new Event('change',{bubbles:true}));})()");
+    await until(() => evaluate("importDraft?.files.length===1 && !importDraft.busy"), "读入整本TXT");
+    await evaluate("document.querySelector('#import-preview').click()");
+    await until(() => evaluate("!!importDraft.preview || (!importDraft.busy && importDraft.message.startsWith('操作失败'))"), "TXT整本长段预览");
+    if(!await evaluate("importDraft.preview?.chapters[0]?.paragraphs.length>35000 && importDraft.preview.chapters[0].paragraphs[0].text==='第一段原文。' && importDraft.preview.chapters[0].paragraphs[1].text==='第二段原文。' && importDraft.preview.chapters[0].parsing.warnings.length>0")) throw new Error("整本TXT或超长单行未正确预览："+await evaluate("importDraft.message"));
+    if(!await evaluate("!!document.querySelector('[data-import-expand]') && document.querySelectorAll('#import-chapters .text-para').length===120")) throw new Error("整本TXT预览未折叠超长章节段落");
+    await evaluate("document.querySelector('[data-import-expand]').click()");
+    await until(() => evaluate("!document.querySelector('[data-import-expand]') && document.querySelectorAll('#import-chapters .text-para').length>35000"), "展开整本TXT全部段落");
+    await evaluate("document.querySelector('#import-paragraphs').value='blank_lines';document.querySelector('#import-paragraphs').dispatchEvent(new Event('change',{bubbles:true}))");
+    if(!await evaluate("!importDraft.preview && document.querySelector('#import-confirm').disabled")) throw new Error("修改TXT分段方式未要求重新预览");
+    await evaluate("document.querySelector('#import-paragraphs').value='lines';document.querySelector('#import-paragraphs').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#import-preview').click()");
+    await until(() => evaluate("!!importDraft.preview && !importDraft.busy"), "重做TXT预览");
+    await evaluate("document.querySelector('#import-confirm').click()");
+    await until(() => evaluate("document.querySelector('[data-workspace-tab=draft]').getAttribute('aria-selected')==='true' && document.querySelector('#text-source').textContent.includes('第一段原文')"), "整本TXT导入并进入译稿");
+    console.log(JSON.stringify({ ok: true, cases, themes, widths, halls: 6, workspaceTabs:4, directEntry:true, emptyProjectToImport:true, documentImportToDraft:true, txtNovelImport:true, readableLocations:true, legacyDeepLink:true, draftPreserved:true, crossPanelNavigation:true, dialogs: 3, longText: true, zoomEquivalent: "200%" }));
   }
 } catch (error) {
   console.error(error.message); process.exitCode = 1;

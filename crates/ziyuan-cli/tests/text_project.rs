@@ -172,6 +172,26 @@ fn prepared_import_options_are_usage_errors_before_io() {
         ],
         &["preview", "id", "a.md", "--heading-level", "3"],
         &["preview", "id", "a.md", "--heading-level"],
+        &["preview", "id", "a.txt", "--text-paragraphs"],
+        &["preview", "id", "a.txt", "--text-paragraphs", "invalid"],
+        &[
+            "preview",
+            "id",
+            "a.txt",
+            "--text-paragraphs",
+            "lines",
+            "--text-paragraphs",
+            "lines",
+        ],
+        &[
+            "preview",
+            "id",
+            "a.txt",
+            "--split-long-paragraphs",
+            "--split-long-paragraphs",
+        ],
+        &["import", "id", "a.txt", "--text-paragraphs", "lines"],
+        &["import", "id", "a.txt", "--split-long-paragraphs"],
         &["preview", "id", "a.md", "--chapter-title"],
         &["preview", "id", "a.md", "--chapter-title", "  "],
         &["preview", "id", "a.md", "--chapter-title", "--ruby"],
@@ -1802,4 +1822,53 @@ fn human_submit_freezes_candidate_and_is_idempotent() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("不符"));
     assert_eq!(std::fs::read(&zh).unwrap(), b"outside\n");
+}
+
+#[test]
+fn cli_preview_and_import_supports_txt_lines_and_split_long_paragraphs() {
+    let dir = TempDir::new("preview-txt-novel");
+    let root = dir.path();
+    let id = init_json(root, "整本TXT", "ja");
+    let raw = format!("第一行。\r\n第二行。\r\n{}", "春の朝。".repeat(8000));
+    dir.write("novel.txt", &raw);
+    let preview = ok_json(
+        root,
+        &[
+            "text",
+            "preview",
+            &id,
+            "novel.txt",
+            "--text-paragraphs",
+            "lines",
+            "--split-long-paragraphs",
+            "--json",
+        ],
+    );
+    assert_eq!(preview["options"]["parsing"]["text_paragraphs"], "lines");
+    assert_eq!(preview["options"]["parsing"]["split_long_paragraphs"], true);
+    assert!(
+        preview["chapters"][0]["paragraphs"]
+            .as_array()
+            .unwrap()
+            .len()
+            > 3
+    );
+    let fp = preview["fingerprint"].as_str().unwrap();
+    let imported = ok_json(
+        root,
+        &[
+            "text",
+            "import",
+            &id,
+            "novel.txt",
+            "--text-paragraphs",
+            "lines",
+            "--split-long-paragraphs",
+            "--confirm",
+            fp,
+            "--json",
+        ],
+    );
+    assert_import_matches_preview(&imported, &preview);
+    no_court(root);
 }

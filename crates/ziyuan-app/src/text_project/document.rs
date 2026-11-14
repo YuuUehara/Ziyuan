@@ -29,6 +29,27 @@ pub enum SourceFormat {
 pub struct ParseOptions {
     pub ruby: bool,
     pub heading_level: Option<u8>,
+    #[serde(skip_serializing_if = "TextParagraphs::is_default")]
+    pub text_paragraphs: TextParagraphs,
+    #[serde(skip_serializing_if = "is_false")]
+    pub split_long_paragraphs: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextParagraphs {
+    #[default]
+    BlankLines,
+    Lines,
+}
+impl TextParagraphs {
+    fn is_default(&self) -> bool {
+        *self == Self::BlankLines
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +171,9 @@ pub fn parse_document(
             SourceFormat::Text => text_paragraphs(source, body..end, options, &mut chapter),
             SourceFormat::Markdown => markdown_paragraphs(source, body..end, options, &mut chapter),
         }
+        if format == SourceFormat::Text && options.split_long_paragraphs {
+            split_long_text(source, options, &mut chapter)?;
+        }
         if !chapter.paragraphs.iter().any(|p| !p.text.trim().is_empty()) {
             return Err(invalid(format!(
                 "{}: 原文为空或没有可翻译正文（字节 {start}..{end}）；请补充正文、调整分章级别或改用普通文本导入",
@@ -240,6 +264,17 @@ fn text_paragraphs(
         } else {
             start.get_or_insert(offset);
             end = offset + body.len();
+            if options.text_paragraphs == TextParagraphs::Lines {
+                let begin = start.take().expect("nonempty line has a start");
+                let inlines = parse_inlines(
+                    &source[begin..end],
+                    begin,
+                    options.ruby,
+                    false,
+                    &mut out.warnings,
+                );
+                finish(out, begin..end, inlines);
+            }
         }
         offset += line.len();
     }
@@ -253,6 +288,154 @@ fn text_paragraphs(
         );
         finish(out, begin..end, inlines);
     }
+}
+
+/// Only an explicitly opted-in TXT import gains working paragraphs. Source ranges remain
+/// contiguous inside each original paragraph, and annotated spans are indivisible.
+fn split_long_text(
+    source: &str,
+    options: &ParseOptions,
+    chapter: &mut ParsedChapter,
+) -> Result<()> {
+    const BUDGET: usize = super::DEFAULT_BLOCK_BYTES - 1024;
+    fn encoded_size(p: &DocumentParagraph) -> Result<usize> {
+        let annotated = p.inlines.iter().any(|i| !matches!(i, Inline::Text { .. }));
+        Ok(super::PromptBlock {
+            schema_version: 1,
+            block_id: "c00000000-b00000000".into(),
+            paragraphs: vec![super::BlockParagraph {
+                id: "c00000000-p00000000".into(),
+                text: p.text.clone(),
+                inlines: if annotated {
+                    p.inlines.clone()
+                } else {
+                    Vec::new()
+                },
+            }],
+        }
+        .serialized()?
+        .len())
+    }
+    fn paragraph(source: &str, start: usize, end: usize, ruby: bool) -> DocumentParagraph {
+        let inlines = parse_inlines(&source[start..end], start, ruby, false, &mut Vec::new());
+        DocumentParagraph {
+            byte_start: start,
+            byte_end: end,
+            text: inlines.iter().map(visible).collect(),
+            inlines,
+        }
+    }
+    fn ends_sentence(prefix: &str) -> bool {
+        let trimmed = prefix.trim_end_matches(['」', '』', '”', '’', '）', ')']);
+        trimmed.ends_with(['。', '！', '？', '.', '!', '?', '\n'])
+            && (trimmed.len() == prefix.len() || !trimmed.ends_with('\n'))
+    }
+    let mut out = Vec::new();
+    for original in std::mem::take(&mut chapter.paragraphs) {
+        let annotated = original
+            .inlines
+            .iter()
+            .any(|i| !matches!(i, Inline::Text { .. }));
+        if !annotated && original.text.len() * 6 + 256 <= BUDGET {
+            out.push(original);
+            continue;
+        }
+        if encoded_size(&original)? <= BUDGET {
+            out.push(original);
+            continue;
+        }
+        let start = original.byte_start;
+        let end = original.byte_end;
+        let mut protected = Vec::new();
+        // Collect exact protected spans using the inline parser itself so malformed markup
+        // never blocks splitting and unparsed HTML is never reinterpreted across a cut.
+        if options.ruby {
+            parse_inlines_inner(
+                &source[start..end],
+                start,
+                true,
+                false,
+                &mut Vec::new(),
+                Some(&mut protected),
+            );
+        }
+        protected.sort_by_key(|r| r.start);
+        let mut protected_index = 0;
+        let boundaries: Vec<usize> = source[start..end]
+            .grapheme_indices(true)
+            .map(|(i, g)| start + i + g.len())
+            .filter(|n| {
+                while protected.get(protected_index).is_some_and(|r| r.end <= *n) {
+                    protected_index += 1;
+                }
+                !protected
+                    .get(protected_index)
+                    .is_some_and(|r| r.start < *n && *n < r.end)
+            })
+            .collect();
+        let mut begin = start;
+        let before = out.len();
+        while begin < end {
+            let from = boundaries.partition_point(|n| *n <= begin);
+            let until = boundaries
+                .partition_point(|n| *n <= begin.saturating_add(super::DEFAULT_BLOCK_BYTES));
+            let available = &boundaries[from..until];
+            let mut low = 0;
+            let mut high = available.len();
+            // Encoding length is monotonic at safe inline boundaries.
+            while low < high {
+                let middle = (low + high) / 2;
+                if encoded_size(&paragraph(source, begin, available[middle], options.ruby))?
+                    <= BUDGET
+                {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            if low == 0 {
+                return Err(invalid(format!(
+                    "{}：一处注音、强调标记或连续字形过长，无法完整放入译稿工作段；请缩短该处标记，或关闭注音解析后重新预览（原文字节 {begin}..{end}）",
+                    chapter.title
+                )));
+            }
+            let maximum = available[low - 1];
+            // Prefer a sentence end in the latter half; otherwise retain a whole grapheme.
+            let cut = if maximum == end {
+                end
+            } else {
+                available[..low]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|n| *n >= begin + (maximum - begin) / 2 && ends_sentence(&source[..*n]))
+                    .unwrap_or(maximum)
+            };
+            out.push(paragraph(source, begin, cut, options.ruby));
+            begin = cut;
+        }
+        if out[before..]
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<String>()
+            != original.text
+        {
+            return Err(invalid(format!(
+                "{}：长段中的复杂标记无法完整拆分；请调整该处标记后重新预览（原文字节 {start}..{end}）",
+                chapter.title
+            )));
+        }
+        warning(
+            &mut chapter.warnings,
+            start..end,
+            &format!(
+                "长段已按句末或完整字形分为 {} 个译稿工作段；原文副本保持不变。",
+                out.len() - before
+            ),
+        );
+    }
+    chapter.paragraphs = out;
+    Ok(())
 }
 
 fn markdown_paragraphs(
@@ -417,7 +600,11 @@ fn implicit_base(text: &str) -> usize {
 }
 
 fn boundary(text: &str, index: usize) -> bool {
-    index == text.len() || text.grapheme_indices(true).any(|(i, _)| i == index)
+    // Ask at the requested offset; scanning every preceding grapheme for every ruby
+    // turned a whole-novel TXT import into quadratic work.
+    unicode_segmentation::GraphemeCursor::new(index, text.len(), true)
+        .is_boundary(text, 0)
+        .unwrap_or(false)
 }
 
 fn pair(text: &str, open: usize) -> Option<(usize, &str)> {
@@ -513,6 +700,17 @@ fn parse_inlines(
     emphasis: bool,
     warnings: &mut Vec<ImportWarning>,
 ) -> Vec<Inline> {
+    parse_inlines_inner(text, offset, ruby, emphasis, warnings, None)
+}
+
+fn parse_inlines_inner(
+    text: &str,
+    offset: usize,
+    ruby: bool,
+    emphasis: bool,
+    warnings: &mut Vec<ImportWarning>,
+    mut protected: Option<&mut Vec<Range<usize>>>,
+) -> Vec<Inline> {
     let mut out = Vec::new();
     let mut cursor = 0;
     let mut plain = 0;
@@ -532,6 +730,9 @@ fn parse_inlines(
                 .then(|| simple_html(literal))
                 .flatten()
             {
+                if let Some(ranges) = protected.as_deref_mut() {
+                    ranges.push(offset + cursor..offset + end);
+                }
                 out.push(Inline::Ruby {
                     base: base.into(),
                     reading: reading.into(),
@@ -539,6 +740,12 @@ fn parse_inlines(
                     byte_end: offset + end,
                 });
             } else {
+                if ruby
+                    && (literal.contains('《') || literal.contains("<ruby"))
+                    && let Some(ranges) = protected.as_deref_mut()
+                {
+                    ranges.push(offset + cursor..offset + end);
+                }
                 warning(
                     warnings,
                     offset + cursor..offset + end,
@@ -630,6 +837,9 @@ fn parse_inlines(
             );
         }
         if let Some((start, end, inline)) = parsed {
+            if let Some(ranges) = protected.as_deref_mut() {
+                ranges.push(offset + start..offset + end);
+            }
             append(&mut out, &text[plain..start], emphasis);
             out.push(inline);
             cursor = end;
@@ -659,6 +869,7 @@ mod tests {
             &ParseOptions {
                 ruby,
                 heading_level,
+                ..Default::default()
             },
             "原題",
         )
@@ -888,7 +1099,8 @@ mod tests {
                 SourceFormat::Text,
                 &ParseOptions {
                     ruby: false,
-                    heading_level: Some(3)
+                    heading_level: Some(3),
+                    ..Default::default()
                 },
                 "題"
             )
@@ -910,6 +1122,7 @@ mod tests {
                 &ParseOptions {
                     ruby: true,
                     heading_level: level,
+                    ..Default::default()
                 },
                 "題",
             )
@@ -951,6 +1164,78 @@ mod tests {
             ["前<ruby>漢<rt>かん", "次段</ruby>終", "字\n名"]
         );
         assert_ranges(source, &chapters);
+    }
+
+    #[test]
+    fn split_long_text_ignores_multiline_broken_emphasis_and_keeps_closing_quotes() {
+        let broken = format!("《《未閉じた強調\n{}\n》》", "春の風。".repeat(8000));
+        let chapters = parse_document(
+            broken.as_bytes(),
+            SourceFormat::Text,
+            &ParseOptions {
+                ruby: true,
+                text_paragraphs: TextParagraphs::BlankLines,
+                split_long_paragraphs: true,
+                ..Default::default()
+            },
+            "長文",
+        )
+        .unwrap();
+        assert!(chapters[0].paragraphs.len() > 1);
+        assert_eq!(
+            chapters[0]
+                .paragraphs
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<String>(),
+            broken
+        );
+
+        let quoted = format!(
+            "{}「dialogue。」{}「next。」",
+            "春。".repeat(7900),
+            "夏。".repeat(4000)
+        );
+        let quote_chapters = parse_document(
+            quoted.as_bytes(),
+            SourceFormat::Text,
+            &ParseOptions {
+                ruby: true,
+                text_paragraphs: TextParagraphs::Lines,
+                split_long_paragraphs: true,
+                ..Default::default()
+            },
+            "会話",
+        )
+        .unwrap();
+        assert!(quote_chapters[0].paragraphs.len() > 1);
+        assert!(!quote_chapters[0].paragraphs[1].text.starts_with("」"));
+
+        let html_ruby = format!(
+            "{}<script>漢《かん》</script>{}",
+            "あ".repeat(15_990),
+            "い".repeat(4000)
+        );
+        let html_chapters = parse_document(
+            html_ruby.as_bytes(),
+            SourceFormat::Text,
+            &ParseOptions {
+                ruby: true,
+                text_paragraphs: TextParagraphs::Lines,
+                split_long_paragraphs: true,
+                ..Default::default()
+            },
+            "脚本",
+        )
+        .unwrap();
+        assert_eq!(
+            html_chapters[0]
+                .paragraphs
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<String>(),
+            html_ruby
+        );
     }
 
     #[test]

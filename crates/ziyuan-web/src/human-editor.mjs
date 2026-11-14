@@ -1,3 +1,4 @@
+import { textLocation } from "./translation-workspace.mjs";
 import {
   KIND_LABELS, utf8Bytes, graphemes, validateMarks, spliceMarks, addMark,
   removeMark, runs, paragraphsToWire, paragraphsFromWire, u16ToUtf8,
@@ -24,7 +25,7 @@ export function draftStats(paragraphs) {
     for (const m of p.marks) if(m.kind==="ruby") {
       reading += graphemes(m.reading || "").length; bytes += utf8Bytes(m.reading || "");
     }
-    problems.push(...validateMarks(p.text,p.marks).map(e => `${p.id}：${e.message}`));
+    problems.push(...validateMarks(p.text,p.marks).map(e => `${textLocation(p.id)}：${e.message}`));
   }
   if(marks>4096) problems.push("整稿标记超过 4096 项");
   if(bytes>256*1024) problems.push("整稿正文与读音超过 256 KiB");
@@ -47,8 +48,8 @@ export function chapterProgress(progress) {
   const line = c => `共 ${Number(c.total)||0} · 已起草 ${Number(c.drafted)||0} · 历史送审 ${Number(c.submitted)||0} · 准奏 ${Number(c.approved)||0} · 定稿 ${Number(c.finalized)||0} · 未起草 ${Number(c.not_started)||0}`;
   return `<p class="hint">起草＝至少一段非空；送审为历史记录，不代表当前修订已送审。</p>` +
     (progress.totals ? `<p>${line(progress.totals)}</p>` : "") +
-    (progress.chapters||[]).map(c=>`<p class="hint">${escape(c.chapter)}：${line(c)}</p>`).join("") +
-    `<button type="button" data-view data-human-next ${progress.next_untranslated ? "" : "disabled"}>下一未起草${progress.next_untranslated ? "："+escape(progress.next_untranslated) : "：无"}</button>`;
+    (progress.chapters||[]).map(c=>`<p class="hint">${escape(textLocation(c.chapter))}：${line(c)}</p>`).join("") +
+    `<button type="button" data-view data-human-next ${progress.next_untranslated ? "" : "disabled"}>下一未起草${progress.next_untranslated ? "："+escape(textLocation(progress.next_untranslated)) : "：无"}</button>`;
 }
 
 /** One block, independent of the active page selection. UI and Node tests share this state machine. */
@@ -265,7 +266,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     entry.paras.replaceChildren(); entry.rows=[];
     for(const [i,p] of entry.draft.paragraphs.entries()) {
       const section=host.ownerDocument.createElement("section"); section.className="human-paragraph";
-      section.innerHTML=`<h4>${escape(p.id)}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><label>人工译文<textarea aria-label="${escape(p.id)} 人工译文"></textarea></label></div><div class="actions human-mark-tools"></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
+      section.innerHTML=`<h4 title="内部编号：${escape(p.id)}">${escape(textLocation(p.id))}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><label>人工译文<textarea aria-label="${escape(textLocation(p.id))} 人工译文"></textarea></label></div><div class="actions human-mark-tools"></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
       const textarea=section.querySelector("textarea"), tools=section.querySelector(".human-mark-tools");
       for(const [kind,label] of Object.entries(KIND_LABELS)) {
         const b=button(label,null,tools); b.dataset.mark=kind;
@@ -298,7 +299,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
   function create(context) {
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
-    root.innerHTML=`<h3>人工译稿 · ${escape(context.block)}</h3><p class="hint">逐段编辑译文，选中文字后可加注音、着重或粗斜体。正文用浏览器的撤销功能；标记可单独撤销，修改正文后会清空标记撤销记录。完成后依次保存、送审、准奏，再御览定稿，每一步都会核对当前稿件。</p><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
+    root.innerHTML=`<h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段编辑译文，选中文字后可加注音、着重或粗斜体。正文用浏览器的撤销功能；标记可单独撤销，修改正文后会清空标记撤销记录。完成后依次保存、送审、准奏，再御览定稿，每一步都会核对当前稿件。</p><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
     const entry={draft:d,root,rows:[],buttons:new Map(),request:0,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};

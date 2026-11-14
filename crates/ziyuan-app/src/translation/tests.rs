@@ -1633,6 +1633,7 @@ fn finished_markdown_reinserts_approved_text_without_activating_markup() {
         parsing: ParseOptions {
             ruby: true,
             heading_level: Some(2),
+            ..Default::default()
         },
         ..Default::default()
     };

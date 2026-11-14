@@ -1,3 +1,4 @@
+import { textLocation } from "./translation-workspace.mjs";
 const labels={pending:"待查",confirmed:"确认问题",intentional:"有意异译",resolved:"已解决"};
 export function mountIssues(host,{api,getSelection,navigate}) {
   const section=document.createElement("details");section.className="continuity-tools";
@@ -6,7 +7,7 @@ export function mountIssues(host,{api,getSelection,navigate}) {
   let loaded,project,busy=false;
   const run=async(task)=>{if(busy)return;busy=true;try{el("status").textContent="处理中…";await task();el("status").textContent="完成";}catch(e){el("status").textContent=e.message;}finally{busy=false;}};
   const check=()=>{if(!loaded||project!==getSelection().project)throw new Error("请先载入当前项目的待查记录");};
-  const option=(anchor)=>{const o=document.createElement("option");o.value=anchor.paragraph;o.textContent=`${anchor.title} · ${anchor.source.slice(0,50)}`;return o;};
+  const option=(anchor)=>{const o=document.createElement("option");o.value=anchor.paragraph;o.textContent=`${anchor.title} · ${textLocation(anchor.paragraph, true)} · ${anchor.source.slice(0,50)}`;return o;};
   const load=async()=>{
     loaded=null;project=null;el("list").replaceChildren();
     const selected=getSelection();if(!selected.project)throw new Error("请先选择项目");

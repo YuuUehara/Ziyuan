@@ -308,8 +308,16 @@ fn router_for(app: AppState) -> Router {
         )
         .route("/text/{project}", get(text::project))
         .route("/text/{project}/export", get(text::export))
-        .route("/text/{project}/import/preview", post(text::import_preview))
-        .route("/text/{project}/import", post(text::import_confirm))
+        .route(
+            "/text/{project}/import/preview",
+            post(text::import_preview)
+                .layer(axum::extract::DefaultBodyLimit::max(24 * 1024 * 1024)),
+        )
+        .route(
+            "/text/{project}/import",
+            post(text::import_confirm)
+                .layer(axum::extract::DefaultBodyLimit::max(24 * 1024 * 1024)),
+        )
         .route("/text/{project}/memory", get(text::memory_status))
         .route("/text/{project}/memory/build", post(text::memory_build))
         .route("/text/{project}/memory/search", get(text::memory_search))

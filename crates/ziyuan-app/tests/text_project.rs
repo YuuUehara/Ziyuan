@@ -5,6 +5,153 @@ use std::{
 };
 use ziyuan_app::text_project::*;
 
+#[test]
+fn txt_long_fallback_preserves_graphemes_and_explicit_soft_wrapping() {
+    let f = Fixture::new();
+    let options: ImportOptions = serde_json::from_value(serde_json::json!({
+        "parsing": {"split_long_paragraphs": true, "ruby":true}
+    }))
+    .unwrap();
+    for raw in [
+        "a\u{0301}👩‍👩‍👧‍👦\\\"".repeat(2400),
+        format!(
+            "{}｜漢字《かんじ》{}《《強調》》{}",
+            "a".repeat(47000),
+            "b".repeat(47000),
+            "c".repeat(47000)
+        ),
+    ] {
+        let p = f.create("ja");
+        let expected = parse_document(
+            raw.as_bytes(),
+            SourceFormat::Text,
+            &ParseOptions {
+                ruby: true,
+                ..Default::default()
+            },
+            "test",
+        )
+        .unwrap();
+        let input = [ImportSource::Text {
+            name: "single.txt".into(),
+            text: raw.clone(),
+        }];
+        let preview = f.service().preview_import(&p.id, &input, &options).unwrap();
+        let chapter = &preview.chapters[0];
+        assert!(chapter.paragraphs.len() > 1);
+        assert_eq!(
+            chapter
+                .paragraphs
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<String>(),
+            expected[0].paragraphs[0].text
+        );
+        assert_eq!(
+            chapter
+                .paragraphs
+                .iter()
+                .map(|p| &raw[p.byte_start..p.byte_end])
+                .collect::<String>(),
+            raw
+        );
+        for paragraph in &chapter.paragraphs {
+            assert!(!paragraph.text.starts_with('\u{0301}'));
+        }
+        assert!(
+            chapter
+                .blocks
+                .iter()
+                .all(|b| b.serialized().unwrap().len() <= DEFAULT_BLOCK_BYTES)
+        );
+    }
+    let soft = parse_document(
+        b"soft\nwrapped\n\nnext",
+        SourceFormat::Text,
+        &ParseOptions::default(),
+        "test",
+    )
+    .unwrap();
+    assert_eq!(soft[0].paragraphs[0].text, "soft\nwrapped");
+    let bad = format!("｜字《{}》", "あ".repeat(20000));
+    let error = parse_document(bad.as_bytes(), SourceFormat::Text, &options.parsing, "test")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("关闭注音解析"), "{error}");
+}
+
+#[test]
+fn txt_novel_lines_and_long_working_paragraphs_preserve_original_and_reopen() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let raw = format!(
+        "\u{feff}第一行。\r\n第二行。\r\n\r\n{}",
+        "春の朝。｜空《そら》は青い。".repeat(2400)
+    );
+    let input = [ImportSource::Text {
+        name: "novel.txt".into(),
+        text: raw.clone(),
+    }];
+    let options: ImportOptions = serde_json::from_value(serde_json::json!({
+        "parsing": { "ruby": true, "text_paragraphs": "lines", "split_long_paragraphs": true }
+    }))
+    .unwrap();
+    let preview = f.service().preview_import(&p.id, &input, &options).unwrap();
+    let chapter = &preview.chapters[0];
+    assert_eq!(chapter.paragraphs[0].text, "第一行。");
+    assert_eq!(chapter.paragraphs[1].text, "第二行。");
+    assert!(chapter.paragraphs.len() > 3);
+    assert!(!chapter.parsing.as_ref().unwrap().warnings.is_empty());
+    assert_eq!(
+        chapter.paragraphs[2..]
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<String>(),
+        "春の朝。空は青い。".repeat(2400)
+    );
+    let mut end = chapter.paragraphs[2].byte_start;
+    for paragraph in &chapter.paragraphs[2..] {
+        assert_eq!(paragraph.byte_start, end);
+        end = paragraph.byte_end;
+        for inline in &paragraph.inlines {
+            if let Inline::Ruby {
+                byte_start,
+                byte_end,
+                ..
+            } = inline
+            {
+                assert_eq!(&raw[*byte_start..*byte_end], "｜空《そら》");
+            }
+        }
+    }
+    assert_eq!(end, raw.len());
+    assert!(
+        chapter
+            .blocks
+            .iter()
+            .all(|b| b.serialized().unwrap().len() <= DEFAULT_BLOCK_BYTES)
+    );
+    let imported = f
+        .service()
+        .import_prepared(&p.id, &input, &options, &preview.fingerprint)
+        .unwrap();
+    assert_eq!(f.service().show(&p.id).unwrap(), imported);
+    assert_eq!(
+        fs::read(
+            f.service()
+                .project_dir(&p.id)
+                .unwrap()
+                .join(&imported.chapters[0].original_path)
+        )
+        .unwrap(),
+        raw.as_bytes()
+    );
+    assert_eq!(
+        serde_json::to_value(ParseOptions::default()).unwrap(),
+        serde_json::json!({"ruby":false,"heading_level":null})
+    );
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -849,6 +996,7 @@ fn prepared_chapters_share_raw_originals_and_budget_readings_not_just_base_text(
         parsing: ParseOptions {
             ruby: true,
             heading_level: Some(1),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -920,4 +1068,78 @@ fn prepared_chapters_share_raw_originals_and_budget_readings_not_just_base_text(
                 .to_string_lossy()
                 .starts_with(".import-"))
     );
+}
+
+#[test]
+fn whole_book_multi_megabyte_txt_imports_chunks_reopens_and_updates_chapter() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let mut lines = Vec::with_capacity(12_000);
+    for i in 1..=12_000 {
+        lines.push(format!(
+            "第{i}行。「｜剣《つるぎ》を振るって、朝の光へ向かう。」"
+        ));
+    }
+    let ch1_text = format!(
+        "\u{feff}{}\r\n{}",
+        lines.join("\r\n"),
+        "春の終章。".repeat(5000)
+    );
+    let ch2_text = "第二章第一行。\n第二章第二行。\n".to_owned();
+    assert!(ch1_text.len() > 1_000_000);
+    let input = [
+        ImportSource::Text {
+            name: "01-vol1.txt".into(),
+            text: ch1_text.clone(),
+        },
+        ImportSource::Text {
+            name: "02-vol2.txt".into(),
+            text: ch2_text.clone(),
+        },
+    ];
+    let options = ImportOptions {
+        parsing: ParseOptions {
+            ruby: true,
+            text_paragraphs: TextParagraphs::Lines,
+            split_long_paragraphs: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let preview = f.service().preview_import(&p.id, &input, &options).unwrap();
+    assert_eq!(preview.chapters.len(), 2);
+    assert!(preview.chapters[0].paragraphs.len() > 12_001);
+    assert!(preview.chapters[0].blocks.len() > 20);
+    let imported = f
+        .service()
+        .import_prepared(&p.id, &input, &options, &preview.fingerprint)
+        .unwrap();
+    assert_eq!(f.service().show(&p.id).unwrap(), imported);
+
+    let translations = ziyuan_app::translation::Translations::new(&f.0);
+    let update_preview = translations
+        .preview_source_update(
+            &p.id,
+            &ziyuan_app::translation::SourceUpdate {
+                chapter: Some("c0002".into()),
+                name: "02-vol2-rev.txt".into(),
+                text: "第二章改行一。\n第二章改行二。\n".into(),
+                package_base64: None,
+            },
+        )
+        .unwrap();
+    assert!(update_preview.blockers.is_empty(), "{update_preview:?}");
+    let updated = translations
+        .apply_source_update(
+            &p.id,
+            &ziyuan_app::translation::SourceUpdate {
+                chapter: Some("c0002".into()),
+                name: "02-vol2-rev.txt".into(),
+                text: "第二章改行一。\n第二章改行二。\n".into(),
+                package_base64: None,
+            },
+            &update_preview.fingerprint,
+        )
+        .unwrap();
+    assert_eq!(updated.chapters[1].paragraphs[0].text, "第二章改行一。");
 }

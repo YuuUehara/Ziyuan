@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTextRoute, textRoute, choosePanel, toolPanel } from './translation-workspace.mjs';
+import { parseTextRoute, textRoute, choosePanel, toolPanel, textLocation } from './translation-workspace.mjs';
+
+test('book locations read as chapter, paragraph and translation group without changing IDs', () => {
+  assert.equal(textLocation('c0001'), '第1章');
+  assert.equal(textLocation('c0002-p0023'), '第2章 · 第23段');
+  assert.equal(textLocation('c0002-p0023', true), '第23段');
+  assert.equal(textLocation('c0001-b0002'), '第1章 · 译稿第2组');
+  assert.equal(textLocation('c0001-b0002', true), '译稿第2组');
+  assert.equal(textLocation('c10000-p10001'), '第10000章 · 第10001段');
+  assert.equal(textLocation('external-id'), 'external-id');
+  assert.equal(textLocation(null), '');
+});
 
 test('new and saved legacy book links preserve project and block', () => {
   for (const prefix of ['translation', 'wuying']) {

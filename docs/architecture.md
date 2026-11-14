@@ -1,6 +1,6 @@
 # ZiYuan 设计文档
 
-本文始于 1.0.0-rc.2，保留核心分层设计，并补充到 1.5.3 的边界说明。文本项目与作品关注独立存于 `.ziyuan/text-projects/` 与 `.ziyuan/subscriptions/`；1.4 新增参考绑定事件、逐段勘校与用量账本，现行契约见[稳定性约定](stability.md)，用法见[文本整理与检查](text-projects.md)和[作品更新提醒](subscriptions.md)。内部设计说明不是冻结 API。
+本文说明紫垣的核心分层设计、事件簿与权限边界。文本项目与作品关注独立存于 `.ziyuan/text-projects/` 与 `.ziyuan/subscriptions/`，本地译文记忆由 `ziyuan-memory` 管理并缓存于 `.ziyuan/memory/`；现行兼容契约见[稳定性约定](stability.md)，用法见[文本整理与检查](text-projects.md)和[作品更新提醒](subscriptions.md)。内部设计说明不是冻结 API。
 
 ## 1. 核心目标
 

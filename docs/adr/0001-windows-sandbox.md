@@ -31,7 +31,7 @@ v1.0 对 Windows 的承诺：
 
 出现明确的 Windows 原生强隔离需求、可复现威胁模型、稳定的原生 Windows CI、安全测试与 unsafe 审计的维护资源时，按方案 B 启动 `ziyuan-sandbox-windows`；实现按能力等级如实报告，不笼统宣称「已隔离」。
 
-2026-11-01：Windows 原生号舍已纳入[正式开发计划](../code-task-next-batch.md#五windows-原生号舍先立边界再接执行)，分 W0 设计与启动条件、W1 隔离原型、W2 工具接入验收。列入计划不等于再评估条件已经全部满足；W0 记录方案 B 的启动决定，W2 通过后才修改当前支持状态。此前方案 A 的失败关闭规则继续有效。
+2026-11-01 起按分阶段路线推进 Windows 原生号舍（W0 设计与启动条件、W1 隔离原型、W2 工具接入验收）。列入计划不等于再评估条件已经全部满足；W0 记录方案 B 的启动决定，W2 通过后才修改当前支持状态。此前方案 A 的失败关闭规则继续有效。
 
 ## W0 决定（2026-11-01）：进入独立原型，不接生产
 
@@ -87,68 +87,14 @@ v1.0 对 Windows 的承诺：
 
 W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升级最高能力、不接入生产。探针若依赖管理员放宽策略、宿主广域 ACL、网络豁免或静默去掉 LPAC 才能跑，应停止并记录兼容性缺项，而非降低保护门槛。W1d 的取消机制与 4B 分别记录实现和实测，不能借平台 API 文档替代实际后代退出证据。
 
-**W0 当时结果：** 已完成源码、现有原生 CI 和官方接口约束的设计核对，选定有边界的 LPAC＋Job 原型及上述验收顺序。W0 时尚未实现平台 crate、运行隔离探针或完成 unsafe／独立安全审阅；这些是 W1／W2 的继续条件，不虚构为已通过。W1 有条件推进，R0 本地代码索引契约可按正式计划独立安排，不因 Windows 生产接入未完成而无限搁置。
+### 当前原型进度（独立实验 crate，未接入生产）
 
-### W1a 实现：独立启动探针，Server 2025 CI 基线已通过
+`ziyuan-sandbox-windows` 目前仅作为未发布的工作区实验成员保留，无生产调用者，工作区根目录仍保持 `unsafe_code = "forbid"`，生产行为继续执行方案 A（`auto`／`require` 失败关闭）。
 
-新增未发布的 `ziyuan-sandbox-windows` 工作区成员，仅含独立探针可执行文件；不是通用命令启动 API，不接受用户测试命令，也没有 runtime／MCP 调用者。生产十一 crate 和发布流程不变。根 `unsafe_code = "forbid"` 不动；该实验 crate 使用 `deny`，只有私有 Win32 模块显式允许 FFI，逐处记录指针、所有权、对齐与释放约束。这是实现者自查，不是独立安全签核。
-
-- 每次新建 profile，把自身受信探针复制进去；不复用可写 profile，不给宿主目录加 ACL。显式 Unicode 环境只选择 `SystemRoot` 与指向本任务 profile 的 `LOCALAPPDATA`，按变量名排序；系统根变量缺失则拒绝，不回退继承宿主环境，也不传入宿主 AppData 路径。不授 capability，设置 LPAC 属性，挂起创建、加入 kill-on-close Job 后核对身份与**本任务** Job 归属，再恢复线程。
-- 身份以 `TokenIsAppContainer` 检查，AAP opt-out 改用真实令牌的 `AccessCheck` 对照，不再依赖 class 46 的用户态支持。固定合成 DACL 向 Everyone 与 `ALL_APPLICATION_PACKAGES` 授予同一访问位；宿主及单独创建的普通 AppContainer 必须允许，LPAC 必须拒绝，挂起阶段与恢复后的子进程分别检查。访问检查 API 失败绝不当作拒绝通过。普通容器只运行本探针作为显式正对照，不是 LPAC 失败后的回退。
-- 白名单只含本任务标准流；另建一个宿主可用、故意设为可继承的匿名事件哨兵，但不放入白名单。宿主用 `GetHandleInformation` 核对哨兵有效且可继承；在线程恢复前，从父进程用 `DuplicateHandle` 查询子进程句柄表：白名单输出句柄必须可复制，哨兵必须明确返回无效句柄，其他错误均失败。复制品只留在父进程，立即关闭，不关闭源句柄。输出 `CHILD_OUTPUT_HANDLE=1 CHILD_SENTINEL_ABSENT=1` 并只读记录严格句柄策略；不让子进程故意引用无效句柄，不关闭保护策略。子进程入口先写出并刷新 `CHILD_ENTERED=1`，再检查身份。LPAC 子进程必须实际写出 `APP=1 AAP_ACCESS=0 JOB=1 ENV=1`，普通容器对应 `AAP_ACCESS=1`；不再声称子进程自行测得 `SECRET=0`，也不输出容易被误认为通用身份查询的 `LPAC=1`。哨兵是模拟秘密句柄，不是真实秘密文件。`ENV` 检查系统根变量存在、LocalAppData 值位于本任务 profile、宿主注入的模拟秘密变量未传入。这是环境值检查，不是路径防换链或文件隔离证明。
-- 故障对照在所有挂起身份检查成功后注入恢复前拒绝，走同一终止／等待／清理路径，检查子进程输出为空；不能把入 Job 本身失败误当故障对照通过。等待有时限，无法确认结束时保留 profile 并诊断，不删除或复用不确定资源。
-- 关闭句柄、删除自建文件后删除 profile，同时检查存储路径已消失，不把删除 API 返回成功等同无残留。完整进程树、父进程崩溃、超时取消与并发资源生命周期仍属 W1d；当前只运行自己的单进程探针。
-- 原生 Windows 测试运行普通容器、LPAC 与恢复前拒绝三个公开可执行入口。CI 固定 `windows-2025`，记录 OS、镜像、宿主提升状态与父 Job 状态；非 Windows 跳过原生测试不是隔离证据，手动运行探针会明确失败，不伪装成功。普通用户及桌面系统对照仍待补验。
-
-本地 Windows MSVC 交叉目标 Clippy 与 Rust 1.89 检查通过；原生结果以以下验收记录为准。合成 DACL 检查是目标版本上的 AAP 授权行为验证，不是微软承诺的通用 LPAC 检测 API，也未证明宿主文件不可访问、网络被拒或后代进程全部正确收尾。以下失败轮次保留定位依据，不代表当前仍在等待同一批验收。
-
-**首轮原生失败记录：** [f0e0c21 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347088703)五项通过，Windows 两条探针各自及证据步骤重试均报 Win32 203；没有拿到子进程身份／Job／句柄通过证据。实际平台是 Server 2025 `26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。原始空环境块是启动兼容性假设，不将错误号直接解释为 LPAC／Job 不可用。随后仅选择 `SystemRoot` 并增加错误调用位置与环境哨兵，原生结果见下。
-
-**第二轮定位：** [3837fa3 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41347867878)仍是五项通过、Windows 两条失败；位置诊断确认 `CreateProcessW` 返回 203，说明仅补 `SystemRoot` 不足。外部 AppContainer 的[逐变量对照](https://github.com/janhq/jan/issues/9101)指向缺失 `LOCALAPPDATA`，但不代替本仓库的 LPAC 实测。本次只新增指向本任务 profile 的 `LOCALAPPDATA`，并核对子进程实际环境；失败时保留受信探针输出用于诊断。原生 CI 确认前仍不结项，不放宽身份、Job 或句柄检查，也不据提升权限宿主外推普通用户支持。
-
-**第三轮进展与接口修正：** [defbff4 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41348504203)仍有 Windows 失败，但已越过创建与入 Job，错误转为 `GetTokenInformation` 返回 87，尚未恢复线程。`LOCALAPPDATA` 修正已使该基线不再出现启动 203，不等于子进程已运行通过。[微软 Q&A 的版本实测与文档核对](https://learn.microsoft.com/en-us/answers/questions/6011619/gettokeninformation-supported-contract-for-tokenis)指出 class 46 没有完整 Win32 支持契约，SDK 枚举存在不能当作可查询保证。当前改验上述 AAP 授权行为，新增普通容器正对照，仍待本仓库原生 CI；不使用保留属性、原生内核接口或将查询失败改成 `true` 来冒充身份确认。
-
-**第四轮分段结果：** [67e96e1 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41349478196)中恢复前拒绝对照已通过，含挂起 LPAC 的身份、AAP 拒绝、Job 与零输出清理检查。普通容器的挂起检查亦已通过，但恢复后以 `0xc0000008`（无效句柄）退出，尚无入口输出，后续 LPAC 正常运行对照未执行。入口原本先等待故意缺失的哨兵，与异常码吻合但尚无调用栈证明；现改用句柄信息查询，并增加首行启动标记，仍需原生 CI 确认原因和正常运行结果，不将该异常算作句柄隔离成功。
-
-**第五轮入口定位：** [149f6ca 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41350205175)确实收到 `CHILD_ENTERED=1`，随后仍以 `0xc0000008` 退出，恢复前拒绝对照通过；把等待改成 `GetHandleInformation` 并未解决异常。微软[严格句柄策略文档](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-process_mitigation_strict_handle_check_policy)说明无效句柄引用可触发异常；本轮尚无该策略标志或调用栈实测，不把它定为已证明的原因。当前改为上述父进程挂起查询，增加正对照并记录策略，正常普通容器与 LPAC 的结果仍待原生 CI。
-
-**2026-11-01 原生基线验收：** 实现提交 [922af58](https://github.com/YuuUehara/Ziyuan/commit/922af58b985395c722b96bd809bcfa24f08b3f99) 的[六项 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41350809351)全部通过。[Windows 原生日志](https://github.com/YuuUehara/Ziyuan/actions/runs/41350809351/job/124980335319)在工作区测试和单独证据步骤各运行两项测试，均为 `2 passed; 0 failed`；后者实际输出如下：
-
-| 对照 | 实测结果 |
-| --- | --- |
-| 普通 AppContainer | `CHILD_ENTERED=1`、`APP=1 AAP_ACCESS=1 JOB=1 ENV=1`、`PROFILE_CLEANED=1` |
-| LPAC | `CHILD_ENTERED=1`、`APP=1 AAP_ACCESS=0 JOB=1 ENV=1`、`PROFILE_CLEANED=1` |
-| 恢复前拒绝 | `FAULT_BEFORE_RESUME=1 CHILD_BYTES=0 PROFILE_CLEANED=1`，无子进程入口标记 |
-| 三个对照共同的挂起检查 | `CHILD_OUTPUT_HANDLE=1 CHILD_SENTINEL_ABSENT=1`、`CHILD_STRICT_HANDLE_FLAGS=3` |
-
-实际平台为 Server 2025 Datacenter `10.0.26100`，镜像 `win25-vs2026`／`20261021.278.1`，宿主 `HOST_ELEVATED=1 HOST_JOB=1`。严格句柄标志证实本基线启用了无效句柄异常且永久生效；移除子进程内的无效句柄引用后，正常探针已通过，不声称获得了旧崩溃的调用栈。W1a 按此原生 CI 基线结项，允许继续 W1b；普通用户与桌面 Windows 补验、文件／网络隔离及后代生命周期仍未完成。实验 crate 仍不发布、不接生产，Windows 受保护执行继续失败关闭，未升级支持等级。
-
-### W1b 首批实现：合成文件访问矩阵，限定原生 CI 已通过
-
-独立可执行入口 `--file-probe` 仍只重执行受信自身，沿用 W1a 的 LPAC、Job、环境与句柄检查，不授 capability、不改 ACL。安全 Rust 文件模块独立于允许 unsafe 的私有 FFI 模块。
-
-- 父进程在独占新建的临时目录建立合成源码、`.ziyuan`、模拟 `.ssh` 与 `.git` 哨兵，另在第二个新建 profile 建立 peer 哨兵。全部先验证宿主写入、读回和写打开成功，随后关闭文件句柄；不读取真实仓库、凭据或其他用户文件。临时目录名含空格与 Unicode；这不是完整路径边界验收。
-- LPAC 子进程先读回并修改自己的已准入合成副本，另建私有输出和临时文件，逐一读回内容；再对五类受保护哨兵分别请求读取和写打开。两者均须明确返回 Win32 `ERROR_ACCESS_DENIED`（5），NotFound、共享冲突、异常、超时或无输出均失败。拒绝探针不截断、不写入受保护文件，即使意外授予访问也只报告失败。
-- 子进程结束后，父进程独立核对实际私有写入结果、五份受保护哨兵未变，再删除三棵自建目录及两个 profile，确认路径消失。无法确认子进程结束时保留全部 profile／夹具，不让析构删除不确定资源。新增公开可执行测试与原有启动对照一同进入 Windows 原生 CI；交叉编译通过不算原生隔离通过。
-
-实现提交 [c9af11b](https://github.com/YuuUehara/Ziyuan/commit/c9af11b97ef02c248851cd5faa1d4e1fbdf5e1a1) 的[六项 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41354168120)全部通过。[Windows 原生证据](https://github.com/YuuUehara/Ziyuan/actions/runs/41354168120/job/124990548526)为 `3 passed; 0 failed`：实际私有读写成功，五类读取与写打开均返回 5，父进程核对内容、夹具及两个 profile 清理通过。宿主仍为提升权限且已有父 Job 的 CI 基线。
-
-第二个 profile 没有运行任务，不能称为完整双任务并发隔离验证。大小写／长路径、重解析点／硬链接、启动后换链、普通用户及桌面系统仍待后续批次；网络和后代生命周期仍分别属于 W1c／W1d。本矩阵不结项整个 W1b、不接生产、不升级能力等级。只读依赖的下一批进度单列如下。
-
-### W1b 只读依赖小批：实现已加入，原生 CI 待验
-
-新增 `--readonly-dependency`，沿用并重跑首批私有／宿主／peer 对照。另独占新建依赖目录，复制自身受信可执行文件和非映像数据哨兵；不使用真实项目依赖、不启动任意命令、不增加 capability。LPAC 直接从该目录启动同一受信探针，不额外派生执行器，以实际入口和卷序列号／128 位文件 ID 核对正在运行的就是准入映像，再验证文件读取。
-
-- 只修改这个自建依赖目录的 DACL，禁止父级权限继承；SYSTEM 与宿主用户保留完整权限，本任务 AppContainer SID 只获可继承的读取／执行。`OWNER RIGHTS` ACE 限制隐含所有者 `WRITE_DAC`，防止同用户身份改回写权限；不设置 DOS 只读属性，不改其他宿主目录或原有拒绝夹具的 ACL。
-- 同时建立独立可写对照子目录及未映射的映像副本，仅该对照向本任务 SID 授完整访问。两组目录／文件均显式设低完整性标签；父子分别查询对象标签，子进程还核对自身令牌完整性，均须为 `4096`。同一 LPAC 必须先取得可写对照的全部逐项权限，并实际完成写入、读回、改名、新建和删除；随后才接受只读组拒绝，不能把 medium／low 完整性差异当作 DACL 生效。
-- 父进程在策略生效后、子进程启动前，用相同文件 API 验证目录及两文件的写入、追加、扩展属性、属性、删除、改 DACL、改所有者权限均可取得；目录另验 `DELETE_CHILD`。句柄全部立即关闭。子进程对这些权限逐项请求，必须明确返回 5，不能只用一次 `GENERIC_WRITE` 的部分拒绝冒充全部写权限被拒。
-- 实际删除／改名使用未映射的数据文件，另试新建文件；均须明确拒绝，避免把运行中 EXE 的映像锁当成只读策略证据。父进程在退出后逐字节核对依赖映像、数据和目录条目，再清理并检查路径消失；无法确认子进程终止时，依赖目录与其他夹具一并保留。
-
-**首轮原生失败：** [bb8a148 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41371781992)五项通过、Windows 失败。子进程实际进入、身份／私有读写／五类拒绝均通过，随后新增依赖检查返回错误 5；尚无完整依赖允许／拒绝证据，原日志不足以区分具体失败调用。随后将只读 ACE 从通用 `GRGX` 改为文件专用 `FRFX`，不增加写权限，同时为文件允许对照和完整性标签查询补足错误位置／阶段，不跳过失败检查；该调整没有解决下一轮失败，不能将掩码假设写成原因。
-
-**第二轮定位与身份检查修正：** [8f7611f 的 CI](https://github.com/YuuUehara/Ziyuan/actions/runs/41372512656)仍是五项通过、Windows 失败，实际错误位置为 `files.rs:205` 的 `canonicalize(current_exe())`，尚未进入后续权限对照。[Rust 1.99 的实现](https://github.com/rust-lang/rust/blob/1.99.0/library/std/src/sys/fs/windows.rs)会查询 DOS 卷规范路径；这里所需契约是文件身份，不是可查询 DOS 路径。当前改为同时保持运行映像、准入文件和同卷独立副本的只读句柄，以 `FileIdInfo` 验证前两者相同、第三者不同；独立副本字节相同，避免仅比较卷或内容就制造假绿。查询失败仍失败，不扩大权限、不跳过身份检查。该修正仍待原生验证，也不代替后续链接／换链边界验收。
-
-本批尚待原生 CI，不凭交叉编译宣称 DACL 生效。保护依赖目录父级的换链／替换、重解析点、硬链接、真实工具链依赖和普通用户兼容性不在本批验收内，仍不构成完整 W1b 或生产安全签核。
+- **W0（已完成）**：完成威胁模型、LPAC＋Job 方案选型及边界协议；选定以独立平台 crate 推进，不改生产 `runtime`／`MCP` 行为。
+- **W1a 启动与句柄探针（Server 2025 CI 基线已通过）**：独立探针以 LPAC 属性、`SystemRoot`＋任务私有 `LOCALAPPDATA`、挂起创建＋kill-on-close Job 及显式标准流句柄白名单运行；在 Windows Server 2025 Datacenter（`10.0.26100`）基线上通过普通 AppContainer、LPAC（`AAP_ACCESS=0`）与恢复前故障清理三组对照。
+- **W1b 文件隔离探针（合成读写矩阵已通过；只读依赖小批待完成原生验证）**：合成矩阵确认 LPAC 子进程可读写自身准入副本，对宿主源码、`.ziyuan`、模拟 `.ssh`/`.git` 与 peer 哨兵返回 `ERROR_ACCESS_DENIED`（5）。只读依赖目录（禁继承、显式 DACL 与低完整性标签）已完成实现与文件身份（`FileIdInfo`）校验，尚待原生 Windows CI 复验。
+- **仍未完成**：普通非管理员用户及桌面 Windows 11 对照、大小写／长路径／重解析点与换链边界、网络阻断（W1c）、完整进程树与取消生命周期（W1d）、独立 unsafe／安全审阅与长期维护确认。在此之前不接入生产、不升级能力等级。
 
 ## 参考
 

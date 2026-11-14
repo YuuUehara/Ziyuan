@@ -455,6 +455,8 @@ pub(crate) async fn call(
         let status = response.status().as_u16();
         let text = response
             .body_mut()
+            .with_config()
+            .limit(64 * 1024 * 1024)
             .read_to_string()
             .unwrap_or_else(|error| panic!("{context}, status={status}: {error:?}"));
         (status, serde_json::from_str(&text).unwrap_or(Value::Null))

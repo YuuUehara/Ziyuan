@@ -1,3 +1,4 @@
+import { textLocation } from "./translation-workspace.mjs";
 // Read-only, single-run identity preview. No network globals or persistent state.
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -191,7 +192,7 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
       const entry = associations.get(paragraph.id);
       if (!entry) continue;
       const row = make("fieldset", { dataset: { role: "association", paragraph: paragraph.id } });
-      row.append(text("legend", paragraph.id));
+      row.append(text("legend", textLocation(paragraph.id)));
       for (const kind of ["persons", "targets"]) {
         const group = make("div", { dataset: { role: kind, paragraph: paragraph.id } });
         group.append(text("span", kind === "persons" ? "关联人物" : "称呼目标"));
@@ -242,8 +243,8 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
       for (const entry of selection[kind]) {
         const id = kind === "terms" ? entry.term_id : entry.person_id;
         const detail = kind === "address_rules"
-          ? `${id} · 规则序号 ${entry.rule_index} · 人物${statusLabels[entry.person_status]}／词条${statusLabels[entry.term_status]} · ${entry.paragraphs.join(", ")}`
-          : `${id} · ${statusLabels[entry.status]} · ${entry.paragraphs.join(", ")}`;
+          ? `${id} · 规则序号 ${entry.rule_index} · 人物${statusLabels[entry.person_status]}／词条${statusLabels[entry.term_status]} · ${entry.paragraphs.map(id => textLocation(id)).join(", ")}`
+          : `${id} · ${statusLabels[entry.status]} · ${entry.paragraphs.map(id => textLocation(id)).join(", ")}`;
         section.append(text("div", detail, { role: "report-entry", reportGroup: group, reportKind: kind, id }));
       }
       parent.append(section);
@@ -256,7 +257,7 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
     if (!success) return;
     const { report } = success.value;
     const reportNode = make("article", { dataset: { role: "identity-report", block: report.block } });
-    reportNode.append(text("h3", `资料适用范围报告 · ${report.project} · ${report.block}`));
+    reportNode.append(text("h3", `资料适用范围报告 · ${report.project} · ${textLocation(report.block)}`));
     renderSelection(reportNode, "applicable", report.applicable);
     renderSelection(reportNode, "automatic", report.automatic);
     const diagnostics = make("div", { dataset: { role: "diagnostics" } });
@@ -264,7 +265,7 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
       const identity = diagnostic.identity;
       const dependency = diagnostic.dependency
         ? ` · dependency=${diagnostic.dependency.kind}:${diagnostic.dependency.id}:${diagnostic.dependency.rule_index}` : "";
-      diagnostics.append(text("div", `${identity.kind}:${identity.id}:${identity.rule_index} · ${diagnostic.reason}${dependency} · ${diagnostic.paragraphs.join(", ")}`,
+      diagnostics.append(text("div", `${identity.kind}:${identity.id}:${identity.rule_index} · ${diagnostic.reason}${dependency} · ${diagnostic.paragraphs.map(id => textLocation(id)).join(", ")}`,
         { role: "diagnostic", id: identity.id }));
     }
     reportNode.append(diagnostics);
@@ -275,11 +276,11 @@ export function mountMaterialPreview(host, { editor, getView, runPreview } = {})
     const current = state();
     card.textContent = current ? JSON.stringify(current.material, null, 2) : "";
     blockSelect.replaceChildren();
-    for (const item of blocks()) blockSelect.append(makeOption(item.block_id));
+    for (const item of blocks()) blockSelect.append(makeOption(item.block_id, textLocation(item.block_id)));
     blockSelect.value = selectedBlock;
     paragraphs.replaceChildren();
     for (const paragraph of currentBlock()?.paragraphs ?? []) {
-      paragraphs.append(text("div", `${paragraph.id} · ${paragraph.text}`, { paragraph: paragraph.id }));
+      paragraphs.append(text("div", `${textLocation(paragraph.id)} · ${paragraph.text}`, { paragraph: paragraph.id }));
     }
     renderAssociations();
     runButton.disabled = disposed || !current || !currentBlock();

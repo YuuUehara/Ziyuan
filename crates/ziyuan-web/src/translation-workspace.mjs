@@ -42,7 +42,7 @@ export function mountWorkspace(card) {
       if (next) { event.preventDefault(); select(next); buttons.get(next).focus(); }
     });
   }
-  main.prepend(tabs);
+  main.insertBefore(tabs, main.querySelector('#text-status'));
   function select(key) {
     if (!panels.has(key)) return;
     if (current) current.panel = key;
@@ -56,7 +56,7 @@ export function mountWorkspace(card) {
   function arrange() {
     // Existing editor hosts are moved intact; switching tabs never reconstructs them.
     for (const [selector, panel] of [
-      ['#text-actions','draft'], ['#text-action-result','draft'], ['#text-human-editor','draft'], ['.text-compare','draft'], ['#text-materials','draft'], ['#verification-panel','draft'], ['#text-n2b-hints','draft'],
+      ['#text-human-editor','draft'], ['.text-compare','draft'], ['#text-materials','draft'], ['#text-actions','draft'], ['#text-action-result','draft'], ['#verification-panel','draft'], ['#text-n2b-hints','draft'],
       ['#text-materials-panel','materials'], ['#text-memory','materials'], ['.text-notes-layout','materials'],
       ['#text-export','delivery'], ['#text-import','manage'], ['#text-versions','manage'],
     ]) move(card.querySelector(selector), panel);
@@ -75,4 +75,13 @@ export function mountWorkspace(card) {
     select,
     update(next) { const panel = choosePanel(current, next); current = {...next, panel}; select(panel); arrange(); },
   };
+}
+// Display labels only: persisted IDs, API values and deep links stay unchanged.
+export function textLocation(id, local = false) {
+  const value = String(id ?? ''), match = /^c(\d+)(?:-([pb])(\d+))?$/.exec(value);
+  if (!match) return value;
+  const chapter = `第${Number(match[1])}章`;
+  if (!match[2]) return chapter;
+  const item = match[2] === 'p' ? `第${Number(match[3])}段` : `译稿第${Number(match[3])}组`;
+  return local ? item : `${chapter} · ${item}`;
 }

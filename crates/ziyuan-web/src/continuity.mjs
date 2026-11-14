@@ -1,3 +1,4 @@
+import { textLocation } from "./translation-workspace.mjs";
 import { mountIssues } from "./continuity-issues.mjs";
 import { mountReading } from "./continuity-reading.mjs";
 import { mountSearch } from "./continuity-search.mjs";
@@ -5,7 +6,7 @@ import { mountMemoryExchange } from "./continuity-memory.mjs";
 import { mountDocuments } from "./continuity-document.mjs";
 export function mount({ api, getSelection, refresh, navigate }) {
   const host = document.createElement("details");host.className="continuity-tools";host.dataset.workspaceTool="backup";
-  host.innerHTML = `<summary>备份与恢复</summary><p class="hint">完整备份包含全部译书项目和共用朝廷记录，其中可能有代码任务正文；登录令牌和模型凭据配置不会打包。恢复时会在当前工作区内新建目录，请勿把这份备份直接当作单本书的分享包。</p><div class="row write"><button type="button" data-preview>预览完整备份</button><button type="button" data-download disabled>确认下载</button></div><div class="row write"><input type="file" accept=".tar" data-file aria-label="备份文件"><input data-destination placeholder="新目录名，如 books-restored（英文）" aria-label="恢复目录"><button type="button" data-check>校验备份</button><button type="button" data-restore disabled>确认恢复</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  host.innerHTML = `<summary>备份与恢复</summary><p class="hint">完整备份包含全部译书项目和共用朝廷记录，其中可能有代码任务正文；登录令牌和模型凭据配置不会打包。恢复时会在当前工作区内新建目录，请勿把这份备份直接当作单本书的分享包。</p><div class="row write"><button type="button" data-preview>预览完整备份</button><button type="button" data-download disabled>确认下载</button></div><div class="row write"><input type="file" accept=".tar" data-file aria-label="备份文件"><input data-destination placeholder="恢复到的新目录名，如 books-restored" aria-label="恢复目录"><button type="button" data-check>校验备份</button><button type="button" data-restore disabled>确认恢复</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   document.querySelector("#text-card > .body").prepend(host);
   const el = (key) => host.querySelector(`[data-${key}]`);
   let preview, checked, upload;
@@ -81,7 +82,7 @@ function renderChanges(host,preview) {
   for(const message of preview.warnings||[])host.append(text("p",message,"hint"));
   for(const change of preview.changes) {
     const row=document.createElement("article");row.className="continuity-change";
-    row.append(text("h4",`${change.before===null?"新增":change.after===null?"删除":"修订"} · ${change.paragraph}`));
+    row.append(text("h4",`${change.before===null?"新增":change.after===null?"删除":"修订"} · ${textLocation(change.paragraph)}`));
     const columns=document.createElement("div");columns.className="continuity-columns";
     for(const [label,value] of [["更新前的原文",change.before],["更新后的原文",change.after]]) {const column=document.createElement("div");column.append(text("p",label,"hint"),text("p",value??"—"));columns.append(column);}row.append(columns);host.append(row);
   }

@@ -6,8 +6,8 @@ use std::io::Read;
 use std::path::PathBuf;
 use ziyuan_app::Session;
 use ziyuan_app::text_project::{
-    ImportOptions, ImportPreview, ImportSource, NewProject, Project, Provenance, TextProjects,
-    ValidationReport,
+    ImportOptions, ImportPreview, ImportSource, NewProject, Project, Provenance, TextParagraphs,
+    TextProjects, ValidationReport,
 };
 use ziyuan_app::translation::{DraftSave, ExportFormat, ExportLayout, ExportOptions, Translations};
 use ziyuan_storage::EventLog;
@@ -32,9 +32,11 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
   ziyuan text import <项目ID> <章节.txt>...
                                        按给出的顺序一次性导入 UTF-8 TXT（每个项目只能导入一次）
   ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>]
+                     [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs]
                      [--chapter-title <章名>]...
                                        只读预览 TXT/MD，显示章序、原文字节范围、段落、提示块及警告和指纹
   ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>]
+                    [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs]
                     [--chapter-title <章名>]... --confirm <预览指纹>
                                        MD（.md/.markdown）、ruby 或新解析选项须先 preview 再确认；
                                        TXT 使用新解析/BOM 处理也须 preview + --confirm；不加选项仍走旧 TXT 导入
@@ -153,8 +155,8 @@ pub(crate) enum TextAction {
 }
 
 const INIT_USAGE: &str = "用法: ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明> [--author <作者>] [--version <版本>] [--date <取得日期>] [--scope <使用范围>]";
-const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--chapter-title <章名>]... [--confirm <预览指纹>]；MD 或解析选项须先 text preview 再 --confirm";
-const PREVIEW_USAGE: &str = "用法: ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--chapter-title <章名>]...";
+const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs] [--chapter-title <章名>]... [--confirm <预览指纹>]；MD 或解析选项须先 text preview 再 --confirm";
+const PREVIEW_USAGE: &str = "用法: ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs] [--chapter-title <章名>]...";
 const SHOW_USAGE: &str = "用法: ziyuan text show <项目ID>";
 const HUMAN_SHOW_USAGE: &str = "用法: ziyuan text human show <项目ID> <块ID> [--json]（只读）";
 const HUMAN_SAVE_USAGE: &str =
@@ -421,7 +423,8 @@ fn parse_import(args: &[String], preview: bool) -> Result<TextAction, Box<dyn Er
         given.push(arg.clone());
         match arg.as_str() {
             "--ruby" => options.parsing.ruby = true,
-            "--heading-level" | "--chapter-title" | "--confirm" => {
+            "--split-long-paragraphs" => options.parsing.split_long_paragraphs = true,
+            "--heading-level" | "--text-paragraphs" | "--chapter-title" | "--confirm" => {
                 let value = rest
                     .next()
                     .filter(|value| !value.starts_with("--") && !value.trim().is_empty())
@@ -433,6 +436,13 @@ fn parse_import(args: &[String], preview: bool) -> Result<TextAction, Box<dyn Er
                             "2" => 2,
                             _ => return Err(usage.into()),
                         });
+                    }
+                    "--text-paragraphs" => {
+                        options.parsing.text_paragraphs = match value.as_str() {
+                            "blank_lines" => TextParagraphs::BlankLines,
+                            "lines" => TextParagraphs::Lines,
+                            _ => return Err(usage.into()),
+                        };
                     }
                     "--chapter-title" => options.chapter_titles.push(value.clone()),
                     "--confirm" if !preview => confirm = Some(value.clone()),

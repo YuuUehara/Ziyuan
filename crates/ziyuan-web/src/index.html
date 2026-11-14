@@ -356,7 +356,7 @@
   #recommend-office { flex-basis: 240px; }
   .row > .shrink { flex: 0 0 auto; width: auto; }
   .checks { display: flex; gap: 6px 14px; flex-wrap: wrap; }
-  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); font-size: 13px; font-family: var(--mono); }
+  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); font-size: 13px; font-family: var(--sans); }
   input[type=checkbox] { accent-color: var(--tint-ink); }
   .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
   code { font-family: var(--mono); font-size: .92em; }
@@ -424,15 +424,16 @@
   .record .a { color: var(--ok); }
   .record .r { color: var(--bad); }
   .officials-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; }
-  /* 文华殿：百官表占满宽，招募、荐举、配置等分栏排在表下。 */
+  /* 文华殿：百官表占满宽，招募、荐举、配置等网格排在表下。 */
   #hall-wenhua .officials-layout { grid-template-columns: minmax(0, 1fr); }
   #hall-wenhua .officials-layout > div:last-child {
-    columns: 300px; column-gap: 32px; border-top: 1px solid var(--line); padding-top: 18px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    gap: 20px 28px; align-items: start; border-top: 1px solid var(--line); padding-top: 18px;
   }
-  #hall-wenhua .side { border-left: 0; padding-left: 0; margin: 0 0 24px; break-inside: avoid; }
   .officials-layout > * { min-width: 0; }
   .side { border-left: 1px solid var(--line); padding-left: 20px; }
   .side + .side { margin-top: 20px; }
+  #hall-wenhua .side { border-left: 0; padding-left: 0; margin: 0; }
   .officials-layout h3 { margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
   .officials-layout h3:first-child { margin-top: 0; }
   .officials-layout h3 small { font-family: var(--sans); letter-spacing: 0; font-weight: normal; color: var(--muted); }
@@ -480,13 +481,14 @@
   /* ---- 翰林院 · 译书：项目 → 章 → 块，三栏对照 ---- */
   .text-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 20px; align-items: start; }
   .text-side, .text-main { min-width: 0; }
+  #text-book-title { margin: 0 0 12px; font: 600 21px/1.5 var(--serif); overflow-wrap: anywhere; }
   .text-outline { margin-top: 10px; max-height: 46vh; overflow: auto; border-top: 1px solid var(--line); }
   .text-chapter { margin: 10px 0 2px; font-family: var(--serif); font-size: 13px; color: var(--muted); }
   .text-block-row {
     display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; font: inherit;
     border: 0; border-left: 2px solid transparent; border-radius: 0; background: transparent; padding: 3px 6px;
   }
-  .text-block-row .id { font-family: var(--mono); font-size: 11.5px; }
+  .text-block-row .id { font-family: var(--serif); font-size: 12px; }
   .text-block-row .state { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
   .text-block-row:hover { background: var(--well); }
   .text-block-row.current { background: var(--tint); border-left-color: var(--seal); }
@@ -504,7 +506,7 @@
   .text-para[data-text-para] { cursor: pointer; }
   .text-para[data-text-para]:hover { background: var(--well); }
   .text-para.picked { background: var(--tint); }
-  .text-para .pid { display: block; font: 11px/1.5 var(--mono); color: var(--muted); }
+  .text-para .pid { display: block; font: 11px/1.5 var(--sans); color: var(--muted); }
   .text-para .zhu { display: block; margin-top: 4px; padding-left: 8px; border-left: 2px solid var(--seal); font-family: var(--text); font-size: 12.5px; color: var(--tint-ink); }
   .text-para.changed { background: var(--add); }
   .text-materials { display: grid; gap: 10px; margin-top: 14px; min-width: 0; }
@@ -512,7 +514,7 @@
   #text-human-editor { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
   #text-human-editor:empty { display: none; }
   .human-paragraph { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); min-width: 0; }
-  .human-paragraph h4 { margin: 0 0 8px; font: 12px var(--mono); color: var(--muted); }
+  .human-paragraph h4 { margin: 0 0 8px; font: 12px var(--serif); color: var(--muted); }
   .human-bilingual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .human-bilingual > * { min-width: 0; margin: 0; }
   .human-bilingual textarea { display: block; min-height: 120px; font-family: var(--text); }
@@ -560,7 +562,11 @@
   #verification-panel .row > label, #text-export .row > label { margin: 0; }
   #verification-panel input, #verification-panel select, #verification-panel textarea { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
   #verification-panel input, #verification-panel select, #text-export select { min-height: 36px; min-width: 0; }
-  #verification-panel fieldset { min-width: 0; border: 1px solid var(--line); margin: 12px 0; padding: 10px; }
+  #verification-panel fieldset { min-width: 0; border: 1px solid var(--line); margin: 12px 0; padding: 10px; box-sizing: border-box; }
+  .verification-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; margin: 12px 0; }
+  #verification-panel .verification-grid fieldset { margin: 0; }
+  .verification-toolbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; margin: 10px 0 6px; }
+  .verification-toolbar label { margin: 0; flex: 0 1 180px; min-width: 140px; }
   #verification-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
   #verification-panel dl { margin: 8px 0; }
   #verification-panel dt { color: var(--muted); margin-top: 8px; }
@@ -616,12 +622,15 @@
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: var(--ink); color: var(--sheet); padding: 9px 18px; border-radius: var(--radius);
     box-shadow: 0 6px 20px rgba(0, 0, 0, .18); opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 80vw;
+    z-index: 200;
   }
   #toast.show { opacity: 1; }
   #toast.error { background: var(--bad); color: #fff; }
-  #locked { position: fixed; inset: 0; background: rgba(20, 24, 24, .55); display: none; align-items: center; justify-content: center; }
+  body:not(.authed) > header, body:not(.authed) > .court { opacity: .08; filter: blur(2px); pointer-events: none; user-select: none; }
+  body:not(.authed) > .court { max-height: calc(100vh - 60px); overflow: hidden; }
+  #locked { position: fixed; inset: 0; background: rgba(20, 24, 24, .42); backdrop-filter: blur(6px); display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px; overflow-y: auto; }
   #locked.show { display: flex; }
-  #locked div { background: var(--sheet); padding: 28px 34px; border-radius: var(--radius); max-width: 460px; }
+  #locked > div { background: var(--sheet); padding: 28px 34px; border-radius: var(--radius); width: min(440px, 100%); border: 1px solid var(--line-strong); box-shadow: 0 14px 40px rgba(20, 24, 24, .18); }
   #locked h2 { font-family: var(--serif); margin-top: 0; }
 
   @media (max-width: 1100px) {
@@ -646,8 +655,9 @@
     .header-actions { margin-left: 0; }
   }
 
-  #text-card .continuity-tools { min-width:0; margin:12px 0; }
-  #text-card .continuity-tools > summary { cursor:pointer; }
+  #text-card .continuity-tools { min-width:0; margin:12px 0; padding:10px 14px; background:var(--well); border:1px solid var(--line); border-radius:var(--radius); box-sizing:border-box; }
+  #text-card .continuity-tools > summary { cursor:pointer; font-family:var(--serif); font-size:14px; font-weight:600; letter-spacing:1px; color:var(--ink); list-style-position:inside; }
+  #text-card .continuity-tools[open] > summary { padding-bottom:10px; margin-bottom:12px; border-bottom:1px solid var(--line); }
   #text-card .continuity-tools .row { flex-wrap:wrap; }
   #text-card .continuity-tools input, #text-card .continuity-tools select { min-width:0; max-width:100%; box-sizing:border-box; }
   #text-card .continuity-tools p { white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -659,9 +669,17 @@
   #continuity-reader .reading-row { border-top:1px solid var(--line); padding:16px 0; }
   @media (max-width:700px) { .continuity-columns, #continuity-reader .reading-row { grid-template-columns:minmax(0,1fr); } }
 
-  .workspace-tabs { display:flex; flex-wrap:wrap; gap:6px; padding:0 0 12px; margin-bottom:12px; border-bottom:1px solid var(--line); }
-  .workspace-tabs button { flex:1 1 100px; min-width:0; white-space:normal; font-family:var(--serif); }
+  .materials-toolbar { display:grid; gap:8px; margin-top:12px; padding:10px 12px; background:var(--well); border:1px solid var(--line); border-radius:var(--radius); }
+  .materials-toolbar .tool-group { display:flex; flex-wrap:wrap; gap:6px 8px; align-items:center; }
+  .materials-toolbar .tool-group-label { font-size:12px; color:var(--muted); min-width:4.5em; }
+  .materials-toolbar button { max-width:100%; }
+  .materials-qa-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; }
+  #materials-qa-filter { width:auto; min-width:140px; max-width:min(100%, 240px); }
+
+  .workspace-tabs { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:6px; padding:0 0 12px; margin-bottom:12px; border-bottom:1px solid var(--line); }
+  .workspace-tabs button { min-width:0; white-space:normal; font-family:var(--serif); padding:6px 8px; }
   .workspace-tabs button[aria-selected="true"] { color:var(--sheet); background:var(--ink); }
+  @media (max-width:560px) { .workspace-tabs { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
   [data-workspace-panel] { min-width:0; }
   [data-workspace-panel] > .hint:first-child { margin:0 0 16px; }
 </style>
@@ -689,7 +707,7 @@
 
 <div class="court">
   <nav class="halls" aria-label="殿阁">
-    <a href="#translation" data-hall="translation"><b>译书</b><span>翰林院 · 项目与译稿</span></a>
+    <a href="#translation" data-hall="translation"><b>翰林院</b><span>翻译 · 项目与译稿</span></a>
     <a href="#fengtian" data-hall="fengtian"><b>奉天殿</b><span>诏令</span><i id="hall-badge-fengtian" hidden></i></a>
     <a href="#huagai" data-hall="huagai"><b>华盖殿</b><span>朝堂</span><i id="hall-badge-huagai" hidden></i></a>
     <a href="#wenhua" data-hall="wenhua"><b>文华殿</b><span>百官</span></a>
@@ -723,14 +741,14 @@
           <input type="text" id="edict-scope" data-keep placeholder="crates/ziyuan-storage, README.md">
           <label>玉玺 · 可用工具</label>
           <div class="checks">
-            <label><input type="checkbox" id="tool-read_file" data-keep checked> read_file</label>
-            <label><input type="checkbox" id="tool-search_code" data-keep checked> search_code</label>
-            <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> write_file</label>
-            <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> run_tests</label>
+            <label><input type="checkbox" id="tool-read_file" data-keep checked> 读文件 <code>read_file</code></label>
+            <label><input type="checkbox" id="tool-search_code" data-keep checked> 搜代码 <code>search_code</code></label>
+            <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> 改文件 <code>write_file</code></label>
+            <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> 跑测试 <code>run_tests</code></label>
           </div>
           <label for="edict-mcp">玉玺 · 外藩 MCP <span>（服务名逗号分隔，留空为不许；须在官职外藩上限内）</span></label>
           <input type="text" id="edict-mcp" data-keep placeholder="如 docs, fetch">
-          <p class="hint">.ziyuan、.git、.jj 与 .env* 无论玉玺如何均不可读。外部事件（CI 等）可凭令牌 POST <code>api/courier</code> 经兵部驿站入队。</p>
+          <p class="hint"><code>.ziyuan</code>、<code>.git</code>、<code>.jj</code> 与 <code>.env*</code> 无论玉玺如何均不可读。外部事件（如 CI）可凭令牌调用 <code>POST api/courier</code> 经兵部驿站入队。</p>
           <div class="actions">
             <button type="submit" class="primary" data-run="1">下诏并执行</button>
             <button type="submit" data-run="0">仅入队</button>
@@ -819,13 +837,15 @@
               <input type="text" id="ceiling-mcp" data-keep placeholder="外藩上限（空为不限，none 为不许）">
             </div>
             <div class="row" style="flex-wrap:wrap">
-              <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> read_file</label>
-              <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> search_code</label>
-              <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> write_file</label>
-              <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> run_tests</label>
+              <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> 读文件 <code>read_file</code></label>
+              <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> 搜代码 <code>search_code</code></label>
+              <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> 改文件 <code>write_file</code></label>
+              <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> 跑测试 <code>run_tests</code></label>
               <button class="small shrink" id="ceiling-set">设上限</button>
               <button class="small shrink" id="ceiling-clear">取消</button>
             </div>
+          </div>
+          <div class="side write">
             <h3>户部度支 <small class="hint">token 上限，用尽即停支</small></h3>
             <div class="row">
               <input type="number" min="1" id="office-budget" data-keep placeholder="此官职每件诏令的上限">
@@ -853,7 +873,7 @@
 
     <div class="hall" id="hall-translation" hidden>
     <section class="card full" id="text-card">
-      <h2>翰林院 · 译书 <small>选项目 → 选章节 → 写译稿</small><span class="viewer-badge">只读：不能下诏、朱批、定稿或改札记</span></h2>
+      <h2>翰林院 <small>翻译与校订</small><span class="viewer-badge">只读：不能下诏、朱批、定稿或改札记</span></h2>
       <div class="body">
         <p class="hint">从左侧选项目和章节即可继续；第一次使用请点「新建项目」，再到「项目管理」导入原文。编辑、资料和交稿分开办理，准奏与定稿仍由你确认。</p>
         <div class="text-layout">
@@ -862,9 +882,11 @@
             <select id="text-project" data-keep></select>
             <div class="actions"><button class="small" id="text-new-project" type="button">新建项目</button></div>
             <p class="hint" id="text-project-meta"></p>
-            <div class="text-outline" id="text-outline" role="region" aria-label="章与块" tabindex="0"></div>
+            <p class="hint">每组包含若干段原文，可分别翻译和审校。</p>
+            <div class="text-outline" id="text-outline" role="region" aria-label="章节与译稿组" tabindex="0"></div>
           </div>
           <div class="text-main">
+            <h3 id="text-book-title">选择项目，开始翻译</h3>
             <p class="hint" id="text-status" role="status" aria-live="polite"></p>
             <section id="text-import" aria-label="导入原文"></section>
             <dialog id="text-new-project-dialog" aria-labelledby="text-new-project-title">
@@ -918,13 +940,13 @@
                 <button class="small" id="version-save" type="button">保存当前快照</button>
                 <button class="small" id="version-prune" type="button">清理旧快照</button>
               </div>
-              <p class="hint" id="version-status" role="status" aria-live="polite">选中一块译文后，可查看它的版本记录。</p>
+              <p class="hint" id="version-status" role="status" aria-live="polite">选中一组译稿后，可查看它的版本记录。</p>
               <div id="version-diff" class="materials-report" aria-live="polite"></div>
             </section>
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
-              <h3>本地资料 <small class="hint">独立草稿；批准前不进入生产译文、不外发</small></h3>
-              <p class="hint">只编辑独立的本地资料草稿；保存后不代表批准，也不进入生产译文。</p>
+              <h3>本地资料 <small class="hint">草稿与生产隔离；批准前不生效、不外发</small></h3>
+              <p class="hint">在这里整理术语表与人物设定。保存草稿不会影响已批准译文，也不会发给模型；校验并准备后，需再点「批准上下文」。</p>
               <dialog id="material-wizard">
                 <form method="dialog" class="write">
                   <h3>向导式新建</h3>
@@ -941,43 +963,52 @@
                   <li>点「新增术语」或「新增人物」，填名称和译法；不确定的字段留空。</li>
                   <li>点「保存草稿」；保存不等于批准。</li>
                   <li>点「校验」，通过后点「准备生产资料」。</li>
-                  <li>准备好后，仍须在译书操作区点「批准上下文」。熟悉命令行时也可运行 ziyuan text context approve。</li>
+                  <li>准备好后，仍须在译书操作区点「批准上下文」。熟悉命令行时也可运行 <code>ziyuan text context approve</code>。</li>
                 </ol>
               </details>
-              <div class="actions">
-                <button class="small" id="materials-load" type="button">读取本地资料</button>
-                <button class="small" id="materials-refresh" type="button">刷新</button>
-                <button class="small" id="materials-save" type="button">保存草稿</button>
-                <button class="small" id="materials-validate" type="button">校验</button>
-                <button class="small" id="materials-backup" type="button">导出备份文件</button>
-                <button class="small" id="materials-copy" type="button">复制恢复 JSON（高级）</button>
-                <button class="small" id="materials-prepare" type="button">准备生产资料</button>
-                <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
-                <button class="small" id="materials-qa" type="button">确定性检查</button>
-                <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
-                <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
-                <button class="small" id="materials-tbx-export" type="button">导出 TBX</button>
-                <button class="small" id="materials-tbx-import" type="button">导入 TBX</button>
-                <input type="file" id="materials-tbx-file" accept=".tbx,.xml" hidden>
-                <button class="small" id="materials-tm-list" type="button">翻译记忆</button>
-                <button class="small" id="materials-comment-list" type="button">评论</button>
-                <button class="small" id="materials-wizard" type="button">向导式新建</button>
-                <input type="file" id="materials-termbase-file" accept=".csv,text/csv" hidden>
-                <button class="small" id="materials-preview-run" type="button">预览当前块</button>
+              <div class="materials-toolbar">
+                <div class="tool-group">
+                  <span class="tool-group-label">常用</span>
+                  <button class="small" id="materials-load" type="button">读取本地资料</button>
+                  <button class="small" id="materials-refresh" type="button">刷新</button>
+                  <button class="small" id="materials-wizard" type="button">向导式新建</button>
+                  <button class="small" id="materials-save" type="button">保存草稿</button>
+                  <button class="small" id="materials-validate" type="button">校验</button>
+                  <button class="small" id="materials-prepare" type="button">准备生产资料</button>
+                </div>
+                <div class="tool-group">
+                  <span class="tool-group-label">核对</span>
+                  <button class="small" id="materials-preview-run" type="button">预览当前块</button>
+                  <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
+                  <button class="small" id="materials-qa" type="button">确定性检查</button>
+                  <button class="small" id="materials-tm-list" type="button">翻译记忆</button>
+                  <button class="small" id="materials-comment-list" type="button">评论</button>
+                </div>
+                <div class="tool-group">
+                  <span class="tool-group-label">交换备份</span>
+                  <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
+                  <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
+                  <button class="small" id="materials-tbx-export" type="button">导出 TBX</button>
+                  <button class="small" id="materials-tbx-import" type="button">导入 TBX</button>
+                  <button class="small" id="materials-backup" type="button">导出备份文件</button>
+                  <button class="small" id="materials-copy" type="button">复制恢复 JSON</button>
+                  <input type="file" id="materials-tbx-file" accept=".tbx,.xml" hidden>
+                  <input type="file" id="materials-termbase-file" accept=".csv,text/csv" hidden>
+                </div>
               </div>
               <p class="hint" id="materials-states" aria-live="polite">
                 <span id="materials-save-state">服务器：未载入</span> ·
                 <span id="materials-session-state">页面暂存：—</span> ·
                 <span id="materials-validate-state">校验：未校验</span>
               </p>
-              <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（隐藏范围、证据、称谓等高级字段）</label></p>
+              <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（只看名称、译法与备注，隐藏范围与称谓规则）</label></p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
-              <div class="actions"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字</option><option value="term_inconsistent">术语</option><option value="person_inconsistent">人物名</option><option value="paragraph_id_mismatch">段号</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
+              <div class="materials-qa-bar"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字</option><option value="term_inconsistent">术语</option><option value="person_inconsistent">人物名</option><option value="paragraph_id_mismatch">段号</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
               <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
               <div id="materials-tm-result" class="materials-report" aria-live="polite"></div>
               <div id="materials-comment-result" class="materials-report" aria-live="polite"></div>
-              <div class="row"><textarea id="materials-comment-text" data-keep rows="2" placeholder="针对当前块的评论（不修改译稿）"></textarea><button class="small" id="materials-comment-add" type="button">添加评论</button></div>
+              <div class="row"><textarea id="materials-comment-text" data-keep rows="2" style="flex:1 1 260px;min-height:54px;" placeholder="针对当前块的评论（不修改译稿）"></textarea><button class="small shrink" id="materials-comment-add" type="button">添加评论</button></div>
               <div class="actions">
                 <button class="small" id="materials-restore" type="button" hidden>恢复页面暂存</button>
                 <button class="small" id="materials-discard" type="button" hidden>放弃本地，载入服务器</button>
@@ -1019,7 +1050,7 @@
         </div>
         <div class="text-notes-layout">
           <div>
-            <h3>御笔札记 <small class="hint">全局一份，不随诏令交给模型；并入草稿后须批准上下文才生效</small></h3>
+            <h3>御笔札记 <small class="hint">全朝廷共用；并入草稿并批准后才生效</small></h3>
             <form class="row" id="note-filter-form">
               <input type="text" id="note-search" data-view data-keep placeholder="搜索原文、译法、备注">
               <select id="note-kind" data-keep class="shrink">
@@ -1154,10 +1185,10 @@
 </dialog>
 <div id="locked"><div>
   <h2>需要访问令牌</h2>
-  <p>请打开 <code>ziyuan serve</code> 启动时打印的完整地址，或在此输入令牌（见 <code>.ziyuan/web-token</code>）。</p>
+  <p>请直接打开 <code>ziyuan serve</code> 启动时给出的完整网址，或在下方输入访问令牌（保存在 <code>.ziyuan/web-token</code>）。</p>
   <form id="login-form" class="row">
     <input type="password" id="login-token" autocomplete="off" placeholder="访问令牌">
-    <button class="gold" type="submit" data-view>入朝</button>
+    <button class="gold shrink" type="submit" data-view>入朝</button>
   </form>
 </div></div>
 
@@ -1205,8 +1236,9 @@ function deltaFor(id, version, side) {
 
 let translationWorkspace = null;
 let translationRoutes = null;
+let textLocation = (id) => String(id ?? "");
 function selectWorkspaceTab(panel) { translationWorkspace?.select(panel); }
-import("./assets/translation-workspace.mjs").then(({ mountWorkspace, parseTextRoute, textRoute }) => { translationRoutes = {parseTextRoute, textRoute}; translationWorkspace = mountWorkspace($("text-card")); translationWorkspace.update({project:textProjectId,hasSource:!!textProject?.outline?.some(c=>c.blocks.length)}); }).catch(e=>console.error(e));
+import("./assets/translation-workspace.mjs").then(({ mountWorkspace, parseTextRoute, textRoute, textLocation: locationLabel }) => { textLocation = locationLabel; translationRoutes = {parseTextRoute, textRoute}; translationWorkspace = mountWorkspace($("text-card")); translationWorkspace.update({project:textProjectId,hasSource:!!textProject?.outline?.some(c=>c.blocks.length)}); renderText(); }).catch(e=>console.error(e));
 
 import("./assets/continuity.mjs").then(({ mount }) => mount({ api, getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }), refresh: () => loadTextProject(), navigate: async anchor => { selectWorkspaceTab("draft"); textBlockId=anchor.block; invalidateReferences(true); await loadTextBlock(); textPick(anchor.paragraph); document.querySelector("#text-human-editor")?.scrollIntoView({block:"start"}); } })).catch(e => console.error(e));
 
@@ -1217,7 +1249,7 @@ async function api(path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({ error: response.statusText }));
-  if (response.status === 401) $("locked").classList.add("show");
+  if (response.status === 401) { $("locked").classList.add("show"); document.body.classList.remove("authed"); }
   if (!response.ok) {
     const error = new Error(data.error || data.message || (response.status === 401 ? "缺少访问令牌" : response.statusText));
     error.status = response.status;
@@ -1315,7 +1347,7 @@ function taskHtml(t) {
     const fields = [
       d.dependencies.length ? `先办 ${d.dependencies.map((id) => "#" + id).join("、")}` : "无依赖",
       d.attempts != null ? `尝试上限 ${d.attempts}` : "",
-      d.deadline != null ? `期限 ${d.deadline}（Unix 秒）` : "",
+      d.deadline != null ? `期限 ${new Date(d.deadline * 1000).toLocaleString("zh-CN")}` : "",
       d.budget != null ? `度支 ${d.budget} tokens` : "",
       d.artifact ? `约定产出：${d.artifact}` : "",
       d.approval_required ? "内阁制下另须批红" : "",
@@ -1428,7 +1460,7 @@ function taskHtml(t) {
         : rendered && (rendered.error || (d && d.error)) ? `<span class="note">delta 未能渲染（${esc(rendered.error || d.error)}），改用内置预览</span>` : "";
       return note + (split ? splitLines(h.lines) : h.lines.map(codeLine).join(""));
     };
-    const hashNote = (f) => f.base_hash ? `<span class="hash" title="呈报时原文的 ${esc(f.base_hash)}；原文变了则准奏被拒">base ${esc(f.base_hash.replace("sha256:", "").slice(0, 12))}</span>` : `<span class="hash">新建，无原文</span>`;
+    const hashNote = (f) => f.base_hash ? `<span class="hash" title="呈报时原文的 ${esc(f.base_hash)}；原文变了则准奏被拒">原文摘要 ${esc(f.base_hash.replace("sha256:", "").slice(0, 12))}</span>` : `<span class="hash">新建，无原文</span>`;
     const stat = (f) => `<span class="plus">+${f.additions}</span> <span class="minus">−${f.deletions}</span>`;
     const staleMark = (f) => pending && f.stale ? ` <span class="badge failed">原文已变</span>` : "";
     const files = c.files.map((f, i) => `<details id="diff-${t.id}-${i}" ${pending ? "open" : ""}>
@@ -1739,7 +1771,7 @@ $("materials-comment-list")?.addEventListener("click", async () => {
   if (!comments.length) { host.textContent = "暂无评论。"; return; }
   for (const c of comments) {
     const row = document.createElement("p"); row.className = "hint";
-    row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + c.block + (c.paragraph ? " / " + c.paragraph : "") + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
+    row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + textLocation(c.paragraph || c.block) + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
     {
       const commentProject=project;
       const done = document.createElement("button"); done.type = "button"; done.className = "link-button write"; done.textContent = c.resolved ? "重新打开" : "标记解决";
@@ -1822,7 +1854,7 @@ function renderQaIssues() {
     const box = document.createElement("input");
     box.type = "checkbox";
     const text = document.createElement("span");
-    text.textContent = " " + (labels[issue.code] || issue.code) + (issue.paragraph ? "（" + issue.paragraph + "）" : "") + "：" + issue.message + " ";
+    text.textContent = " " + (labels[issue.code] || issue.code) + (issue.paragraph ? "（" + textLocation(issue.paragraph) + "）" : "") + "：" + issue.message + " ";
     row.append(box, text);
     if (issue.paragraph) {
       const go = document.createElement("button");
@@ -1943,7 +1975,7 @@ function associationRow(paragraph) {
   row.className = "row";
   row.dataset.assocId = paragraph.id;
   const label = document.createElement("label");
-  label.textContent = paragraph.id;
+  label.textContent = textLocation(paragraph.id);
   const make = (placeholder) => {
     const input = document.createElement("input");
     input.type = "text";
@@ -1957,7 +1989,7 @@ function associationRow(paragraph) {
   };
   const persons = make("人物 ID"); persons.dataset.field = "persons"; persons.setAttribute("list", "assoc-person-ids");
   const targets = make("称呼对象 ID"); targets.dataset.field = "targets"; targets.setAttribute("list", "assoc-person-ids");
-  const speaker = make("speaker"); speaker.dataset.field = "speaker"; speaker.setAttribute("list", "assoc-speaker-ids");
+  const speaker = make("说话人（选填）"); speaker.dataset.field = "speaker"; speaker.setAttribute("list", "assoc-speaker-ids");
   const pick = (field, placeholder) => {
     const select = document.createElement("select");
     select.dataset.pick = field;
@@ -2099,7 +2131,7 @@ function renderMaterialsAssociations() {
     title = document.createElement("p");
     title.className = "hint";
     title.dataset.role = "assoc-title";
-    title.textContent = "临时关联（只用于本次预览，不保存）：人物与称呼对象填 ID，多个用逗号分隔；说话人填 narration／unknown／人物 ID。";
+    title.textContent = "临时关联（只用于本次预览，不保存）：人物与称呼对象选或填人物 ID，多个用逗号分隔；说话人可选旁白、未知或人物 ID。";
     host.prepend(title);
   }
   const wanted = new Set(paragraphs.map((p) => p.id));
@@ -2162,7 +2194,7 @@ function fillAssocDatalists() {
     const field = select.dataset.pick;
     const options = ["persons", "targets"].includes(field)
       ? ids.map((id) => [id, labels.get(id) ? labels.get(id) + "（" + id + "）" : id])
-      : [["narration", "narration"], ["unknown", "unknown"], ...ids.map((id) => [id, labels.get(id) ? labels.get(id) + "（" + id + "）" : id])];
+      : [["narration", "旁白（narration）"], ["unknown", "未知（unknown）"], ...ids.map((id) => [id, labels.get(id) ? labels.get(id) + "（" + id + "）" : id])];
     const placeholder = field === "persons" ? "选人物" : field === "targets" ? "选对象" : "选说话人";
     select.replaceChildren(new Option(placeholder, ""), ...options.map(([value, label]) => new Option(label, value)));
     select.value = options.some(([value]) => value === current) ? current : "";
@@ -2232,7 +2264,7 @@ function renderMaterialsReport(result) {
 $("materials-preview-run")?.addEventListener("click", async () => {
   const snapshot = materialsEditor?.previewState();
   if (!snapshot) { $("materials-status").textContent = "资料尚未载入或项目已变，请先刷新。"; return; }
-  if (!textBlockId) { $("materials-status").textContent = "请先在左侧选一个块，再预览身份可见性。"; return; }
+  if (!textBlockId) { $("materials-status").textContent = "请先在左侧选一组译稿，再预览身份可见性。"; return; }
   $("materials-status").textContent = "正在计算当前块的本地可见性…";
   $("materials-preview").textContent = "";
   try {
@@ -2294,7 +2326,7 @@ function renderExport() {
   host.innerHTML = `<h3>章节导出</h3>
     <p class="hint">下载为 TAR 归档包，内含所选文件和 manifest.json 校验清单。原件保留原始文件；定稿可选 TXT、Markdown 或 HTML。HTML 保留注音、着重、粗斜体和同范围叠加样式。章节按项目顺序导出；任何一章未定稿或已失效，整批定稿都不会导出。</p>
     <div class="actions"><button type="button" class="small" data-view data-export-all ${d.busy ? "disabled" : ""}>全选章节</button></div>
-    <div class="text-note-list checks" role="group" aria-label="导出章节">${outline.map((c, i) => `<label><input type="checkbox" data-view data-keep data-export-chapter="${esc(c.chapter)}" id="${esc(prefix)}-chapter-${i}" ${d.chapters === null || d.chapters.includes(c.chapter) ? "checked" : ""} ${d.busy ? "disabled" : ""}> ${esc(c.title || c.chapter)}</label>`).join("")}</div>
+    <div class="text-note-list checks" role="group" aria-label="导出章节">${outline.map((c, i) => `<label><input type="checkbox" data-view data-keep data-export-chapter="${esc(c.chapter)}" id="${esc(prefix)}-chapter-${i}" ${d.chapters === null || d.chapters.includes(c.chapter) ? "checked" : ""} ${d.busy ? "disabled" : ""}> ${esc(c.title || textLocation(c.chapter))}</label>`).join("")}</div>
     <div class="row"><label for="${esc(prefix)}-format">定稿格式<select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option><option value="html" ${d.format === "html" ? "selected" : ""}>HTML（保留文学标记）</option></select></label>
     <label for="${esc(prefix)}-layout">定稿编排<select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></label></div>
     <p class="hint">格式与编排只用于导出定稿。取回原件固定按归档字节、逐章请求，不沿用这两项；接口若收到其他格式或编排会拒绝。先查看文件列表和警告，再确认下载；下载时仍会重新检查材料。同一原件若包含多章，只打包一次，取回时可能包含未选章节。</p>
@@ -2355,7 +2387,7 @@ async function downloadTextExport(kind, confirmed = false) {
 }
 function importState() {
   if (!importDraft || importDraft.project !== textProjectId) {
-    importDraft = { project: textProjectId, files: [], ruby: false, heading: "", titles: [], preview: null, busy: false, message: "", revision: 0 };
+    importDraft = { project: textProjectId, files: [], ruby: false, heading: "", textParagraphs: "lines", splitLongParagraphs: true, titles: [], expandedChapters: new Set(), preview: null, busy: false, message: "", revision: 0 };
   }
   return importDraft;
 }
@@ -2382,17 +2414,25 @@ function renderImport() {
   const files = box.dataset.project === d.project ? $("import-files") : null;
   box.dataset.project = d.project; box.dataset.revision = String(d.revision);
   const disabled = d.busy ? "disabled" : "";
-  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；不追加、不替换。UTF-8；HTTP JSON 请求体上限 2 MiB（含转义和元数据），应用层原文上限 8 MiB。用上移／下移调整章序，改动后须重新预览。</p>
+  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；不追加、不替换。UTF-8；全部原文合计上限 8 MiB（JSON 请求上限 24 MiB）。用上移／下移调整章序，改动后须重新预览。</p>
     <label>选择文件 <input type="file" id="import-files" multiple accept=".txt,.md,.markdown" ${disabled}></label>
     <ol>${d.files.map((f, i) => `<li><div class="row"><span>${esc(f.name)}</span><span class="shrink"><button type="button" class="small" data-import-move="${i}" data-step="-1" ${i === 0 ? "disabled" : disabled}>上移</button> <button type="button" class="small" data-import-move="${i}" data-step="1" ${i === d.files.length - 1 ? "disabled" : disabled}>下移</button></span></div></li>`).join("")}</ol>
+    <label>TXT 分段 <select id="import-paragraphs" ${disabled}><option value="lines" ${d.textParagraphs === "lines" ? "selected" : ""}>每个非空行一段（常见小说排版）</option><option value="blank_lines" ${d.textParagraphs === "blank_lines" ? "selected" : ""}>按空行分段（段内换行保留）</option></select></label>
+    <label><input id="import-split-long" type="checkbox" ${d.splitLongParagraphs ? "checked" : ""} ${disabled}>TXT 过长段落拆为工作段</label>
+    <p class="hint">选项只影响 TXT。过长段落优先沿句末拆开，预览会说明拆分位置；归档原件保持原样。若原文只是为了排版而换行，请选择「按空行分段」。</p>
     <label><input id="import-ruby" type="checkbox" ${d.ruby ? "checked" : ""} ${disabled}>显式识别注音 ruby</label>
     <label>MD 分章 <select id="import-heading" ${disabled}><option value="">不分章</option><option value="1" ${d.heading === "1" ? "selected" : ""}>一级标题</option><option value="2" ${d.heading === "2" ? "selected" : ""}>二级标题</option></select></label>
     <button type="button" id="import-preview" ${d.busy || !d.files.length ? "disabled" : ""}>${d.busy ? "处理中…" : "重新预览"}</button>
     <p role="status" class="hint">${esc(d.message)}</p>
-    <div id="import-chapters" class="text-scroll" role="region" aria-label="章节导入预览，可滚动" tabindex="0" ${d.preview ? "" : "hidden"}>${d.preview ? `<p>预览共 ${d.preview.chapters.length} 章（未写入，可滚动核对全部内容）。</p>` + d.preview.chapters.map((c, i) => {
-      const p = c.parsing || {};
-      const rubyCount = (c.paragraphs || []).reduce((n, para) => n + (para.inlines || []).filter((i) => i.kind === "ruby").length, 0);
-      return `<div class="text-material"><label>章 ${i + 1} 标题 <input type="text" data-import-title="${i}" value="${esc(d.titles[i] ?? p.title ?? c.source_name)}" ${disabled}></label><p>${esc(c.source_name)} · ${esc(p.format)} · 字节 [${esc(p.byte_start)}, ${esc(p.byte_end)}) · ${(c.paragraphs || []).length} 段 · ${(c.blocks || []).length} 块 · ${rubyCount} 处注音 · ${(p.warnings || []).length} 条警告</p>${(p.warnings || []).map((w) => `<p class="hint">警告 [${esc(w.byte_start)}, ${esc(w.byte_end)})：${esc(w.message)}</p>`).join("")}${(c.paragraphs || []).map((p) => `<p class="text-para">${sourceInlineHtml(p)}</p>`).join("")}</div>`;
+    <div id="import-chapters" class="text-scroll" role="region" aria-label="章节导入预览，可滚动" tabindex="0" ${d.preview ? "" : "hidden"}>${d.preview ? `<p>预览共 ${d.preview.chapters.length} 章（未写入，可滚动核对内容）。</p>` + d.preview.chapters.map((c, i) => {
+      const p = c.parsing || {}, paras = c.paragraphs || [], warnings = p.warnings || [];
+      const expanded = d.expandedChapters?.has(i), limit = 120;
+      const shownParas = (!expanded && paras.length > 200) ? paras.slice(0, limit) : paras;
+      const rubyCount = paras.reduce((n, para) => n + (para.inlines || []).filter((x) => x.kind === "ruby").length, 0);
+      const shownWarnings = warnings.slice(0, 50).map((w) => `<p class="hint">警告（第 ${esc(w.byte_start)}–${esc(w.byte_end)} 字节）：${esc(w.message)}</p>`).join("");
+      const extraWarnings = warnings.length > 50 ? `<details class="hint"><summary>查看其余 ${warnings.length - 50} 条警告</summary>${warnings.slice(50).map((w) => `<p>警告（第 ${esc(w.byte_start)}–${esc(w.byte_end)} 字节）：${esc(w.message)}</p>`).join("")}</details>` : "";
+      const expandBtn = (!expanded && paras.length > 200) ? `<p class="hint">此处先展示前 ${limit} 段（本章共 ${paras.length} 段，全部内容均已纳入预览与指纹校验）。</p><button type="button" class="small" data-import-expand="${i}" ${disabled}>展开本章全部 ${paras.length} 段</button>` : "";
+      return `<div class="text-material"><label>章 ${i + 1} 标题 <input type="text" data-import-title="${i}" value="${esc(d.titles[i] ?? p.title ?? c.source_name)}" ${disabled}></label><p>${esc(c.source_name)} · ${esc(p.format)} · 字节 ${esc(p.byte_start)}–${esc(p.byte_end)} · ${paras.length} 段 · ${(c.blocks || []).length} 组 · ${rubyCount} 处注音 · ${warnings.length} 条警告</p>${shownWarnings}${extraWarnings}${shownParas.map((para) => `<p class="text-para">${sourceInlineHtml(para)}</p>`).join("")}${expandBtn}</div>`;
     }).join("") : ""}</div>
     <button type="button" id="import-confirm" ${d.busy || !d.preview || d.dirty ? "disabled" : ""}>确认预览并导入</button>`;
   if (files) {
@@ -2406,10 +2446,10 @@ function invalidateImport() {
 async function submitImport(confirm) {
   const d = importState();
   if (!state || state.viewer || d.busy || !d.files.length || (confirm && (!d.preview || d.dirty))) return;
-  const body = { files: d.files, options: { parsing: { ruby: d.ruby, heading_level: d.heading ? Number(d.heading) : null }, chapter_titles: d.titles } };
+  const body = { files: d.files, options: { parsing: { ruby: d.ruby, heading_level: d.heading ? Number(d.heading) : null, text_paragraphs: d.textParagraphs, split_long_paragraphs: d.splitLongParagraphs }, chapter_titles: d.titles } };
   if (confirm) body.fingerprint = d.preview.fingerprint;
-  if (new TextEncoder().encode(JSON.stringify(body)).length > 2 * 1024 * 1024) {
-    d.message = "编码后的 JSON 请求超过 HTTP 2 MiB 上限，请减少文件。"; d.revision++; renderImport(); return;
+  if (new TextEncoder().encode(JSON.stringify(body)).length > 24 * 1024 * 1024) {
+    d.message = "编码后的 JSON 请求超过 HTTP 24 MiB 上限，请拆成多个项目。"; d.revision++; renderImport(); return;
   }
   d.busy = true; d.message = confirm ? "正在导入…" : "正在预览（不会写入）…"; d.revision++; renderImport();
   try {
@@ -2418,7 +2458,7 @@ async function submitImport(confirm) {
       d.preview = null; d.message = "已导入。";
       if (textProjectId === d.project) await loadText();
     } else {
-      d.preview = result; d.dirty = false;
+      d.preview = result; d.dirty = false; d.expandedChapters = new Set();
       d.titles = result.options.chapter_titles.slice();
       d.message = "请核对章序、标题、原文字节范围、段落及警告；修改后须重新预览。";
     }
@@ -2434,6 +2474,8 @@ $("text-import").addEventListener("click", (e) => {
     const i = Number(move.dataset.importMove), j = i + Number(move.dataset.step);
     if (j >= 0 && j < d.files.length) { [d.files[i], d.files[j]] = [d.files[j], d.files[i]]; d.titles = []; d.preview = null; invalidateImport(); }
   }
+  const expand = e.target.closest("[data-import-expand]");
+  if (expand) { d.expandedChapters ||= new Set(); d.expandedChapters.add(Number(expand.dataset.importExpand)); d.revision++; renderImport(); return; }
   if (e.target.id === "import-preview") submitImport(false);
   if (e.target.id === "import-confirm") submitImport(true);
 });
@@ -2503,12 +2545,14 @@ $("text-new-project-form")?.addEventListener("submit", async (event) => {
 });
 $("text-import").addEventListener("change", async (e) => {
   const d = importState(); if (d.busy || !state || state.viewer) return;
+  if (e.target.id === "import-paragraphs") { d.textParagraphs = e.target.value; d.titles = []; d.preview = null; invalidateImport(); }
+  if (e.target.id === "import-split-long") { d.splitLongParagraphs = e.target.checked; d.titles = []; d.preview = null; invalidateImport(); }
   if (e.target.id === "import-ruby") { d.ruby = e.target.checked; d.titles = []; d.preview = null; invalidateImport(); }
   if (e.target.id === "import-heading") { d.heading = e.target.value; d.titles = []; d.preview = null; invalidateImport(); }
   if (e.target.id === "import-files") {
     const files = [...e.target.files]; d.busy = true; d.preview = null; d.titles = []; d.message = "正在解码 UTF-8…"; d.revision++; renderImport();
     try {
-      if (files.reduce((n, f) => n + f.size, 0) > 2 * 1024 * 1024) throw new Error("原文超过 HTTP 2 MiB 请求上限");
+      if (files.reduce((n, f) => n + f.size, 0) > 8 * 1024 * 1024) throw new Error("导入原文合计超过 8 MiB 上限，请拆成多个项目");
       d.files = await Promise.all(files.map(async (f) => ({ name: f.name, text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await f.arrayBuffer()) })));
       d.message = "请用上移／下移明确核对文件顺序，再预览。";
     } catch (e) { d.files = []; d.message = `文件读取失败：${e.message}`; }
@@ -2642,26 +2686,25 @@ function renderVerificationForm() {
   if (!verificationView || !verificationParagraph) return;
   const d = verificationDraft();
   $("verification-form").innerHTML = `<div class="write"><h4>逐段勘校</h4>
-    <p class="hint">六事逐项勘校，记录所据与存疑。此为人工核对记录，不代准奏，亦非御览定稿。</p>
-    <p class="hint">每次保存本段全部六项；意见处理与问题状态分开填写。模型建议不会自动算作已检查，保存记录也不代表专家终审。</p>
-    ${d.checks.map((c, i) => `<fieldset><legend>${esc(semanticCategories[c.category].title)}</legend>
+    <p class="hint">分六项记录核对结果与存疑，意见处理与问题状态分开填；保存只作核对记录，不代准奏或定稿。</p>
+    <div class="verification-grid">${d.checks.map((c, i) => `<fieldset><legend>${esc(semanticCategories[c.category].title)}</legend>
       <p class="hint">${esc(semanticCategories[c.category].note)}</p><p class="hint">例：${esc(semanticCategories[c.category].example)}</p>
       <div class="row"><label>意见处理<select data-vcheck="${i}" data-vfield="disposition">${verificationOptions(verificationDispositions, c.disposition)}</select></label><label>问题状态<select data-vcheck="${i}" data-vfield="resolution">${verificationOptions(verificationResolutions, c.resolution)}</select></label></div>
       <label>理由／核对说明<textarea data-vcheck="${i}" data-vfield="note">${esc(c.note)}</textarea></label>
       <div class="row"><label>审校诏令号（可选）<input type="text" inputmode="numeric" data-vcheck="${i}" data-vfield="task" value="${esc(c.task)}"></label><label>关联词证编号（逗号分隔，可选）<input type="text" data-vcheck="${i}" data-vfield="evidence" value="${esc(c.evidence)}"></label></div>
       <label>审校意见原句（填写诏令号时必填）<textarea data-vcheck="${i}" data-vfield="quote">${esc(c.quote)}</textarea></label>
-    </fieldset>`).join("")}
+    </fieldset>`).join("")}</div>
     <div class="actions"><button type="button" class="small" id="verification-save">保存本段六项复核</button><button type="button" class="small" id="verification-refresh">已读最新材料，继续核对</button></div>
-    <h4>添加词证</h4><p class="hint">词证是词义核对的出处和说明。网址只作记录，不自动打开；保存后保留原记录，补充说明请另存一条。</p>
+    <details class="continuity-tools"><summary>添加词证</summary><p class="hint">记录词义出处和说明（网址仅作记录，不自动打开；保存后保留原记录）。</p>
     ${Object.entries(evidenceFields).map(([key, label]) => `<label>${label}<textarea data-vevidence="${key}">${esc(d.evidence[key])}</textarea></label>`).join("")}
-    <label>词证状态<select data-vevidence="status">${verificationOptions(evidenceStates, d.evidence.status)}</select></label><button type="button" class="small" id="evidence-save">保存词证</button></div>`;
+    <label>词证状态<select data-vevidence="status">${verificationOptions(evidenceStates, d.evidence.status)}</select></label><div class="actions"><button type="button" class="small" id="evidence-save">保存词证</button></div></details></div>`;
 }
 function renderVerification() {
   let panel = $("verification-panel");
   if (!panel) {
     panel = document.createElement("section"); panel.id = "verification-panel"; panel.className = "text-material";
-    $("text-materials").after(panel);
-    panel.innerHTML = `<h3>词证与逐段勘校</h3><p class="hint">记录词义依据，逐段核对译文。记录只保存在本地，不自动纳入已批准上下文或发送给模型；保存勘校记录不会自动准奏、御览定稿或启动下一块。资料面板的「临时关联」会用于称谓条件判定；改后点「重新读取」。</p><div class="actions"><button type="button" class="small" id="verification-reload">重新读取（含关联）</button></div><label>勘校段落<select id="verification-paragraph" data-view></select></label><div id="verification-message" role="status"></div><div id="verification-facts"></div><div id="verification-form"></div>`;
+    ($("text-action-result") || $("text-materials")).after(panel);
+    panel.innerHTML = `<h3>词证与逐段勘校</h3><p class="hint">本地记录词义依据与核对情况，不会发送给模型或代为定稿。若在「资料」页改过临时关联，点「重新读取」即可同步称谓提示。</p><div class="verification-toolbar"><label>勘校段落<select id="verification-paragraph" data-view></select></label><button type="button" class="small" id="verification-reload">重新读取（含关联）</button></div><p class="hint" id="verification-summary"></p><div id="verification-message" role="status"></div><details class="continuity-tools" id="verification-details"><summary>展开逐段勘校（六事核对、审校参考与词证登记）</summary><div id="verification-facts"></div><div id="verification-form"></div></details>`;
     const saveInput = (e) => {
       if (!verificationView || !verificationParagraph) return;
       const d = verificationDraft(), el = e.target;
@@ -2678,6 +2721,7 @@ function renderVerification() {
   }
   panel.hidden = !textProjectId || !textBlockId;
   if (verificationScope !== currentVerificationScope() || !verificationView) {
+    $("verification-summary").textContent = "";
     $("verification-facts").textContent = verificationError || "正在读取复核材料…";
     delete $("verification-facts").dataset.signature;
     $("verification-form").replaceChildren(); verificationFormKey = "";
@@ -2685,12 +2729,13 @@ function renderVerification() {
   }
   const v = verificationView;
   if (!v.source.paragraphs.some((p) => p.id === verificationParagraph)) verificationParagraph = v.source.paragraphs[0]?.id || "";
-  $("verification-paragraph").innerHTML = v.source.paragraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === verificationParagraph ? "selected" : ""}>${esc(p.id)}</option>`).join("");
-  if (!verificationParagraph) return;
+  $("verification-paragraph").innerHTML = v.source.paragraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === verificationParagraph ? "selected" : ""}>${esc(textLocation(p.id))}</option>`).join("");
+  if (!verificationParagraph) { $("verification-summary").textContent = ""; return; }
   const d = verificationDraft(), stale = d.fingerprint !== v.fingerprint;
-  $("verification-message").textContent = verificationError || (stale ? "材料或复核记录已更新，暂不能保存。输入已保留：请先阅读最新内容，再点「已读最新材料，继续核对」。" : "填写后请主动保存。自动刷新或切换段落不会清空输入；刷新整个页面或关闭页面会丢失未保存的内容。");
   const paragraph = verificationParagraph;
   const info = v.paragraphs.find((p) => p.paragraph === paragraph);
+  $("verification-summary").textContent = `最新复核：${info?.latest ? "#" + info.latest : "尚无"} · 待核对：${info?.unresolved ?? 6} 项 · 定稿：${textBlock?.status?.state?.state === "finalized" ? "有效" : "未定稿"}`;
+  $("verification-message").textContent = verificationError || (stale ? "材料或复核记录已更新，暂不能保存。输入已保留：请先阅读最新内容，再点「已读最新材料，继续核对」。" : "当前填写保留在页面内，核对完请主动保存；整页刷新或关闭后未保存内容会清空。");
   const text = (block) => block?.paragraphs.find((p) => p.id === paragraph)?.text || "（无）";
   const facts = $("verification-facts"), signature = JSON.stringify([verificationScope, paragraph, v, textBlock?.status]);
   if (facts.dataset.signature !== signature) {
@@ -2699,8 +2744,8 @@ function renderVerification() {
       <details><summary>本段朱批 · 第 ${esc(v.zhupi.version)} 版</summary><pre>${esc(v.zhupi.items[paragraph]?.text || "本段没有朱批。")}</pre></details>
       <h4>模型审校意见（仅供参考）</h4>${v.reviews.map((r) => `<details><summary>诏令 #${esc(r.task)} · ${esc({review_fidelity:"忠实审校", review_style:"文风审校"}[r.kind])}</summary><pre>${esc(r.text)}</pre></details>`).join("") || "暂无模型审校意见"}
       <h4>已批准词表提示</h4><p class="hint">这里只核对字面用词，是否适合本段仍需你判断。</p>${v.hints.filter((h) => h.paragraph === paragraph).map((h) => `<p>${esc(h.source)} → ${h.allowed.map(esc).join(" / ")} · 适用范围：${esc(h.scope || "未注明")} · 说明：${esc(h.note || "无")} · ${esc(h.message)}</p>`).join("") || "暂无提示"}
-      <h4>本块词证</h4>${v.evidence.map((e) => `<details><summary>词证 #${esc(e.id)} · ${esc(e.details.paragraph)} · ${esc(evidenceStates[e.details.status])}</summary><dl>${Object.entries(evidenceFields).map(([key, label]) => `<dt>${esc(label)}</dt><dd>${esc(e.details[key])}</dd>`).join("")}</dl></details>`).join("") || "尚无词证"}
-      <h4>复核历史（保留原记录）</h4>${v.records.map((r) => `<details><summary>复核 #${esc(r.record.id)} · ${esc(r.record.paragraph)} · ${r.current ? "对应当前材料" : "旧材料 · 需重新核对"} · ${r.record.previous ? "前次 #" + esc(r.record.previous) : "首次记录"}</summary>
+      <h4>本块词证</h4>${v.evidence.map((e) => `<details><summary>词证 #${esc(e.id)} · ${esc(textLocation(e.details.paragraph))} · ${esc(evidenceStates[e.details.status])}</summary><dl>${Object.entries(evidenceFields).map(([key, label]) => `<dt>${esc(label)}</dt><dd>${esc(e.details[key])}</dd>`).join("")}</dl></details>`).join("") || "尚无词证"}
+      <h4>复核历史（保留原记录）</h4>${v.records.map((r) => `<details><summary>复核 #${esc(r.record.id)} · ${esc(textLocation(r.record.paragraph))} · ${r.current ? "对应当前材料" : "旧材料 · 需重新核对"} · ${r.record.previous ? "前次 #" + esc(r.record.previous) : "首次记录"}</summary>
         <p>${esc(r.reason || "")}</p><p class="text-para">记录时的原文：${esc(r.record.source)}</p><p class="text-para">记录时的译文：${esc(r.record.translation)}</p><p class="text-para">记录时的朱批：${esc(r.record.zhupi || "无")}</p>
         ${r.change ? `<p class="text-para">实际修订前：${esc(r.change.before)}</p><p class="text-para">实际修订后：${esc(r.change.after)}</p>` : ""}
         <ul class="text-glossary">${r.record.checks.map((c) => `<li><b>${esc(semanticCategories[c.category].title)}</b> · 意见处理：${esc(verificationDispositions[c.disposition])} · 问题状态：${esc(verificationResolutions[c.resolution])}<p class="text-para">${esc(c.note || "未填写核对说明")}</p>${c.advice.map((a) => `<p class="text-para">审校诏令 #${esc(a.task)}：${esc(a.quote)}</p>`).join("")}${c.evidence.length ? `<p>关联词证：${c.evidence.map((id) => "#" + esc(id)).join("、")}</p>` : ""}</li>`).join("")}</ul>
@@ -2820,7 +2865,7 @@ async function loadTextVersions() {
     textVersions = [];
     list.innerHTML = "";
     list.disabled = true;
-    status.textContent = "选中一块译文后，可查看它的版本记录。";
+    status.textContent = "选中一组译稿后，可查看它的版本记录。";
     diff.replaceChildren();
     renderVersionButtons();
     return;
@@ -2974,7 +3019,7 @@ function textParagraphHtml(p, changed, note, source = false) {
   const picked = p.id === textPicked ? " picked" : "";
   const mark = changed ? " changed" : "";
   return `<p class="text-para${mark}${picked}" data-text-para="${esc(p.id)}" ${note ? `title="${esc(note)}"` : ""}>` +
-    `<span class="pid">${esc(p.id)}</span>${source ? sourceInlineHtml(p) : esc(p.text)}` +
+    `<span class="pid" title="内部编号：${esc(p.id)}">${esc(textLocation(p.id))}</span>${source ? sourceInlineHtml(p) : esc(p.text)}` +
     (zhu ? `<span class="zhu">朱批：${esc(zhu)}</span>` : "") +
     `</p>`;
 }
@@ -3006,7 +3051,7 @@ function updateNoteLink() {
   const link = $("note-link");
   if (!link) return;
   link.textContent = textProjectId
-    ? `出处：项目 ${textProjectId.slice(0, 8)}…${textBlockId ? " · 块 " + textBlockId : ""}${textPicked ? " · 段 " + textPicked : ""}`
+    ? `出处：项目 ${textProjectId.slice(0, 8)}…${textPicked || textBlockId ? " · " + textLocation(textPicked || textBlockId) : ""}`
     : "未选项目：札记不记出处，只存译法。";
 }
 function renderTextNow() {
@@ -3019,11 +3064,12 @@ function renderTextNow() {
   const projects = textProjects || [];
   const select = $("text-project");
   select.innerHTML = projects.length
-    ? projects.map((p) => `<option value="${esc(p.id)}">${esc(p.title)}（${p.chapters} 章 · ${p.blocks} 块）</option>`).join("")
+    ? projects.map((p) => `<option value="${esc(p.id)}">${esc(p.title)}（${p.chapters} 章 · ${p.blocks} 组）</option>`).join("")
     : `<option value="">（尚无文本项目）</option>`;
   select.value = projects.some((p) => p.id === textProjectId) ? textProjectId : "";
   select.disabled = !projects.length;
   const project = textProject && textProject.project;
+  $("text-book-title").textContent = project?.title || "选择项目，开始翻译";
   $("text-project-meta").textContent = project
     ? `${project.source_language} → ${project.target_language}；上下文 v${textProject.context.version}（已批准 ${textProject.context.versions.length} 版）`
     : projects.length ? "" : "尚无文本项目。点「新建项目」建一个，再导入原文。";
@@ -3032,21 +3078,23 @@ function renderTextNow() {
   const byBlock = new Map(((textProject && textProject.statuses) || []).map((s) => [s.block, s]));
   $("text-outline").innerHTML = textProject && (textProject.outline || []).length
     ? textProject.outline.map((chapter) =>
-        `<div class="text-chapter">${esc(chapter.chapter)}${chapter.title || chapter.source_name ? " · " + esc(chapter.title || chapter.source_name) : ""}</div>` +
+        `<div class="text-chapter">${esc(textLocation(chapter.chapter))}${chapter.title || chapter.source_name ? " · " + esc(chapter.title || chapter.source_name) : ""}</div>` +
         chapter.blocks.map((b) => {
           const st = byBlock.get(b);
           return `<button type="button" class="text-block-row ${b === textBlockId ? "current" : ""}" data-view data-text-block="${esc(b)}">` +
-            `<span class="id">${esc(b)}</span><span class="state">${st ? esc(st.label) : ""}</span></button>`;
+            `<span class="id" title="内部编号：${esc(b)}">${esc(textLocation(b, true))}</span><span class="state">${st ? esc(st.label) : ""}</span></button>`;
         }).join(""))
         .join("")
-    : `<p class="hint">${projects.length ? "此项目还没有导入原文。" : "建好项目并导入 TXT 后在此列出章与块。"}</p>`;
+    : `<p class="hint">${projects.length ? "此项目还没有导入原文。" : "建好项目并导入原文后，在此选择章节与译稿组。"}</p>`;
 
-  translationWorkspace?.update({project:textProjectId, hasSource:!!textProject?.outline?.some(c => c.blocks.length)});
+  const hasSource = !!textProject?.outline?.some((c) => c.blocks.length);
+  translationWorkspace?.update({project:textProjectId, hasSource});
+  $("text-versions").hidden = !textBlockId;
   const b = textBlock;
   const statusLine = [];
   if (textError) statusLine.push(`<span class="error">${esc(textError)}</span>`);
   if (b) {
-    statusLine.push(`<b>${esc(b.block)}</b> · 章 ${esc(b.chapter)}`);
+    statusLine.push(`<b title="内部编号：${esc(b.block)}">${esc(textLocation(b.block))}</b>`);
     if (b.status) {
       const kind = b.status.state && b.status.state.state;
       // 与奉天殿诏令同一套徽章：待准奏、待御览用朱印，执行中用 assigned。
@@ -3066,7 +3114,7 @@ function renderTextNow() {
       statusLine.push("朝廷尚未建立：块进度与御览不可用（ziyuan init 后显示）。");
     }
   } else if (!textError) {
-    statusLine.push(textProjectId ? "选一个块看材料。" : "选一个项目。");
+    statusLine.push(textProjectId ? (hasSource ? "选一组译稿看材料。" : "尚无正文：请在下方「导入 TXT / Markdown」或「导入文档或字幕」导入原文。") : "在左侧选择或新建一个项目。");
   }
   $("text-status").innerHTML = statusLine.join(" · ");
 
@@ -3074,18 +3122,18 @@ function renderTextNow() {
   const sourceParagraphs = (b && b.source && b.source.paragraphs) || [];
   $("text-source").innerHTML = sourceParagraphs.length
     ? sourceParagraphs.map((p) => textParagraphHtml(p, false, null, true)).join("")
-    : `<p class="hint">${b ? "此块没有原文。" : "选一个块以看原文。"}</p>`;
+    : `<p class="hint">${b ? "这一组没有原文。" : "选一组译稿看原文。"}</p>`;
   const zh = b && b.translation && b.translation.paragraphs;
   $("text-zh").innerHTML = zh
     ? zh.map((p) => textParagraphHtml(p, false)).join("")
-    : `<p class="hint">${b ? (b.translation_error ? `译稿解析失败：${esc(b.translation_error)}` : "尚无译稿：先下初译诏令。") : "选一个块。"}</p>`;
+    : `<p class="hint">${b ? (b.translation_error ? `译稿解析失败：${esc(b.translation_error)}` : "尚无译稿：先下初译诏令。") : "选一组译稿。"}</p>`;
   const pending = b && b.pending;
   const current = new Map((zh || []).map((p) => [p.id, p.text]));
   $("text-pending").innerHTML = pending
     ? (pending.output && pending.output.paragraphs
         ? pending.output.paragraphs.map((p) => textParagraphHtml(p, current.get(p.id) !== p.text, `诏令 #${pending.task}（${pending.label}）待准奏`)).join("")
         : `<p class="hint">诏令 #${pending.task} 待准奏，候选稿无从解析：${esc(pending.parse_error || "未知错误")}</p><pre>${esc(pending.text || "")}</pre>`)
-    : `<p class="hint">${b ? "没有待准奏的初译或修订。" : "选一个块。"}</p>`;
+    : `<p class="hint">${b ? "没有待准奏的初译或修订。" : "选一组译稿。"}</p>`;
 
   // 材料：结构检查、失效原因、上下文、建议、衔接段、审校回奏、朱批导出与逐段朱批。
   const materials = [];
@@ -3093,7 +3141,7 @@ function renderTextNow() {
     materials.push(b.check.valid
       ? `<div class="text-material"><b>结构检查</b>：<span class="badge accept">通过</span> <span class="hint">只查段落齐全、次序与空译文，不评质量</span></div>`
       : `<div class="text-material"><b>结构检查</b>：<span class="badge failed">不通过</span><ul class="text-problems">${
-          b.check.issues.map((i) => `<li>${esc(i.message)}${i.paragraph_id ? `（${esc(i.paragraph_id)}）` : ""}</li>`).join("")
+          b.check.issues.map((i) => `<li>${esc(i.message)}${i.paragraph_id ? `（${esc(textLocation(i.paragraph_id))}）` : ""}</li>`).join("")
         }</ul></div>`);
   }
   if (b && b.status && b.status.state && (b.status.state.state === "stale" || b.status.state.state === "human_stale")) {
@@ -3135,7 +3183,7 @@ function renderTextNow() {
       materials.push(`<div class="text-material write" id="text-zhupi-form"><b>逐段朱批</b>` +
         `<p class="hint">朱批优先于审校意见；存于项目文件，御览定稿时记下版本。</p>` +
         `<label for="text-zhupi-para">段</label><select id="text-zhupi-para" data-keep>${
-          sourceParagraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === paragraph ? "selected" : ""}>${esc(p.id)}${textZhupiSaved(p.id) ? "（已朱批）" : ""}</option>`).join("")
+          sourceParagraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === paragraph ? "selected" : ""}>${esc(textLocation(p.id))}${textZhupiSaved(p.id) ? "（已朱批）" : ""}</option>`).join("")
         }</select>` +
         `<label for="text-zhupi-input">朱批</label><textarea id="text-zhupi-input" data-keep placeholder="此段怎么改：用词、语气、依据">${esc(textZhupiValue(paragraph))}</textarea>` +
         `<div class="actions"><button type="button" class="small" data-text-action="zhupi-save">朱批</button>` +
@@ -3231,7 +3279,7 @@ async function onTextAction(action) {
         return;
       }
       const ok = await textAction(`${base}/zhupi`, { paragraph, text },
-        () => action === "zhupi-clear" ? `已清除 ${paragraph} 的朱批。` : `已记下 ${paragraph} 的朱批。`);
+        () => action === "zhupi-clear" ? `已清除${textLocation(paragraph)}的朱批。` : `已记下${textLocation(paragraph)}的朱批。`);
       if (ok) {
         delete textDrafts[textDraftKey(paragraph)];
         textDraftSave();
@@ -3292,7 +3340,7 @@ function renderNotes() {
     ? notesCache.map((n) => `<article class="text-note">` +
         `<div><span class="badge">${n.kind === "word" ? "词语" : "段落"}</span> <span class="src">${esc(n.source)}</span> → <span class="zh">${esc(n.zh)}</span></div>` +
         (n.remark ? `<div class="hint">${esc(n.remark)}</div>` : "") +
-        (n.project ? `<div class="hint">出处：${esc(n.project.slice(0, 8))}…${n.block ? " · 块 " + esc(n.block) : ""}${n.paragraph ? " · 段 " + esc(n.paragraph) : ""}</div>` : "") +
+        (n.project ? `<div class="hint">出处：${esc(n.project.slice(0, 8))}…${n.block ? " · " + esc(textLocation(n.block)) : ""}${n.paragraph ? " · " + esc(textLocation(n.paragraph)) : ""}</div>` : "") +
         `<div class="actions">` +
         `<button type="button" class="small" data-note-action="promote" data-note-id="${esc(n.id)}" title="并入当前项目的上下文草稿；之后须 text context approve 才生效">并入草稿</button>` +
         `<button type="button" class="small" data-note-action="edit" data-note-id="${esc(n.id)}">改</button>` +
@@ -3547,7 +3595,7 @@ async function runMemory(build) {
     } else {
       $("memory-result").textContent = result.hits.length ? `找到 ${result.hits.length} 条参考（最多 8 条）。` : "当前项目没有匹配的有效定稿参考。";
       referenceHits = result.hits;
-      $("memory-hits").innerHTML = result.hits.map((hit, i) => `<article class="text-note"><label><input type="checkbox" data-view data-reference-hit="${i}">选择此段参考</label><p class="hint">出处：项目 ${esc(hit.project)} · 块 ${esc(hit.block)} · 段 ${esc(hit.paragraph)} · 上下文 v${esc(hit.selection.origin.context_version)} · 朱批 v${esc(hit.selection.origin.zhupi_version)}</p><details><summary>定稿版本与摘要</summary><pre>${esc(JSON.stringify(hit.selection, null, 2))}</pre></details><p class="text-para">原文：${esc(hit.source)}</p><p class="text-para">译文：${esc(hit.translation)}</p></article>`).join("");
+      $("memory-hits").innerHTML = result.hits.map((hit, i) => `<article class="text-note"><label><input type="checkbox" data-view data-reference-hit="${i}">选择此段参考</label><p class="hint">出处：项目 ${esc(hit.project)} · ${esc(textLocation(hit.paragraph || hit.block))} · 上下文 v${esc(hit.selection.origin.context_version)} · 朱批 v${esc(hit.selection.origin.zhupi_version)}</p><details><summary>定稿版本与摘要</summary><pre>${esc(JSON.stringify(hit.selection, null, 2))}</pre></details><p class="text-para">原文：${esc(hit.source)}</p><p class="text-para">译文：${esc(hit.translation)}</p></article>`).join("");
       renderReferences();
     }
   } catch (e) {
@@ -3875,7 +3923,7 @@ function render() {
   $("github-row").hidden = !s.github;
   $("github-state").textContent = s.github
     ? `已通 ${s.github}：收带标签的 issue/PR 入队；办完可在诏令上回报评论、开草稿 PR。`
-    : "未通：启动前设 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN。";
+    : "未接入：启动前请配置环境变量 ZIYUAN_GITHUB_REPO（owner/repo）与 ZIYUAN_GITHUB_TOKEN。";
 
   const deptOptions = s.departments.map((d) => `<option value="${d.code}">${esc(d.label)}</option>`).join("");
   // 与 CLI 一致：默认工部承办。
@@ -3948,6 +3996,7 @@ let showAll = false;
 async function refresh() {
   try {
     state = await api(showAll ? "/state?all=1" : "/state");
+    document.body.classList.add("authed");
     preserve(render);
     showCriteria();
     renderOfficeConfig(state);

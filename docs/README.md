@@ -1,39 +1,36 @@
 # 文档目录
 
-本文档对应 **1.15.0** 源码。初次使用先看[使用指南](guide.md)，译书操作看[文本项目指南](text-projects.md)和[小说翻译指南](novel-translation.md)。本版可以追加、修订 Markdown、DOCX 和 EPUB，终端可以写人工译稿，远程嵌入须先按项目授权。
+初次使用先看[使用指南](guide.md)；译书操作依次查阅[文本整理与检查](text-projects.md)、[小说翻译指南](novel-translation.md)与[连续翻译与交稿](translation-continuity.md)。
 
-发布与验证进度见 [1.15.0 验收记录](acceptance/1.15.0.md)，已公开下载包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准。版本变化与兼容性看 [CHANGELOG](../CHANGELOG.md)，发布流程看 [releasing](releasing.md)。历史验收记录只记录当时实际做过的检查。
+发布进度与验证记录见[验收归档](#验收记录历史归档)及 [1.15.1 验收记录](acceptance/1.15.1.md)，已公开发布的二进制包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准，各版变化见 [CHANGELOG](../CHANGELOG.md)。
 
-连续翻译操作与支持边界见[备份、原文更新、跨章待查与交稿](translation-continuity.md)；既有译稿版本、文档回填和人工译稿操作见[文本项目指南](text-projects.md)。
-
-## 使用
+## 使用指南
 
 | 文档 | 内容 |
 | --- | --- |
-| [使用指南](guide.md) | 命令、Web、终端界面和常见操作 |
-| [文本整理与检查](text-projects.md) | 导入原文、编辑人工译稿、检查并导出成稿 |
-| [连续翻译与交稿](translation-continuity.md) | 备份与恢复、更新原文、跨章待查、通读、检索替换及记忆交换 |
-| [作品更新提醒](subscriptions.md) | 关注 syosetu 作品、检查新章节 |
-| [小说翻译指南](novel-translation.md) | 逐块初译、审校、朱批、修订与御览 |
-| [译文记忆](memory.md) | 本地建库、查询与人工选用参考 |
-| [DAG 排程速查](dag.md) | 拆分任务、设置依赖 |
+| [使用指南](guide.md) | 命令行、Web 奉天门与紫禁城终端界面、模型配置与治政流程 |
+| [文本整理与检查](text-projects.md) | 原文导入与整本分块、人工译稿、本地资料、勘校、用量账本、版本快照与格式回填 |
+| [小说翻译指南](novel-translation.md) | 逐块初译、审校、朱批、修订、御览定稿与御笔札记 |
+| [连续翻译与交稿](translation-continuity.md) | 工作区备份恢复、原文追加与修订、跨章待查、通读预检、检索替换及 TMX 交换 |
+| [译文记忆](memory.md) | 本地与授权远程建库、检索与主动选用参考 |
+| [作品更新提醒](subscriptions.md) | 关注 syosetu 作品更新与新章节自动入队 |
+| [DAG 排程速查](dag.md) | 拆分任务与自定义依赖排程 |
 
-本地资料、段旁提示与复核关联的用法见 [README](../README.md) 的「本地资料与段旁提示」。
-
-## 约定与发布
+## 架构、约定与发布
 
 | 文档 | 内容 |
 | --- | --- |
-| [稳定性约定](stability.md) | 哪些接口只增不改，哪些仍可能调整 |
-| [设计文档](architecture.md) | 内部分层、事件簿和权限边界 |
-| [ADR-0001：Windows 号舍](adr/0001-windows-sandbox.md) | Windows 上为什么默认拒绝需要隔离的命令 |
-| [路线图](roadmap.md) | 已完成的版本和后续计划 |
-| [发布](releasing.md) | 标签发布、四平台验收与 crates.io 可信发布 |
+| [稳定性约定](stability.md) | 对外冻结接口、兼容边界与内部非冻结范围 |
+| [体系结构](architecture.md) | 分层架构、事件簿与权限边界 |
+| [ADR-0001：Windows 号舍](adr/0001-windows-sandbox.md) | Windows 受保护执行政策与原生沙箱实验进展 |
+| [路线图](roadmap.md) | 已完成能力概览与后续非承诺议题 |
+| [发布指南](releasing.md) | 标签发布、四平台打包验收与 crates.io 可信发布 |
 
 ## 验收记录（历史归档）
 
-每份只记录当时实际做过的检查和未测项目。最新一份可能仍在验收，是否已公开发行请看记录中的状态；历史版本的结果不代替当前版本检查。
+每份归档只记录当时实际执行过的检查范围与未测事项；历史版本结果不代替当前源码检查。
 
+- [1.15.1](acceptance/1.15.1.md)
 - [1.15.0](acceptance/1.15.0.md)
 - [1.14.1](acceptance/1.14.1.md)
 - [1.14.0](acceptance/1.14.0.md)
@@ -61,7 +58,3 @@
 - [1.0.0-rc.4 发布包](acceptance/1.0.0-rc.4.md)
 - [1.0.0-rc.2](acceptance/1.0.0-rc.2.md)
 - [1.0.0-rc.1 验收清单](acceptance/1.0.0-rc.1.md)
-
-## 内部资料
-
-以下文件保留给维护者，不是用户操作指南，也不代表当前功能：工作台设计/验收、历史开发计划与写入安全决策。它们不在上表列出，避免与现行用法混淆。

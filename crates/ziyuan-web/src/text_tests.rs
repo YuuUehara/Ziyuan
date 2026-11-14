@@ -1346,6 +1346,10 @@ fn text_frontend_contract() {
         "取回原件固定按归档字节、逐章请求",
         "kind === \"original\" ? \"txt\" : d.format",
         "kind === \"original\" ? \"chapters\" : d.layout",
+        "id=\"import-paragraphs\"",
+        "id=\"import-split-long\"",
+        "data-import-expand",
+        "全部原文合计上限 8 MiB（JSON 请求上限 24 MiB）",
     ] {
         assert!(crate::INDEX_HTML.contains(expected), "missing {expected}");
     }
@@ -2685,5 +2689,80 @@ async fn binary_document_import_requires_owner_and_export_requires_signoff() {
         .0,
         400
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn web_import_accepts_whole_book_txt_over_two_mib_and_rejects_above_eight_mib() {
+    let (base, root) = start("whole-book-txt", false).await;
+    let texts = TextProjects::new(&root);
+    let p = texts
+        .create(NewProject {
+            title: "整本小说".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let line = "「おはようございます。」彼は窓を開けた。\r\n";
+    let book = line.repeat(50_000); // ~2.8 MiB UTF-8, > 2 MiB default Axum limit
+    assert!(book.len() > 2 * 1024 * 1024 && book.len() < 8 * 1024 * 1024);
+    let route = format!("/text/{}/import", p.id);
+    let preview_route = format!("{route}/preview");
+    let mut body = json!({
+        "files": [{"name": "novel.txt", "text": book}],
+        "options": {
+            "parsing": {
+                "ruby": false,
+                "heading_level": null,
+                "text_paragraphs": "lines",
+                "split_long_paragraphs": true
+            },
+            "chapter_titles": []
+        }
+    });
+    let (code, preview) = call(&base, &preview_route, Some(TOKEN), Some(body.clone())).await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(
+        preview["chapters"][0]["paragraphs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        50_000
+    );
+    assert!(preview["chapters"][0]["blocks"].as_array().unwrap().len() > 50);
+
+    body["fingerprint"] = preview["fingerprint"].clone();
+    let (code, imported) = call(&base, &route, Some(TOKEN), Some(body)).await;
+    assert_eq!(code, 200, "{imported}");
+    assert_eq!(
+        imported["chapters"][0]["paragraphs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        50_000
+    );
+
+    // Over 8 MiB raw text must still be rejected cleanly without corrupting projects.
+    let p2 = texts
+        .create(NewProject {
+            title: "超大文件".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let too_big = json!({
+        "files": [{"name": "huge.txt", "text": "a".repeat(8 * 1024 * 1024 + 1)}],
+        "options": {"parsing": {"text_paragraphs": "lines", "split_long_paragraphs": true}, "chapter_titles": []}
+    });
+    let (code, err) = call(
+        &base,
+        &format!("/text/{}/import/preview", p2.id),
+        Some(TOKEN),
+        Some(too_big),
+    )
+    .await;
+    assert_eq!(code, 400, "{err}");
     fs::remove_dir_all(root).unwrap();
 }

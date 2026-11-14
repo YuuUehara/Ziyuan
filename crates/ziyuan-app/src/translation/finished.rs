@@ -506,6 +506,28 @@ pub(crate) fn marked_text(paragraph: &super::DraftParagraph) -> Result<String> {
     Ok(out)
 }
 
+// Adjacent source ranges are continuations of one TXT natural paragraph.
+// Only opted-in imports have working segments; legacy projects keep their layout.
+fn finished_paragraphs(c: &Chapter, texts: &BTreeMap<String, String>) -> Vec<String> {
+    let join_segments = c
+        .parsing
+        .as_ref()
+        .is_some_and(|p| p.format == SourceFormat::Text && p.options.split_long_paragraphs);
+    let mut out: Vec<String> = Vec::new();
+    let mut previous_end = None;
+    for paragraph in &c.paragraphs {
+        if join_segments && previous_end == Some(paragraph.byte_start) {
+            out.last_mut()
+                .expect("previous paragraph")
+                .push_str(&texts[&paragraph.id]);
+        } else {
+            out.push(texts[&paragraph.id].clone());
+        }
+        previous_end = Some(paragraph.byte_end);
+    }
+    out
+}
+
 fn render_chapter(
     c: &Chapter,
     raw: &[u8],
@@ -521,8 +543,8 @@ fn render_chapter(
             warnings.push("HTML 成稿保留批准译文的正文与文学标记；原件的代码、链接、图片及版式请另取归档原件。".into());
         }
         let mut html = format!("<section><h1>{}</h1>\n", html_text(title(c)));
-        for paragraph in &c.paragraphs {
-            html.push_str(&format!("<p>{}</p>\n", texts[&paragraph.id]));
+        for paragraph in finished_paragraphs(c, texts) {
+            html.push_str(&format!("<p>{paragraph}</p>\n"));
         }
         html.push_str("</section>\n");
         return Ok(html);
@@ -594,8 +616,8 @@ fn render_chapter(
         out.push_str(&raw[start..info.byte_end].replace("\r\n", "\n"));
         warnings.push("Markdown 以原件字节范围回填定稿段落并保留非翻译节点；原文行内样式、链接及图片目标不套到译文，章名仍用导入时的标题。".into());
     } else {
-        for para in &c.paragraphs {
-            out.push_str(&texts[&para.id]);
+        for paragraph in finished_paragraphs(c, texts) {
+            out.push_str(&paragraph);
             out.push_str("\n\n");
         }
         if is_md {
@@ -609,4 +631,48 @@ fn render_chapter(
         out.push('\n');
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod working_segment_tests {
+    use super::*;
+    #[test]
+    fn finished_exports_rejoin_txt_working_segments_but_keep_natural_breaks() {
+        let mut chapter: Chapter = serde_json::from_value(json!({
+            "id":"c0001", "source_name":"sample.txt", "original_path":"sample.txt",
+            "sha256":"", "byte_len":11, "blocks":[],
+            "paragraphs":[
+                {"id":"p1","byte_start":0,"byte_end":3,"text":"abc"},
+                {"id":"p2","byte_start":3,"byte_end":6,"text":"def"},
+                {"id":"p3","byte_start":8,"byte_end":11,"text":"ghi"}
+            ],
+            "parsing":{"version":1,"format":"text","options":{"split_long_paragraphs":true},
+                "source_file":1,"part":0,"title":"样章","byte_start":0,"byte_end":11,"warnings":[]}
+        }))
+        .unwrap();
+        let texts = BTreeMap::from([
+            ("p1".into(), "前半".into()),
+            ("p2".into(), "后半".into()),
+            ("p3".into(), "另段".into()),
+        ]);
+        for format in [
+            ExportFormat::Txt,
+            ExportFormat::Markdown,
+            ExportFormat::Html,
+        ] {
+            let body = render_chapter(&chapter, b"abcdef\n\nghi", &texts, format, &mut Vec::new())
+                .unwrap();
+            assert!(body.contains("前半后半"), "{body}");
+            if format == ExportFormat::Html {
+                assert!(body.contains("<p>另段</p>"));
+            } else {
+                assert!(body.contains("前半后半\n\n另段"));
+            }
+        }
+        chapter.parsing = None;
+        assert_eq!(
+            finished_paragraphs(&chapter, &texts),
+            ["前半", "后半", "另段"]
+        );
+    }
 }
