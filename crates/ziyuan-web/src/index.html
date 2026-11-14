@@ -493,7 +493,7 @@
   .text-block-row:hover { background: var(--well); }
   .text-block-row.current { background: var(--tint); border-left-color: var(--seal); }
   .text-block-row.current .id { color: var(--tint-ink); font-weight: 600; }
-  .text-compare { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .text-compare { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 4px; }
   .text-col { display: flex; flex-direction: column; min-width: 0; }
   .text-col h4 { margin: 0 0 6px; font-family: var(--serif); font-size: 14px; font-weight: 600; letter-spacing: 2px; }
   /* 长段落在栏内换行、栏内滚动，不撑开页面。 */
@@ -535,13 +535,24 @@
   .switch-toggle input:focus-visible + .switch-track { outline: 2px solid var(--line-strong); outline-offset: 2px; }
   .human-block-nav { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .human-block-nav .hint { font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #text-human-editor { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
-  #text-human-editor:empty { display: none; }
-  .human-paragraph { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); min-width: 0; }
+  #text-human-editor { margin: 16px 0 20px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 16px 0 22px; }
+  #text-human-editor:empty, #text-human-editor[hidden] { display: none; }
+  .human-progress { margin-bottom: 16px; padding: 10px 12px; background: var(--well); border: 1px solid var(--line); border-radius: var(--radius); }
+  .human-progress-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; }
+  .human-progress-stats { min-width: 0; flex: 1 1 260px; }
+  .human-progress-total { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+  .human-progress-stats .hint { margin: 4px 0 0; }
+  .human-progress-chapters { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .human-progress-chapters summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+  .human-stage-head { margin-bottom: 4px; }
+  .human-actions { margin: 12px 0 18px; }
+  .human-paragraph { margin-top: 18px; padding: 16px 0 10px; border-top: 1px solid var(--line); min-width: 0; }
+  .human-paragraph:first-child { margin-top: 8px; }
   .human-paragraph h4 { margin: 0 0 8px; font: 12px var(--serif); color: var(--muted); }
   .human-bilingual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .human-bilingual > * { min-width: 0; margin: 0; }
   .human-bilingual textarea { display: block; min-height: 120px; font-family: var(--text); }
+  .human-mark-tools { margin-top: 12px; }
   .human-preview, .human-message { white-space: pre-wrap; overflow-wrap: anywhere; }
   .human-preview { padding: 12px; margin-top: 12px; background: var(--well); }
   .human-paragraph td { white-space: normal; overflow-wrap: anywhere; }
@@ -580,7 +591,11 @@
   .text-notes-layout > div { min-width: 0; }
   #text-zhupi-input { min-height: 60px; }
   #text-zhupi-form label { margin-top: 0; }
-  #verification-panel { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+  #text-n2b-hints { margin: 12px 0 14px; }
+  #text-n2b-hints:empty { display: none; }
+  #text-model-drawer #text-actions { margin-top: 14px; }
+  #verification-panel { margin: 14px 0; min-width: 0; }
+  #verification-panel > .continuity-tools { margin: 0; }
   #verification-panel .row, #text-export .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 10px; align-items: end; }
   #verification-panel label, #text-export .row > label { display: grid; gap: 4px; min-width: 0; }
   #verification-panel .row > label, #text-export .row > label { margin: 0; }
@@ -947,11 +962,7 @@
               </form>
             </dialog>
             <section class="text-memory" id="text-export" aria-label="章节导出"></section>
-            <div class="text-compare">
-              <div class="text-col"><h4>原文</h4><div class="text-scroll" id="text-source"></div></div>
-              <div class="text-col"><h4>已准奏译文</h4><div class="text-scroll" id="text-zh"></div></div>
-              <div class="text-col"><h4>待准修订</h4><div class="text-scroll" id="text-pending"></div></div>
-            </div>
+
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
             <section class="text-materials" id="text-versions" aria-label="译稿版本快照">
               <h3>译稿版本 <small class="hint">三态自动留存；只读对比</small></h3>
@@ -979,6 +990,18 @@
               </div>
             </section>
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
+            <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
+            <details class="continuity-tools" id="text-model-drawer">
+              <summary>三栏对照、逐段朱批与模型译校</summary>
+              <div class="text-compare">
+                <div class="text-col"><h4>原文</h4><div class="text-scroll" id="text-source"></div></div>
+                <div class="text-col"><h4>已准奏译文</h4><div class="text-scroll" id="text-zh"></div></div>
+                <div class="text-col"><h4>待准修订</h4><div class="text-scroll" id="text-pending"></div></div>
+              </div>
+              <div class="text-materials" id="text-materials"></div>
+              <div class="actions" id="text-actions"></div>
+              <p class="hint" id="text-action-result" role="status" aria-live="polite"></p>
+            </details>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">草稿与生产隔离；批准前不生效、不外发</small></h3>
               <p class="hint">在这里整理术语表与人物设定。保存草稿不会影响已批准译文，也不会发给模型；校验并准备后，需再点「批准上下文」。</p>
@@ -1059,13 +1082,9 @@
                 <span class="hint" id="n2b-assoc-state" role="status" aria-live="polite">使用当前临时关联</span>
               </div>
             </div>
-            <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
               <div id="materials-preview" class="materials-report" aria-live="polite"></div>
               <section id="text-materials-editor" aria-label="本地资料编辑器"></section>
             </section>
-            <div class="text-materials" id="text-materials"></div>
-            <div class="actions" id="text-actions"></div>
-            <p class="hint" id="text-action-result" role="status" aria-live="polite"></p>
             <section class="text-memory" id="text-memory" aria-label="当前项目译文记忆">
               <h3>译文记忆 <small class="hint">仅当前项目 · 已定稿段落</small></h3>
               <p class="hint">参考不是指令，朱批与术语优先，本地方法不理解文意。默认不开启、不外发；服务端设 ZIYUAN_MEMORY_PROVIDER=local 后才可用。这里只查当前项目，跨项目请用命令行。</p>
@@ -1312,11 +1331,13 @@ function ensureTextModules() {
         textPick(anchor.paragraph);
         if (anchor?.kind === "draft") {
           setHumanEditorEnabled(true, true);
-          document.querySelector("#text-human-editor")?.scrollIntoView({ block: "start" });
-        } else if (humanEditorEnabled()) {
-          document.querySelector("#text-human-editor")?.scrollIntoView({ block: "start" });
+          const paraNode = anchor.paragraph && document.querySelector('[data-human-para="' + CSS.escape(anchor.paragraph) + '"]');
+          (paraNode || document.querySelector("#text-human-editor"))?.scrollIntoView({ block: "start" });
         } else {
-          document.querySelector("#human-mode-bar")?.scrollIntoView({ block: "start" });
+          const drawer = $("text-model-drawer");
+          if (drawer) drawer.open = true;
+          const paraNode = anchor?.paragraph && document.querySelector('[data-text-para="' + CSS.escape(anchor.paragraph) + '"]');
+          (paraNode || drawer || document.querySelector("#human-mode-bar"))?.scrollIntoView({ block: "start" });
         }
       },
     })),
@@ -1712,22 +1733,27 @@ const HUMAN_TOGGLE_KEY = "ziyuan-human-editor-enabled";
 function humanEditorEnabled() {
   try { return localStorage.getItem(HUMAN_TOGGLE_KEY) !== "0"; } catch { return true; }
 }
+function syncModelDrawerForMode(enabled) {
+  const drawer = $("text-model-drawer");
+  if (drawer) drawer.open = !enabled;
+}
 function updateHumanModeBar() {
-  const bar = $("human-mode-bar"), host = $("text-human-editor");
+  const bar = $("human-mode-bar"), host = $("text-human-editor"), drawer = $("text-model-drawer");
   if (!bar || !host) return;
   const hasBlock = !!(textProjectId && textBlockId);
   const enabled = humanEditorEnabled();
   bar.hidden = !hasBlock;
   host.hidden = !hasBlock || !enabled;
+  if (drawer) drawer.hidden = !hasBlock;
   const toggle = $("human-editor-toggle");
   if (toggle) toggle.checked = enabled;
   const note = $("human-toggle-note");
   if (note) {
     note.textContent = enabled
-      ? "已展开人工逐段编辑与送审区"
+      ? "当前优先显示人工逐段译稿；三栏对照与模型操作已收起在下方"
       : (humanEditor?.hasDirty?.()
           ? "已收起（尚有未保存草稿，切回可继续保存）"
-          : "已收起，当前优先显示对照译文与模型操作");
+          : "已收起，当前优先显示三栏对照与模型译校");
   }
   const allBlocks = (textProject?.outline || []).flatMap((c) => c.blocks || []);
   const idx = textBlockId ? allBlocks.indexOf(textBlockId) : -1;
@@ -1740,9 +1766,11 @@ function setHumanEditorEnabled(on, persist = true) {
   if (persist) {
     try { localStorage.setItem(HUMAN_TOGGLE_KEY, on ? "1" : "0"); } catch {}
   }
+  syncModelDrawerForMode(on);
   updateHumanModeBar();
   if (on && textBlock) renderHumanEditor();
 }
+syncModelDrawerForMode(humanEditorEnabled());
 $("human-editor-toggle")?.addEventListener("change", (event) => {
   setHumanEditorEnabled(event.target.checked, true);
 });
@@ -2013,7 +2041,7 @@ function renderQaIssues() {
       go.type = "button"; go.className = "link-button"; go.textContent = "定位";
       go.addEventListener("click", () => {
         const target = document.querySelector('[data-text-para="' + CSS.escape(issue.paragraph) + '"]');
-        if (target) { selectWorkspaceTab("draft"); target.scrollIntoView({ block: "center" }); }
+        if (target) { selectWorkspaceTab("draft"); const drawer = target.closest("#text-model-drawer"); if (drawer) drawer.open = true; target.scrollIntoView({ block: "center" }); }
       });
       row.append(go);
     }
@@ -2248,7 +2276,7 @@ async function renderN2bHints() {
           button.addEventListener("click", () => {
             const first = (item.paragraphs || [])[0];
             const target = first && document.querySelector('[data-text-para="' + CSS.escape(first) + '"]');
-            if (target) { selectWorkspaceTab("draft"); target.scrollIntoView({ block: "center" }); }
+            if (target) { selectWorkspaceTab("draft"); const drawer = target.closest("#text-model-drawer"); if (drawer) drawer.open = true; target.scrollIntoView({ block: "center" }); }
           });
           hint.append(button, "（" + (item.paragraphs || []).join("、") + "）");
         });
@@ -2856,8 +2884,8 @@ function renderVerification() {
   let panel = $("verification-panel");
   if (!panel) {
     panel = document.createElement("section"); panel.id = "verification-panel"; panel.className = "text-material";
-    ($("text-action-result") || $("text-materials")).after(panel);
-    panel.innerHTML = `<h3>词证与逐段勘校</h3><p class="hint">本地记录词义依据与核对情况，不会发送给模型或代为定稿。若在「资料」页改过临时关联，点「重新读取」即可同步称谓提示。</p><div class="verification-toolbar"><label>勘校段落<select id="verification-paragraph" data-view></select></label><button type="button" class="small" id="verification-reload">重新读取（含关联）</button></div><p class="hint" id="verification-summary"></p><div id="verification-message" role="status"></div><details class="continuity-tools" id="verification-details"><summary>展开逐段勘校（六事核对、审校参考与词证登记）</summary><div id="verification-facts"></div><div id="verification-form"></div></details>`;
+    ($("text-model-drawer") || $("text-action-result") || $("text-materials")).after(panel);
+    panel.innerHTML = `<details class="continuity-tools" id="verification-details"><summary>逐段勘校（六事核对、审校参考与词证登记）</summary><p class="hint">本地记录词义依据与核对情况，不会发送给模型或代为定稿。若在「资料」页改过临时关联，点「重新读取」即可同步称谓提示。</p><div class="verification-toolbar"><label>勘校段落<select id="verification-paragraph" data-view></select></label><button type="button" class="small" id="verification-reload">重新读取（含关联）</button></div><p class="hint" id="verification-summary"></p><div id="verification-message" role="status"></div><div id="verification-facts"></div><div id="verification-form"></div></details>`;
     const saveInput = (e) => {
       if (!verificationView || !verificationParagraph) return;
       const d = verificationDraft(), el = e.target;

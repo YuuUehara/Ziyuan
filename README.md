@@ -14,13 +14,10 @@
 
 ### 译书与本地文本工具概览
 
-- **原文预览与导入**：TXT／Markdown 导入前先检查章序、原文字节范围、注音、警告与分段结果，确认指纹后再写入，见[导入指南](docs/text-projects.md#预览与确认导入)。不带选项的旧 `ziyuan text import` 命令仍沿用原有纯文本路径。
-- **成稿导出**：`text export-originals` 取回归档原件，`text export-finished` 将有效定稿与校验清单打包为 TAR（CLI 默认只预览，Web 确认后下载）。支持 TXT、Markdown 与保留注音／着重／粗斜体叠加样式的 HTML 成稿；缺块、失效或无法定位回填时整批拒绝，不改变审批或覆盖已有文件，见[导出指南](docs/text-projects.md#原件与成稿导出)。
-- **选用参考译法**：从译文记忆中主动勾选参考，先预览完整外发文本，再确认初译或修订；默认不选，预览不外发，下诏只入队。所选原译文随任务快照记入事件簿，分享前须核对隐私与权利，见[选择与确认](docs/memory.md#显式选用参考)及[兼容边界](docs/stability.md#140显式选用参考)。
-- **术语表、双语检索与检查**：支持 CSV／TBX 术语与人物规则导入导出（只合并到本地资料草稿）、`ziyuan text concordance` 本项目原文检索，以及 `ziyuan text qa`／Web「确定性检查」（空译、段号、数字、重复与适用词条）。
-- **词证、逐段勘校与用量账本**：支持记录词义依据与六事勘校清单（言行归属、事理正反、数目分寸、前后次第、称谓名分、谐趣留白），保留历次核对快照，详见[勘校指南](docs/text-projects.md#词证与逐段勘校)；`ziyuan text usage <项目ID>` 只读汇总四阶段已报告用量与分币种估价，见[账本与精简边界](docs/text-projects.md#逐阶段用量账本与请求材料精简)。
-- **人工译稿与版本快照**：不调用模型即可完成保存草稿、送审、准奏落盘与定稿（CLI、Web 编辑器与 TUI 均可办理，见[人工译稿](docs/text-projects.md#人工译稿)）。每次保存、准奏与定稿自动写入本地快照，可对比现行译稿或人工草稿并清理旧快照；DOCX／EPUB／SRT 保留原件或时间轴并在定稿后回填，见[译稿版本与格式回填](docs/text-projects.md#译稿版本与格式回填)。
-- **连续翻译与本地交付**：提供完整工作区备份与迁机恢复、原文追加与修订（TXT／Markdown／DOCX／EPUB）、跨章待查、连续通读与交稿预检、全文检索与草稿替换、纯文本 TMX 交换及翻译记忆／审校评论管理，详见[连续翻译指南](docs/translation-continuity.md)与[翻译记忆与评论管理](docs/text-projects.md#翻译记忆审校评论与字幕)。
+- **原文预览、追加修订与成稿导出**：TXT／Markdown 导入前先预览章序、分段（默认按非空行，可改按空行并拆分超长段）与安全注音，核对指纹后再写入；支持 DOCX／EPUB／SRT 导入与定稿回填、原文追加或单章修订，以及双语通读、交稿预检和 TXT／Markdown／HTML（保留注音与着重号）成稿打包导出，见[预览与导入](docs/novel-translation.md#预览与确认导入)、[版本与回填](docs/novel-translation.md#译稿版本与格式回填)与[通读与导出](docs/novel-translation.md#原件与成稿导出)。
+- **手工翻译优先与模型译校**：网页「翰林院 → 译稿」默认开启独立的「手工翻译」开关，提供双语逐段编辑与注音／着重／粗斜体标记工具；关闭开关可展开三栏对照、逐段朱批与模型初译／审校／修订流程。人工与模型译稿都保留三态版本快照，也可搭配局部词证与六事勘校记录使用，见[人工译稿](docs/novel-translation.md#人工译稿)与[词证与逐段勘校](docs/novel-translation.md#词证与逐段勘校)。
+- **资料、检索、译文记忆与备份**：在「资料」页签可集中维护人物、术语与称谓规则草稿（支持 CSV／TBX／TMX 交换）、确定性检查、御笔札记、审校评论与跨章待查；「全文检索与草稿替换」可快速定位原文、现行译文与人工草稿。「项目管理」支持完整工作区备份与迁机恢复；若启用局部／远程译文记忆并显式选用参考，外发前可预览全部提示文本，见[本地译文记忆](docs/memory.md#显式选用参考)与[兼容边界](docs/stability.md#140显式选用参考)。
+- **用量账本与更新提醒**：`ziyuan text usage <项目ID>` 按阶段汇总已报告用量与分币种估价，见[账本与精简边界](docs/novel-translation.md#逐阶段用量账本与请求材料精简)；「武英殿 · 作品关注」支持 syosetu 更新提醒与新章节自动入队（只记目录变化，不下载正文），见[作品更新提醒](docs/subscriptions.md)。
 
 ### 第一次启动（不用命令行）
 
@@ -158,9 +155,7 @@ bash scripts/smoke.sh
   - 评定与监督：[吏部：评定、考绩与荐举](docs/guide.md#吏部评定考绩与荐举)、[都察院：复核回奏与证据核验](docs/guide.md#都察院复核回奏与证据核验)、[廷推与廷杖](docs/guide.md#廷推与廷杖)、[内阁、皇权与昏君模式](docs/guide.md#内阁皇权与昏君模式)
   - 协作与文书：[多官协作：分办与汇总](docs/guide.md#多官协作分办与汇总)、[人格、字号与廷议](docs/guide.md#人格字号与廷议)、[翰林院：诏令模板](docs/guide.md#翰林院诏令模板)、[礼部：科举与文书](docs/guide.md#礼部科举与文书)、[礼部修 CHANGELOG](docs/guide.md#礼部修-changelog)
   - 记录与对接：[起居注：按诏令、官员、类型、时间查](docs/guide.md#起居注按诏令官员类型时间查)、[翰林院修史：实录与前例](docs/guide.md#翰林院修史实录与前例)、[兵部：驿传与八百里加急](docs/guide.md#兵部驿传与八百里加急)、[兵部驿站 · GitHub](docs/guide.md#兵部驿站--github)、[版本控制：Jujutsu](docs/guide.md#版本控制jujutsu)
-- [整理原文与检查译稿](docs/text-projects.md)：原文预览导入、成稿导出、词证勘校、用量账本、人工译稿与格式回填。
-- [连续翻译指南](docs/translation-continuity.md)：完整备份、原文追加与修订、跨章待查、连续通读、全文检索替换与 TMX 交换。
-- [小说翻译指南](docs/novel-translation.md)：逐块初译、审校、朱批、修订、御览与御笔札记。
+- [翰林院译书指南](docs/novel-translation.md)：项目导入与追加修订、手工翻译优先与模型译校、资料词证勘校、检索版本、通读交稿导出、备份恢复与版权边界。
 - [本地译文记忆](docs/memory.md)：启用、建库、查询、远程嵌入授权及显式选用参考。
 - [作品更新提醒](docs/subscriptions.md)：syosetu 关注列表、定时检查与新章节自动入队（不下载正文）。
 - [体系结构](docs/architecture.md)：分层、事件簿与设计取舍。
@@ -181,4 +176,4 @@ bash scripts/smoke.sh
 
 Web 界面内置的 [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) 字体按 SIL Open Font License 1.1 随附，许可证见 [`crates/ziyuan-web/src/fonts/JetBrainsMono-OFL.txt`](crates/ziyuan-web/src/fonts/JetBrainsMono-OFL.txt)（发行包中为 `JetBrainsMono-OFL.txt`）。界面推荐的中文、日文字体也都是 OFL 1.1，不随程序附带，见[使用指南 · 字体](docs/guide.md#字体)。
 
-软件的 MIT / Apache-2.0 许可不授权第三方文学原文、译文或书库品牌；模型上传、再分发与商业出版仍须逐项核对权利，见[小说翻译版权边界](docs/novel-translation.md#发布前版权核对2026-10-30)。
+软件的 MIT / Apache-2.0 许可不授权第三方文学原文、译文或书库品牌；模型上传、再分发与商业出版仍须逐项核对权利，见[版权、来源与再分发边界](docs/novel-translation.md#版权来源与再分发边界)。

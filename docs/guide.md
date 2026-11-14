@@ -11,12 +11,9 @@
 | 修改文件前先审阅 | [受控写权限](#工部动手受控写权限) |
 | 限制费用和调用量 | [预算与限额](#户部度支预算与限额) |
 | 理解哪些内容可能发给外部服务 | [安全说明](../SECURITY.md) |
-| 逐块初译、审校、朱批与御览 | [小说翻译指南](novel-translation.md) |
-| 整理原文、检查漏段与人工译稿 | [文本工具](text-projects.md) |
+| 整本导入、手工翻译与模型译校 | [翰林院译书指南](novel-translation.md) |
 | 选择参考、确认外发材料 | [译文记忆](memory.md#显式选用参考) |
-| 查词义依据、逐段勘校与用量账本 | [词证与逐段勘校](text-projects.md#词证与逐段勘校)、[用量账本](text-projects.md#逐阶段用量账本与请求材料精简) |
-| 版本快照、对比与清理；DOCX／EPUB 回填 | [译稿版本与格式回填](text-projects.md#译稿版本与格式回填) |
-| 备份迁机、更新原文、跨章待查、通读与交稿 | [连续翻译指南](translation-continuity.md) |
+| 词证勘校、版本快照、通读交稿与用量账本 | [词证与逐段勘校](novel-translation.md#词证与逐段勘校)、[版本与回填](novel-translation.md#译稿版本与格式回填)、[用量账本](novel-translation.md#逐阶段用量账本与请求材料精简) |
 | 关注作品更新 | [作品更新提醒](subscriptions.md) |
 
 代码结构和实现取舍见 [architecture.md](architecture.md)。本指南主要用 Bash 示例；PowerShell 设置变量要用 `$env:变量名 = '值'`，不要直接照抄 `export`。示例中的任务 ID 都要换成当前项目的实际编号；同一任务的 `apply`、`discard` 等操作是不同选择，不要依次全执行。
@@ -101,11 +98,11 @@ ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 - **节略**：默认对话估算超过 48000 tokens 时，从最早的起把工具输出压成开头 200 字加一行说明（仍在外来文书边界内），最近 4 份不动。不调用模型。rc.4 起可设 `ZIYUAN_CONTEXT_TOKENS` 为正整数覆盖触发阈值；CLI、Web、TUI 启动时读取，服务须重启才生效。它不是模型硬窗口、输出上限或度支预算，最近四份输出保留也意味着节略后未必低于阈值；按所选模型能力留出提示、工具与输出余量。
 - **参数校验**：工具参数须是合法 JSON，并合乎工具声明的 JSON Schema（类型、必填、不许多余字段）；不合的不执行，作为工具错误退回模型，审计记为失败。
 
-小说翻译的逐块流程见[小说翻译指南](novel-translation.md)：可用 `text translate`、`text review`、`text revise`、`text zhupi`、`text finalize` 与 `text status` / `text resume`，写入仍须准奏。上传原文与再分发译文的权利须另行核对；长篇连续翻译的文学质量尚未验证。
+小说与整本文本翻译（手工优先与模型辅助）的完整流程见[翰林院译书指南](novel-translation.md)：支持网页、终端与 `text translate`、`text review`、`text revise`、`text zhupi`、`text finalize`、`text human` 等命令，所有落盘仍须人工确认或准奏。上传原文与再分发译文的权利须另行核对；长篇连续翻译的文学质量尚未验证。
 
 ## 奉天门：Web 界面
 
-![奉天门首屏：左为三殿，中为诏令列表，右为所选诏令的全文与工部奏本](images/web-overview.png)
+![奉天门首屏：左为翰林院与诸殿导航，中为诏令列表，右为所选诏令的全文与工部奏本](images/web-overview.png)
 
 
 ```bash
@@ -118,13 +115,13 @@ cd /path/to/your/project && ziyuan serve --port 8080
 - 在浏览器中下诏（含玉玺）、执行与中止、撤销、评定、改制、招募、任免与荐举。
 - 执行中官员的回答实时流式显示；页面每 5 秒刷新一次，以反映 CLI 等其他进程的变更。诏令只列待理会的（未结束、待评定、改动待准奏）与最近 50 件，「全部列出」可看全部；起居注只列最近 500 条，更早的用筛选查。
 - 与 CLI 对齐：页首「开常朝」即 `run --watch`（常驻执行、办完自动请都察院复核，「散朝」停止）；下诏表单与官职上限可授外藩 MCP；武英殿可检索实录、一键请礼部修 CHANGELOG、收 GitHub 来件（启动前设 `ZIYUAN_GITHUB_REPO` / `ZIYUAN_GITHUB_TOKEN`）；驿传诏令评定后可在诏令上「回报 GitHub」，准奏落盘后可「开草稿 PR」。
-- 主导航首项为独立的「翰林院」（`/#translation`）。按「译稿、资料、通读交稿、项目管理」切换工作内容；旧 `#wuying/text/…` 书签仍可定位原项目。翻译工作台可按项目、章节和译稿组选择（每组包含若干段），原文、已准奏译文、待准修订三栏对照，附上下文依据、检查问题与失效原因；可发起初译、审校、修订、逐段朱批、御览定稿、退回重修与上下文批准。长段落在各自栏内滚动，窄屏（约 390px）改为上下堆叠，刷新后保持选中的项目与块。观政令牌能看不能写，写请求回 403。用法与限制见[小说翻译指南](novel-translation.md)。
+- 主导航首项为独立的「**翰林院**」（`/#translation`），按「**译稿、资料、通读交稿、项目管理**」四个页签切换（旧 `#wuying/text/…` 书签仍可定位原项目）。「译稿」页签上方设有独立的「**手工翻译**」开关与「上一组 / 下一组」切换：默认开启手工编辑与注音／着重／粗斜体标记工具；关闭开关可展开原文、已准奏译文、待准修订三栏对照与模型初译／审校／朱批／修订流程，下方另附「全文检索与草稿替换」和「逐段勘校」。观政令牌能看不能写，写请求回 403。详细用法与限制见[翰林院译书指南](novel-translation.md)。
 
-  ![翰林院译书（1.2.0 早期布局截图）：原文、已准奏译文和待准修订对照，段下显示朱批](images/web-text-translation.png)
+  ![翰林院「译稿」工作台：默认开启「手工翻译」，原文与人工译文并排对照并支持标记工具](images/web-text-translation.png)
 
-- 「御笔札记」位于译稿区下方，可新增、搜索札记并并入项目上下文草稿；并入只写草稿，须再批准上下文才生效。
+- 切换到「**资料**」页签，可集中维护人物、术语与称谓规则草稿、确定性检查、翻译记忆、审校评论、跨章待查与底部的「**御笔札记**」；并入项目草稿后仍须批准上下文才会用于模型译校。
 
-  ![御笔札记（1.2.0 早期布局截图）：词语与段落译法、备注和并入草稿按钮，右侧可记下新札记](images/web-text-notes.png)
+  ![翰林院「资料」页签：统一维护人物术语草稿、确定性检查与临时关联](images/web-hanlin-materials.png)
 
 - 武英殿设有「兵部驿站 · 作品关注」，可勾选「新章节自动入队」；旧书签会重定向到 `#wuying`。详见[作品更新提醒](subscriptions.md)。
 
@@ -168,7 +165,7 @@ cd /path/to/your/project && ziyuan tui
 ```
 
 - 四个页签：诏令（列表 + 详情，执行中实时流式输出）、百官（考绩与各部派工路线）、起居注（事件记录）、人工译稿。上面三张图仍是前三个页签。
-- 人工译稿可以查看一块、改译文、保存草稿，再送审、准奏、定稿。送审、准奏、定稿都要再按 `y`。底栏有按键，步骤见[人工译稿](text-projects.md#人工译稿)。
+- 人工译稿可以查看一块、改译文、保存草稿，再送审、准奏、定稿。送审、准奏、定稿都要再按 `y`。底栏有按键，步骤见[人工译稿](novel-translation.md#人工译稿)。
 - 译书诏令的详情仍有一行只读关联（项目与块）。不在那一行改稿，也不在那里下诏或写朱批。
 - 键盘操作：`n` 下诏/招募，`r` 执行、`s` 停止，`c` 撤销，`a`/`d` 采纳/驳回，`p`/`d` 任命/罢免，`m` 易名，`g` 改制，`q` 退出。
 - 刑部与实录：诏令页 `x` 请刑部复勘密报、`X` 平反复勘判为误报的各处；`R` 检索翰林院实录（留空看最近 10 件）。底栏列出全部按键。
@@ -184,8 +181,8 @@ ziyuan completions zsh > ~/.ziyuan.zsh   # 借 bashcompinit；在 ~/.zshrc 的 c
 ziyuan completions fish > ~/.config/fish/completions/ziyuan.fish
 ```
 
-- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）。1.1.0 起另支持 [`text`](text-projects.md) 和 [`follow`](subscriptions.md) 的操作，1.2.0 起支持 `note` 与新增的 `text` 子命令；帮助仍显示普通文字。其他命令带 `--json` 会报错。兼容约定见 [稳定性约定](stability.md)。
-- 译书与札记（1.2.0）：`text translate|review|revise|zhupi|finalize|reopen|context approve|status|resume`、`note add|list|show|edit|remove|promote`、`follow queue on|off`。初译与修订只入队，须 `ziyuan run` 执行、`ziyuan apply` 准奏；参数见 `ziyuan text help` 与 `ziyuan note help`，流程与限制见[小说翻译指南](novel-translation.md)。
+- `--json` 支持 `court`（朝廷全貌，与 Web 的 `/api/state` 同构）、`officials`、`tasks`、`history`、`records`、`migrate`（事件簿检查；读不了时退出码为 1）、`flags`（密报逐处展开，`index` 即 `acquit` 的序号）、`mcp`（各服务的工具与参数结构）。另支持 [`text`](novel-translation.md)、`note` 和 [`follow`](subscriptions.md) 的操作；帮助仍显示普通文字。其他命令带 `--json` 会报错。兼容约定见 [稳定性约定](stability.md)。
+- 译书与札记：`text translate|review|revise|zhupi|finalize|reopen|context approve|status|resume`、`text human ...`、`note add|list|show|edit|remove|promote`、`follow queue on|off`。初译与修订只入队，须 `ziyuan run` 执行、`ziyuan apply` 准奏；参数见 `ziyuan text help` 与 `ziyuan note help`，流程与限制见[翰林院译书指南](novel-translation.md)。
 - 退出码：0 成功，1 运行中出错，2 用法错误（未知命令、参数不对）。
 - 补全首词补子命令，再按子命令补官职代码、部门、制度、`--tools` 的工具名，以及 `apply` 的 `--skip`、`--commit`；官职代码含冒号也能正常补全。
 - 实测（2026-10）：bash 5.2、zsh 5.9、fish 3.6 中实际加载并按 Tab 补全过（官职代码、部门、子命令选项）。zsh 起初加载即报错（`${COMP_LINE:0:COMP_POINT}` 在 zsh 中被当作修饰符），且含冒号的官职代码补不出，均已修正。
@@ -575,4 +572,4 @@ jj bookmark set work/my-feature -r @- && jj git push --remote origin -b work/my-
 
 ## 截图来源与验证范围
 
-文档中的 Web 截图均来自真实浏览器运行本机界面，使用模拟后端与虚构示例数据（未接真实模型密钥），主要采用「汝窑天青」主题；「译书、御笔札记、作品关注」等部分附图摄于早期版本，仅作功能与界面参考，最新分殿与分栏布局以当前 Web 页面及近期[验收记录](README.md)为准。所有截图只演示界面与交互流程，不构成真实模型能力或文学翻译质量的证明。
+文档中的 Web 截图均来自真实浏览器运行本机界面，使用模拟后端与虚构示例数据（未接真实模型密钥），主要采用「汝窑天青」主题；「翰林院、奉天门首屏、观政只读、TXT 导入、译文记忆」等主力截图已随当前版本刷新，少数早期局部附图仅作参考，最新分殿与分栏布局以当前 Web 页面及近期[验收记录](README.md)为准。所有截图只演示界面与交互流程，不构成真实模型能力或文学翻译质量的证明。

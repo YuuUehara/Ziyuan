@@ -22,6 +22,10 @@ test("page imports the actual editor, uses a persistent host and retains API con
   assert.match(html,/import\(`\/assets\/human-editor\.mjs/);
   assert.ok(!html.includes('<script type="module">'), "page script must stay classic so a failed module load cannot break login");
   assert.match(html,/id="text-human-editor"/);
+  assert.match(html,/id="text-model-drawer"/);
+  assert.match(html,/<summary>逐段勘校（六事核对、审校参考与词证登记）<\/summary>/);
+  assert.ok(!html.includes("<summary>展开逐段勘校"), "collapsible summary should not include redundant 展开 prefix");
+  assert.match(html,/\.human-mark-tools\s*\{/);
   assert.match(html,/error\.body = data/);
   assert.match(html,/error\.current = data\.current/);
   assert.ok(!html.includes("Web 尚未开放人工"));
@@ -99,9 +103,16 @@ test("409 retains current and message; disk/local resolution is never automatic"
   assert.equal(d.state,"conflict"); assert.equal(d.paragraphs[0].text,"本地"); assert.equal(d.message,"修订已改变");
   assert.equal(d.revision,"1"); assert.deepEqual(d.conflictCurrent,current);
 });
-test("progress labels drafted versus historical submitted and next undrafted", () => {
+test("progress labels drafted versus historical submitted, collapses multi-chapter details, and avoids duplicating single-chapter totals", () => {
   const html = chapterProgress({chapters:[{chapter:"一",total:4,drafted:2,submitted:3,approved:1,finalized:0,not_started:2}],next_untranslated:"b"});
   assert.match(html,/已起草 2/); assert.match(html,/历史送审 3/); assert.match(html,/下一未起草/);
+  const single = chapterProgress({totals:{total:19,drafted:1,submitted:0,approved:0,finalized:0,not_started:18},chapters:[{chapter:"c0001",total:19,drafted:1,submitted:0,approved:0,finalized:0,not_started:18}],next_untranslated:"c0001-b0002"});
+  assert.ok(!single.includes("第1章："), "single chapter should not repeat identical totals line");
+  assert.ok(!single.includes("各章进度"));
+  const multi = chapterProgress({totals:{total:10,drafted:2,submitted:0,approved:0,finalized:0,not_started:8},chapters:[{chapter:"c0001",total:5,drafted:2,submitted:0,approved:0,finalized:0,not_started:3},{chapter:"c0002",total:5,drafted:0,submitted:0,approved:0,finalized:0,not_started:5}],next_untranslated:"c0001-b0003"});
+  assert.match(multi, /各章进度（2 章）/);
+  assert.match(multi, /第1章：共 5/);
+  assert.match(multi, /第2章：共 5/);
 });
 test("GET started before a successful write cannot roll the state back", async () => {
   const d=new HumanDraft("p","b",source,storage()); d.receive(remote("1","旧"));

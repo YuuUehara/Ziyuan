@@ -15,7 +15,7 @@ export function toolPanel(tool) {
 }
 
 const definitions = [
-  ['draft', '译稿', '在左侧选章节，直接写人工译稿；需要模型初译时，使用下方译书操作区。'],
+  ['draft', '译稿', '在左侧选译稿组，直接写人工译稿；需要三栏对照或模型译校时，展开下方对应面板或关闭「手工翻译」。'],
   ['materials', '资料', '集中维护人物、术语、参考译法与跨章待查。保存资料后仍须按原流程单独批准。'],
   ['delivery', '通读交稿', '先通读和预检，再导出定稿；取回原件也在这里。'],
   ['manage', '项目管理', '新项目先导入原文；原文更新、版本记录、备份与恢复也收在这里。'],
@@ -56,13 +56,19 @@ export function mountWorkspace(card) {
   function arrange() {
     // Existing editor hosts are moved intact; switching tabs never reconstructs them.
     for (const [selector, panel] of [
-      ['#human-mode-bar','draft'], ['#text-human-editor','draft'], ['.text-compare','draft'], ['#text-materials','draft'], ['#text-actions','draft'], ['#text-action-result','draft'], ['#verification-panel','draft'], ['#text-n2b-hints','draft'],
+      ['#human-mode-bar','draft'], ['#text-human-editor','draft'], ['#text-n2b-hints','draft'], ['#text-model-drawer','draft'], ['#verification-panel','draft'],
       ['#text-materials-panel','materials'], ['#text-memory','materials'], ['.text-notes-layout','materials'],
       ['#text-export','delivery'], ['#text-import','manage'], ['#text-versions','manage'],
     ]) move(card.querySelector(selector), panel);
     for (const tool of card.querySelectorAll('[data-workspace-tool]')) {
       const kind = tool.dataset.workspaceTool, panel = panels.get(toolPanel(kind));
-      const anchor = kind === 'document-import' ? card.querySelector('#text-versions') : kind === 'reading' ? card.querySelector('#text-export') : null;
+      const anchor = kind === 'document-import'
+        ? card.querySelector('#text-versions')
+        : kind === 'reading'
+          ? card.querySelector('#text-export')
+          : kind === 'search'
+            ? card.querySelector('#verification-panel')
+            : null;
       if (anchor?.parentElement === panel) {
         if (tool.parentElement !== panel || tool.nextElementSibling !== anchor) panel.insertBefore(tool, anchor);
       } else move(tool, toolPanel(kind));

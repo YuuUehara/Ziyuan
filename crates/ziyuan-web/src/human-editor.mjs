@@ -7,7 +7,7 @@ import {
 const STATE_LABELS = {dirty:"未保存",saving:"保存中",saved:"已保存",conflict:"冲突",invalid:"不合规"};
 const copy = (v) => JSON.parse(JSON.stringify(v));
 const equal = (a,b) => JSON.stringify(a) === JSON.stringify(b);
-const escape = (v) => String(v ?? "").replace(/[&<>"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const escape = (v) => String(v ?? "").replace(/[&<>\"']/g,c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const snapshot = (paragraphs) => JSON.stringify(paragraphs);
 function requestId() {
   if(globalThis.crypto.randomUUID) return globalThis.crypto.randomUUID();
@@ -46,10 +46,15 @@ export function previewHtml(paragraph) {
 export function chapterProgress(progress) {
   if(!progress) return "";
   const line = c => `共 ${Number(c.total)||0} · 已起草 ${Number(c.drafted)||0} · 历史送审 ${Number(c.submitted)||0} · 准奏 ${Number(c.approved)||0} · 定稿 ${Number(c.finalized)||0} · 未起草 ${Number(c.not_started)||0}`;
-  return `<p class="hint">起草＝至少一段非空；送审为历史记录，不代表当前修订已送审。</p>` +
-    (progress.totals ? `<p>${line(progress.totals)}</p>` : "") +
-    (progress.chapters||[]).map(c=>`<p class="hint">${escape(textLocation(c.chapter))}：${line(c)}</p>`).join("") +
-    `<button type="button" data-view data-human-next ${progress.next_untranslated ? "" : "disabled"}>下一未起草${progress.next_untranslated ? "："+escape(textLocation(progress.next_untranslated)) : "：无"}</button>`;
+  const chapters = progress.chapters || [];
+  const summary = progress.totals || (chapters.length === 1 ? chapters[0] : null);
+  const multi = chapters.length > 1
+    ? `<details class="human-progress-chapters"><summary>各章进度（${chapters.length} 章）</summary>${chapters.map(c=>`<p class="hint">${escape(textLocation(c.chapter))}：${line(c)}</p>`).join("")}</details>`
+    : "";
+  return `<div class="human-progress"><div class="human-progress-row"><div class="human-progress-stats">` +
+    (summary ? `<p class="human-progress-total">${line(summary)}</p>` : "") +
+    `<p class="hint">起草＝至少一段非空；送审为历史记录，不代表当前修订已送审。</p></div>` +
+    `<button type="button" class="small" data-view data-human-next ${progress.next_untranslated ? "" : "disabled"}>下一未起草${progress.next_untranslated ? "："+escape(textLocation(progress.next_untranslated)) : "：无"}</button></div>${multi}</div>`;
 }
 
 /** One block, independent of the active page selection. UI and Node tests share this state machine. */
@@ -278,14 +283,15 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     });
     details(entry);
   }
-  function button(label,action,parent) {
-    const b=host.ownerDocument.createElement("button"); b.type="button"; b.className="small";
+  function button(label,action,parent,variant="") {
+    const b=host.ownerDocument.createElement("button"); b.type="button"; b.className=variant?`small ${variant}`:"small";
     b.textContent=label; if(action) b.dataset.action=action; parent.append(b); return b;
   }
   function buildRows(entry) {
     entry.paras.replaceChildren(); entry.rows=[];
     for(const [i,p] of entry.draft.paragraphs.entries()) {
       const section=host.ownerDocument.createElement("section"); section.className="human-paragraph";
+      section.dataset.humanPara=p.id;
       section.innerHTML=`<h4 title="内部编号：${escape(p.id)}">${escape(textLocation(p.id))}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><label>人工译文<textarea aria-label="${escape(textLocation(p.id))} 人工译文"></textarea></label></div><div class="actions human-mark-tools"></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
       const textarea=section.querySelector("textarea"), tools=section.querySelector(".human-mark-tools");
       for(const [kind,label] of Object.entries(KIND_LABELS)) {
@@ -319,7 +325,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
   function create(context) {
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
-    root.innerHTML=`<h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段编辑译文，选中文字后可加注音、着重或粗斜体。正文用浏览器的撤销功能；标记可单独撤销，修改正文后会清空标记撤销记录。完成后依次保存、送审、准奏，再御览定稿，每一步都会核对当前稿件。</p><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
+    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段填写译文；选中文字可加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
     const entry={draft:d,root,rows:[],buttons:new Map(),request:0,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};
@@ -329,7 +335,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     button("确认保留本地，取最新基准","rebase",entry.conflict);
     const actions=root.querySelector(".human-actions");
     for(const [action,label] of [["save","保存人工草稿"],["submit","送审当前已保存修订"],["approve","人工准奏"],["finalize","人工御览定稿"],["undo","撤销标记"],["redo","重做标记"]]) {
-      entry.buttons.set(action,button(label,action,actions));
+      entry.buttons.set(action,button(label,action,actions,action==="save"?"primary":""));
     }
     entry.refresh=button("刷新人工状态","refresh",actions); entry.refresh.dataset.view="";
     root.addEventListener("click",async event=>{

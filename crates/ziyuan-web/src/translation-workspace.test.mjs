@@ -37,12 +37,17 @@ test('management tools never become the default writing surface', () => {
   assert.equal(toolPanel('document-export'),'delivery');
 });
 
-test('mountWorkspace places human-mode-bar directly above text-human-editor in draft panel', () => {
+test('mountWorkspace prioritizes manual editor above secondary drawers in draft panel', () => {
   globalThis.MutationObserver = class { observe() {} };
   const makeNode = (id, cls = '') => {
     const node = {
       id, className: cls, dataset: {}, attributes: {}, children: [], hidden: false, parentElement: null,
       ownerDocument: null,
+      get nextElementSibling() {
+        if (!this.parentElement) return null;
+        const idx = this.parentElement.children.indexOf(this);
+        return idx >= 0 && idx + 1 < this.parentElement.children.length ? this.parentElement.children[idx + 1] : null;
+      },
       setAttribute(k, v) { this.attributes[k] = v; },
       addEventListener() {},
       append(...items) {
@@ -50,16 +55,23 @@ test('mountWorkspace places human-mode-bar directly above text-human-editor in d
           if (item.parentElement && item.parentElement !== this) {
             item.parentElement.children = item.parentElement.children.filter((c) => c !== item);
           }
-          item.parentElement = this;
-          this.children.push(item);
+          if (!this.children.includes(item)) {
+            item.parentElement = this;
+            this.children.push(item);
+          }
         }
       },
       insertBefore(item, ref) {
-        this.append(item);
+        if (item.parentElement && item.parentElement !== this) {
+          item.parentElement.children = item.parentElement.children.filter((c) => c !== item);
+        }
+        this.children = this.children.filter((c) => c !== item);
+        item.parentElement = this;
         if (ref) {
-          this.children = this.children.filter((c) => c !== item);
           const idx = this.children.indexOf(ref);
           this.children.splice(idx >= 0 ? idx : this.children.length, 0, item);
+        } else {
+          this.children.push(item);
         }
       },
       querySelector(sel) {
@@ -76,17 +88,34 @@ test('mountWorkspace places human-mode-bar directly above text-human-editor in d
   const status = makeNode('text-status'); status.ownerDocument = doc;
   const bar = makeNode('human-mode-bar'); bar.ownerDocument = doc;
   const editor = makeNode('text-human-editor'); editor.ownerDocument = doc;
+  const hints = makeNode('text-n2b-hints'); hints.ownerDocument = doc;
+  const drawer = makeNode('text-model-drawer'); drawer.ownerDocument = doc;
+  const verification = makeNode('verification-panel'); verification.ownerDocument = doc;
+  const search = makeNode('continuity-search'); search.ownerDocument = doc; search.dataset.workspaceTool = 'search';
   main.append(status);
+  const bySelector = {
+    '.text-main': main,
+    '#human-mode-bar': bar,
+    '#text-human-editor': editor,
+    '#text-n2b-hints': hints,
+    '#text-model-drawer': drawer,
+    '#verification-panel': verification,
+  };
   const card = {
     ownerDocument: doc,
-    querySelector(sel) {
-      return ({ '.text-main': main, '#human-mode-bar': bar, '#text-human-editor': editor })[sel] || null;
-    },
-    querySelectorAll() { return []; },
+    querySelector(sel) { return bySelector[sel] || null; },
+    querySelectorAll(sel) { return sel === '[data-workspace-tool]' ? [search] : []; },
   };
   mountWorkspace(card);
   const draftPanel = main.children.find((c) => c.dataset.workspacePanel === 'draft');
   const idxBar = draftPanel.children.indexOf(bar);
   const idxEditor = draftPanel.children.indexOf(editor);
+  const idxHints = draftPanel.children.indexOf(hints);
+  const idxDrawer = draftPanel.children.indexOf(drawer);
+  const idxSearch = draftPanel.children.indexOf(search);
+  const idxVerification = draftPanel.children.indexOf(verification);
   assert.ok(idxBar >= 0 && idxEditor === idxBar + 1, 'human-mode-bar must precede text-human-editor');
+  assert.ok(idxHints === idxEditor + 1, 'n2b hints should follow text-human-editor');
+  assert.ok(idxDrawer === idxHints + 1, 'model drawer should follow n2b hints');
+  assert.ok(idxSearch === idxDrawer + 1 && idxVerification === idxSearch + 1, 'search should precede verification-panel');
 });
