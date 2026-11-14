@@ -554,6 +554,8 @@
   .human-bilingual textarea { display: block; min-height: 120px; font-family: var(--text); }
   .human-mark-tools { margin-top: 12px; }
   .human-preview, .human-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .human-message:empty { display: none; }
+  .human-message[data-tone="error"] { color: var(--bad); background: var(--well); border: 1px solid var(--bad); border-radius: var(--radius); padding: 8px 10px; font-size: 13px; }
   .human-preview { padding: 12px; margin-top: 12px; background: var(--well); }
   .human-paragraph td { white-space: normal; overflow-wrap: anywhere; }
   @media (max-width: 760px) { .human-bilingual { grid-template-columns: minmax(0, 1fr); } }
@@ -1354,10 +1356,20 @@ async function api(path, body) {
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const data = await response.json().catch(() => ({ error: response.statusText }));
+  const httpFallback = (status) => ({
+    400: "请求内容或参数格式有误",
+    401: "缺少访问令牌",
+    403: "当前令牌只读或无此操作权限",
+    404: "请求的接口或记录不存在",
+    409: "状态冲突，请刷新后重试",
+    413: "提交的内容过大",
+    415: "请求内容须为 JSON 格式",
+    422: "提交的数据格式不完整或字段有误",
+  }[status] || (status >= 500 ? "服务器处理失败，请稍后重试" : `请求失败（HTTP ${status}）`));
+  const data = await response.json().catch(() => ({ error: httpFallback(response.status) }));
   if (response.status === 401) { $("locked").classList.add("show"); document.body.classList.remove("authed"); }
   if (!response.ok) {
-    const error = new Error(data.error || data.message || (response.status === 401 ? "缺少访问令牌" : response.statusText));
+    const error = new Error(data.error || data.message || httpFallback(response.status));
     error.status = response.status;
     error.body = data;
     error.current = data.current;

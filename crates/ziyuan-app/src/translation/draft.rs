@@ -5,7 +5,7 @@ use super::{
     Result, TargetMark, TargetMarkKind, TranslationError, Translations, check_plain_dirs,
     ensure_plain_dirs, find_block, invalid, markup, sha256_hex,
 };
-use crate::text_project::{BlockParagraph, Project, PromptBlock};
+use crate::text_project::{BlockParagraph, IssueKind, Project, PromptBlock, ValidationIssue};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -475,7 +475,7 @@ impl Translations {
             &candidate.text_structure().serialized()?,
         )?;
         if !report.valid {
-            return Err(invalid("人工送审候选未通过段落归属与完整性检查"));
+            return Err(invalid(format_validation_issues(&report.issues)));
         }
         if self.draft_basis_in(&project, &r.block)? != r.basis {
             return Err(TranslationError::DraftBasisChanged);
@@ -774,10 +774,7 @@ impl Translations {
             .texts()
             .check_in(&p, block, &candidate.text_structure().serialized()?)?;
         if !report.valid {
-            return Err(invalid(format!(
-                "人工提交结构检查未通过：{:?}",
-                report.issues
-            )));
+            return Err(invalid(format_validation_issues(&report.issues)));
         }
         submission.candidate_hash = sha256_hex(&bytes);
         book.submissions
@@ -1229,7 +1226,7 @@ impl Translations {
             self.texts()
                 .check(project, block, &candidate.text_structure().serialized()?)?;
         if !report.valid {
-            return Err(invalid("送审候选未通过段落归属与完整性检查"));
+            return Err(invalid(format_validation_issues(&report.issues)));
         }
         // The target, not the candidate, decides format and bytes: an unmarked v2
         // candidate lands as the first format, which finalization can read back.
@@ -1559,5 +1556,191 @@ impl Translations {
         let dir = super::ensure_plain_dirs(&self.root, &["translations", project, "context"])?;
         super::write_plain(&dir.join("glossary.json"), &bytes)?;
         Ok(bytes.len())
+    }
+}
+
+fn parse_chapter_para(id: &str) -> Option<(usize, usize)> {
+    let rest = id.strip_prefix('c')?;
+    let (ch, p) = rest.split_once("-p")?;
+    if ch.is_empty()
+        || !ch.bytes().all(|b| b.is_ascii_digit())
+        || p.is_empty()
+        || !p.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((ch.parse().ok()?, p.parse().ok()?))
+}
+
+fn format_paragraph_refs(refs: &[(Option<&str>, Option<usize>)]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut prev_chapter: Option<usize> = None;
+    let mut i = 0usize;
+    while i < refs.len() {
+        let (id, pos) = refs[i];
+        if let Some(id_str) = id {
+            if let Some((ch, start_p)) = parse_chapter_para(id_str) {
+                let mut end_p = start_p;
+                while i + 1 < refs.len() {
+                    if let Some((next_ch, next_p)) = refs[i + 1].0.and_then(parse_chapter_para)
+                        && next_ch == ch
+                        && next_p == end_p + 1
+                    {
+                        end_p = next_p;
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let prefix = if prev_chapter == Some(ch) {
+                    String::new()
+                } else {
+                    prev_chapter = Some(ch);
+                    format!("第{ch}章 · ")
+                };
+                if end_p > start_p {
+                    parts.push(format!("{prefix}第{start_p}～{end_p}段"));
+                } else {
+                    parts.push(format!("{prefix}第{start_p}段"));
+                }
+            } else {
+                prev_chapter = None;
+                parts.push(id_str.to_owned());
+            }
+        } else if let Some(p) = pos {
+            prev_chapter = None;
+            parts.push(format!("第 {p} 项"));
+        }
+        i += 1;
+    }
+    const LIMIT: usize = 6;
+    if parts.len() > LIMIT {
+        format!("{} 等共 {} 处", parts[..LIMIT].join("、"), refs.len())
+    } else {
+        parts.join("、")
+    }
+}
+
+pub(crate) fn format_validation_issues(issues: &[ValidationIssue]) -> String {
+    if issues.is_empty() {
+        return "人工送审结构检查未通过".into();
+    }
+    let mut empty = Vec::new();
+    let mut missing = Vec::new();
+    let mut duplicate = Vec::new();
+    let mut out_of_order = Vec::new();
+    let mut unknown = Vec::new();
+    let mut others = Vec::new();
+    for issue in issues {
+        let loc = (issue.paragraph_id.as_deref(), issue.position);
+        match issue.kind {
+            IssueKind::EmptyText => empty.push(loc),
+            IssueKind::Missing => missing.push(loc),
+            IssueKind::Duplicate => duplicate.push(loc),
+            IssueKind::OutOfOrder => out_of_order.push(loc),
+            IssueKind::Unknown => unknown.push(loc),
+            IssueKind::WrongBlock
+            | IssueKind::InvalidJson
+            | IssueKind::NewerVersion
+            | IssueKind::UnsupportedVersion => others.push(issue.message.clone()),
+        }
+    }
+    let mut parts = Vec::new();
+    if !empty.is_empty() {
+        let locs = format_paragraph_refs(&empty);
+        if empty.len() == 1 {
+            parts.push(format!(
+                "以下段落尚未填写译文（不能为空或仅含空白）：{locs}"
+            ));
+        } else {
+            parts.push(format!(
+                "以下 {} 段尚未填写译文（不能为空或仅含空白）：{locs}",
+                empty.len()
+            ));
+        }
+    }
+    if !missing.is_empty() {
+        let locs = format_paragraph_refs(&missing);
+        if missing.len() == 1 {
+            parts.push(format!("缺少译文段落：{locs}"));
+        } else {
+            parts.push(format!("缺少 {} 段译文：{locs}", missing.len()));
+        }
+    }
+    if !duplicate.is_empty() {
+        parts.push(format!(
+            "存在重复段落：{}",
+            format_paragraph_refs(&duplicate)
+        ));
+    }
+    if !out_of_order.is_empty() {
+        parts.push(format!(
+            "以下段落顺序与原文不一致：{}",
+            format_paragraph_refs(&out_of_order)
+        ));
+    }
+    if !unknown.is_empty() {
+        parts.push(format!(
+            "存在不属于本组的段落：{}",
+            format_paragraph_refs(&unknown)
+        ));
+    }
+    parts.extend(others);
+    format!(
+        "人工送审结构检查未通过（共 {} 处）：{}",
+        issues.len(),
+        parts.join("；")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_validation_issues;
+    use crate::text_project::{IssueKind, ValidationIssue};
+
+    fn issue(kind: IssueKind, pid: Option<&str>, pos: Option<usize>, msg: &str) -> ValidationIssue {
+        ValidationIssue {
+            kind,
+            chapter_id: "c0001".into(),
+            block_id: "c0001-b0001".into(),
+            paragraph_id: pid.map(str::to_owned),
+            position: pos,
+            message: msg.into(),
+        }
+    }
+
+    #[test]
+    fn formats_contiguous_empty_paragraphs_cleanly() {
+        let issues: Vec<_> = (3..=14)
+            .map(|n| {
+                issue(
+                    IssueKind::EmptyText,
+                    Some(&format!("c0001-p{n:04}")),
+                    Some(n),
+                    "候选段落文本不能为空或仅有空白",
+                )
+            })
+            .collect();
+        let text = format_validation_issues(&issues);
+        assert_eq!(
+            text,
+            "人工送审结构检查未通过（共 12 处）：以下 12 段尚未填写译文（不能为空或仅含空白）：第1章 · 第3～14段"
+        );
+        assert!(!text.contains("ValidationIssue"));
+    }
+
+    #[test]
+    fn formats_mixed_and_non_standard_issues_cleanly() {
+        let issues = vec![
+            issue(IssueKind::EmptyText, Some("c0001-p0002"), Some(2), "空"),
+            issue(IssueKind::EmptyText, Some("c0001-p0004"), Some(4), "空"),
+            issue(IssueKind::Missing, Some("p-custom"), None, "缺少"),
+            issue(IssueKind::WrongBlock, None, None, "预期 b1，收到 b2"),
+        ];
+        let text = format_validation_issues(&issues);
+        assert_eq!(
+            text,
+            "人工送审结构检查未通过（共 4 处）：以下 2 段尚未填写译文（不能为空或仅含空白）：第1章 · 第2段、第4段；缺少译文段落：p-custom；预期 b1，收到 b2"
+        );
     }
 }

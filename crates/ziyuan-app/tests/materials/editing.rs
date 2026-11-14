@@ -287,7 +287,14 @@ fn diagnostic_wire_shape_and_production_display_remain_stable() {
     }
     assert_eq!(
         MaterialError::Conflict { current: None }.to_string(),
-        "资料草稿修订冲突，现行修订为 None；请保留输入并重新读取"
+        "资料草稿修订冲突，现行修订为 无（尚无草稿）；请保留输入并重新读取"
+    );
+    assert_eq!(
+        MaterialError::Conflict {
+            current: Some("rev-2".into())
+        }
+        .to_string(),
+        "资料草稿修订冲突，现行修订为 rev-2；请保留输入并重新读取"
     );
     assert_eq!(
         MaterialError::RequestConflict.to_string(),

@@ -2,7 +2,7 @@
 
 初次使用先看[使用指南](guide.md)；译书与本地文本工作台操作集中查阅[翰林院译书指南](novel-translation.md)，再按需配合[译文记忆与参考选用](memory.md)与[作品更新提醒](subscriptions.md)。
 
-发布进度与验证记录见[验收归档](#验收记录历史归档)及 [1.15.2 验收记录](acceptance/1.15.2.md)，已公开发布的二进制包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准，各版变化见 [CHANGELOG](../CHANGELOG.md)。
+发布进度与验证记录见[验收归档](#验收记录历史归档)及 [1.15.3 验收记录](acceptance/1.15.3.md)，已公开发布的二进制包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准，各版变化见 [CHANGELOG](../CHANGELOG.md)。
 
 ## 使用指南
 
@@ -28,6 +28,7 @@
 
 每份归档只记录当时实际执行过的检查范围与未测事项；历史版本结果不代替当前源码检查。
 
+- [1.15.3](acceptance/1.15.3.md)
 - [1.15.2](acceptance/1.15.2.md)
 - [1.15.1](acceptance/1.15.1.md)
 - [1.15.0](acceptance/1.15.0.md)

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use ziyuan_core::CourtEvent;
 use ziyuan_memory::{
     Digests, EmbeddingProvider, EmbeddingSignature, Identity, MemoryError, MemoryIndex,
-    MemoryRecord, Origin, ParaPairInput, PromptBlockView, Text, Watermark, pair_paragraphs,
-    sha256_hex, workspace_id_from_canonical_text,
+    MemoryRecord, Origin, PairingProblem, ParaPairInput, PromptBlockView, Text, Watermark,
+    pair_paragraphs, sha256_hex, workspace_id_from_canonical_text,
 };
 use ziyuan_storage::{EventStore, LockScope, Workspace, encode_event_line};
 
@@ -311,8 +311,8 @@ impl<S: EventStore> Session<S> {
                         })
                         .collect(),
                 };
-                let pairs =
-                    pair_paragraphs(&source, &view).map_err(|problems| format!("{problems:?}"))?;
+                let pairs = pair_paragraphs(&source, &view)
+                    .map_err(|problems| format_pairing_problems(&problems))?;
                 let mut finalized_events = Vec::new();
                 let mut versions = None;
                 let mut human = None;
@@ -687,4 +687,57 @@ fn pair_matches(pair: &FinalizedPair, record: &MemoryRecord) -> bool {
         && pair.target == record.target.text
         && pair.digests == record.digests
         && pair.origin == record.origin
+}
+
+fn format_pairing_problems(problems: &[PairingProblem]) -> String {
+    problems
+        .iter()
+        .map(|p| match p {
+            PairingProblem::NewerVersion { found } => format!("unsupported_schema_version {found}"),
+            PairingProblem::UnsupportedVersion { found } => {
+                format!("unsupported_schema_version {found}")
+            }
+            PairingProblem::WrongBlock { expected, found } => {
+                format!("wrong_block(expected={expected},found={found})")
+            }
+            PairingProblem::Missing { id } => format!("missing_paragraph({id})"),
+            PairingProblem::Duplicate { id, position } => {
+                format!("duplicate_paragraph({id}@{position})")
+            }
+            PairingProblem::Unknown { id, position } => {
+                format!("unknown_paragraph({id}@{position})")
+            }
+            PairingProblem::OutOfOrder { id, position } => {
+                format!("out_of_order_paragraph({id}@{position})")
+            }
+            PairingProblem::EmptyText { id, position } => {
+                format!("empty_paragraph({id}@{position})")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_pairing_problems;
+    use ziyuan_memory::PairingProblem;
+
+    #[test]
+    fn formats_pairing_problems_without_rust_debug_structs() {
+        let out = format_pairing_problems(&[
+            PairingProblem::Missing {
+                id: "c0001-p0002".into(),
+            },
+            PairingProblem::EmptyText {
+                id: "c0001-p0003".into(),
+                position: 3,
+            },
+        ]);
+        assert_eq!(
+            out,
+            "missing_paragraph(c0001-p0002); empty_paragraph(c0001-p0003@3)"
+        );
+        assert!(!out.contains("EmptyText {"));
+    }
 }

@@ -568,9 +568,7 @@ impl Translations {
                 issues.push(QaIssue {
                     paragraph: source_para.id.clone(),
                     code: "number_mismatch",
-                    message: format!(
-                        "数字不一致：原文 {source_digits:?}，译文 {target_digits:?}。"
-                    ),
+                    message: format_number_mismatch(&source_digits, &target_digits),
                 });
             }
         }
@@ -763,5 +761,33 @@ impl Translations {
             Ok::<_, super::TranslationError>((book, record))
         })?;
         Ok(record)
+    }
+}
+
+fn format_number_mismatch(source_digits: &str, target_digits: &str) -> String {
+    fn show(d: &str) -> &str {
+        if d.is_empty() { "无" } else { d }
+    }
+    format!(
+        "数字不一致：原文含 {}，译文含 {}。",
+        show(source_digits),
+        show(target_digits)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_number_mismatch;
+
+    #[test]
+    fn formats_number_mismatch_without_debug_quotes() {
+        assert_eq!(
+            format_number_mismatch("1904", ""),
+            "数字不一致：原文含 1904，译文含 无。"
+        );
+        assert_eq!(
+            format_number_mismatch("1904", "1905"),
+            "数字不一致：原文含 1904，译文含 1905。"
+        );
     }
 }

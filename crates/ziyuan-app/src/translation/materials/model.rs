@@ -131,7 +131,8 @@ impl fmt::Display for MaterialError {
             Self::Path(message) => f.write_str(message),
             Self::Conflict { current } => write!(
                 f,
-                "资料草稿修订冲突，现行修订为 {current:?}；请保留输入并重新读取"
+                "资料草稿修订冲突，现行修订为 {}；请保留输入并重新读取",
+                current.as_deref().unwrap_or("无（尚无草稿）")
             ),
             Self::RequestConflict => f.write_str("资料草稿请求身份已被不同内容使用"),
             Self::ProjectChanged => f.write_str("资料所依据的项目已变化，请重新读取并核对"),

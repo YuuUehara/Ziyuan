@@ -48,7 +48,25 @@ impl fmt::Display for WorkspaceError {
         match self {
             Self::Io(e) => write!(f, "工作区读写失败: {e}"),
             Self::Timeout { waited } => {
-                write!(f, "等待工作区写入锁超过 {waited:?}，请稍后重试")
+                if waited.as_secs() >= 1 && waited.subsec_millis() == 0 {
+                    write!(
+                        f,
+                        "等待工作区写入锁超过 {} 秒，请稍后重试",
+                        waited.as_secs()
+                    )
+                } else if waited.as_secs() >= 1 {
+                    write!(
+                        f,
+                        "等待工作区写入锁超过 {:.1} 秒，请稍后重试",
+                        waited.as_secs_f64()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "等待工作区写入锁超过 {} 毫秒，请稍后重试",
+                        waited.as_millis()
+                    )
+                }
             }
             Self::Unsafe(reason) => write!(f, "工作区路径不安全: {reason}"),
             Self::Corrupt(reason) => write!(f, "工作区控制文件不合规: {reason}"),
@@ -2107,5 +2125,30 @@ mod tests {
         guard.remove_record().unwrap();
         assert_eq!(guard.reserve().unwrap(), 3);
         assert_no_temps(&root);
+    }
+
+    #[test]
+    fn timeout_display_is_human_readable() {
+        assert_eq!(
+            WorkspaceError::Timeout {
+                waited: Duration::from_secs(5),
+            }
+            .to_string(),
+            "等待工作区写入锁超过 5 秒，请稍后重试"
+        );
+        assert_eq!(
+            WorkspaceError::Timeout {
+                waited: Duration::from_millis(2500),
+            }
+            .to_string(),
+            "等待工作区写入锁超过 2.5 秒，请稍后重试"
+        );
+        assert_eq!(
+            WorkspaceError::Timeout {
+                waited: Duration::from_millis(350),
+            }
+            .to_string(),
+            "等待工作区写入锁超过 350 毫秒，请稍后重试"
+        );
     }
 }

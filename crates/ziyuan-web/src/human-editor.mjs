@@ -17,6 +17,32 @@ function requestId() {
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
+export function summarizeParagraphIds(ids) {
+  const parse = (id) => {
+    const m = /^c(\d+)-p(\d+)$/.exec(String(id || ""));
+    return m ? [Number(m[1]), Number(m[2])] : null;
+  };
+  const parts = [];
+  let prevCh = null;
+  for (let i = 0; i < ids.length; i++) {
+    const parsed = parse(ids[i]);
+    if (parsed) {
+      const [ch, startP] = parsed;
+      let endP = startP;
+      while (i + 1 < ids.length) {
+        const next = parse(ids[i + 1]);
+        if (next && next[0] === ch && next[1] === endP + 1) { endP = next[1]; i++; } else break;
+      }
+      const prefix = prevCh === ch ? "" : (prevCh = ch, `第${ch}章 · `);
+      parts.push(endP > startP ? `${prefix}第${startP}～${endP}段` : `${prefix}第${startP}段`);
+    } else {
+      prevCh = null;
+      parts.push(textLocation(ids[i]));
+    }
+  }
+  return parts.length > 6 ? `${parts.slice(0, 6).join("、")} 等共 ${ids.length} 段` : parts.join("、");
+}
+
 export function draftStats(paragraphs) {
   let bytes=0, marks=0, body=0, reading=0;
   const problems=[];
@@ -65,7 +91,7 @@ export class HumanDraft {
     this.paragraphs=source.map(p=>({id:p.id,text:"",marks:[]}));
     this.revision=null; this.basis=null; this.remote=null; this.initialized=false;
     this.saved=snapshot(this.paragraphs); this.busy=false; this.composing=false;
-    this.conflict=false; this.conflictCurrent=null; this.message=""; this.viewer=false;
+    this.conflict=false; this.conflictCurrent=null; this.message=""; this.messageTone=""; this.viewer=false;
     this.undo=[]; this.redo=[]; this.pendingSave=null; this.recovery=null; this.epoch=0;
     try { this.recovery=JSON.parse(storage?.getItem(this.key)||"null"); } catch {}
   }
@@ -94,6 +120,7 @@ export class HumanDraft {
     }
     if(changed) {
       this.conflict=true;
+      this.messageTone="error";
       this.message="已保存的稿件或参考材料有变化。请选择载入最新稿件，或保留页面中的文字，核对后重新保存。";
     }
     return false;
@@ -103,7 +130,7 @@ export class HumanDraft {
     this.paragraphs=view.draft ? paragraphsFromWire(view.draft.paragraphs) : this.source.map(p=>({id:p.id,text:"",marks:[]}));
     this.basis=copy(view.basis); this.revision=view.revision ?? null;
     this.saved=snapshot(this.paragraphs); this.initialized=true; this.conflict=false;
-    this.undo=[]; this.redo=[]; this.pendingSave=null; this.message=view.message||"";
+    this.undo=[]; this.redo=[]; this.pendingSave=null; this.message=view.message||""; this.messageTone="";
     // A mirror identical to the disk draft holds nothing to recover.
     if(this.recovery && snapshot(this.recovery.paragraphs)===this.saved && this.recovery.revision===this.revision) this.dismissRecovery();
   }
@@ -111,7 +138,7 @@ export class HumanDraft {
     if(this.composing || this.viewer || this.recovery) return;
     try {
       this.storage?.setItem(this.key,JSON.stringify({paragraphs:this.paragraphs,basis:this.basis,revision:this.revision}));
-    } catch { this.message="浏览器暂存失败，可能是空间或权限不足。请先保存草稿，再关闭页面。"; }
+    } catch { this.messageTone="error"; this.message="浏览器暂存失败，可能是空间或权限不足。请先保存草稿，再关闭页面。"; }
   }
   restore() {
     if(!this.recovery || this.locked || this.composing || this.busy) return false;
@@ -119,7 +146,7 @@ export class HumanDraft {
     if(!Array.isArray(r.paragraphs) || r.paragraphs.length!==this.source.length ||
       r.paragraphs.some((p,i)=>!p || p.id!==this.source[i].id || typeof p.text!=="string" || !Array.isArray(p.marks) ||
         p.marks.some(m=>!m || typeof m!=="object")) || !r.basis || typeof r.basis!=="object") {
-      this.message="页面暂存的段落与当前原文不一致，无法恢复。"; return false;
+      this.messageTone="error"; this.message="页面暂存的段落与当前原文不一致，无法恢复。"; return false;
     }
     this.paragraphs=copy(r.paragraphs);
     this.conflict=r.revision!==this.revision || !equal(r.basis,this.basis);
@@ -136,7 +163,7 @@ export class HumanDraft {
     this.basis=copy(this.remote.basis); this.revision=this.remote.revision ?? null;
     this.conflict=false; this.conflictCurrent=null; this.pendingSave=null;
     // Even identical text needs saving when rebased onto changed source material.
-    this.saved=""; this.message="已保留页面中的文字并载入最新参考材料，请核对后重新保存，再送审。"; this.mirror(); return true;
+    this.saved=""; this.messageTone=""; this.message="已保留页面中的文字并载入最新参考材料，请核对后重新保存，再送审。"; this.mirror(); return true;
   }
   beginComposition() { this.composing=true; }
   endComposition(index,text) { this.composing=false; this.editText(index,text); }
@@ -161,7 +188,7 @@ export class HumanDraft {
     const issues=validateMarks(p.text,marks);
     if(issues.length) throw new Error(issues[0].message);
     const changed=this.changeMarks(index,marks);
-    if(changed) this.message="";
+    if(changed) { this.message=""; this.messageTone=""; }
     return changed;
   }
   remove(index,mark) { return this.changeMarks(index,removeMark(this.paragraphs[index].marks,mark)); }
@@ -175,6 +202,7 @@ export class HumanDraft {
   redoMarks() { return this.history(this.redo,this.undo); }
   get base() { return `/text/${encodeURIComponent(this.project)}/blocks/${encodeURIComponent(this.block)}/human`; }
   fail(error) {
+    this.messageTone="error";
     this.message=error.body?.message || error.message;
     if(error.status===409) {
       this.conflict=true; this.conflictCurrent=error.body?.current ?? error.current ?? null;
@@ -192,7 +220,7 @@ export class HumanDraft {
       const receipt=await api(this.base+"/draft",request.body);
       this.revision=receipt.revision; this.saved=sent; this.pendingSave=null;
       if(this.remote?.human) this.remote.human.submitted=false;
-      this.message=receipt.message||"已保存人工草稿";
+      this.messageTone=""; this.message=receipt.message||"已保存人工草稿";
       if(!this.dirty) { try { this.storage?.removeItem(this.key); } catch {} } else this.mirror();
       return true;
     } catch(e) { this.fail(e); return false; } finally { this.busy=false; }
@@ -203,7 +231,7 @@ export class HumanDraft {
     this.busy=true; this.epoch++;
     try {
       const receipt=await api(this.base+"/"+action,{});
-      this.message=receipt.message||"操作完成，已按当前稿件核对状态。"; return true;
+      this.messageTone=""; this.message=receipt.message||"操作完成，已按当前稿件核对状态。"; return true;
     } catch(e) { this.fail(e); return false; } finally { this.busy=false; }
   }
 }
@@ -231,6 +259,8 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
       d.recovery && !d.viewer ? "发现本块上次留在页面中的暂存内容，请先选择恢复或忽略，再继续编辑。" : "",
       d.message,...stats.problems,
     ].filter(Boolean).join("\n");
+    if(d.messageTone==="error" || stats.problems.length) entry.message.dataset.tone="error";
+    else delete entry.message.dataset.tone;
     entry.recovery.hidden=!d.recovery || d.viewer;
     entry.conflict.hidden=!d.conflict || d.viewer;
     const h=d.remote?.human;
@@ -355,6 +385,19 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
       } else if(action==="undo" || action==="redo") {
         action==="undo" ? d.undoMarks() : d.redoMarks(); details(entry);
       } else if(action==="save" || ["submit","approve","finalize"].includes(action)) {
+        if(action==="submit") {
+          const empty=d.paragraphs.filter(p=>!String(p.text||"").trim());
+          if(empty.length) {
+            d.messageTone="error";
+            d.message=`本组还有 ${empty.length} 段尚未填写译文（${summarizeParagraphIds(empty.map(p=>p.id))}），请先补齐并保存人工草稿后再送审。`;
+            notify(entry);
+            const firstIdx=d.paragraphs.findIndex(p=>!String(p.text||"").trim());
+            const tx=entry.rows[firstIdx]?.textarea;
+            tx?.scrollIntoView?.({block:"center",behavior:"smooth"});
+            tx?.focus?.();
+            return;
+          }
+        }
         if(action!=="save" && !confirm(`确定${{submit:"送审当前已保存修订",approve:"准奏当前已送审修订",finalize:"人工御览定稿"}[action]}？未保存或未送审的修订不会自动提交。`)) return;
         const promise=action==="save" ? d.save(api) : d.action(action,api);
         notify(entry); const ok=await promise; notify(entry);

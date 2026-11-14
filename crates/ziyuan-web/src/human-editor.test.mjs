@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { HumanDraft, draftStats, previewHtml, chapterProgress, mountHumanEditor } from "./human-editor.mjs";
+import { HumanDraft, draftStats, previewHtml, chapterProgress, summarizeParagraphIds, mountHumanEditor } from "./human-editor.mjs";
 
 const source = [{ id: "p1", text: "原文" }];
 const remote = (revision = null, text = "") => ({
@@ -262,4 +262,117 @@ test("mounted editor hides empty mark details, labels initial state, and gates w
   assert.equal(btns2.submit.disabled, true, "already submitted revision disables submit");
   assert.equal(btns2.approve.disabled, false, "submitted revision enables approve");
   assert.equal(btns2.finalize.disabled, true, "unapproved revision disables finalize");
+});
+
+test("summarizeParagraphIds condenses contiguous ranges and submit blocks empty paragraphs before confirm", async () => {
+  const ids = Array.from({ length: 12 }, (_, i) => `c0001-p${String(i + 3).padStart(4, "0")}`);
+  assert.equal(summarizeParagraphIds(ids), "第1章 · 第3～14段");
+  assert.equal(summarizeParagraphIds(["c0001-p0002", "c0001-p0004", "c0001-p0005"]), "第1章 · 第2段、第4～5段");
+
+  let focused = null;
+  let confirmCount = 0;
+  let submitPosts = 0;
+  const makeEl = (tag, doc) => {
+    const node = {
+      tagName: tag.toUpperCase(), className: "", hidden: false, disabled: false, readOnly: false,
+      value: "", textContent: "", _innerHTML: "", dataset: {}, attributes: {}, children: [],
+      listeners: new Map(), parentElement: null, ownerDocument: doc,
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) {
+        this._innerHTML = String(v);
+        if (this.className === "human-paragraph") {
+          const tx = makeEl("textarea", doc);
+          const pid = this.dataset.humanPara;
+          tx.focus = () => { focused = pid; };
+          const src = makeEl("p", doc); src.className = "text-para";
+          const tools = makeEl("div", doc); tools.className = "actions human-mark-tools";
+          const preview = makeEl("p", doc); preview.className = "human-preview text-para";
+          const tableWrap = makeEl("div", doc); tableWrap.className = "table-wrap";
+          const table = makeEl("table", doc);
+          tableWrap.append(table);
+          this.children = [src, tx, tools, preview, tableWrap];
+          this._map = { textarea: tx, ".human-mark-tools": tools, table, ".text-para": src, ".human-preview": preview, ".table-wrap": tableWrap };
+        } else if (this._innerHTML.includes("human-paragraphs")) {
+          const status = makeEl("p", doc); status.className = "human-status";
+          const msg = makeEl("p", doc); msg.className = "human-message hint";
+          const rec = makeEl("div", doc); rec.className = "human-recovery actions";
+          const conf = makeEl("div", doc); conf.className = "human-conflict actions";
+          const acts = makeEl("div", doc); acts.className = "human-actions actions";
+          const paras = makeEl("div", doc); paras.className = "human-paragraphs";
+          this.children = [status, msg, rec, conf, acts, paras];
+          this._map = { ".human-status": status, ".human-message": msg, ".human-recovery": rec, ".human-conflict": conf, ".human-actions": acts, ".human-paragraphs": paras };
+        }
+      },
+      setAttribute(k, v) { this.attributes[k] = v; },
+      append(...items) { items.forEach((i) => { i.parentElement = this; this.children.push(i); }); },
+      replaceChildren(...items) { this.children = []; this.append(...items); },
+      addEventListener(type, fn) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type).push(fn);
+      },
+      querySelector(sel) { return this._map?.[sel] || null; },
+      querySelectorAll(sel) {
+        const out = [];
+        const walk = (n) => {
+          for (const c of n.children || []) {
+            if (sel === "textarea" && c.tagName === "TEXTAREA") out.push(c);
+            if (sel.includes("[data-mark]") && (c.dataset.mark || c.dataset.remove !== undefined)) out.push(c);
+            walk(c);
+          }
+        };
+        walk(this);
+        return out;
+      },
+      closest(sel) {
+        if (sel === "[data-action]" && this.dataset?.action) return this;
+        return null;
+      },
+      focus() {},
+    };
+    return node;
+  };
+  const doc = {}; doc.createElement = (tag) => makeEl(tag, doc);
+  const host = makeEl("div", doc);
+  const src = [
+    { id: "c0001-p0001", text: "原文1" },
+    { id: "c0001-p0002", text: "原文2" },
+    { id: "c0001-p0003", text: "原文3" },
+  ];
+  const api = async (path) => {
+    if (path.endsWith("/submit")) { submitPosts++; return {}; }
+    if (path.endsWith("/human/progress")) return null;
+    return {
+      basis: { source_hash: "s", context_hash: "c" },
+      revision: "rev-1",
+      draft: {
+        revision: "rev-1",
+        paragraphs: [
+          { id: "c0001-p0001", text: "译1", marks: [] },
+          { id: "c0001-p0002", text: "", marks: [] },
+          { id: "c0001-p0003", text: "   ", marks: [] },
+        ],
+      },
+      human: { submitted: false, approved: false, finalized: false, stale: false },
+    };
+  };
+  const editor = mountHumanEditor(host, {
+    api,
+    isViewer: () => false,
+    storage: storage(),
+    confirm: () => { confirmCount++; return true; },
+  });
+  editor.update({ project: "p", block: "c0001-b0001", source: src });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const root = host.children[1].children[0];
+  const submitBtn = root.querySelector(".human-actions").children.find((b) => b.dataset.action === "submit");
+  for (const fn of root.listeners.get("click") || []) {
+    await fn({ target: submitBtn });
+  }
+  const msg = root.querySelector(".human-message");
+  assert.equal(confirmCount, 0);
+  assert.equal(submitPosts, 0);
+  assert.equal(msg.dataset.tone, "error");
+  assert.match(msg.textContent, /还有 2 段尚未填写译文（第1章 · 第2～3段）/);
+  assert.equal(focused, "c0001-p0002");
 });

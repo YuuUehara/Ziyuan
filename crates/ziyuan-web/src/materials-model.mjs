@@ -108,7 +108,7 @@ export class MaterialModel {
     this._receiveWatermark = 0;
     if (storage === undefined) {
       try { storage = globalThis.sessionStorage; } catch {
-        this.mirrorError = "Session storage is unavailable; input remains in memory.";
+        this.mirrorError = "浏览器暂存不可用，当前输入仅保留在内存中。";
       }
     }
     this.storage = storage;
@@ -402,7 +402,7 @@ export class MaterialModel {
       }
       this.recoveryChoice = mirror;
     } catch {
-      this.mirrorError = "Session recovery is unavailable; input remains in memory.";
+      this.mirrorError = "浏览器暂存恢复不可用，当前输入仅保留在内存中。";
     }
   }
 
@@ -433,8 +433,8 @@ export class MaterialModel {
       let removed = false;
       try { this.storage?.removeItem(this.mirrorKey); removed = !!this.storage; } catch {}
       this.mirrorError = removed
-        ? "Session mirror could not be saved; complete input remains in memory."
-        : "Session mirror could not be saved and an older copy may remain; complete input remains in memory.";
+        ? "浏览器暂存保存失败，完整输入仍保留在内存中。"
+        : "浏览器暂存保存失败，且旧暂存可能仍在；完整输入仍保留在内存中。";
     }
   }
 }

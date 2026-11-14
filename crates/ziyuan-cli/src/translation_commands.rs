@@ -792,17 +792,7 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
             if json {
                 print_json(serde_json::json!(diff))?;
             } else {
-                println!(
-                    "草稿 {} · 已批准 v{:?}（共 {:?} 版）{}",
-                    diff.draft_revision,
-                    diff.approved_version,
-                    diff.approved_versions,
-                    if diff.legacy_production {
-                        " · 生产仍是旧数组，结构对比不可用"
-                    } else {
-                        ""
-                    }
-                );
+                println!("{}", format_context_diff_header(&diff));
                 for change in diff.terms.iter().chain(&diff.persons) {
                     println!(
                         "{} {}：{}",
@@ -1084,15 +1074,40 @@ pub(crate) fn print_snapshot(snapshot: &Option<ziyuan_app::translation::AutoSnap
     }
 }
 
+fn format_context_diff_header(diff: &ziyuan_app::translation::materials::MaterialDiff) -> String {
+    let approved = match diff.approved_version {
+        Some(v) => format!("已批准 v{v}（共 {} 版）", diff.approved_versions.len()),
+        None => "尚未批准".to_string(),
+    };
+    let legacy = if diff.legacy_production {
+        " · 生产仍是旧数组，结构对比不可用"
+    } else {
+        ""
+    };
+    format!("草稿 {} · {approved}{legacy}", diff.draft_revision)
+}
+
+fn format_block_status_line(s: &BlockStatus) -> String {
+    let tasks = if s.tasks.is_empty() {
+        "无".to_string()
+    } else {
+        s.tasks
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    format!(
+        "{} / {}：{}，诏令 {tasks}",
+        s.chapter,
+        s.block,
+        s.state.label()
+    )
+}
+
 fn print_statuses(statuses: &[BlockStatus]) {
     for s in statuses {
-        println!(
-            "{} / {}：{}，诏令 {:?}",
-            s.chapter,
-            s.block,
-            s.state.label(),
-            s.tasks
-        );
+        println!("{}", format_block_status_line(s));
         match &s.state {
             BlockState::Stale { reasons, .. } | BlockState::HumanStale { reasons, .. } => {
                 for reason in reasons {
@@ -1107,5 +1122,61 @@ fn print_statuses(statuses: &[BlockStatus]) {
         if let Some(note) = &s.note {
             println!("  {note}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_block_status_line, format_context_diff_header};
+    use ziyuan_app::translation::materials::MaterialDiff;
+    use ziyuan_app::translation::{BlockState, BlockStatus};
+
+    #[test]
+    fn formats_context_diff_and_status_without_debug_dumps() {
+        let none_diff = MaterialDiff {
+            project: "p".into(),
+            draft_revision: "rev-1".into(),
+            approved_version: None,
+            approved_versions: vec![],
+            legacy_production: false,
+            terms: vec![],
+            persons: vec![],
+        };
+        assert_eq!(
+            format_context_diff_header(&none_diff),
+            "草稿 rev-1 · 尚未批准"
+        );
+
+        let some_diff = MaterialDiff {
+            approved_version: Some(2),
+            approved_versions: vec![1, 2],
+            legacy_production: true,
+            ..none_diff
+        };
+        assert_eq!(
+            format_context_diff_header(&some_diff),
+            "草稿 rev-1 · 已批准 v2（共 2 版） · 生产仍是旧数组，结构对比不可用"
+        );
+
+        let status = BlockStatus {
+            chapter: "c0001".into(),
+            block: "c0001-b0001".into(),
+            state: BlockState::NotStarted,
+            tasks: vec![3, 7],
+            note: None,
+        };
+        assert_eq!(
+            format_block_status_line(&status),
+            "c0001 / c0001-b0001：未开始，诏令 #3、#7"
+        );
+
+        let empty_tasks = BlockStatus {
+            tasks: vec![],
+            ..status
+        };
+        assert_eq!(
+            format_block_status_line(&empty_tasks),
+            "c0001 / c0001-b0001：未开始，诏令 无"
+        );
     }
 }

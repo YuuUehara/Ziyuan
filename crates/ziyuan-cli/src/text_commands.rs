@@ -6,8 +6,8 @@ use std::io::Read;
 use std::path::PathBuf;
 use ziyuan_app::Session;
 use ziyuan_app::text_project::{
-    ImportOptions, ImportPreview, ImportSource, NewProject, Project, Provenance, TextParagraphs,
-    TextProjects, ValidationReport,
+    ImportOptions, ImportPreview, ImportSource, NewProject, Project, Provenance, SourceFormat,
+    TextParagraphs, TextProjects, ValidationReport,
 };
 use ziyuan_app::translation::{DraftSave, ExportFormat, ExportLayout, ExportOptions, Translations};
 use ziyuan_storage::EventLog;
@@ -1124,9 +1124,13 @@ fn print_preview(preview: &ImportPreview) {
             chapter.blocks.len()
         );
         if let Some(parsing) = &chapter.parsing {
+            let format = match parsing.format {
+                SourceFormat::Text => "TXT",
+                SourceFormat::Markdown => "Markdown",
+            };
             println!(
-                "    标题：{} · 格式：{:?} · 原文字节范围：{}..{}",
-                parsing.title, parsing.format, parsing.byte_start, parsing.byte_end
+                "    标题：{} · 格式：{format} · 原文字节范围：{}..{}",
+                parsing.title, parsing.byte_start, parsing.byte_end
             );
             for warning in &parsing.warnings {
                 println!(

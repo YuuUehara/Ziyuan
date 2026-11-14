@@ -144,7 +144,8 @@ impl fmt::Display for TranslationError {
             Self::DraftConflict { current } => {
                 write!(
                     f,
-                    "人工草稿修订冲突，现行修订为 {current:?}；请保留输入并重新读取"
+                    "人工草稿修订冲突，现行修订为 {}；请保留输入并重新读取",
+                    current.as_deref().unwrap_or("无（尚无草稿）")
                 )
             }
             Self::DraftRequestConflict => f.write_str("人工草稿请求身份已被不同内容使用"),
