@@ -4,10 +4,10 @@ function node(tag,text,className){const e=document.createElement(tag);e.textCont
 export function replacementReady(preview){return !!preview&&!preview.blocked&&Number(preview.occurrences)>0;}
 export function mountSearch(host,{api,getSelection,navigate,refresh}){
  const section=document.createElement('details');section.className='continuity-tools';section.id='continuity-search';
- section.innerHTML=`<summary>全文检索与草稿替换</summary><p class="hint">可在原文、当前译文、人工草稿和历史译稿中查找相同文字。草稿替换先预览，再确认保存；准奏稿保持原样，送审与准奏仍须另行操作。</p><div class="row"><input data-query aria-label="检索文字" placeholder="输入要查找的文字"><select data-scope aria-label="检索范围"><option value="all">全部</option><option value="source">原文</option><option value="translation">当前译文</option><option value="draft">人工草稿</option><option value="history">历史译稿</option></select><button type="button" data-search>查找</button></div><p data-status role="status"></p><div data-results></div>`;
+ section.innerHTML=`<summary>全文检索与草稿替换</summary><p class="hint">可在原文、当前译文、人工草稿和历史译稿中查找相同文字。草稿替换先预览，再确认保存；准奏稿保持原样，送审与准奏仍须另行操作。</p><form class="row" data-form><input data-query aria-label="检索文字" placeholder="输入要查找的文字"><select data-scope aria-label="检索范围"><option value="all">全部</option><option value="source">原文</option><option value="translation">当前译文</option><option value="draft">人工草稿</option><option value="history">历史译稿</option></select><button type="submit" data-search>查找</button></form><p data-status role="status"></p><div data-results></div>`;
  host.after(section);const el=k=>section.querySelector(`[data-${k}]`);let busy=false;
  const run=async task=>{if(busy)return;busy=true;try{el('status').textContent='处理中…';await task();}catch(e){el('status').textContent=e.message;}finally{busy=false;}};
- el('search').onclick=()=>run(async()=>{
+ const doSearch=()=>run(async()=>{
   const project=getSelection().project;if(!project)throw new Error('请先选择项目');const query=el('query').value;if(!query.trim())throw new Error('请输入检索文字');el('results').replaceChildren();
   const result=await api(`/text/${encodeURIComponent(project)}/search?query=${encodeURIComponent(query)}&scope=${encodeURIComponent(el('scope').value)}`);if(project!==getSelection().project)throw new Error('项目已变，请重新查找');
   el('status').textContent=`找到 ${result.hits.length} 处${result.truncated?'；结果较多，请缩小检索范围':''}`;
@@ -22,5 +22,8 @@ export function mountSearch(host,{api,getSelection,navigate,refresh}){
     confirm.onclick=()=>run(async()=>{if(!proposed||project!==getSelection().project)throw new Error('请重新预览');await api(`/text/${encodeURIComponent(project)}/draft-replace`,{...proposed.input,fingerprint:proposed.preview.fingerprint,confirm:true});proposed=null;confirm.disabled=true;el('status').textContent='人工草稿已保存，仍须送审、准奏后才能用于定稿';if(refresh)await refresh();});controls.append(replacement,previewButton,confirm);item.append(controls,change);
    }el('results').append(item);
   }
- });return section;
+ });
+ el('search').onclick=doSearch;
+ el('form').onsubmit=(e)=>{e?.preventDefault?.();doSearch();};
+ return section;
 }

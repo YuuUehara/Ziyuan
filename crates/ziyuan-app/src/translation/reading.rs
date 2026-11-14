@@ -82,7 +82,8 @@ impl Translations {
                     };
                     if !aligned {
                         warnings.push(format!(
-                            "{} 的译稿结构无效，未作为通读译文展示",
+                            "{}（{}）的译稿结构无效，未作为通读译文展示",
+                            format_location(&block.block_id),
                             block.block_id
                         ));
                     }

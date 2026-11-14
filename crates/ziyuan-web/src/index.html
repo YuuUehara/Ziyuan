@@ -551,8 +551,11 @@
   .human-paragraph h4 { margin: 0 0 8px; font: 12px var(--serif); color: var(--muted); }
   .human-bilingual { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .human-bilingual > * { min-width: 0; margin: 0; }
+  .human-target-col { display: flex; flex-direction: column; min-width: 0; }
+  .human-target-col label { display: block; margin: 0; }
   .human-bilingual textarea { display: block; min-height: 120px; font-family: var(--text); }
-  .human-mark-tools { margin-top: 12px; }
+  .human-mark-tools { margin-top: 8px; }
+  .human-paragraph.is-empty h4::after { content: "（未填）"; color: var(--muted); font-weight: normal; margin-left: 6px; }
   .human-preview, .human-message { white-space: pre-wrap; overflow-wrap: anywhere; }
   .human-message:empty { display: none; }
   .human-message[data-tone="error"] { color: var(--bad); background: var(--well); border: 1px solid var(--bad); border-radius: var(--radius); padding: 8px 10px; font-size: 13px; }
@@ -1023,7 +1026,7 @@
                   <li>点「新增术语」或「新增人物」，填名称和译法；不确定的字段留空。</li>
                   <li>点「保存草稿」；保存不等于批准。</li>
                   <li>点「校验」，通过后点「准备生产资料」。</li>
-                  <li>准备好后，仍须在译书操作区点「批准上下文」。熟悉命令行时也可运行 <code>ziyuan text context approve</code>。</li>
+                  <li>准备好后，可直接点「批准上下文」（或运行 <code>ziyuan text context approve</code>）。</li>
                 </ol>
               </details>
               <div class="materials-toolbar">
@@ -1035,6 +1038,7 @@
                   <button class="small" id="materials-save" type="button">保存草稿</button>
                   <button class="small" id="materials-validate" type="button">校验</button>
                   <button class="small" id="materials-prepare" type="button">准备生产资料</button>
+                  <button class="small" id="materials-approve-context" type="button">批准上下文</button>
                 </div>
                 <div class="tool-group">
                   <span class="tool-group-label">核对</span>
@@ -1324,24 +1328,9 @@ function ensureTextModules() {
     import("./assets/continuity.mjs").then(({ mount }) => mount({
       api,
       getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }),
+      getChapters: () => (textProject?.outline || []).map((c) => ({ id: c.chapter, title: c.title || textLocation(c.chapter) })),
       refresh: () => loadTextProject(),
-      navigate: async (anchor) => {
-        selectWorkspaceTab("draft");
-        textBlockId = anchor.block;
-        invalidateReferences(true);
-        await loadTextBlock();
-        textPick(anchor.paragraph);
-        if (anchor?.kind === "draft") {
-          setHumanEditorEnabled(true, true);
-          const paraNode = anchor.paragraph && document.querySelector('[data-human-para="' + CSS.escape(anchor.paragraph) + '"]');
-          (paraNode || document.querySelector("#text-human-editor"))?.scrollIntoView({ block: "start" });
-        } else {
-          const drawer = $("text-model-drawer");
-          if (drawer) drawer.open = true;
-          const paraNode = anchor?.paragraph && document.querySelector('[data-text-para="' + CSS.escape(anchor.paragraph) + '"]');
-          (paraNode || drawer || document.querySelector("#human-mode-bar"))?.scrollIntoView({ block: "start" });
-        }
-      },
+      navigate: navigateToParagraph,
     })),
   ]).catch((e) => {
     textModulesPromise = null;
@@ -1722,8 +1711,35 @@ let textBusy = false;
 let textLoaded = false;
 // 编辑器模块与 API 同一把令牌：等已打开一块（必已登录）才按需加载，失败不拖垮整页，下次换查询串重试。
 let humanEditor = null, humanEditorLoading = null, humanEditorAttempt = 0;
+async function navigateToParagraph(anchor) {
+  if (!anchor) return;
+  selectWorkspaceTab("draft");
+  if (anchor.block && anchor.block !== textBlockId) {
+    textBlockId = anchor.block;
+    invalidateReferences(true);
+    textPicked = anchor.paragraph || null;
+    history.replaceState(null, "", textHash());
+    await loadTextBlock();
+  } else if (anchor.paragraph) {
+    textPick(anchor.paragraph);
+  }
+  const preferHuman = anchor.kind === "draft" || (!["translation", "history", "model"].includes(anchor.kind) && humanEditorEnabled());
+  if (preferHuman) {
+    setHumanEditorEnabled(true, anchor.kind === "draft");
+    await loadHumanEditor();
+    const paraNode = anchor.paragraph && document.querySelector('[data-human-para="' + CSS.escape(anchor.paragraph) + '"]');
+    (paraNode || document.querySelector("#text-human-editor"))?.scrollIntoView({ block: "center" });
+    paraNode?.querySelector("textarea")?.focus?.();
+  } else {
+    const drawer = $("text-model-drawer");
+    if (drawer) drawer.open = true;
+    const paraNode = anchor.paragraph && document.querySelector('[data-text-para="' + CSS.escape(anchor.paragraph) + '"]');
+    (paraNode || drawer || document.querySelector("#human-mode-bar"))?.scrollIntoView({ block: "center" });
+  }
+}
 function loadHumanEditor() {
-  if (humanEditor || humanEditorLoading) return;
+  if (humanEditor) return Promise.resolve(humanEditor);
+  if (humanEditorLoading) return humanEditorLoading;
   const attempt = humanEditorAttempt++;
   humanEditorLoading = import(`/assets/human-editor.mjs${attempt ? `?retry=${attempt}` : ""}`).then((m) => {
     humanEditor = m.mountHumanEditor($("text-human-editor"), {
@@ -1740,6 +1756,7 @@ function loadHumanEditor() {
   }, (e) => {
     $("text-human-editor").textContent = "人工编辑器加载失败（" + e.message + "）；刷新页面或重新选块后重试。";
   }).finally(() => { humanEditorLoading = null; });
+  return humanEditorLoading;
 }
 const HUMAN_TOGGLE_KEY = "ziyuan-human-editor-enabled";
 function humanEditorEnabled() {
@@ -1889,6 +1906,9 @@ $("materials-validate")?.addEventListener("click", async () => {
 });
 $("materials-wizard")?.addEventListener("click", () => {
   if (!materialsEditor?.previewState?.()) { $("materials-status").textContent = "请先读取本地资料。"; return; }
+  $("wizard-name").value = "";
+  $("wizard-values").value = "";
+  $("wizard-note").value = "";
   $("wizard-status").textContent = "";
   $("material-wizard").showModal();
 });
@@ -1930,7 +1950,9 @@ $("materials-tbx-file")?.addEventListener("change", async (e) => {
     const xml = decodeUtf8Text(await file.arrayBuffer(), file.name);
     const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx", { method: "POST", headers: { "Content-Type": "application/xml" }, body: xml });
     const data = await r.json().catch(() => ({}));
-    $("materials-status").textContent = r.ok ? "已合并 TBX 到本地草稿（未批准）。" : "导入 TBX 失败：" + (data.error || "");
+    if (!r.ok) throw new Error(data.error || "请求失败");
+    await loadMaterialsView();
+    $("materials-status").textContent = "已合并 TBX 到本地草稿（未批准）。";
   } catch (err) {
     $("materials-status").textContent = "导入 TBX 失败：" + (err.message || "");
   } finally {
@@ -1955,44 +1977,73 @@ $("materials-tm-list")?.addEventListener("click", async () => {
     actions.append(button("保存记忆",()=>api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/update",{source:original.value,target:translation.value})),button("删除记忆",async()=>{if(!window.confirm("删除这条翻译记忆？译稿不受影响。"))return;await api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/delete",{});}));edit.append(summary,original,translation,actions);row.append(controls,edit);host.append(row);
   }
 });
-$("materials-comment-list")?.addEventListener("click", async () => {
-  const project=textProjectId;if(!project)return;
-  const comments = await api("/text/" + encodeURIComponent(project) + "/comments");
-  if(project!==textProjectId)return;
-  const host = $("materials-comment-result"); host.replaceChildren();
-  if (!comments.length) { host.textContent = "暂无评论。"; return; }
-  for (const c of comments) {
-    const row = document.createElement("p"); row.className = "hint";
-    row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + textLocation(c.paragraph || c.block) + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
-    {
-      const commentProject=project;
-      const done = document.createElement("button"); done.type = "button"; done.className = "link-button write"; done.textContent = c.resolved ? "重新打开" : "标记解决";
-      done.classList.add("write");
-      done.addEventListener("click", async () => { if(commentProject!==textProjectId)return; await api("/text/" + encodeURIComponent(commentProject) + "/comments/" + encodeURIComponent(c.id) + (c.resolved ? "/reopen" : "/resolve"), {}); $("materials-status").textContent = "评论状态已更新；未修改译稿。"; });
-      row.append(done);
+async function loadMaterialsComments() {
+  const project = textProjectId; if (!project) return;
+  try {
+    const comments = await api("/text/" + encodeURIComponent(project) + "/comments");
+    if (project !== textProjectId) return;
+    const host = $("materials-comment-result"); host.replaceChildren();
+    if (!comments.length) { host.textContent = "暂无评论。"; return; }
+    for (const c of comments) {
+      const row = document.createElement("p"); row.className = "hint";
+      row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + textLocation(c.paragraph || c.block) + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
+      {
+        const commentProject = project;
+        const done = document.createElement("button"); done.type = "button"; done.className = "link-button write"; done.textContent = c.resolved ? "重新打开" : "标记解决";
+        done.classList.add("write");
+        done.addEventListener("click", async () => {
+          if (commentProject !== textProjectId) return;
+          try {
+            await api("/text/" + encodeURIComponent(commentProject) + "/comments/" + encodeURIComponent(c.id) + (c.resolved ? "/reopen" : "/resolve"), {});
+            $("materials-status").textContent = "评论状态已更新；未修改译稿。";
+            await loadMaterialsComments();
+          } catch (e) {
+            $("materials-status").textContent = "评论操作失败：" + (e.body?.error || e.message);
+          }
+        });
+        row.append(done);
+      }
+      const reply = document.createElement("button"); reply.type = "button"; reply.className = "link-button write"; reply.textContent = "回复";
+      reply.addEventListener("click", async () => {
+        const text = window.prompt("回复内容"); if (!text || project !== textProjectId) return;
+        try {
+          await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/reply", { body: text });
+          $("materials-status").textContent = "已回复。";
+          await loadMaterialsComments();
+        } catch (e) {
+          $("materials-status").textContent = "回复失败：" + (e.body?.error || e.message);
+        }
+      });
+      const assign = document.createElement("button"); assign.type = "button"; assign.className = "link-button write"; assign.textContent = "指派";
+      assign.addEventListener("click", async () => {
+        const who = window.prompt("负责人", c.assignee || ""); if (who === null || project !== textProjectId) return;
+        try {
+          await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/assign", { assignee: who });
+          $("materials-status").textContent = "已指派（空字符串表示取消）。";
+          await loadMaterialsComments();
+        } catch (e) {
+          $("materials-status").textContent = "指派失败：" + (e.body?.error || e.message);
+        }
+      });
+      row.append(reply, assign);
+      host.append(row);
     }
-    const reply = document.createElement("button"); reply.type = "button"; reply.className = "link-button write"; reply.textContent = "回复";
-    reply.addEventListener("click", async () => {
-      const text = window.prompt("回复内容"); if (!text || project!==textProjectId) return;
-      await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/reply", { body: text });
-      $("materials-status").textContent = "已回复。"; 
-    });
-    const assign = document.createElement("button"); assign.type = "button"; assign.className = "link-button write"; assign.textContent = "指派";
-    assign.addEventListener("click", async () => {
-      const who = window.prompt("负责人", c.assignee || ""); if (who === null || project!==textProjectId) return;
-      await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/assign", { assignee: who });
-      $("materials-status").textContent = "已指派（空字符串表示取消）。";
-    });
-    row.append(reply, assign);
-    host.append(row);
+  } catch (e) {
+    $("materials-status").textContent = "读取评论失败：" + (e.body?.error || e.message);
   }
-});
+}
+$("materials-comment-list")?.addEventListener("click", loadMaterialsComments);
 $("materials-comment-add")?.addEventListener("click", async () => {
   const body = $("materials-comment-text").value.trim();
   if (!textProjectId || !textBlockId || !body) { $("materials-status").textContent = "请先选择块并写评论。"; return; }
-  await api("/text/" + encodeURIComponent(textProjectId) + "/comments", { block: textBlockId, paragraph: textPicked || "", body });
-  $("materials-comment-text").value = "";
-  $("materials-status").textContent = "评论已保存（不修改译稿）。";
+  try {
+    await api("/text/" + encodeURIComponent(textProjectId) + "/comments", { block: textBlockId, paragraph: textPicked || "", body });
+    $("materials-comment-text").value = "";
+    $("materials-status").textContent = "评论已保存（不修改译稿）。";
+    await loadMaterialsComments();
+  } catch (e) {
+    $("materials-status").textContent = "保存评论失败：" + (e.body?.error || e.message);
+  }
 });
 $("materials-termbase-export")?.addEventListener("click", async () => {
   if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
@@ -2052,8 +2103,7 @@ function renderQaIssues() {
       const go = document.createElement("button");
       go.type = "button"; go.className = "link-button"; go.textContent = "定位";
       go.addEventListener("click", () => {
-        const target = document.querySelector('[data-text-para="' + CSS.escape(issue.paragraph) + '"]');
-        if (target) { selectWorkspaceTab("draft"); const drawer = target.closest("#text-model-drawer"); if (drawer) drawer.open = true; target.scrollIntoView({ block: "center" }); }
+        navigateToParagraph({ block: textBlockId, paragraph: issue.paragraph });
       });
       row.append(go);
     }
@@ -2086,6 +2136,24 @@ $("materials-diff-run")?.addEventListener("click", async () => {
     $("materials-diff").textContent = lines.join("\n");
   } catch (e) {
     $("materials-diff").textContent = "对比失败：" + materialAdvice(e.body?.error || e.message);
+  }
+});
+$("materials-approve-context")?.addEventListener("click", async () => {
+  if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  if (!state || state.viewer) { $("materials-status").textContent = "观政不能批准上下文。"; return; }
+  if (!window.confirm("确定将当前已准备的上下文批准为新版本？此前旧版译稿会被标为「上下文已更新」。")) return;
+  const project = textProjectId;
+  $("materials-status").textContent = "正在批准上下文…";
+  try {
+    const r = await api("/text/" + encodeURIComponent(project) + "/context/approve", {});
+    if (project !== textProjectId) return;
+    $("materials-status").textContent = `上下文已批准为 v${r.version}；此后下诏与人工送审均使用此版本。`;
+    setMaterialState("save", `服务器：已批准 v${r.version}`);
+    await loadTextProject();
+  } catch (e) {
+    if (project === textProjectId) {
+      $("materials-status").textContent = "批准上下文失败：" + materialAdvice(e.body?.error || e.message);
+    }
   }
 });
 $("materials-prepare")?.addEventListener("click", async () => {
@@ -2283,14 +2351,14 @@ async function renderN2bHints() {
           const button = document.createElement("button");
           button.type = "button";
           button.className = "link-button";
+          const paraLabels = (item.paragraphs || []).map((p) => textLocation(p)).join("、");
           button.textContent = item[idKey];
-          button.title = "定位到段落 " + (item.paragraphs || []).join("、");
+          button.title = "定位到段落 " + paraLabels;
           button.addEventListener("click", () => {
             const first = (item.paragraphs || [])[0];
-            const target = first && document.querySelector('[data-text-para="' + CSS.escape(first) + '"]');
-            if (target) { selectWorkspaceTab("draft"); const drawer = target.closest("#text-model-drawer"); if (drawer) drawer.open = true; target.scrollIntoView({ block: "center" }); }
+            if (first) navigateToParagraph({ block: textBlockId, paragraph: first });
           });
-          hint.append(button, "（" + (item.paragraphs || []).join("、") + "）");
+          hint.append(button, "（" + paraLabels + "）");
         });
       };
       if (terms.length) addGroup("术语", terms, "term_id");
@@ -2441,17 +2509,20 @@ function renderMaterialsReport(result) {
     box.append(list);
     host.append(box);
   };
+  const statusText = (s) => ({ tentative: "暂定", confirmed: "已确认" }[s] || s);
+  const kindText = (k) => ({ term: "术语", person: "人物" }[k] || k);
+  const parasText = (ps) => (ps || []).map((p) => textLocation(p)).join("、");
   const sel = (selection) => {
     const items = [];
-    for (const term of selection?.terms || []) items.push("术语 " + term.term_id + "（" + term.status + "）：" + (term.paragraphs || []).join("、"));
-    for (const person of selection?.persons || []) items.push("人物 " + person.person_id + "（" + person.status + "）：" + (person.paragraphs || []).join("、"));
-    for (const rule of selection?.address_rules || []) items.push("称呼 " + rule.person_id + "#" + rule.rule_index + "：段 " + (rule.paragraphs || []).join("、"));
+    for (const term of selection?.terms || []) items.push("术语 " + term.term_id + "（" + statusText(term.status) + "）：" + parasText(term.paragraphs));
+    for (const person of selection?.persons || []) items.push("人物 " + person.person_id + "（" + statusText(person.status) + "）：" + parasText(person.paragraphs));
+    for (const rule of selection?.address_rules || []) items.push("称呼 " + rule.person_id + "#" + rule.rule_index + "：" + parasText(rule.paragraphs));
     return items;
   };
   add("适用（applicable）", sel(report.applicable));
   add("自动候选（automatic）", sel(report.automatic));
   add("诊断（diagnostics）", (report.diagnostics || []).map((d) =>
-    (d.identity?.kind || "") + " " + (d.identity?.id || "") + " — " + (d.reason || "") + "：段 " + (d.paragraphs || []).join("、")));
+    kindText(d.identity?.kind || "") + " " + (d.identity?.id || "") + " — " + (d.reason || "") + "：" + parasText(d.paragraphs)));
 }
 $("materials-preview-run")?.addEventListener("click", async () => {
   const snapshot = materialsEditor?.previewState();
@@ -2608,7 +2679,7 @@ function renderImport() {
   const disabled = d.busy ? "disabled" : "";
   box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；不追加、不替换。UTF-8；全部原文合计上限 8 MiB（JSON 请求上限 24 MiB）。用上移／下移调整章序，改动后须重新预览。</p>
     <label>选择文件 <input type="file" id="import-files" multiple accept=".txt,.md,.markdown" ${disabled}></label>
-    <ol>${d.files.map((f, i) => `<li><div class="row"><span>${esc(f.name)}</span><span class="shrink"><button type="button" class="small" data-import-move="${i}" data-step="-1" ${i === 0 ? "disabled" : disabled}>上移</button> <button type="button" class="small" data-import-move="${i}" data-step="1" ${i === d.files.length - 1 ? "disabled" : disabled}>下移</button></span></div></li>`).join("")}</ol>
+    <ol>${d.files.map((f, i) => `<li><div class="row"><span>${esc(f.name)}</span><span class="shrink"><button type="button" class="small" data-import-move="${i}" data-step="-1" ${i === 0 ? "disabled" : disabled}>上移</button> <button type="button" class="small" data-import-move="${i}" data-step="1" ${i === d.files.length - 1 ? "disabled" : disabled}>下移</button> <button type="button" class="small" data-import-remove="${i}" ${disabled}>移除</button></span></div></li>`).join("")}</ol>
     <label>TXT 分段 <select id="import-paragraphs" ${disabled}><option value="lines" ${d.textParagraphs === "lines" ? "selected" : ""}>每个非空行一段（常见小说排版）</option><option value="blank_lines" ${d.textParagraphs === "blank_lines" ? "selected" : ""}>按空行分段（段内换行保留）</option></select></label>
     <label><input id="import-split-long" type="checkbox" ${d.splitLongParagraphs ? "checked" : ""} ${disabled}>TXT 过长段落拆为工作段</label>
     <p class="hint">选项只影响 TXT。过长段落优先沿句末拆开，预览会说明拆分位置；归档原件保持原样。若原文只是为了排版而换行，请选择「按空行分段」。</p>
@@ -2629,6 +2700,7 @@ function renderImport() {
     <button type="button" id="import-confirm" ${d.busy || !d.preview || d.dirty ? "disabled" : ""}>确认预览并导入</button>`;
   if (files) {
     files.disabled = d.busy;
+    if (!d.files.length) files.value = "";
     $("import-files").replaceWith(files);
   }
 }
@@ -2665,6 +2737,24 @@ $("text-import").addEventListener("click", (e) => {
   if (move) {
     const i = Number(move.dataset.importMove), j = i + Number(move.dataset.step);
     if (j >= 0 && j < d.files.length) { [d.files[i], d.files[j]] = [d.files[j], d.files[i]]; d.titles = []; d.preview = null; invalidateImport(); }
+  }
+  const remove = e.target.closest("[data-import-remove]");
+  if (remove) {
+    const i = Number(remove.dataset.importRemove);
+    if (i >= 0 && i < d.files.length) {
+      d.files.splice(i, 1);
+      d.titles = [];
+      d.preview = null;
+      if (!d.files.length) {
+        d.dirty = true;
+        d.message = "已清空待导入文件列表，请重新选择文件。";
+        d.revision++;
+        renderImport();
+      } else {
+        invalidateImport();
+      }
+    }
+    return;
   }
   const expand = e.target.closest("[data-import-expand]");
   if (expand) { d.expandedChapters ||= new Set(); d.expandedChapters.add(Number(expand.dataset.importExpand)); d.revision++; renderImport(); return; }
@@ -3097,7 +3187,7 @@ function renderVersionDiff(result) {
   for (const change of changes) {
     const row = document.createElement("p");
     const kinds = { added: "新增", removed: "删除", changed: "改写", markup: "标记" };
-    let text = `${change.paragraph} · ${kinds[change.kind] || change.kind}`;
+    let text = `${textLocation(change.paragraph)} · ${kinds[change.kind] || change.kind}`;
     if (change.kind === "changed") text += `：${change.old || ""} → ${change.new || ""}`;
     else if (change.kind === "added") text += `：${change.new || ""}`;
     else if (change.kind === "removed") text += `：${change.old || ""}`;
@@ -3199,7 +3289,7 @@ function textStaleText(reason) {
   switch (reason.reason) {
     case "source_changed": return "原文已变";
     case "context_changed": return `上下文已更新（所用 v${reason.used}，现行 v${reason.current}）`;
-    case "summary_changed": return `前情摘要有变：${(reason.chapters || []).join("、")}`;
+    case "summary_changed": return `前情摘要有变：${(reason.chapters || []).map((c) => textLocation(c)).join("、")}`;
     case "translation_edited": return "磁盘上的译稿与已准奏或已定稿的不同";
     case "translation_missing": return "已准奏的译稿不见了";
     case "zhupi_changed": return "朱批已变";

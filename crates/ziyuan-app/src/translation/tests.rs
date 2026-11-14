@@ -3328,3 +3328,25 @@ fn human_rounds_go_stale_when_zhupi_or_context_change() {
         BlockState::HumanFinalized { .. }
     ));
 }
+
+#[test]
+fn format_location_and_preflight_avoid_duplicate_block_blockers() {
+    assert_eq!(format_location("c0001"), "第1章");
+    assert_eq!(format_location("c0001-b0002"), "第1章 · 译稿第2组");
+    assert_eq!(format_location("c0002-p0003"), "第2章 · 第3段");
+    assert_eq!(format_location("custom-id"), "custom-id");
+
+    let fx = Fx::new("preflight-dedup");
+    let report = fx
+        .t()
+        .delivery_preflight(&fx.project, &ExportOptions::default())
+        .unwrap();
+    assert!(!report.export_ready);
+    assert_eq!(report.blockers.len(), 3, "{:?}", report.blockers);
+    assert!(
+        report
+            .blockers
+            .iter()
+            .all(|b| b.contains("译稿第") && b.contains("未开始"))
+    );
+}

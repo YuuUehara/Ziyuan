@@ -50,7 +50,7 @@ impl Translations {
             }
             report.open_issues += 1;
             report.warnings.push(format!(
-                "待查 {}：{}{}",
+                "跨章待查 #{}：{}{}",
                 issue.record.issue_id,
                 if issue.current {
                     ""
@@ -68,14 +68,19 @@ impl Translations {
                 report
                     .blocks
                     .retain(|b| selected.is_empty() || selected.contains(&b.chapter));
+                let mut unfinalized = std::collections::BTreeSet::new();
                 for block in &report.blocks {
                     if !matches!(
                         block.state,
                         BlockState::Finalized { .. } | BlockState::HumanFinalized { .. }
                     ) {
-                        report
-                            .blockers
-                            .push(format!("{}：{}", block.block, block.state.label()));
+                        unfinalized.insert(block.block.as_str());
+                        report.blockers.push(format!(
+                            "{}（{}）：{}",
+                            format_location(&block.block),
+                            block.block,
+                            block.state.label()
+                        ));
                     }
                 }
                 match session.export_finished(self.root(), project, options) {
@@ -84,7 +89,26 @@ impl Translations {
                         report.warnings.extend(bundle.warnings);
                         report.export_ready = report.blockers.is_empty();
                     }
-                    Err(error) => report.blockers.push(error.to_string()),
+                    Err(error) => {
+                        let message = error.to_string();
+                        if let Some((_, rest)) =
+                            message.split_once("不能导出成稿（整批未导出）：\n")
+                        {
+                            for line in rest.lines().filter(|l| !l.trim().is_empty()) {
+                                let already_listed = unfinalized.iter().any(|id| {
+                                    line.starts_with(id) || line.contains(&format!("（{id}）"))
+                                });
+                                if !already_listed {
+                                    report.blockers.push(line.to_string());
+                                }
+                            }
+                            if report.blockers.is_empty() {
+                                report.blockers.push(message);
+                            }
+                        } else {
+                            report.blockers.push(message);
+                        }
+                    }
                 }
             }
             Err(crate::AppError::NotFounded) => {

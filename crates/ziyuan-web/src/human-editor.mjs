@@ -247,16 +247,24 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     const d=entry.draft;
     if(d.composing) return;
     const stats=d.stats;
+    const filled=d.paragraphs.filter(p=>String(p.text||"").trim().length>0).length;
+    const total=d.paragraphs.length;
+    const emptyCount=total-filled;
+    entry.rows.forEach((row,i)=>{
+      row.section?.classList?.toggle?.("is-empty", !String(d.paragraphs[i]?.text||"").trim());
+    });
     const revText=!d.initialized ? "读取中…" : d.revision ? `修订 ${d.revision}` : "尚无草稿";
     const statusText=!d.initialized
       ? "正在读取人工草稿…"
       : (d.revision==null && d.state==="saved")
         ? "尚无草稿"
         : `${STATE_LABELS[d.state]} · ${revText}`;
-    entry.status.textContent=`${statusText} · 正文字符 ${stats.counts.body} · 读音字符 ${stats.counts.reading} · ${stats.marks}/4096 标记 · ${stats.bytes}/262144 字节`;
+    entry.status.textContent=`${statusText} · 正文字符 ${stats.counts.body} · 读音字符 ${stats.counts.reading} · ${stats.marks}/4096 标记 · ${stats.bytes}/262144 字节 · 已填 ${filled}/${total} 段`;
+    const notFounded=d.remote?.founded===false;
     entry.message.textContent=[
       !d.storage && !d.viewer ? "浏览器无法暂存编辑内容，请在离开页面前保存草稿。" : "",
       d.recovery && !d.viewer ? "发现本块上次留在页面中的暂存内容，请先选择恢复或忽略，再继续编辑。" : "",
+      notFounded && !d.viewer ? "当前目录尚未建立朝廷（运行 ziyuan init 后可送审、准奏与御览定稿）；人工草稿仍可正常保存。" : "",
       d.message,...stats.problems,
     ].filter(Boolean).join("\n");
     if(d.messageTone==="error" || stats.problems.length) entry.message.dataset.tone="error";
@@ -272,9 +280,14 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
         (action==="approve" && h?.submitted===false) ||
         (action==="finalize" && h && (!h.approved || h.stale || h.finalized));
       button.disabled=!d.editable || d.busy || d.composing ||
-        (workflow && (d.dirty||d.conflict||!!stats.problems.length||!d.revision||stepBlocked)) ||
+        (workflow && (notFounded||d.dirty||d.conflict||!!stats.problems.length||!d.revision||stepBlocked)) ||
         (action==="save" && (d.conflict||!!stats.problems.length)) ||
         (action==="undo" && !d.undo.length) || (action==="redo" && !d.redo.length);
+      button.title=(workflow && notFounded) ? "尚未建立朝廷（运行 ziyuan init 后可送审、准奏与御览定稿）" : "";
+    }
+    if(entry.nextEmpty) {
+      entry.nextEmpty.disabled=emptyCount===0;
+      entry.nextEmpty.textContent=emptyCount ? `下一空白段（余 ${emptyCount}）` : "本组已填满";
     }
     entry.root.querySelectorAll("textarea").forEach(t=>{ t.readOnly=!d.editable; });
     entry.root.querySelectorAll("[data-mark], [data-remove]").forEach(b=>{
@@ -322,17 +335,24 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     for(const [i,p] of entry.draft.paragraphs.entries()) {
       const section=host.ownerDocument.createElement("section"); section.className="human-paragraph";
       section.dataset.humanPara=p.id;
-      section.innerHTML=`<h4 title="内部编号：${escape(p.id)}">${escape(textLocation(p.id))}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><label>人工译文<textarea aria-label="${escape(textLocation(p.id))} 人工译文"></textarea></label></div><div class="actions human-mark-tools"></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
+      section.innerHTML=`<h4 title="内部编号：${escape(p.id)}">${escape(textLocation(p.id))}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><div class="human-target-col"><label>人工译文<textarea aria-label="${escape(textLocation(p.id))} 人工译文"></textarea></label><div class="actions human-mark-tools"></div></div></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
       const textarea=section.querySelector("textarea"), tools=section.querySelector(".human-mark-tools");
       for(const [kind,label] of Object.entries(KIND_LABELS)) {
         const b=button(label,null,tools); b.dataset.mark=kind;
         b.addEventListener("click",()=>{
           try {
             const {selectionStart:start,selectionEnd:end}=textarea;
+            if(start>=end) {
+              entry.draft.messageTone="error";
+              entry.draft.message="请先在右侧「人工译文」框中选中要加标记的文字。";
+              notify(entry);
+              textarea.focus();
+              return;
+            }
             const reading=kind==="ruby" ? globalThis.prompt("所选文字的读音（单行）","") : undefined;
             if(reading===null) return;
             entry.draft.mark(i,start,end,kind,reading); details(entry); textarea.focus();
-          } catch(e) { entry.draft.message=e.message; notify(entry); }
+          } catch(e) { entry.draft.messageTone="error"; entry.draft.message=e.message; notify(entry); }
         });
       }
       textarea.addEventListener("compositionstart",()=>{ entry.draft.beginComposition(); });
@@ -348,14 +368,14 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
         const b=event.target.closest("[data-remove]"); if(!b) return;
         entry.draft.remove(i,Number(b.dataset.remove)); details(entry);
       });
-      entry.rows.push({id:p.id,textarea,source:section.querySelector(".text-para"),preview:section.querySelector(".human-preview"),tableWrap:section.querySelector(".table-wrap"),table:section.querySelector("table")});
+      entry.rows.push({id:p.id,section,textarea,source:section.querySelector(".text-para"),preview:section.querySelector(".human-preview"),tableWrap:section.querySelector(".table-wrap"),table:section.querySelector("table")});
       entry.paras.append(section);
     }
   }
   function create(context) {
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
-    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段填写译文；选中文字可加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
+    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段在右侧填写译文，按 Ctrl+S 可快捷保存草稿；选中右侧译文文字可在栏下加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
     const entry={draft:d,root,rows:[],buttons:new Map(),request:0,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};
@@ -367,12 +387,37 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     for(const [action,label] of [["save","保存人工草稿"],["submit","送审当前已保存修订"],["approve","人工准奏"],["finalize","人工御览定稿"],["undo","撤销标记"],["redo","重做标记"]]) {
       entry.buttons.set(action,button(label,action,actions,action==="save"?"primary":""));
     }
+    entry.nextEmpty=button("下一空白段","next-empty",actions); entry.nextEmpty.dataset.view="";
     entry.refresh=button("刷新人工状态","refresh",actions); entry.refresh.dataset.view="";
+    root.addEventListener("keydown",async event=>{
+      if((event.ctrlKey||event.metaKey) && !event.altKey && String(event.key||"").toLowerCase()==="s") {
+        event.preventDefault();
+        d.viewer=!!isViewer();
+        if(d.viewer||!d.editable||d.busy||d.composing||d.conflict||d.stats.problems.length) return;
+        const promise=d.save(api);
+        notify(entry); const ok=await promise; notify(entry);
+        if(ok) { await pull(entry); onChanged?.(d.project,d.block); }
+      }
+    });
     root.addEventListener("click",async event=>{
       const action=event.target.closest("[data-action]")?.dataset.action;
       if(!action || d.busy || d.composing) return;
       d.viewer=!!isViewer();
       if(action==="refresh") { await pull(entry); return; }
+      if(action==="next-empty") {
+        const activeEl=host.ownerDocument.activeElement;
+        const curIdx=entry.rows.findIndex(r=>r.textarea===activeEl);
+        const indices=[...Array(d.paragraphs.length).keys()];
+        const ordered=curIdx>=0 ? [...indices.slice(curIdx+1),...indices.slice(0,curIdx+1)] : indices;
+        const nextIdx=ordered.find(idx=>!String(d.paragraphs[idx]?.text||"").trim());
+        if(nextIdx!==undefined) {
+          const row=entry.rows[nextIdx];
+          row?.textarea?.scrollIntoView?.({block:"center",behavior:"smooth"});
+          row?.textarea?.focus?.();
+          d.messageTone=""; d.message=`已定位到未填段落：${textLocation(d.paragraphs[nextIdx].id)}`; notify(entry);
+        }
+        return;
+      }
       if(d.viewer) return;
       if(action==="restore") { if(confirm("用页面暂存替换当前编辑内容？恢复后仍须点击保存，才会写入草稿。")) { d.restore(); syncText(entry); } }
       else if(action==="dismiss") { d.dismissRecovery(); notify(entry); }
@@ -416,7 +461,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
       const installed=d.receive(view,epoch);
       if(installed) syncText(entry); else notify(entry);
       return true;
-    } catch(e) { if(request===entry.request) { d.message=e.body?.message||e.message; notify(entry); } return false; }
+    } catch(e) { if(request===entry.request) { d.messageTone="error"; d.message=e.body?.message||e.message; notify(entry); } return false; }
   }
   async function loadProgress(project) {
     const request=++progressRequest;

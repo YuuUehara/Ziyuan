@@ -4,7 +4,11 @@ import { mountReading } from "./continuity-reading.mjs";
 import { mountSearch } from "./continuity-search.mjs";
 import { mountMemoryExchange } from "./continuity-memory.mjs";
 import { mountDocuments } from "./continuity-document.mjs";
-export function mount({ api, getSelection, refresh, navigate }) {
+async function readError(response, fallback) {
+  const data = await response.json().catch(() => ({}));
+  return data.error || data.message || `${fallback}（HTTP ${response.status}）`;
+}
+export function mount({ api, getSelection, getChapters, refresh, navigate }) {
   const host = document.createElement("details");host.className="continuity-tools";host.dataset.workspaceTool="backup";
   host.innerHTML = `<summary>备份与恢复</summary><p class="hint">完整备份包含全部译书项目和共用朝廷记录，其中可能有代码任务正文；登录令牌和模型凭据配置不会打包。恢复时会在当前工作区内新建目录，请勿把这份备份直接当作单本书的分享包。</p><div class="row write"><button type="button" data-preview>预览完整备份</button><button type="button" data-download disabled>确认下载</button></div><div class="row write"><input type="file" accept=".tar" data-file aria-label="备份文件"><input data-destination placeholder="恢复到的新目录名，如 books-restored" aria-label="恢复目录"><button type="button" data-check>校验备份</button><button type="button" data-restore disabled>确认恢复</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   document.querySelector("#text-card > .body").prepend(host);
@@ -15,12 +19,15 @@ export function mount({ api, getSelection, refresh, navigate }) {
   el("preview").onclick = () => run(async () => { preview = await api("/text/backup", {}); show(preview); el("download").disabled = false; });
   el("download").onclick = () => run(async () => {
     const response = await fetch("api/text/backup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fingerprint: preview.fingerprint }) });
-    if (!response.ok) { el("download").disabled = true; throw new Error((await response.json()).error); }
+    if (!response.ok) { el("download").disabled = true; throw new Error(await readError(response, "下载备份失败")); }
     const url = URL.createObjectURL(await response.blob()); const a = document.createElement("a"); a.href = url; a.download = "ziyuan-workspace.tar"; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
   const send = async (query = "") => {
     const response = await fetch("api/text/restore" + query, { method: "POST", body: upload });
-    const value = await response.json(); if (!response.ok) throw new Error(value.error); return value;
+    if (!response.ok) throw new Error(await readError(response, "恢复备份失败"));
+    const value = await response.json().catch(() => null);
+    if (!value) throw new Error("服务器返回了无效的恢复响应");
+    return value;
   };
   el("file").onchange = () => { checked = null; el("restore").disabled = true; };
   el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
@@ -29,7 +36,7 @@ export function mount({ api, getSelection, refresh, navigate }) {
   updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
-  const reading=mountReading(issues,{api,getSelection,navigate});
+  const reading=mountReading(issues,{api,getSelection,getChapters,navigate});
   const search=mountSearch(reading,{api,getSelection,navigate,refresh});
   const memory=mountMemoryExchange(search,{api,getSelection});
   const documents=mountDocuments(memory,{getSelection,refresh});

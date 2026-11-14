@@ -5,7 +5,7 @@ fn format_name(format: &str) -> Result<&str> {
     if matches!(format, "docx" | "epub" | "srt") {
         Ok(format)
     } else {
-        Err(invalid("文件格式须为DOCX、EPUB或SRT"))
+        Err(invalid("文件格式须为 DOCX、EPUB 或 SRT"))
     }
 }
 impl Translations {
@@ -29,10 +29,12 @@ impl Translations {
     ) -> Result<usize> {
         let format = format_name(format)?;
         if bytes.len() > 16 * 1024 * 1024 {
-            return Err(invalid("原件超过16 MiB"));
+            return Err(invalid("原件超过 16 MiB"));
         }
         if !self.project(project)?.chapters.is_empty() {
-            return Err(invalid("项目已有原文，不能重复导入"));
+            return Err(invalid(
+                "项目已有原文，不能重复导入（如需追加或修订单章，请使用「追加与修订原文」）",
+            ));
         }
         let stage = self.document_stage(project)?;
         let file = stage.join(format!("original.{format}"));
@@ -76,7 +78,7 @@ impl Translations {
         let _ = std::fs::remove_dir(&stage);
         let bytes = result?;
         if bytes.len() > 64 * 1024 * 1024 {
-            return Err(invalid("成稿文件超过64 MiB"));
+            return Err(invalid("成稿文件超过 64 MiB"));
         }
         let after = session
             .export_finished(self.root(), project, &options)

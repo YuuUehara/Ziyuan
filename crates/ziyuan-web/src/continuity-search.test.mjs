@@ -32,3 +32,19 @@ test('old project search cannot confirm a draft replacement after project switch
 test('source update rejects invalid UTF-8 and hints Shift_JIS',()=>{
  assert.throws(()=>sourceUpdateRequest('aozora.txt',Uint8Array.from([0x90,0xd4,0x8c,0xbb]),null),/UTF-8.*Shift_JIS/);
 });
+test("pressing Enter (form submit) runs search without navigating", async () => {
+  const previous = globalThis.document;
+  globalThis.document = { createElement: (tag) => new Element(tag) };
+  try {
+    let searches = 0;
+    const api = async () => { searches++; return { hits: [], truncated: false }; };
+    const section = mountSearch(new Element(), { api, getSelection: () => ({ project: "P" }), navigate: async () => {} });
+    section.querySelector("[data-query]").value = "词语";
+    let prevented = false;
+    await section.querySelector("[data-form]").onsubmit({ preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(searches, 1);
+  } finally {
+    globalThis.document = previous;
+  }
+});

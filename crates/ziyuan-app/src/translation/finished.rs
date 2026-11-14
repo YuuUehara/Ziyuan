@@ -1,5 +1,7 @@
 //! Read-only exports: immutable bytes, not paths to reread while streaming a download.
-use super::{BlockState, Result, Translations, invalid, read_plain_opt, sha256_hex};
+use super::{
+    BlockState, Result, Translations, format_location, invalid, read_plain_opt, sha256_hex,
+};
 use crate::text_project::{Chapter, Inline, Project, SourceFormat};
 use crate::{AppError, Session};
 use serde::{Deserialize, Serialize};
@@ -176,7 +178,11 @@ impl<S: EventStore> Session<S> {
             let mut texts = BTreeMap::new();
             let mut blocks = Vec::new();
             if c.blocks.is_empty() {
-                failures.push(format!("{}：没有提示块", c.id));
+                failures.push(format!(
+                    "{}（{}）：没有提示块",
+                    format_location(&c.id),
+                    c.id
+                ));
             }
             for b in &c.blocks {
                 let state = &statuses
@@ -200,8 +206,9 @@ impl<S: EventStore> Session<S> {
                         let zhupi_hash = t.block_zhupi_hash(&p, &b.block_id)?;
                         if link.zhupi_hash != zhupi_hash {
                             failures.push(format!(
-                                "{} / {}：朱批自下诏后有变，须重修定稿",
-                                c.id, b.block_id
+                                "{}（{}）：朱批自下诏后有变，须重修定稿",
+                                format_location(&b.block_id),
+                                b.block_id
                             ));
                             continue;
                         }
@@ -235,8 +242,8 @@ impl<S: EventStore> Session<S> {
                             _ => String::new(),
                         };
                         failures.push(format!(
-                            "{} / {}：{}{}",
-                            c.id,
+                            "{}（{}）：{}{}",
+                            format_location(&b.block_id),
                             b.block_id,
                             state.label(),
                             if detail.is_empty() {
@@ -268,7 +275,11 @@ impl<S: EventStore> Session<S> {
                     .check(id, &b.block_id, &structure)
                     .map_err(super::TranslationError::from)?;
                 if !report.valid {
-                    failures.push(format!("{} / {}：译文结构无效", c.id, b.block_id));
+                    failures.push(format!(
+                        "{}（{}）：译文结构无效",
+                        format_location(&b.block_id),
+                        b.block_id
+                    ));
                     continue;
                 }
                 match target {
@@ -293,16 +304,17 @@ impl<S: EventStore> Session<S> {
                         }
                         if options.format != ExportFormat::Markdown {
                             failures.push(format!(
-                                "{} / {}：译稿带注音、粗体、斜体或着重点等标记，TXT 不能无损表达；请改用 Markdown 导出（命令行加 --format md）",
-                                c.id, b.block_id
+                                "{}（{}）：译稿带注音、粗体、斜体或着重点等标记，TXT 不能无损表达；请改用 Markdown 或 HTML 导出（命令行加 --format md 或 --format html）",
+                                format_location(&b.block_id),
+                                b.block_id
                             ));
                             continue;
                         }
                         let check = candidate.check_format(super::ReviewFormat::MarkdownHtml)?;
                         if !check.lossless {
                             failures.push(format!(
-                                "{} / {}：译稿有 {} 处标记（着重点，或同一范围叠加的标记）Markdown 也不能无损表达；请在人工草稿中改去这些标记，重新送审、准奏、定稿后再导出",
-                                c.id,
+                                "{}（{}）：译稿有 {} 处标记（着重点，或同一范围叠加的标记）Markdown 也不能无损表达；可改用 HTML 导出（--format html），或在人工草稿中改去这些标记后重新送审、准奏、定稿",
+                                format_location(&b.block_id),
                                 b.block_id,
                                 check.unsupported_marks.len()
                             ));
@@ -363,7 +375,8 @@ impl<S: EventStore> Session<S> {
         if options.format == ExportFormat::Html {
             for file in &mut files {
                 file.bytes = super::html_export::document(
-                    std::str::from_utf8(&file.bytes).map_err(|_| invalid("成稿不是UTF-8"))?,
+                    std::str::from_utf8(&file.bytes)
+                        .map_err(|_| invalid("成稿不是有效的 UTF-8"))?,
                 )
                 .into_bytes();
             }
@@ -591,8 +604,9 @@ fn render_chapter(
                 .any(|e| matches!(e, pulldown_cmark::Event::Code(_)))
             {
                 return Err(invalid(format!(
-                    "{} / {}：原段含行内代码，现有逐段译稿没有位置锚点，不能无损回填；请取回原件或选择 TXT（明确丢弃代码）",
-                    c.id, para.id
+                    "{}（{}）：原段含行内代码，现有逐段译稿没有位置锚点，不能无损回填；请取回原件或选择 TXT（明确丢弃代码）",
+                    format_location(&para.id),
+                    para.id
                 )));
             }
             out.push_str(&raw[start..para.byte_start].replace("\r\n", "\n"));

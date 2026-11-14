@@ -406,6 +406,30 @@ impl DirLock {
 }
 
 /// 章 ID 的排序键：取 `c` 后的数字；不合格式的按最大，排在最后。
+/// 把内部 ID（如 `c0001`、`c0001-b0002`、`c0001-p0003`）格式化为与前端一致的可读中文位置。
+pub(crate) fn format_location(id: &str) -> String {
+    if let Some((ch_raw, rest)) = id.split_once('-')
+        && let Some(ch_digits) = ch_raw.strip_prefix('c')
+        && let Ok(ch) = ch_digits.parse::<u64>()
+    {
+        if let Some(b_digits) = rest.strip_prefix('b')
+            && let Ok(b) = b_digits.parse::<u64>()
+        {
+            return format!("第{ch}章 · 译稿第{b}组");
+        }
+        if let Some(p_digits) = rest.strip_prefix('p')
+            && let Ok(p) = p_digits.parse::<u64>()
+        {
+            return format!("第{ch}章 · 第{p}段");
+        }
+    } else if let Some(ch_digits) = id.strip_prefix('c')
+        && let Ok(ch) = ch_digits.parse::<u64>()
+    {
+        return format!("第{ch}章");
+    }
+    id.to_string()
+}
+
 pub(crate) fn chapter_rank(id: &str) -> u64 {
     id.strip_prefix('c')
         .and_then(|digits| digits.parse().ok())

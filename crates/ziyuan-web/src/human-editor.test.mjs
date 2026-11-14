@@ -37,6 +37,9 @@ test("page imports the actual editor, uses a persistent host and retains API con
   assert.match(html,/kind === "original" \? "txt" : d\.format/);
   assert.match(html,/kind === "original" \? "chapters" : d\.layout/);
   assert.ok(!html.includes("格式与编排不影响原件"));
+  assert.match(html,/id="materials-approve-context"/);
+  assert.match(html,/\.human-target-col\s*\{/);
+  assert.match(html,/data-import-remove="/);
 });
 test("whole draft limits include readings and every paragraph", () => {
   const paragraphs = ["a", "b"].map((id) => ({ id, text: "字", marks: Array.from({ length: 2049 }, () => ({start:0,end:1,kind:"strong"})) }));
@@ -375,4 +378,135 @@ test("summarizeParagraphIds condenses contiguous ranges and submit blocks empty 
   assert.equal(msg.dataset.tone, "error");
   assert.match(msg.textContent, /还有 2 段尚未填写译文（第1章 · 第2～3段）/);
   assert.equal(focused, "c0001-p0002");
+});
+
+test("next-empty jump, selection guard before ruby prompt, Ctrl+S shortcut, and un-founded court gating", async () => {
+  let focused = null;
+  let promptCalls = 0;
+  let savedPayloads = 0;
+  const origPrompt = globalThis.prompt;
+  globalThis.prompt = () => { promptCalls++; return "かな"; };
+  try {
+    const makeEl = (tag, doc) => {
+      const classes = new Set();
+      const node = {
+        tagName: tag.toUpperCase(), className: "", hidden: false, disabled: false, readOnly: false,
+        value: "", textContent: "", _innerHTML: "", dataset: {}, attributes: {}, children: [],
+        listeners: new Map(), parentElement: null, ownerDocument: doc,
+        selectionStart: 0, selectionEnd: 0,
+        classList: {
+          toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
+          contains(name) { return classes.has(name); },
+        },
+        get innerHTML() { return this._innerHTML; },
+        set innerHTML(v) {
+          this._innerHTML = String(v);
+          if (this.className === "human-paragraph") {
+            const tx = makeEl("textarea", doc);
+            const pid = this.dataset.humanPara;
+            tx.focus = () => { focused = pid; doc.activeElement = tx; };
+            const src = makeEl("p", doc); src.className = "text-para";
+            const tools = makeEl("div", doc); tools.className = "actions human-mark-tools";
+            const preview = makeEl("p", doc); preview.className = "human-preview text-para";
+            const tableWrap = makeEl("div", doc); tableWrap.className = "table-wrap";
+            const table = makeEl("table", doc);
+            tableWrap.append(table);
+            this.children = [src, tx, tools, preview, tableWrap];
+            this._map = { textarea: tx, ".human-mark-tools": tools, table, ".text-para": src, ".human-preview": preview, ".table-wrap": tableWrap };
+          } else if (this._innerHTML.includes("human-paragraphs")) {
+            const status = makeEl("p", doc); status.className = "human-status";
+            const msg = makeEl("p", doc); msg.className = "human-message hint";
+            const rec = makeEl("div", doc); rec.className = "human-recovery actions";
+            const conf = makeEl("div", doc); conf.className = "human-conflict actions";
+            const acts = makeEl("div", doc); acts.className = "human-actions actions";
+            const paras = makeEl("div", doc); paras.className = "human-paragraphs";
+            this.children = [status, msg, rec, conf, acts, paras];
+            this._map = { ".human-status": status, ".human-message": msg, ".human-recovery": rec, ".human-conflict": conf, ".human-actions": acts, ".human-paragraphs": paras };
+          }
+        },
+        setAttribute(k, v) { this.attributes[k] = v; },
+        append(...items) { items.forEach((i) => { i.parentElement = this; this.children.push(i); }); },
+        replaceChildren(...items) { this.children = []; this.append(...items); },
+        addEventListener(type, fn) {
+          if (!this.listeners.has(type)) this.listeners.set(type, []);
+          this.listeners.get(type).push(fn);
+        },
+        querySelector(sel) { return this._map?.[sel] || null; },
+        querySelectorAll(sel) {
+          const out = [];
+          const walk = (n) => {
+            for (const c of n.children || []) {
+              if (sel === "textarea" && c.tagName === "TEXTAREA") out.push(c);
+              if (sel.includes("[data-mark]") && (c.dataset.mark || c.dataset.remove !== undefined)) out.push(c);
+              walk(c);
+            }
+          };
+          walk(this);
+          return out;
+        },
+        closest(sel) {
+          if (sel === "[data-action]" && this.dataset?.action) return this;
+          return null;
+        },
+        focus() {},
+      };
+      return node;
+    };
+    const doc = { activeElement: null };
+    doc.createElement = (tag) => makeEl(tag, doc);
+    const host = makeEl("div", doc);
+    const src = [{ id: "c0001-p0001", text: "原文1" }, { id: "c0001-p0002", text: "原文2" }];
+    const api = async (path) => {
+      if (path.endsWith("/draft")) { savedPayloads++; return { revision: "rev-2" }; }
+      if (path.endsWith("/human/progress")) return null;
+      return {
+        founded: false,
+        basis: { source_hash: "s", context_hash: "c" },
+        revision: "rev-1",
+        draft: { revision: "rev-1", paragraphs: [{ id: "c0001-p0001", text: "译1", marks: [] }, { id: "c0001-p0002", text: "", marks: [] }] },
+        human: { submitted: false, approved: false, finalized: false, stale: false },
+      };
+    };
+    const editor = mountHumanEditor(host, { api, isViewer: () => false, storage: storage(), confirm: () => true });
+    editor.update({ project: "p", block: "c0001-b0001", source: src });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const root = host.children[1].children[0];
+    assert.match(root.querySelector(".human-status").textContent, /已填 1\/2 段/);
+    const msg = root.querySelector(".human-message");
+    assert.match(msg.textContent, /尚未建立朝廷/);
+    assert.equal(msg.dataset.tone, undefined);
+
+    const btns = Object.fromEntries(root.querySelector(".human-actions").children.map((b) => [b.dataset.action, b]));
+    assert.equal(btns.save.disabled, false);
+    assert.equal(btns.submit.disabled, true);
+    assert.equal(btns.approve.disabled, true);
+    assert.equal(btns.finalize.disabled, true);
+    assert.equal(btns["next-empty"].textContent, "下一空白段（余 1）");
+
+    // Clicking next-empty focuses the unfilled second paragraph
+    for (const fn of root.listeners.get("click") || []) {
+      await fn({ target: btns["next-empty"] });
+    }
+    assert.equal(focused, "c0001-p0002");
+
+    // Clicking ruby mark without selection reports error without opening prompt
+    const rubyBtn = root.querySelector(".human-paragraphs").children[0].querySelector(".human-mark-tools").children[0];
+    for (const fn of rubyBtn.listeners.get("click") || []) {
+      fn();
+    }
+    assert.equal(promptCalls, 0);
+    assert.equal(msg.dataset.tone, "error");
+    assert.match(msg.textContent, /请先在右侧「人工译文」框中选中要加标记的文字/);
+
+    // Ctrl+S triggers save
+    let prevented = false;
+    for (const fn of root.listeners.get("keydown") || []) {
+      await fn({ ctrlKey: true, metaKey: false, altKey: false, key: "s", preventDefault() { prevented = true; } });
+    }
+    assert.equal(prevented, true);
+    assert.equal(savedPayloads, 1);
+  } finally {
+    globalThis.prompt = origPrompt;
+  }
 });

@@ -102,9 +102,10 @@ impl Translations {
                         TaskStatus::Pending | TaskStatus::Assigned { .. }
                     )
                 {
-                    preview
-                        .blockers
-                        .push(format!("诏令 {} 尚未完成，请先收尾或撤销", task.edict.id.0));
+                    preview.blockers.push(format!(
+                        "诏令 #{} 尚未完成，请先执行、准奏或撤销",
+                        task.edict.id.0
+                    ));
                 }
             }
         }

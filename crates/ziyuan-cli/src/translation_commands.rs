@@ -532,14 +532,18 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
         }
         TranslationAction::CommentReply(project, parent, body) => {
             let comment = translations.comment_reply(&project, &parent, &body)?;
-            if !json {
+            if json {
+                print_json(serde_json::json!(comment))?;
+            } else {
                 println!("已回复评论 {}（父 {}）。", comment.id, parent);
             }
             return Ok(());
         }
         TranslationAction::CommentAssign(project, id, who) => {
             let comment = translations.comment_assign(&project, &id, &who)?;
-            if !json {
+            if json {
+                print_json(serde_json::json!(comment))?;
+            } else {
                 println!("评论 {} 已指派给 {}。", comment.id, who);
             }
             return Ok(());
@@ -592,7 +596,13 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
         TranslationAction::TbxExport(project, file) => {
             let tbx = translations.export_termbase_tbx(&project)?;
             std::fs::write(&file, tbx.as_bytes())?;
-            if !json {
+            if json {
+                print_json(serde_json::json!({
+                    "project": project,
+                    "file": file,
+                    "bytes": tbx.len(),
+                }))?;
+            } else {
                 println!("已导出 TBX：{}（{} 字节）。", file.display(), tbx.len());
             }
             return Ok(());
@@ -600,7 +610,9 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
         TranslationAction::TbxImport(project, file) => {
             let bytes = std::fs::read(&file)?;
             let receipt = translations.import_termbase_tbx(&project, &bytes)?;
-            if !json {
+            if json {
+                print_json(serde_json::json!(receipt))?;
+            } else {
                 println!(
                     "已合并 TBX 到本地草稿（未批准）：修订 {}。",
                     receipt.revision
