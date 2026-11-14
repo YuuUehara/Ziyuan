@@ -29,6 +29,13 @@ pub(crate) struct Materials {
 impl Translations {
     pub(crate) fn reading_materials(&self, project: &str) -> Result<Materials> {
         let p = self.project(project)?;
+        self.reading_materials_for(&p)
+    }
+    pub(crate) fn reading_materials_for(
+        &self,
+        p: &crate::text_project::Project,
+    ) -> Result<Materials> {
+        let project = p.id.as_str();
         let mut paragraphs = Vec::new();
         let mut block_hashes = BTreeMap::new();
         let mut warnings = Vec::new();
@@ -121,14 +128,10 @@ impl Translations {
         })
     }
     pub fn read_chapter(&self, project: &str, chapter: Option<&str>) -> Result<ReadingView> {
-        let mut result = self.reading_materials(project)?.reading;
+        let p = self.project(project)?;
+        let mut result = self.reading_materials_for(&p)?.reading;
         if let Some(chapter) = chapter {
-            if !self
-                .project(project)?
-                .chapters
-                .iter()
-                .any(|c| c.id == chapter)
-            {
+            if !p.chapters.iter().any(|c| c.id == chapter) {
                 return Err(invalid("章节不存在"));
             }
             result.paragraphs.retain(|p| p.chapter == chapter);

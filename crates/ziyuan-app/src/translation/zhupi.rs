@@ -182,6 +182,39 @@ impl Translations {
         )?))
     }
 
+    /// 一次读取 `zhupi.json`，按块返回各块朱批条目内容的 SHA-256。
+    pub(crate) fn block_zhupi_hashes(
+        &self,
+        project: &crate::text_project::Project,
+    ) -> Result<BTreeMap<String, String>> {
+        let book = self
+            .zhupi_file(&project.id)?
+            .load()?
+            .map(|s| s.value)
+            .unwrap_or_default();
+        let empty = BTreeMap::new();
+        let mut hashes = BTreeMap::new();
+        for chapter in &project.chapters {
+            for block in &chapter.blocks {
+                let items_map = book.blocks.get(&block.block_id).unwrap_or(&empty);
+                let items: Vec<serde_json::Value> = block
+                    .paragraphs
+                    .iter()
+                    .filter_map(|p| {
+                        items_map
+                            .get(&p.id)
+                            .map(|n| serde_json::json!({ "id": p.id, "zhupi": n.text }))
+                    })
+                    .collect();
+                hashes.insert(
+                    block.block_id.clone(),
+                    super::sha256_hex(&pretty_json(&items)?),
+                );
+            }
+        }
+        Ok(hashes)
+    }
+
     /// 修订时导出的 `zhupi.json`：按块内段落顺序列出。
     pub(crate) fn zhupi_export(
         &self,

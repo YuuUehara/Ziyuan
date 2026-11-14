@@ -54,7 +54,17 @@ export function mount({ api, getSelection, refresh, navigate }) {
 export function sourceUpdateRequest(name, bytes, chapter) {
   const binary = /\.(docx|epub)$/i.test(name);
   if (!binary) {
-    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      let hint = "";
+      try {
+        new TextDecoder("shift_jis", { fatal: true }).decode(bytes);
+        hint = "（检测到可能是 Shift_JIS / 日文旧编码，如青空文库默认下载格式）";
+      } catch {}
+      throw new Error(`「${name || "文件"}」不是有效的 UTF-8 文本${hint}，请先转为 UTF-8 再上传`);
+    }
     return { chapter, name, text };
   }
   let binaryText = "";

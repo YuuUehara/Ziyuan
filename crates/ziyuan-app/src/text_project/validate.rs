@@ -1,5 +1,5 @@
 //! Structural checks only. Passing says nothing about translation fidelity or quality.
-use super::{PromptBlock, Result, TextProjects, invalid};
+use super::{Project, PromptBlock, Result, TextProjects, invalid};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,6 +66,16 @@ impl TextProjects {
     /// Project/source failures are `Err`; candidate failures are a serializable report.
     pub fn check(&self, id: &str, block_id: &str, bytes: &[u8]) -> Result<ValidationReport> {
         let project = self.show(id)?;
+        self.check_in(&project, block_id, bytes)
+    }
+
+    /// Validates candidate JSON bytes against an already-validated [`Project`].
+    pub fn check_in(
+        &self,
+        project: &Project,
+        block_id: &str,
+        bytes: &[u8],
+    ) -> Result<ValidationReport> {
         let (chapter, expected) = project
             .chapters
             .iter()
@@ -78,7 +88,7 @@ impl TextProjects {
             })
             .ok_or_else(|| invalid(format!("未知提示块: {block_id}")))?;
         let mut report = ValidationReport {
-            project_id: id.to_owned(),
+            project_id: project.id.clone(),
             chapter_id: chapter.id.clone(),
             block_id: block_id.to_owned(),
             expected_ids: expected.paragraphs.iter().map(|p| p.id.clone()).collect(),

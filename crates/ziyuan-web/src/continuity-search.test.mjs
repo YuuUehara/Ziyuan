@@ -29,3 +29,6 @@ test('old project search cannot confirm a draft replacement after project switch
   project='B';await confirm.onclick();assert.equal(writes,1);assert.match(section.querySelector('[data-status]').textContent,/重新预览/);
  }finally{globalThis.document=previous;}
 });
+test('source update rejects invalid UTF-8 and hints Shift_JIS',()=>{
+ assert.throws(()=>sourceUpdateRequest('aozora.txt',Uint8Array.from([0x90,0xd4,0x8c,0xbb]),null),/UTF-8.*Shift_JIS/);
+});

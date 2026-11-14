@@ -45,7 +45,8 @@ impl Translations {
         {
             return Err(invalid("检索文字须非空且不超过4000字节；范围须明确"));
         }
-        let material = self.reading_materials(project)?;
+        let p = self.project(project)?;
+        let material = self.reading_materials_for(&p)?;
         let mut hits = Vec::new();
         let mut truncated = false;
         let mut push = |chapter: &str,
@@ -94,11 +95,17 @@ impl Translations {
             }
         }
         if matches!(scope, "all" | "draft" | "history") {
-            let p = self.project(project)?;
+            let project_hash = if matches!(scope, "all" | "draft") {
+                Some(sha256_hex(&serde_json::to_vec(&p)?))
+            } else {
+                None
+            };
             for chapter in &p.chapters {
                 for block in &chapter.blocks {
-                    if matches!(scope, "all" | "draft")
-                        && let Some(draft) = self.peek_human_draft(project, &block.block_id)?.draft
+                    if let Some(ref project_hash) = project_hash
+                        && let Some(draft) = self
+                            .peek_human_draft_with_hash_in(&p, project_hash, &block.block_id)?
+                            .draft
                     {
                         for paragraph in &draft.paragraphs {
                             push(
@@ -112,12 +119,9 @@ impl Translations {
                         }
                     }
                     if matches!(scope, "all" | "history") {
-                        for version in self.list_translation_versions(project, &block.block_id)? {
-                            let bytes = self.read_translation_version(
-                                project,
-                                &block.block_id,
-                                &version.id,
-                            )?;
+                        for version in self.list_translation_versions_in(&p, &block.block_id)? {
+                            let bytes =
+                                self.read_translation_version_in(&p, &block.block_id, &version.id)?;
                             let saved = super::versions::parse_snapshot(&bytes, &block.block_id)?;
                             for paragraph in saved.paragraphs {
                                 push(

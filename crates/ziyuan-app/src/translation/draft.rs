@@ -5,7 +5,7 @@ use super::{
     Result, TargetMark, TargetMarkKind, TranslationError, Translations, check_plain_dirs,
     ensure_plain_dirs, find_block, invalid, markup, sha256_hex,
 };
-use crate::text_project::{BlockParagraph, PromptBlock};
+use crate::text_project::{BlockParagraph, Project, PromptBlock};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -455,7 +455,7 @@ impl Translations {
             };
         }
         let book = self
-            .draft_file(&r.project, &r.block)?
+            .draft_file_in(&project, &r.block)?
             .load()?
             .ok_or_else(|| invalid("尚无可核对的人工送审快照"))?
             .value;
@@ -469,15 +469,15 @@ impl Translations {
         {
             return Err(invalid("人工送审绑定与原提交不符"));
         }
-        let report = self.texts().check(
-            &r.project,
+        let report = self.texts().check_in(
+            &project,
             &r.block,
             &candidate.text_structure().serialized()?,
         )?;
         if !report.valid {
             return Err(invalid("人工送审候选未通过段落归属与完整性检查"));
         }
-        if self.draft_basis(&r.project, &r.block)? != r.basis {
+        if self.draft_basis_in(&project, &r.block)? != r.basis {
             return Err(TranslationError::DraftBasisChanged);
         }
         let source = super::resolve_translation_source(&history, &r.project, &r.block)?;
@@ -491,17 +491,22 @@ impl Translations {
     }
 
     fn draft_file(&self, project: &str, block: &str) -> Result<JsonFile<DraftBook>> {
-        self.draft_file_with_dirs(project, block, true)
+        let p = self.project(project)?;
+        self.draft_file_in(&p, block)
     }
 
-    fn draft_file_with_dirs(
+    fn draft_file_in(&self, project: &Project, block: &str) -> Result<JsonFile<DraftBook>> {
+        self.draft_file_with_dirs_in(project, block, true)
+    }
+
+    fn draft_file_with_dirs_in(
         &self,
-        project: &str,
+        project: &Project,
         block: &str,
         create: bool,
     ) -> Result<JsonFile<DraftBook>> {
         // Membership is checked before using either identifier as a path component.
-        find_block(&self.project(project)?, block)?;
+        find_block(project, block)?;
         let dirs = if create {
             ensure_plain_dirs
         } else {
@@ -509,7 +514,7 @@ impl Translations {
         };
         let dir = dirs(
             &self.root,
-            &[".ziyuan", "text-projects", project, "human-drafts"],
+            &[".ziyuan", "text-projects", &project.id, "human-drafts"],
         )?;
         let file = JsonFile::new(dir.join(format!("{block}.json")), 4, MAX_FILE_BYTES);
         for path in [file.path(), file.lock_path()] {
@@ -525,35 +530,66 @@ impl Translations {
 
     fn draft_basis(&self, project: &str, block: &str) -> Result<DraftBasis> {
         let p = self.project(project)?;
-        let (_, _, source) = find_block(&p, block)?;
+        self.draft_basis_in(&p, block)
+    }
+
+    fn draft_basis_in(&self, p: &Project, block: &str) -> Result<DraftBasis> {
+        let project_hash = sha256_hex(&serde_json::to_vec(p)?);
+        self.draft_basis_with_hash_in(p, &project_hash, block)
+    }
+
+    fn draft_basis_with_hash_in(
+        &self,
+        p: &Project,
+        project_hash: &str,
+        block: &str,
+    ) -> Result<DraftBasis> {
+        let (_, _, source) = find_block(p, block)?;
         Ok(DraftBasis {
-            project_hash: sha256_hex(&serde_json::to_vec(&p)?),
+            project_hash: project_hash.to_owned(),
             source_hash: sha256_hex(&source.serialized()?),
-            context_version: self.context_version(project)?,
-            zhupi_hash: self.block_zhupi_hash(&p, block)?,
+            context_version: self.context_version(&p.id)?,
+            zhupi_hash: self.block_zhupi_hash(p, block)?,
             translation_hash: self
-                .read_translation(project, block)?
+                .read_translation(&p.id, block)?
                 .map(|bytes| sha256_hex(&bytes)),
         })
     }
 
     /// Read-only view of the current human draft; never locks, writes or upgrades.
     pub fn peek_human_draft(&self, project: &str, block: &str) -> Result<DraftView> {
-        let basis = self.draft_basis(project, block)?;
-        let draft = self.load_human_draft(project, block, false)?;
+        let p = self.project(project)?;
+        self.peek_human_draft_in(&p, block)
+    }
+
+    /// Read-only view of the current human draft against an already-validated [`Project`].
+    pub fn peek_human_draft_in(&self, p: &Project, block: &str) -> Result<DraftView> {
+        let basis = self.draft_basis_in(p, block)?;
+        let draft = self.load_human_draft_in(p, block, false)?;
         Ok(DraftView { basis, draft })
     }
 
-    fn load_human_draft(
+    pub(crate) fn peek_human_draft_with_hash_in(
         &self,
-        project: &str,
+        p: &Project,
+        project_hash: &str,
+        block: &str,
+    ) -> Result<DraftView> {
+        let basis = self.draft_basis_with_hash_in(p, project_hash, block)?;
+        let draft = self.load_human_draft_in(p, block, false)?;
+        Ok(DraftView { basis, draft })
+    }
+
+    fn load_human_draft_in(
+        &self,
+        p: &Project,
         block: &str,
         create: bool,
     ) -> Result<Option<HumanDraft>> {
-        self.draft_file_with_dirs(project, block, create)?
+        self.draft_file_with_dirs_in(p, block, create)?
             .load()?
             .map(|s| {
-                s.value.check(project, block)?;
+                s.value.check(&p.id, block)?;
                 Ok::<_, TranslationError>(s.value.draft)
             })
             .transpose()
@@ -562,8 +598,14 @@ impl Translations {
     /// Read-only progress check using the same typed file and path validation as the editor.
     /// A saved draft counts as started once any paragraph contains non-whitespace text.
     pub fn human_draft_written(&self, project: &str, block: &str) -> Result<bool> {
+        let p = self.project(project)?;
+        self.human_draft_written_in(&p, block)
+    }
+
+    /// Read-only progress check against an already-validated [`Project`].
+    pub fn human_draft_written_in(&self, p: &Project, block: &str) -> Result<bool> {
         Ok(self
-            .load_human_draft(project, block, false)?
+            .load_human_draft_in(p, block, false)?
             .is_some_and(|draft| draft.paragraphs.iter().any(|p| !p.text.trim().is_empty())))
     }
 
@@ -577,8 +619,9 @@ impl Translations {
         workspace
             .ensure_writable()
             .map_err(|e| invalid(e.to_string()))?;
-        let basis = self.draft_basis(project, block)?;
-        let draft = self.load_human_draft(project, block, true)?;
+        let p = self.project(project)?;
+        let basis = self.draft_basis_in(&p, block)?;
+        let draft = self.load_human_draft_in(&p, block, true)?;
         Ok(DraftView { basis, draft })
     }
 
@@ -599,7 +642,9 @@ impl Translations {
         workspace
             .ensure_writable()
             .map_err(|e| invalid(e.to_string()))?;
-        let file = self.draft_file(project, block)?;
+        let p = self.project(project)?;
+        let (_, _, source) = find_block(&p, block)?;
+        let file = self.draft_file_in(&p, block)?;
         let current = file.load()?;
         if let Some(stored) = &current {
             stored.value.check(project, block)?;
@@ -619,11 +664,9 @@ impl Translations {
         if request.expected_revision != revision {
             return Err(TranslationError::DraftConflict { current: revision });
         }
-        if request.basis != self.draft_basis(project, block)? {
+        if request.basis != self.draft_basis_in(&p, block)? {
             return Err(TranslationError::DraftBasisChanged);
         }
-        let p = self.project(project)?;
-        let (_, _, source) = find_block(&p, block)?;
         let mut previous = None;
         for paragraph in &request.paragraphs {
             let rank = source
@@ -665,7 +708,7 @@ impl Translations {
         // Workspace exclusion covers load/check/update. JsonFile keeps the previous
         // publication on error; text and deduplication do not need multi-file recovery.
         file.update::<_, TranslationError>(|_| {
-            if request.basis != self.draft_basis(project, block)? {
+            if request.basis != self.draft_basis_in(&p, block)? {
                 return Err(TranslationError::DraftBasisChanged);
             }
             Ok((
@@ -678,7 +721,7 @@ impl Translations {
             ))
         })?;
         // 自动快照是辅助材料：失败不撤销这次已成功的保存。
-        let _ = self.snapshot_state(project, block, VersionState::Draft);
+        let _ = self.snapshot_state_in(&p, block, VersionState::Draft);
         Ok(receipt)
     }
 
@@ -698,7 +741,8 @@ impl Translations {
         workspace
             .ensure_writable()
             .map_err(|e| invalid(e.to_string()))?;
-        let file = self.draft_file(project, block)?;
+        let p = self.project(project)?;
+        let file = self.draft_file_in(&p, block)?;
         let mut book = file
             .load()?
             .ok_or_else(|| invalid("尚无可提交的人工草稿"))?
@@ -716,7 +760,7 @@ impl Translations {
                 current: Some(book.draft.revision),
             });
         }
-        if book.draft.basis != self.draft_basis(project, block)? {
+        if book.draft.basis != self.draft_basis_in(&p, block)? {
             return Err(TranslationError::DraftBasisChanged);
         }
         let mut submission = HumanSubmission {
@@ -726,9 +770,9 @@ impl Translations {
         };
         let candidate = submission.candidate()?;
         let bytes = candidate.serialized()?;
-        let report =
-            self.texts()
-                .check(project, block, &candidate.text_structure().serialized()?)?;
+        let report = self
+            .texts()
+            .check_in(&p, block, &candidate.text_structure().serialized()?)?;
         if !report.valid {
             return Err(invalid(format!(
                 "人工提交结构检查未通过：{:?}",
@@ -739,7 +783,7 @@ impl Translations {
         book.submissions
             .insert(request.request_id.clone(), submission.clone());
         file.update::<_, TranslationError>(|_| {
-            if book.draft.basis != self.draft_basis(project, block)? {
+            if book.draft.basis != self.draft_basis_in(&p, block)? {
                 return Err(TranslationError::DraftBasisChanged);
             }
             Ok((book, ()))

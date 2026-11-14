@@ -186,6 +186,7 @@ export class HumanDraft {
     try {
       const receipt=await api(this.base+"/draft",request.body);
       this.revision=receipt.revision; this.saved=sent; this.pendingSave=null;
+      if(this.remote?.human) this.remote.human.submitted=false;
       this.message=receipt.message||"已保存人工草稿";
       if(!this.dirty) { try { this.storage?.removeItem(this.key); } catch {} } else this.mirror();
       return true;
@@ -213,7 +214,13 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     const d=entry.draft;
     if(d.composing) return;
     const stats=d.stats;
-    entry.status.textContent=`${STATE_LABELS[d.state]} · 修订 ${d.revision ?? "尚无"} · 正文字符 ${stats.counts.body} · 读音字符 ${stats.counts.reading} · ${stats.marks}/4096 标记 · ${stats.bytes}/262144 字节`;
+    const revText=!d.initialized ? "读取中…" : d.revision ? `修订 ${d.revision}` : "尚无草稿";
+    const statusText=!d.initialized
+      ? "正在读取人工草稿…"
+      : (d.revision==null && d.state==="saved")
+        ? "尚无草稿"
+        : `${STATE_LABELS[d.state]} · ${revText}`;
+    entry.status.textContent=`${statusText} · 正文字符 ${stats.counts.body} · 读音字符 ${stats.counts.reading} · ${stats.marks}/4096 标记 · ${stats.bytes}/262144 字节`;
     entry.message.textContent=[
       !d.storage && !d.viewer ? "浏览器无法暂存编辑内容，请在离开页面前保存草稿。" : "",
       d.recovery && !d.viewer ? "发现本块上次留在页面中的暂存内容，请先选择恢复或忽略，再继续编辑。" : "",
@@ -221,11 +228,16 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     ].filter(Boolean).join("\n");
     entry.recovery.hidden=!d.recovery || d.viewer;
     entry.conflict.hidden=!d.conflict || d.viewer;
+    const h=d.remote?.human;
     for(const [action,button] of entry.buttons) {
       button.hidden=d.viewer;
       const workflow=["submit","approve","finalize"].includes(action);
+      const stepBlocked=
+        (action==="submit" && h?.submitted===true) ||
+        (action==="approve" && h?.submitted===false) ||
+        (action==="finalize" && h && (!h.approved || h.stale || h.finalized));
       button.disabled=!d.editable || d.busy || d.composing ||
-        (workflow && (d.dirty||d.conflict||!!stats.problems.length||!d.revision)) ||
+        (workflow && (d.dirty||d.conflict||!!stats.problems.length||!d.revision||stepBlocked)) ||
         (action==="save" && (d.conflict||!!stats.problems.length)) ||
         (action==="undo" && !d.undo.length) || (action==="redo" && !d.redo.length);
     }
@@ -241,9 +253,17 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     entry.rows.forEach((row,i)=>{
       const p=d.paragraphs[i];
       if(!p) return;
-      row.preview.innerHTML=previewHtml(p);
-      row.table.innerHTML=`<thead><tr><th>标记</th><th>UTF-8 字节 [起,止)</th><th>读音</th><th></th></tr></thead><tbody>`+
-        p.marks.map((m,j)=>`<tr><td>${escape(KIND_LABELS[m.kind])}</td><td>[${u16ToUtf8(p.text,m.start) ?? "无效"}, ${u16ToUtf8(p.text,m.end) ?? "无效"})</td><td>${escape(m.reading||"")}</td><td>${d.viewer ? "" : `<button type="button" class="small" data-remove="${j}">删除</button>`}</td></tr>`).join("")+"</tbody>";
+      const hasMarks=p.marks.length>0;
+      row.preview.hidden=!hasMarks;
+      row.tableWrap.hidden=!hasMarks;
+      if(hasMarks) {
+        row.preview.innerHTML=previewHtml(p);
+        row.table.innerHTML=`<thead><tr><th>标记</th><th>UTF-8 字节 [起,止)</th><th>读音</th><th></th></tr></thead><tbody>`+
+          p.marks.map((m,j)=>`<tr><td>${escape(KIND_LABELS[m.kind])}</td><td>[${u16ToUtf8(p.text,m.start) ?? "无效"}, ${u16ToUtf8(p.text,m.end) ?? "无效"})</td><td>${escape(m.reading||"")}</td><td>${d.viewer ? "" : `<button type="button" class="small" data-remove="${j}">删除</button>`}</td></tr>`).join("")+"</tbody>";
+      } else {
+        row.preview.replaceChildren();
+        row.table.replaceChildren();
+      }
     });
     notify(entry);
   }
@@ -292,7 +312,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
         const b=event.target.closest("[data-remove]"); if(!b) return;
         entry.draft.remove(i,Number(b.dataset.remove)); details(entry);
       });
-      entry.rows.push({id:p.id,textarea,source:section.querySelector(".text-para"),preview:section.querySelector(".human-preview"),table:section.querySelector("table")});
+      entry.rows.push({id:p.id,textarea,source:section.querySelector(".text-para"),preview:section.querySelector(".human-preview"),tableWrap:section.querySelector(".table-wrap"),table:section.querySelector("table")});
       entry.paras.append(section);
     }
   }

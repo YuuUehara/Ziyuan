@@ -511,7 +511,31 @@
   .text-para.changed { background: var(--add); }
   .text-materials { display: grid; gap: 10px; margin-top: 14px; min-width: 0; }
   .text-materials > * { min-width: 0; max-width: 100%; }
-  #text-human-editor { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
+  .human-mode-bar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px;
+    margin: 14px 0 0; padding: 10px 12px; background: var(--well); border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .human-mode-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; flex: 1 1 220px; }
+  .human-mode-bar .hint { margin: 0; overflow-wrap: anywhere; }
+  .switch-toggle {
+    display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+    font-family: var(--serif); font-weight: 600; color: var(--ink);
+  }
+  .switch-toggle input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+  .switch-track {
+    position: relative; display: inline-block; width: 38px; height: 22px; flex: 0 0 auto;
+    border-radius: 999px; background: var(--sheet); border: 1px solid var(--line-strong); transition: background .15s, border-color .15s;
+  }
+  .switch-track::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s;
+  }
+  .switch-toggle input:checked + .switch-track { background: var(--tint); border-color: var(--tint-ink); }
+  .switch-toggle input:checked + .switch-track::after { transform: translateX(16px); background: var(--tint-ink); }
+  .switch-toggle input:focus-visible + .switch-track { outline: 2px solid var(--line-strong); outline-offset: 2px; }
+  .human-block-nav { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .human-block-nav .hint { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #text-human-editor { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
   #text-human-editor:empty { display: none; }
   .human-paragraph { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); min-width: 0; }
   .human-paragraph h4 { margin: 0 0 8px; font: 12px var(--serif); color: var(--muted); }
@@ -943,6 +967,17 @@
               <p class="hint" id="version-status" role="status" aria-live="polite">选中一组译稿后，可查看它的版本记录。</p>
               <div id="version-diff" class="materials-report" aria-live="polite"></div>
             </section>
+            <section id="human-mode-bar" class="human-mode-bar" aria-label="人工翻译开关及块切换" hidden>
+              <div class="human-mode-main">
+                <label class="switch-toggle"><input type="checkbox" id="human-editor-toggle" data-view checked><span class="switch-track" aria-hidden="true"></span><span>手工翻译</span></label>
+                <span class="hint" id="human-toggle-note"></span>
+              </div>
+              <div class="human-block-nav">
+                <button type="button" class="small" id="block-prev" data-view>上一组</button>
+                <span class="hint" id="block-nav-pos"></span>
+                <button type="button" class="small" id="block-next" data-view>下一组</button>
+              </div>
+            </section>
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">草稿与生产隔离；批准前不生效、不外发</small></h3>
@@ -1237,10 +1272,60 @@ function deltaFor(id, version, side) {
 let translationWorkspace = null;
 let translationRoutes = null;
 let textLocation = (id) => String(id ?? "");
-function selectWorkspaceTab(panel) { translationWorkspace?.select(panel); }
-import("./assets/translation-workspace.mjs").then(({ mountWorkspace, parseTextRoute, textRoute, textLocation: locationLabel }) => { textLocation = locationLabel; translationRoutes = {parseTextRoute, textRoute}; translationWorkspace = mountWorkspace($("text-card")); translationWorkspace.update({project:textProjectId,hasSource:!!textProject?.outline?.some(c=>c.blocks.length)}); renderText(); }).catch(e=>console.error(e));
-
-import("./assets/continuity.mjs").then(({ mount }) => mount({ api, getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }), refresh: () => loadTextProject(), navigate: async anchor => { selectWorkspaceTab("draft"); textBlockId=anchor.block; invalidateReferences(true); await loadTextBlock(); textPick(anchor.paragraph); document.querySelector("#text-human-editor")?.scrollIntoView({block:"start"}); } })).catch(e => console.error(e));
+function selectWorkspaceTab(panel) {
+  translationWorkspace?.select(panel);
+  if (panel === "materials") ensureMaterialsLoaded();
+}
+function decodeUtf8Text(buffer, label = "文件") {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    let hint = "";
+    try {
+      new TextDecoder("shift_jis", { fatal: true }).decode(bytes);
+      hint = "（检测到可能是 Shift_JIS / 日文旧编码，如青空文库默认下载格式）";
+    } catch {}
+    throw new Error(`「${label}」不是有效的 UTF-8 文本${hint}，请先转为 UTF-8 再上传`);
+  }
+}
+let textModulesPromise = null;
+function ensureTextModules() {
+  if (textModulesPromise) return textModulesPromise;
+  textModulesPromise = Promise.all([
+    import("./assets/translation-workspace.mjs").then(({ mountWorkspace, parseTextRoute, textRoute, textLocation: locationLabel }) => {
+      textLocation = locationLabel;
+      translationRoutes = { parseTextRoute, textRoute };
+      translationWorkspace = mountWorkspace($("text-card"));
+      translationWorkspace.update({ project: textProjectId, hasSource: !!textProject?.outline?.some((c) => c.blocks.length) });
+      renderText();
+    }),
+    import("./assets/continuity.mjs").then(({ mount }) => mount({
+      api,
+      getSelection: () => ({ project: textProjectId, block: textBlockId, paragraph: textPicked }),
+      refresh: () => loadTextProject(),
+      navigate: async (anchor) => {
+        selectWorkspaceTab("draft");
+        textBlockId = anchor.block;
+        invalidateReferences(true);
+        await loadTextBlock();
+        textPick(anchor.paragraph);
+        if (anchor?.kind === "draft") {
+          setHumanEditorEnabled(true, true);
+          document.querySelector("#text-human-editor")?.scrollIntoView({ block: "start" });
+        } else if (humanEditorEnabled()) {
+          document.querySelector("#text-human-editor")?.scrollIntoView({ block: "start" });
+        } else {
+          document.querySelector("#human-mode-bar")?.scrollIntoView({ block: "start" });
+        }
+      },
+    })),
+  ]).catch((e) => {
+    textModulesPromise = null;
+    console.error(e);
+  });
+  return textModulesPromise;
+}
 
 async function api(path, body) {
   const response = await fetch("api" + path, {
@@ -1623,7 +1708,56 @@ function loadHumanEditor() {
     $("text-human-editor").textContent = "人工编辑器加载失败（" + e.message + "）；刷新页面或重新选块后重试。";
   }).finally(() => { humanEditorLoading = null; });
 }
+const HUMAN_TOGGLE_KEY = "ziyuan-human-editor-enabled";
+function humanEditorEnabled() {
+  try { return localStorage.getItem(HUMAN_TOGGLE_KEY) !== "0"; } catch { return true; }
+}
+function updateHumanModeBar() {
+  const bar = $("human-mode-bar"), host = $("text-human-editor");
+  if (!bar || !host) return;
+  const hasBlock = !!(textProjectId && textBlockId);
+  const enabled = humanEditorEnabled();
+  bar.hidden = !hasBlock;
+  host.hidden = !hasBlock || !enabled;
+  const toggle = $("human-editor-toggle");
+  if (toggle) toggle.checked = enabled;
+  const note = $("human-toggle-note");
+  if (note) {
+    note.textContent = enabled
+      ? "已展开人工逐段编辑与送审区"
+      : (humanEditor?.hasDirty?.()
+          ? "已收起（尚有未保存草稿，切回可继续保存）"
+          : "已收起，当前优先显示对照译文与模型操作");
+  }
+  const allBlocks = (textProject?.outline || []).flatMap((c) => c.blocks || []);
+  const idx = textBlockId ? allBlocks.indexOf(textBlockId) : -1;
+  const pos = $("block-nav-pos"), prev = $("block-prev"), next = $("block-next");
+  if (pos) pos.textContent = idx >= 0 ? `第 ${idx + 1} / ${allBlocks.length} 组` : "";
+  if (prev) prev.disabled = idx <= 0;
+  if (next) next.disabled = idx < 0 || idx >= allBlocks.length - 1;
+}
+function setHumanEditorEnabled(on, persist = true) {
+  if (persist) {
+    try { localStorage.setItem(HUMAN_TOGGLE_KEY, on ? "1" : "0"); } catch {}
+  }
+  updateHumanModeBar();
+  if (on && textBlock) renderHumanEditor();
+}
+$("human-editor-toggle")?.addEventListener("change", (event) => {
+  setHumanEditorEnabled(event.target.checked, true);
+});
+$("block-prev")?.addEventListener("click", () => {
+  const allBlocks = (textProject?.outline || []).flatMap((c) => c.blocks || []);
+  const idx = textBlockId ? allBlocks.indexOf(textBlockId) : -1;
+  if (idx > 0) selectTextBlock(allBlocks[idx - 1]);
+});
+$("block-next")?.addEventListener("click", () => {
+  const allBlocks = (textProject?.outline || []).flatMap((c) => c.blocks || []);
+  const idx = textBlockId ? allBlocks.indexOf(textBlockId) : -1;
+  if (idx >= 0 && idx < allBlocks.length - 1) selectTextBlock(allBlocks[idx + 1]);
+});
 function renderHumanEditor() {
+  updateHumanModeBar();
   const b = textBlock;
   const context = b && b.project === textProjectId && b.block === textBlockId
     ? { project: textProjectId, block: textBlockId, source: b.source?.paragraphs || [] }
@@ -1632,6 +1766,12 @@ function renderHumanEditor() {
   else if (context) loadHumanEditor();
 }
 let materialsEditor = null, materialsEditorLoading = null, materialsEditorAttempt = 0;
+let materialsLoadedProject = null, materialsLoadingProject = null;
+function ensureMaterialsLoaded() {
+  if (!textProjectId || !state) return;
+  if (materialsLoadedProject === textProjectId || materialsLoadingProject === textProjectId) return;
+  loadMaterialsView();
+}
 function loadMaterialsEditor() {
   if (materialsEditor || materialsEditorLoading) return;
   const attempt = materialsEditorAttempt++;
@@ -1643,16 +1783,21 @@ function loadMaterialsEditor() {
     });
     loadMaterialsView();
   }, (e) => {
+    materialsLoadingProject = null;
     $("materials-status").textContent = "本地资料编辑器加载失败（" + e.message + "）；刷新页面后重试。";
   }).finally(() => { materialsEditorLoading = null; });
 }
 async function loadMaterialsView() {
   if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  const project = textProjectId;
+  materialsLoadingProject = project;
   if (!materialsEditor) { loadMaterialsEditor(); return; }
   $("materials-status").textContent = "正在读取本地资料…";
   try {
     const ticket = materialsEditor.beginReceive();
-    const view = await api("/text/" + encodeURIComponent(textProjectId) + "/materials?t=" + Date.now());
+    const view = await api("/text/" + encodeURIComponent(project) + "/materials?t=" + Date.now());
+    if (project !== textProjectId) return;
+    materialsLoadedProject = project;
     materialsEditor.update(view, ticket);
     renderMaterialsAssociations();
     renderMaterialsState();
@@ -1668,9 +1813,10 @@ async function loadMaterialsView() {
     } else {
       hideMaterialsRecovery();
     }
-    if (!view.draft) $("materials-status").textContent = "尚无服务器草稿；编辑后可保存第一版（未批准）。";
   } catch (e) {
     $("materials-status").textContent = "读取本地资料失败：" + (e.body?.error || e.message);
+  } finally {
+    if (materialsLoadingProject === project) materialsLoadingProject = null;
   }
 }
 $("materials-load")?.addEventListener("click", loadMaterialsView);
@@ -1740,10 +1886,16 @@ $("materials-tbx-export")?.addEventListener("click", async () => {
 $("materials-tbx-import")?.addEventListener("click", () => $("materials-tbx-file")?.click());
 $("materials-tbx-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0]; if (!file || !textProjectId) return;
-  const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx", { method: "POST", headers: { "Content-Type": "application/xml" }, body: await file.text() });
-  const data = await r.json().catch(() => ({}));
-  $("materials-status").textContent = r.ok ? "已合并 TBX 到本地草稿（未批准）。" : "导入 TBX 失败：" + (data.error || "");
-  e.target.value = "";
+  try {
+    const xml = decodeUtf8Text(await file.arrayBuffer(), file.name);
+    const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx", { method: "POST", headers: { "Content-Type": "application/xml" }, body: xml });
+    const data = await r.json().catch(() => ({}));
+    $("materials-status").textContent = r.ok ? "已合并 TBX 到本地草稿（未批准）。" : "导入 TBX 失败：" + (data.error || "");
+  } catch (err) {
+    $("materials-status").textContent = "导入 TBX 失败：" + (err.message || "");
+  } finally {
+    e.target.value = "";
+  }
 });
 $("materials-tm-list")?.addEventListener("click", async () => {
   const project=textProjectId;if(!project)return;
@@ -1820,7 +1972,7 @@ $("materials-termbase-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file || !textProjectId) return;
   try {
-    const text = await file.text();
+    const text = decodeUtf8Text(await file.arrayBuffer(), file.name);
     const response = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase", {
       method: "POST", headers: { "Content-Type": "text/csv" }, body: text,
     });
@@ -2420,9 +2572,9 @@ function renderImport() {
     <label>TXT 分段 <select id="import-paragraphs" ${disabled}><option value="lines" ${d.textParagraphs === "lines" ? "selected" : ""}>每个非空行一段（常见小说排版）</option><option value="blank_lines" ${d.textParagraphs === "blank_lines" ? "selected" : ""}>按空行分段（段内换行保留）</option></select></label>
     <label><input id="import-split-long" type="checkbox" ${d.splitLongParagraphs ? "checked" : ""} ${disabled}>TXT 过长段落拆为工作段</label>
     <p class="hint">选项只影响 TXT。过长段落优先沿句末拆开，预览会说明拆分位置；归档原件保持原样。若原文只是为了排版而换行，请选择「按空行分段」。</p>
-    <label><input id="import-ruby" type="checkbox" ${d.ruby ? "checked" : ""} ${disabled}>显式识别注音 ruby</label>
+    <label><input id="import-ruby" type="checkbox" ${d.ruby ? "checked" : ""} ${disabled}>显式识别注音 ruby（支持青空文库《》与 HTML &lt;ruby&gt;）</label>
     <label>MD 分章 <select id="import-heading" ${disabled}><option value="">不分章</option><option value="1" ${d.heading === "1" ? "selected" : ""}>一级标题</option><option value="2" ${d.heading === "2" ? "selected" : ""}>二级标题</option></select></label>
-    <button type="button" id="import-preview" ${d.busy || !d.files.length ? "disabled" : ""}>${d.busy ? "处理中…" : "重新预览"}</button>
+    <button type="button" id="import-preview" ${d.busy || !d.files.length ? "disabled" : ""}>${d.busy ? "处理中…" : (!d.preview ? "生成预览" : "重新预览")}</button>
     <p role="status" class="hint">${esc(d.message)}</p>
     <div id="import-chapters" class="text-scroll" role="region" aria-label="章节导入预览，可滚动" tabindex="0" ${d.preview ? "" : "hidden"}>${d.preview ? `<p>预览共 ${d.preview.chapters.length} 章（未写入，可滚动核对内容）。</p>` + d.preview.chapters.map((c, i) => {
       const p = c.parsing || {}, paras = c.paragraphs || [], warnings = p.warnings || [];
@@ -2553,7 +2705,7 @@ $("text-import").addEventListener("change", async (e) => {
     const files = [...e.target.files]; d.busy = true; d.preview = null; d.titles = []; d.message = "正在解码 UTF-8…"; d.revision++; renderImport();
     try {
       if (files.reduce((n, f) => n + f.size, 0) > 8 * 1024 * 1024) throw new Error("导入原文合计超过 8 MiB 上限，请拆成多个项目");
-      d.files = await Promise.all(files.map(async (f) => ({ name: f.name, text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await f.arrayBuffer()) })));
+      d.files = await Promise.all(files.map(async (f) => ({ name: f.name, text: decodeUtf8Text(await f.arrayBuffer(), f.name) })));
       d.message = "请用上移／下移明确核对文件顺序，再预览。";
     } catch (e) { d.files = []; d.message = `文件读取失败：${e.message}`; }
     finally { d.busy = false; d.dirty = true; d.revision++; if (importDraft === d) renderImport(); }
@@ -2616,6 +2768,7 @@ async function loadTextProject() {
     if (project !== textProjectId) return;
     textProject = loaded;
     loadMemoryStatus(JSON.stringify(loaded));
+    if ($("workspace-tab-materials")?.getAttribute("aria-selected") === "true") ensureMaterialsLoaded();
   } catch (e) {
     if (project !== textProjectId) return;
     loadMemoryStatus(null);
@@ -2788,7 +2941,6 @@ async function verificationClick(e) {
 async function loadTextBlock() {
   if (!textProjectId || !textBlockId) return;
   const project = textProjectId, block = textBlockId;
-  renderHumanEditor();
   loadVerification();
   textError = null;
   try {
@@ -3617,6 +3769,8 @@ $("text-project").addEventListener("change", (event) => {
   loadTextProject();
 });
 $("text-card").addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-workspace-tab]");
+  if (tab?.dataset.workspaceTab === "materials") ensureMaterialsLoaded();
   const action = event.target.closest("[data-text-action]");
   if (action) { onTextAction(action.dataset.textAction); return; }
   const note = event.target.closest("[data-note-action]");
@@ -3860,8 +4014,8 @@ function showHall() {
   document.querySelectorAll("[data-hall]").forEach((a) => a.classList.toggle("current", a.dataset.hall === hall));
   if (hall === "qiju" && state) loadHistory().catch((e) => toast(e.message, true));
   if (hall === "wuying" && state) loadRecords().catch((e) => toast(e.message, true));
-  if (hall === "wuying") loadSubscriptions();
-  if (hall === "translation") loadText();
+  if (hall === "wuying" && state) loadSubscriptions();
+  if (hall === "translation" && state) { ensureTextModules(); loadText(); }
 }
 window.addEventListener("hashchange", showHall);
 showHall();
@@ -4002,8 +4156,12 @@ async function refresh() {
     renderOfficeConfig(state);
     if (hall === "qiju") loadHistory();
     if (hall === "wuying") loadSubscriptions();
+    ensureTextModules();
     // 译书材料随「changed」重置（朱批、下诏、准奏都改状态），输入由重绘时保留。
-    if (hall === "translation" && textLoaded) loadTextProject();
+    if (hall === "translation") {
+      if (textLoaded) loadTextProject();
+      else loadText();
+    }
   } catch (e) {
     if (!$("locked").classList.contains("show")) toast(e.message, true);
   }

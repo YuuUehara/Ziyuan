@@ -56,7 +56,7 @@ export function mountWorkspace(card) {
   function arrange() {
     // Existing editor hosts are moved intact; switching tabs never reconstructs them.
     for (const [selector, panel] of [
-      ['#text-human-editor','draft'], ['.text-compare','draft'], ['#text-materials','draft'], ['#text-actions','draft'], ['#text-action-result','draft'], ['#verification-panel','draft'], ['#text-n2b-hints','draft'],
+      ['#human-mode-bar','draft'], ['#text-human-editor','draft'], ['.text-compare','draft'], ['#text-materials','draft'], ['#text-actions','draft'], ['#text-action-result','draft'], ['#verification-panel','draft'], ['#text-n2b-hints','draft'],
       ['#text-materials-panel','materials'], ['#text-memory','materials'], ['.text-notes-layout','materials'],
       ['#text-export','delivery'], ['#text-import','manage'], ['#text-versions','manage'],
     ]) move(card.querySelector(selector), panel);

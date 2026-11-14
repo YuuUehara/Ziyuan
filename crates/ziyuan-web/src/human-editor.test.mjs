@@ -157,3 +157,98 @@ test("a successful save clears the session mirror and an identical mirror is not
   const again = new HumanDraft("p","b",source,store); again.receive(remote("1","已存"));
   assert.equal(again.recovery, null); assert.equal(store.getItem(again.key), null);
 });
+
+test("mounted editor hides empty mark details, labels initial state, and gates workflow buttons by submitted/approved", async () => {
+  const makeEl = (tag, doc) => {
+    const node = {
+      tagName: tag.toUpperCase(), className: "", hidden: false, disabled: false, readOnly: false,
+      value: "", textContent: "", _innerHTML: "", dataset: {}, attributes: {}, children: [],
+      listeners: new Map(), parentElement: null, ownerDocument: doc,
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) {
+        this._innerHTML = String(v);
+        if (this.className === "human-paragraph") {
+          const tx = makeEl("textarea", doc);
+          const src = makeEl("p", doc); src.className = "text-para";
+          const tools = makeEl("div", doc); tools.className = "actions human-mark-tools";
+          const preview = makeEl("p", doc); preview.className = "human-preview text-para";
+          const tableWrap = makeEl("div", doc); tableWrap.className = "table-wrap";
+          const table = makeEl("table", doc);
+          tableWrap.append(table);
+          this.children = [src, tx, tools, preview, tableWrap];
+          this._map = { textarea: tx, ".human-mark-tools": tools, table, ".text-para": src, ".human-preview": preview, ".table-wrap": tableWrap };
+        } else if (this._innerHTML.includes("human-paragraphs")) {
+          const status = makeEl("p", doc); status.className = "human-status";
+          const msg = makeEl("p", doc); msg.className = "human-message hint";
+          const rec = makeEl("div", doc); rec.className = "human-recovery actions";
+          const conf = makeEl("div", doc); conf.className = "human-conflict actions";
+          const acts = makeEl("div", doc); acts.className = "human-actions actions";
+          const paras = makeEl("div", doc); paras.className = "human-paragraphs";
+          this.children = [status, msg, rec, conf, acts, paras];
+          this._map = { ".human-status": status, ".human-message": msg, ".human-recovery": rec, ".human-conflict": conf, ".human-actions": acts, ".human-paragraphs": paras };
+        }
+      },
+      setAttribute(k, v) { this.attributes[k] = v; },
+      append(...items) { items.forEach((i) => { i.parentElement = this; this.children.push(i); }); },
+      replaceChildren(...items) { this.children = []; this.append(...items); },
+      addEventListener(type, fn) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type).push(fn);
+      },
+      querySelector(sel) { return this._map?.[sel] || null; },
+      querySelectorAll(sel) {
+        const out = [];
+        const walk = (n) => {
+          for (const c of n.children || []) {
+            if (sel === "textarea" && c.tagName === "TEXTAREA") out.push(c);
+            if (sel.includes("[data-mark]") && (c.dataset.mark || c.dataset.remove !== undefined)) out.push(c);
+            walk(c);
+          }
+        };
+        walk(this);
+        return out;
+      },
+      closest() { return null; },
+      focus() {},
+    };
+    return node;
+  };
+  const doc = {}; doc.createElement = (tag) => makeEl(tag, doc);
+  const host = makeEl("div", doc);
+  let resolvePull;
+  const pullPromise = new Promise((r) => { resolvePull = r; });
+  let apiCalls = 0;
+  const api = async (path, body) => {
+    apiCalls++;
+    if (apiCalls === 1) return pullPromise;
+    if (path.endsWith("/draft")) return { revision: "rev-2" };
+    return { basis: { source_hash: "s", context_hash: "c" }, revision: "rev-1", draft: { revision: "rev-1", paragraphs: [{ id: "p1", text: "译文", marks: [] }] }, human: { submitted: true, approved: false, finalized: false, stale: false } };
+  };
+  const editor = mountHumanEditor(host, { api, isViewer: () => false, storage: storage(), confirm: () => true });
+  editor.update({ project: "p", block: "b1", source: [{ id: "p1", text: "原文" }] });
+  const stage = host.children[1];
+  const root = stage.children[0];
+  assert.match(root.querySelector(".human-status").textContent, /^正在读取人工草稿…/);
+  const paraSection = root.querySelector(".human-paragraphs").children[0];
+  assert.equal(paraSection.querySelector(".human-preview").hidden, true);
+  assert.equal(paraSection.querySelector(".table-wrap").hidden, true);
+
+  resolvePull({ ...remote(null, ""), human: { submitted: false, approved: false, finalized: false, stale: false } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.match(root.querySelector(".human-status").textContent, /^尚无草稿 · 正文字符 0/);
+
+  const btns = Object.fromEntries(root.querySelector(".human-actions").children.map((b) => [b.dataset.action, b]));
+  assert.equal(btns.submit.disabled, true);
+  assert.equal(btns.approve.disabled, true);
+  assert.equal(btns.finalize.disabled, true);
+
+  apiCalls = 99; // subsequent pulls return submitted:true
+  editor.update({ project: "p", block: "b2", source: [{ id: "p1", text: "原文" }] });
+  await new Promise((r) => setTimeout(r, 0));
+  const root2 = stage.children[0];
+  const btns2 = Object.fromEntries(root2.querySelector(".human-actions").children.map((b) => [b.dataset.action, b]));
+  assert.match(root2.querySelector(".human-status").textContent, /^已保存 · 修订 rev-1/);
+  assert.equal(btns2.submit.disabled, true, "already submitted revision disables submit");
+  assert.equal(btns2.approve.disabled, false, "submitted revision enables approve");
+  assert.equal(btns2.finalize.disabled, true, "unapproved revision disables finalize");
+});

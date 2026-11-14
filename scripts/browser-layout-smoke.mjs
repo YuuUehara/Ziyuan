@@ -110,6 +110,11 @@ try {
   await until(() => evaluate("!!document.querySelector('#text-human-editor textarea')"), "人工编辑器");
   if(!await evaluate("document.querySelector('[data-hall=translation] b').textContent==='翰林院' && document.querySelector('#text-book-title').textContent===textProject.project.title && document.querySelector('#text-human-editor h4').textContent==='第1章 · 第1段' && document.querySelector('#text-human-editor textarea').getAttribute('aria-label')==='第1章 · 第1段 人工译文' && document.querySelector('#text-source .pid').textContent==='第1章 · 第1段' && document.querySelector('[data-text-block] .id').textContent==='译稿第1组'")) throw new Error("书名、章节与段落仍显示技术编号或入口名称不符");
   await evaluate("window.layoutDraft=document.querySelector('#text-human-editor textarea');layoutDraft.value='未保存的排版检查草稿';layoutDraft.dispatchEvent(new Event('input',{bubbles:true}))");
+  if(!await evaluate("!document.querySelector('#human-mode-bar').hidden && document.querySelector('#human-editor-toggle').checked")) throw new Error("手工翻译独立开关未正常显示");
+  await evaluate("document.querySelector('#human-editor-toggle').click()");
+  if(!await evaluate("document.querySelector('#text-human-editor').hidden && document.querySelector('#human-toggle-note').textContent.includes('未保存草稿')")) throw new Error("收起手工翻译未保留脏草稿提示");
+  await evaluate("document.querySelector('#human-editor-toggle').click()");
+  if(!await evaluate("!document.querySelector('#text-human-editor').hidden && document.querySelector('#text-human-editor textarea')===layoutDraft && layoutDraft.value==='未保存的排版检查草稿'")) throw new Error("重开手工翻译丢失草稿或重建了编辑器");
   await evaluate("document.querySelector('[data-workspace-tab=materials]').click();document.querySelector('[data-workspace-tab=draft]').click()");
   if(!await evaluate("document.querySelector('#text-human-editor textarea')===layoutDraft && layoutDraft.value==='未保存的排版检查草稿'")) throw new Error("切换工作区丢失草稿或重建了编辑器");
   await evaluate("localStorage.setItem(referenceKey(),'{}');onTextAction('translate')");

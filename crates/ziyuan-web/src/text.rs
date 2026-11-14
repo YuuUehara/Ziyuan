@@ -659,7 +659,7 @@ pub(crate) async fn project(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let root = app.0.config.root.clone();
-    let (summary, versions, outline) = blocking({
+    let (p, summary, versions, outline) = blocking({
         let root = root.clone();
         let id = id.clone();
         move || {
@@ -678,15 +678,15 @@ pub(crate) async fn project(
                     })
                 })
                 .collect::<Vec<_>>();
-            Ok((project_json(&t, &p)?, versions, outline))
+            let summary = project_json(&t, &p)?;
+            Ok((p, summary, versions, outline))
         }
     })
     .await?;
     let statuses = app
         .session_result({
             let root = root.clone();
-            let id = id.clone();
-            move |s| s.translation_status(&root, &id)
+            move |s| s.translation_status_for(&root, &p)
         })
         .await?;
     let (founded, statuses) = match statuses {
@@ -721,7 +721,7 @@ pub(crate) async fn block(
         move || {
             let t = Translations::new(&root);
             let p = t.project(&id).map_err(material)?;
-            let chapter = p
+            let (chapter_id, chapter_block) = p
                 .chapters
                 .iter()
                 .find_map(|c| {
@@ -736,8 +736,7 @@ pub(crate) async fn block(
             let (source, origin) = match material_file(&dir, "source.json") {
                 (Some(value), _, _) => (value, "exported"),
                 _ => {
-                    let bytes = chapter
-                        .1
+                    let bytes = chapter_block
                         .serialized()
                         .map_err(|e| material(TranslationError::from(e)))?;
                     let value = serde_json::from_slice(&bytes)
@@ -758,7 +757,7 @@ pub(crate) async fn block(
                 Some(bytes) => {
                     let report = t
                         .texts()
-                        .check(&id, &block, bytes)
+                        .check_in(&p, &block, bytes)
                         .map_err(|e| material(TranslationError::from(e)))?;
                     Some(serde_json::to_value(report).unwrap_or(Value::Null))
                 }
@@ -775,7 +774,8 @@ pub(crate) async fn block(
             }
             proposals.sort();
             Ok((
-                chapter.0,
+                p,
+                chapter_id,
                 source,
                 origin,
                 translation,
@@ -792,6 +792,7 @@ pub(crate) async fn block(
     })
     .await?;
     let (
+        p,
         chapter,
         source,
         origin,
@@ -812,7 +813,7 @@ pub(crate) async fn block(
             let block = block.clone();
             move |s| {
                 let status = s
-                    .translation_status(&root, &id)?
+                    .translation_status_for(&root, &p)?
                     .into_iter()
                     .find(|b| b.block == block);
                 let pending = pending_json(s.court(), &id, &block);
@@ -1183,13 +1184,13 @@ const HUMAN_FINALIZE_NO_COURT: &str = "人工定稿需要先开国（ziyuan init
 fn human_hint(message: &str) -> String {
     let next = if message.contains("尚无人工草稿") || message.contains("尚无可提交的人工草稿")
     {
-        "下一步：先保存草稿（POST /api/text/{项目}/blocks/{块}/human/draft）。"
+        "下一步：请先在页面点「保存人工草稿」。"
     } else if message.contains("尚未送审") {
-        "下一步：先送审（POST /api/text/{项目}/blocks/{块}/human/submit）。"
+        "下一步：请先点「送审当前已保存修订」。"
     } else if message.contains("不是人工准奏") {
-        "下一步：先准奏（POST /api/text/{项目}/blocks/{块}/human/approve），再御览定稿。"
+        "下一步：请先点「人工准奏」，再点「人工御览定稿」。"
     } else if message.contains("须先完成工作区换版") || message.contains("恢复记录") {
-        "下一步：先运行 ziyuan text recovery status 收尾恢复记录，再重试。"
+        "下一步：请先完成工作区恢复，再重试。"
     } else if message.contains("结构检查") || message.contains("段落归属与完整性") {
         "下一步：补齐或改正草稿段落后重新保存，再送审。"
     } else {
@@ -1218,7 +1219,7 @@ fn human_write_error(error: TranslationError) -> ApiError {
         ),
         TranslationError::DraftBasisChanged => ApiError(
             StatusCode::CONFLICT,
-            "人工草稿所据的原文、上下文或朱批已变，本次未做任何改动。请重新读取后再保存（GET /api/text/{项目}/blocks/{块}/human）。".into(),
+            "人工草稿所据的原文、上下文或朱批已变，本次未做任何改动。请点击「刷新人工状态」或重新读取后再保存。".into(),
         ),
         TranslationError::DraftRequestConflict => ApiError(
             StatusCode::CONFLICT,
@@ -1238,7 +1239,13 @@ fn founded(root: &Path) -> Result<bool, ApiError> {
 }
 
 /// 人工准奏／定稿事实：只从回放得出，不取锁、不写盘。
-fn human_json(court: &Court, project: &str, block: &str, state: Option<&BlockState>) -> Value {
+fn human_json(
+    court: &Court,
+    project: &str,
+    block: &str,
+    revision: Option<&str>,
+    state: Option<&BlockState>,
+) -> Value {
     let (approved, finalized, operation_id, stale) = match state {
         Some(BlockState::HumanApproved { operation_id }) => {
             (true, false, Some(operation_id.clone()), false)
@@ -1265,7 +1272,13 @@ fn human_json(court: &Court, project: &str, block: &str, state: Option<&BlockSta
             }) => Some(translation_hash.clone()),
             _ => None,
         });
+    let submitted = revision.is_some_and(|rev| {
+        court
+            .human_submission_binding(project, block, &human_submit_request_id(rev))
+            .is_some()
+    });
     json!({
+        "submitted": submitted,
         "approved": approved,
         "finalized": finalized,
         "stale": stale,
@@ -1278,6 +1291,7 @@ fn human_json(court: &Court, project: &str, block: &str, state: Option<&BlockSta
 /// 没有朝廷时的人工事实占位。
 fn no_human() -> Value {
     json!({
+        "submitted": false,
         "approved": false,
         "finalized": false,
         "stale": false,
@@ -1293,12 +1307,15 @@ pub(crate) async fn human_view(
     UrlPath((project, block)): UrlPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let root = app.0.config.root.clone();
-    let view: DraftView = blocking({
+    let (p, view): (Project, DraftView) = blocking({
         let (root, project, block) = (root.clone(), project.clone(), block.clone());
         move || {
-            Translations::new(&root)
-                .peek_human_draft(&project, &block)
-                .map_err(human_read_error)
+            let t = Translations::new(&root);
+            let p = t.project(&project).map_err(material)?;
+            let view = t
+                .peek_human_draft_in(&p, &block)
+                .map_err(human_read_error)?;
+            Ok::<_, ApiError>((p, view))
         }
     })
     .await?;
@@ -1312,16 +1329,22 @@ pub(crate) async fn human_view(
     drop(view);
     let extra = app
         .session_result({
-            let (root, project, block) = (root.clone(), project.clone(), block.clone());
+            let (root, project, block, revision) = (
+                root.clone(),
+                project.clone(),
+                block.clone(),
+                revision.clone(),
+            );
             move |s| {
                 let status = s
-                    .translation_status(&root, &project)?
+                    .translation_status_for(&root, &p)?
                     .into_iter()
                     .find(|b| b.block == block);
                 let human = human_json(
                     s.court(),
                     &project,
                     &block,
+                    revision.as_deref(),
                     status.as_ref().map(|b| &b.state),
                 );
                 Ok((status.map(|b| status_json(&b)), human))
@@ -1360,7 +1383,7 @@ pub(crate) async fn human_progress(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let root = app.0.config.root.clone();
-    let (chapters, drafted) = blocking({
+    let (project, chapters, drafted) = blocking({
         let (root, id) = (root.clone(), id.clone());
         move || {
             let t = Translations::new(&root);
@@ -1370,7 +1393,7 @@ pub(crate) async fn human_progress(
             for chapter in &project.chapters {
                 let mut blocks = Vec::new();
                 for block in &chapter.blocks {
-                    if t.human_draft_written(&id, &block.block_id)
+                    if t.human_draft_written_in(&project, &block.block_id)
                         .map_err(human_read_error)?
                     {
                         drafted.insert(block.block_id.clone());
@@ -1379,7 +1402,7 @@ pub(crate) async fn human_progress(
                 }
                 chapters.push((chapter.id.clone(), blocks));
             }
-            Ok::<_, ApiError>((chapters, drafted))
+            Ok::<_, ApiError>((project, chapters, drafted))
         }
     })
     .await?;
@@ -1401,7 +1424,7 @@ pub(crate) async fn human_progress(
                     .collect();
                 let mut approved = BTreeSet::new();
                 let mut finalized = BTreeSet::new();
-                for status in s.translation_status(&root, &id)? {
+                for status in s.translation_status_for(&root, &project)? {
                     match status.state {
                         BlockState::HumanApproved { .. } | BlockState::HumanStale { .. } => {
                             approved.insert(status.block);
@@ -1486,24 +1509,25 @@ pub(crate) async fn human_draft_save(
             Ok(Json(json!({
                 "revision": receipt.revision,
                 "content_hash": receipt.content_hash,
-                "message": "已保存人工草稿。下一步：送审（POST /api/text/{项目}/blocks/{块}/human/submit）。",
+                "message": "已保存人工草稿。下一步：点击「送审当前已保存修订」。",
             }))
             .into_response())
         }
-        Err(TranslationError::DraftConflict { current }) => {
-            Ok((StatusCode::CONFLICT, Json(json!({
+        Err(TranslationError::DraftConflict { current }) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
                 "error": "人工草稿修订冲突：这份草稿已不是最新，本次未保存任何内容。",
                 "current": current,
-                "message": "请重新读取（GET /api/text/{项目}/blocks/{块}/human）后再保存，并保留本次输入。",
-            })))
-            .into_response())
-        }
+                "message": "请点击「刷新人工状态」或载入最新稿件后再保存，并保留本次输入。",
+            })),
+        )
+            .into_response()),
         Err(TranslationError::DraftBasisChanged) => Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "error": "原文、上下文或朱批已变，本次未保存任何内容。请重新读取后再保存。",
                 "current": serde_json::Value::Null,
-                "message": "重新读取（GET /api/text/{项目}/blocks/{块}/human）取新的基准后再保存。",
+                "message": "请先核对最新参考材料（或刷新人工状态）后再保存。",
             })),
         )
             .into_response()),
@@ -1537,13 +1561,17 @@ pub(crate) async fn human_submit(
                 .peek_human_draft(&project, &block)
                 .map_err(human_read_error)?;
             let draft = view.draft.ok_or_else(|| {
-                ApiError::bad(
-                    "尚无人工草稿，无从送审。下一步：先保存草稿（POST /api/text/{项目}/blocks/{块}/human/draft）。",
-                )
+                ApiError::bad("尚无人工草稿，无从送审。下一步：请先在页面点「保存人工草稿」。")
             })?;
             let request_id = human_submit_request_id(&draft.revision);
             let binding = translations
-                .prepare_web_human_submission(&project, &block, &request_id, &request_id, &draft.revision)
+                .prepare_web_human_submission(
+                    &project,
+                    &block,
+                    &request_id,
+                    &request_id,
+                    &draft.revision,
+                )
                 .map_err(human_write_error)?;
             let workspace = Workspace::open(&root)
                 .map_err(|e| ApiError::bad(format!("工作区打不开（{e}）；请核对后再送审。")))?;
@@ -1565,9 +1593,9 @@ pub(crate) async fn human_submit(
                 "binding_hash": binding.request_hash,
                 "submit_request_id": request_id,
                 "message": if published {
-                    "已送审并入簿。下一步：准奏（POST /api/text/{项目}/blocks/{块}/human/approve）。"
+                    "已送审并入簿。下一步：点击「人工准奏」。"
                 } else {
-                    "这次送审此前已入簿，未重复追加。下一步：准奏（POST /api/text/{项目}/blocks/{块}/human/approve）。"
+                    "这次送审此前已入簿，未重复追加。下一步：点击「人工准奏」。"
                 },
             }))
         }
@@ -1629,9 +1657,9 @@ pub(crate) async fn human_approve(
                 "target_hash": approval.map(|a| a.request.target.after.clone()),
                 "snapshot": snapshot.map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
                 "message": if approved {
-                    "已准奏并落盘：译稿写入 zh.json，准奏事实已入簿。下一步：御览定稿（POST /api/text/{项目}/blocks/{块}/human/finalize）。"
+                    "已准奏并落盘：译稿已写入成稿文件，准奏事实已入簿。下一步：点击「人工御览定稿」。"
                 } else {
-                    "这次准奏此前已入簿并落盘，未重复追加。下一步：御览定稿（POST /api/text/{项目}/blocks/{块}/human/finalize）。"
+                    "这次准奏此前已入簿并落盘，未重复追加。下一步：点击「人工御览定稿」。"
                 },
             }))
         }
@@ -1678,9 +1706,9 @@ pub(crate) async fn human_finalize(
                 "finalized": finalized,
                 "snapshot": snapshot.map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
                 "message": if finalized {
-                    "已御览定稿并入簿，可导出成品（ziyuan text export-finished）。"
+                    "已御览定稿并入簿，现在可以前往「通读交稿」导出成品。"
                 } else {
-                    "这次定稿此前已入簿，未重复追加。可直接导出成品（ziyuan text export-finished）。"
+                    "这次定稿此前已入簿，未重复追加。可以直接前往「通读交稿」导出成品。"
                 },
             }))
         }

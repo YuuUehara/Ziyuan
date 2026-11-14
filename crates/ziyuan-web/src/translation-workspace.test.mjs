@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTextRoute, textRoute, choosePanel, toolPanel, textLocation } from './translation-workspace.mjs';
+import { parseTextRoute, textRoute, choosePanel, toolPanel, textLocation, mountWorkspace } from './translation-workspace.mjs';
 
 test('book locations read as chapter, paragraph and translation group without changing IDs', () => {
   assert.equal(textLocation('c0001'), '第1章');
@@ -35,4 +35,58 @@ test('management tools never become the default writing surface', () => {
   assert.equal(toolPanel('issues'),'materials');
   assert.equal(toolPanel('document-import'),'manage');
   assert.equal(toolPanel('document-export'),'delivery');
+});
+
+test('mountWorkspace places human-mode-bar directly above text-human-editor in draft panel', () => {
+  globalThis.MutationObserver = class { observe() {} };
+  const makeNode = (id, cls = '') => {
+    const node = {
+      id, className: cls, dataset: {}, attributes: {}, children: [], hidden: false, parentElement: null,
+      ownerDocument: null,
+      setAttribute(k, v) { this.attributes[k] = v; },
+      addEventListener() {},
+      append(...items) {
+        for (const item of items) {
+          if (item.parentElement && item.parentElement !== this) {
+            item.parentElement.children = item.parentElement.children.filter((c) => c !== item);
+          }
+          item.parentElement = this;
+          this.children.push(item);
+        }
+      },
+      insertBefore(item, ref) {
+        this.append(item);
+        if (ref) {
+          this.children = this.children.filter((c) => c !== item);
+          const idx = this.children.indexOf(ref);
+          this.children.splice(idx >= 0 ? idx : this.children.length, 0, item);
+        }
+      },
+      querySelector(sel) {
+        if (sel === '.text-main') return main;
+        if (sel === '#text-status') return status;
+        return null;
+      },
+      querySelectorAll() { return []; },
+    };
+    return node;
+  };
+  const doc = { createElement: (tag) => makeNode(tag) };
+  const main = makeNode('main'); main.ownerDocument = doc;
+  const status = makeNode('text-status'); status.ownerDocument = doc;
+  const bar = makeNode('human-mode-bar'); bar.ownerDocument = doc;
+  const editor = makeNode('text-human-editor'); editor.ownerDocument = doc;
+  main.append(status);
+  const card = {
+    ownerDocument: doc,
+    querySelector(sel) {
+      return ({ '.text-main': main, '#human-mode-bar': bar, '#text-human-editor': editor })[sel] || null;
+    },
+    querySelectorAll() { return []; },
+  };
+  mountWorkspace(card);
+  const draftPanel = main.children.find((c) => c.dataset.workspacePanel === 'draft');
+  const idxBar = draftPanel.children.indexOf(bar);
+  const idxEditor = draftPanel.children.indexOf(editor);
+  assert.ok(idxBar >= 0 && idxEditor === idxBar + 1, 'human-mode-bar must precede text-human-editor');
 });

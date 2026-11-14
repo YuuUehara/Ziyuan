@@ -6,7 +6,7 @@
 use super::{
     Result, TargetMark, Translations, find_block, invalid, pretty_json, read_approved_target,
 };
-use crate::text_project::PromptBlock;
+use crate::text_project::{Project, PromptBlock};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
@@ -282,23 +282,28 @@ pub(crate) fn parse_snapshot(bytes: &[u8], block: &str) -> Result<VersionFile> {
 }
 
 impl Translations {
-    fn versions_dir(&self, project: &str, block: &str) -> Result<PathBuf> {
+    fn versions_dir_in(&self, project: &Project, block: &str) -> Result<PathBuf> {
         // 先核对项目与块确实存在，再拿它们作路径成分。
-        find_block(&self.project(project)?, block)?;
+        find_block(project, block)?;
         Ok(self
             .root
             .join(".ziyuan")
             .join("text-projects")
-            .join(project)
+            .join(&project.id)
             .join("versions")
             .join(block))
     }
 
-    fn version_path(&self, project: &str, block: &str, id: &str) -> Result<PathBuf> {
+    fn version_path_in(&self, project: &Project, block: &str, id: &str) -> Result<PathBuf> {
         if !valid_id(id) {
             return Err(invalid("版本 ID 不合法"));
         }
-        Ok(self.versions_dir(project, block)?.join(id))
+        Ok(self.versions_dir_in(project, block)?.join(id))
+    }
+
+    fn version_path(&self, project: &str, block: &str, id: &str) -> Result<PathBuf> {
+        let p = self.project(project)?;
+        self.version_path_in(&p, block, id)
     }
 
     /// 列出快照，按时间从早到晚；损坏或未知文件跳过，不阻止其余快照可读。
@@ -307,7 +312,17 @@ impl Translations {
         project: &str,
         block: &str,
     ) -> Result<Vec<VersionInfo>> {
-        let dir = self.versions_dir(project, block)?;
+        let p = self.project(project)?;
+        self.list_translation_versions_in(&p, block)
+    }
+
+    /// 按已校验的 [`Project`] 列出快照。
+    pub fn list_translation_versions_in(
+        &self,
+        project: &Project,
+        block: &str,
+    ) -> Result<Vec<VersionInfo>> {
+        let dir = self.versions_dir_in(project, block)?;
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -468,10 +483,20 @@ impl Translations {
         block: &str,
         state: VersionState,
     ) -> Result<Option<VersionInfo>> {
+        let p = self.project(project)?;
+        self.snapshot_state_in(&p, block, state)
+    }
+
+    pub(crate) fn snapshot_state_in(
+        &self,
+        project: &Project,
+        block: &str,
+        state: VersionState,
+    ) -> Result<Option<VersionInfo>> {
         let file = match state {
             VersionState::Draft => {
                 let Some(draft) = self
-                    .peek_human_draft(project, block)?
+                    .peek_human_draft_in(project, block)?
                     .draft
                     .filter(|d| d.paragraphs.iter().any(|p| !p.text.trim().is_empty()))
                 else {
@@ -490,13 +515,13 @@ impl Translations {
                 file
             }
             _ => {
-                let Some(bytes) = self.read_translation(project, block)? else {
+                let Some(bytes) = self.read_translation(&project.id, block)? else {
                     return Ok(None);
                 };
                 from_target(block, state, &bytes, now_ms())?
             }
         };
-        self.store_if_changed(project, block, file)
+        self.store_if_changed(&project.id, block, file)
     }
 
     /// 自动快照并附上与最新草稿快照的比较。写入失败返回 `None`，不影响已完成的操作。
@@ -537,6 +562,18 @@ impl Translations {
         id: &str,
     ) -> Result<Vec<u8>> {
         let path = self.version_path(project, block, id)?;
+        super::read_plain_opt(&path)?
+            .ok_or_else(|| invalid(format!("没有版本 {id}，请先运行 ziyuan text version list")))
+    }
+
+    /// 按已校验的 [`Project`] 读取一份快照的原始字节。
+    pub fn read_translation_version_in(
+        &self,
+        project: &Project,
+        block: &str,
+        id: &str,
+    ) -> Result<Vec<u8>> {
+        let path = self.version_path_in(project, block, id)?;
         super::read_plain_opt(&path)?
             .ok_or_else(|| invalid(format!("没有版本 {id}，请先运行 ziyuan text version list")))
     }

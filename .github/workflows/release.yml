@@ -77,6 +77,9 @@ jobs:
             cp "target/${{ matrix.target }}/release/ziyuan.exe" "$name/"
             cp scripts/start-windows.bat "$name/start-ziyuan.bat"
             cp scripts/start-translation.bat "$name/start-translation.bat"
+            for bat in "$name"/*.bat; do
+              LC_ALL=C awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "$bat" > "$bat.tmp" && mv "$bat.tmp" "$bat"
+            done
             7z a "$name.zip" "$name" > /dev/null
             asset="$name.zip"
           else

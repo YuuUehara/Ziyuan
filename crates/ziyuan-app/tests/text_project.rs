@@ -6,6 +6,40 @@ use std::{
 use ziyuan_app::text_project::*;
 
 #[test]
+fn v1_warning_ranges_remain_readable_for_existing_projects() {
+    let f = Fixture::new();
+    let p = f.create("ja");
+    let raw = "前文《《破损\n强调》》后文。\n\n（《あ》其余文字。\n\n［＃改ページ］正文继续。\n";
+    let input = [ImportSource::Text {
+        name: "legacy.txt".into(),
+        text: raw.into(),
+    }];
+    let options: ImportOptions =
+        serde_json::from_value(serde_json::json!({"parsing":{"ruby":true}})).unwrap();
+    let preview = f.service().preview_import(&p.id, &input, &options).unwrap();
+    let chapter = &preview.chapters[0];
+    let warnings = &chapter.parsing.as_ref().unwrap().warnings;
+    assert_eq!(warnings.len(), 3);
+    // Persisted parser v1 stored the remainder of the paragraph, not just its marker.
+    // Changing these ranges makes untouched old manifests fail source validation.
+    for (warning, expected) in warnings.iter().zip([
+        "《《破损\n强调》》后文。",
+        "《あ》其余文字。",
+        "［＃改ページ］正文继续。",
+    ]) {
+        assert_eq!(&raw[warning.byte_start..warning.byte_end], expected);
+    }
+    let imported = f
+        .service()
+        .import_prepared(&p.id, &input, &options, &preview.fingerprint)
+        .unwrap();
+    let path = f.service().project_dir(&p.id).unwrap().join("project.json");
+    let before = fs::read(&path).unwrap();
+    assert_eq!(f.service().show(&p.id).unwrap(), imported);
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
 fn txt_long_fallback_preserves_graphemes_and_explicit_soft_wrapping() {
     let f = Fixture::new();
     let options: ImportOptions = serde_json::from_value(serde_json::json!({

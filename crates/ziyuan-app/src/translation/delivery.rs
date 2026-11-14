@@ -18,8 +18,8 @@ impl Translations {
         project: &str,
         options: &ExportOptions,
     ) -> Result<DeliveryReport> {
-        let material = self.reading_materials(project)?;
         let p = self.project(project)?;
+        let material = self.reading_materials_for(&p)?;
         let mut selected = std::collections::BTreeSet::new();
         for chapter in &options.chapters {
             if !selected.insert(chapter) || !p.chapters.iter().any(|c| &c.id == chapter) {
@@ -63,7 +63,7 @@ impl Translations {
         match crate::Session::open(ziyuan_storage::EventLog::new(self.root())) {
             Ok(mut session) => {
                 report.blocks = session
-                    .translation_status(self.root(), project)
+                    .translation_status_for(self.root(), &p)
                     .map_err(|e| invalid(e.to_string()))?;
                 report
                     .blocks

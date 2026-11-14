@@ -516,6 +516,17 @@ impl<S: EventStore> Session<S> {
     ) -> std::result::Result<Vec<BlockStatus>, AppError> {
         let t = Translations::new(root);
         let p = t.project(project)?;
+        self.translation_status_for(root, &p)
+    }
+
+    /// 按已校验的 [`Project`] 计算各块状态，避免重复重算整本项目的磁盘原文哈希。
+    pub fn translation_status_for(
+        &self,
+        root: &Path,
+        p: &Project,
+    ) -> std::result::Result<Vec<BlockStatus>, AppError> {
+        let t = Translations::new(root);
+        let project = &p.id;
         let mut context = ContextFacts {
             current: t.context_version(project)?,
             ..Default::default()
@@ -526,8 +537,9 @@ impl<S: EventStore> Session<S> {
                 .summaries
                 .insert(version, super::context::summary_hashes(&manifest.files));
         }
+        let zhupi_hashes = t.block_zhupi_hashes(p)?;
         let mut facts = Vec::new();
-        for (chapter, prompt) in all_blocks(&p) {
+        for (chapter, prompt) in all_blocks(p) {
             facts.push(BlockFacts {
                 block: prompt.block_id.clone(),
                 chapter: chapter.to_owned(),
@@ -537,7 +549,10 @@ impl<S: EventStore> Session<S> {
                 disk_hash: t
                     .read_translation(project, &prompt.block_id)?
                     .map(|b| sha256_hex(&b)),
-                zhupi_hash: t.block_zhupi_hash(&p, &prompt.block_id)?,
+                zhupi_hash: zhupi_hashes
+                    .get(&prompt.block_id)
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
         let history = self.history()?;

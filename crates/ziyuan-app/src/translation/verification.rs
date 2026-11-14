@@ -298,7 +298,7 @@ impl Translations {
         let bytes = self.read_translation(project, block)?;
         let structure = bytes
             .as_ref()
-            .map(|b| self.texts().check(project, block, b))
+            .map(|b| self.texts().check_in(&p, block, b))
             .transpose()?;
         // Invalid candidates remain visible as structural failures, not "reviewed" text.
         let translation = if structure.as_ref().is_some_and(|s| s.valid) {

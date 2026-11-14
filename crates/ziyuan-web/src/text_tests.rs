@@ -1295,6 +1295,12 @@ fn text_frontend_contract() {
         "已人工定稿；要重译或修订请先退回重修",
         "已人工准奏并落盘；请在上方人工编辑器核对后人工御览定稿",
         "import(`/assets/human-editor.mjs",
+        "id=\"human-mode-bar\"",
+        "id=\"human-editor-toggle\"",
+        "id=\"block-prev\"",
+        "id=\"block-next\"",
+        "id=\"block-nav-pos\"",
+        "Shift_JIS",
         "id=\"text-human-editor\"",
         "import(`/assets/materials-editor.mjs",
         "id=\"text-materials-panel\"",
@@ -2055,6 +2061,7 @@ async fn human_round_lands_plain_and_marked_targets_and_is_idempotent() {
         let finalize_route = format!("{view_route}/finalize");
         let (code, view) = call(&base, &view_route, Some(TOKEN), None).await;
         assert_eq!(code, 200, "{view}");
+        assert_eq!(view["human"]["submitted"], json!(false), "{view}");
         let mut body = draft_body(&p, block, &view["basis"], None, &format!("save-{block}"));
         if with_marks {
             body["paragraphs"][0]["text"] = json!("唄声");
@@ -2066,6 +2073,12 @@ async fn human_round_lands_plain_and_marked_targets_and_is_idempotent() {
         let (code, saved) = call(&base, &save_route, Some(TOKEN), Some(body)).await;
         assert_eq!(code, 200, "{saved}");
         let revision = saved["revision"].as_str().unwrap().to_owned();
+        let (_, before_submit) = call(&base, &view_route, Some(VIEWER), None).await;
+        assert_eq!(
+            before_submit["human"]["submitted"],
+            json!(false),
+            "{before_submit}"
+        );
 
         // 送审：同修订号派生同一请求；重复发布不追加。
         let (code, submitted) = call(&base, &submit_route, Some(TOKEN), Some(json!({}))).await;
@@ -2081,6 +2094,12 @@ async fn human_round_lands_plain_and_marked_targets_and_is_idempotent() {
         assert_eq!(again["published"], json!(false));
         assert_eq!(again["binding_hash"], binding);
         assert!(again["message"].as_str().unwrap().contains("此前已入簿"));
+        let (_, after_submit) = call(&base, &view_route, Some(VIEWER), None).await;
+        assert_eq!(
+            after_submit["human"]["submitted"],
+            json!(true),
+            "{after_submit}"
+        );
 
         // 准奏即落盘：zh.json 字节等于期望目标。
         let (code, approved) = call(&base, &approve_route, Some(TOKEN), Some(json!({}))).await;
