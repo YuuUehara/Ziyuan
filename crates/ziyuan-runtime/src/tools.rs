@@ -856,15 +856,16 @@ impl Tool for ReplaceText {
         let relative = required_string(&args, "path")?;
         let old = required_string(&args, "old")?;
         let new = required_string(&args, "new")?;
+        // 路径先过玉玺和禁区。空 old、新旧相同都不能让越界路径报成功。
+        let (path, key) = self.0.resolve_write(&relative)?;
+        if path.is_dir() {
+            return Err(format!("{key} 是目录").into());
+        }
         if old.is_empty() {
             return Err("old 不能为空".into());
         }
         if old == new {
             return Ok("新旧文本相同，未写入暂存".into());
-        }
-        let (path, key) = self.0.resolve_write(&relative)?;
-        if path.is_dir() {
-            return Err(format!("{key} 是目录").into());
         }
         let mut staged = self.0.staged.lock().expect("暂存区锁未中毒");
         let (before, current) = if let Some(change) = staged.get(&key) {
@@ -1565,6 +1566,18 @@ mod tests {
                 .to_string()
                 .contains("拒绝访问")
         );
+        // 新旧相同或 old 为空，也不能绕过禁区和越界。
+        for args in [
+            r#"{"path":".env","old":"unsafe","new":"unsafe"}"#,
+            r#"{"path":".env","old":"","new":""}"#,
+            r#"{"path":"../secret.txt","old":"outside","new":"outside"}"#,
+            r#"{"path":"../secret.txt","old":"","new":"x"}"#,
+        ] {
+            let err = replace.execute(args).unwrap_err().to_string();
+            assert!(err.contains("拒绝访问"), "{args}: {err}");
+            assert!(!err.contains("未写入暂存"), "{args}: {err}");
+        }
+        assert_eq!(sealed.changes().len(), 1);
         assert!(
             replace
                 .execute(r#"{"path":"docs/a.md","old":"unsafe","new":"x"}"#)

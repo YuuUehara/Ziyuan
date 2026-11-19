@@ -101,7 +101,7 @@ fn translate_text(project: &str, block: &str, schema: u32, context: u32) -> Stri
          {SOURCE_ANNOTATIONS}\n\
          要求：\n\
          1. 先用 read_file 读以上材料。\n\
-         2. 只用 write_file 写 {dir}/zh.json，格式与 source.json 相同：\
+         2. 把译文写入 {dir}/zh.json。可以用 write_file 整篇写入，也可以用 replace_text 替换恰好一处旧文本。准奏只看路径和译文结构，不看用的哪个工具。格式与 source.json 相同：\
          {{\"schema_version\": {schema}, \"block_id\": \"{block}\", \"paragraphs\": [{{\"id\": \"…\", \"text\": \"中文译文\"}}]}}。\
          逐段保留 source.json 中每个段落 id，顺序不变，不增不减，译文不得为空。\n\
          3. 术语依 context.json 的术语表（allowed 为允许译法），文体依其 style。\n\
@@ -144,7 +144,7 @@ fn revise_text(project: &str, block: &str, schema: u32, context: u32) -> String 
          {SOURCE_ANNOTATIONS}\n\
          要求：\n\
          1. 朱批优先：朱批所及之段必须照改；审校意见与朱批冲突时按朱批改。\n\
-         2. 只用 write_file 改写 {dir}/zh.json，格式不变：\
+         2. 改写 {dir}/zh.json。可以用 write_file 整篇写入，也可以用 replace_text 替换恰好一处旧文本。准奏只看路径和译文结构，不看用的哪个工具。格式不变：\
          {{\"schema_version\": {schema}, \"block_id\": \"{block}\", \"paragraphs\": [{{\"id\": \"…\", \"text\": \"…\"}}]}}；\
          保留每个段落 id，顺序不变，不增不减，译文不得为空。\n\
          3. neighbors.json 不得翻译或写入译稿；新术语建议只可写在 {dir}/proposals/ 下。\n\

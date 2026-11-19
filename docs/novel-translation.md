@@ -175,7 +175,7 @@ ziyuan text context approve <项目ID>
 - **逐段朱批**（`ziyuan text zhupi <项目ID> <块ID> <段号> <意见>`，或 `--clear` / `--show`）：你在网页或命令行逐段写下的修改要求，版本随变更递增，且**优先级高于模型审校意见**。注意：朱批在下诏那一刻定稿，下诏之后修改的朱批会导致御览拒绝并要求按新朱批再修订一次。
 - **修订**（`ziyuan text revise <项目ID> <块ID>`）：导出本块原文、`zh.json`、`zhupi.json` 与上一轮准奏之后两路审校各自最近一条已完成回奏（`reviews.json`）。修订可以只改 `proposals/` 下的新术语或摘要建议而不改 `zh.json`；`proposals/` 永不自动生效，须你并入草稿并重新批准上下文。
 
-**模型可见边界与准奏门控**：每次下诏会导出 `source.json`（原文）、`context.json`（已批准上下文）、`neighbors.json`（前后只读衔接段，不得译入译稿）、`zhupi.json`、`reviews.json`、`zh.json`。模型玉玺看不到 `.ziyuan/`。准奏落盘前程序再次校验：只动了 `zh.json` 与 `proposals/`、段落编号齐整无缺重乱序、译文非空、原文哈希与上下文版本未变；任意一项不符即整次拒绝、一字不写。
+**模型可见边界与准奏门控**：每次下诏会导出 `source.json`（原文）、`context.json`（已批准上下文）、`neighbors.json`（前后只读衔接段，不得译入译稿）、`zhupi.json`、`reviews.json`、`zh.json`。模型玉玺看不到 `.ziyuan/`。准奏落盘前程序再次校验：只动了 `zh.json` 与 `proposals/`、段落编号齐整无缺重乱序、译文非空、原文哈希与上下文版本未变；任意一项不符即整次拒绝、一字不写。这道检查看的是路径和译文结构，不看用的是 `write_file` 还是 `replace_text`。
 
 ### 御览定稿、退回与续做
 
