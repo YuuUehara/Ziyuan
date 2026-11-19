@@ -812,7 +812,7 @@ mod tests {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["search_code", "search_records"]);
+        assert_eq!(names, ["search_code", "find_symbols", "search_records"]);
         let system = first["messages"][0]["content"].as_str().unwrap();
         assert!(system.contains("工具：search_code"), "{system}");
         // 第二次请求带回工具调用与真实工具输出。

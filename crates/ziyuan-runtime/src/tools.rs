@@ -22,6 +22,7 @@ use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_record
 
 mod failures;
 mod replace;
+mod symbols;
 pub mod temp_cleanup;
 
 /// 单次 `read_file` 最多返回的字节数。
@@ -30,6 +31,13 @@ const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_MATCHES: usize = 50;
 /// 单次 `list_files` 最多列出的文件数。
 const MAX_LISTED: usize = 300;
+/// 单次 `file_outline` 默认与最多返回的符号数、可扫描的文件字节上限。
+const DEFAULT_OUTLINE_SYMBOLS: usize = 100;
+const MAX_OUTLINE_SYMBOLS: usize = 200;
+const MAX_OUTLINE_BYTES: usize = 2 * 1024 * 1024;
+/// 单次 `find_symbols` 一页最多返回的符号数、跨文件扫描时单文件字节上限。
+const MAX_SYMBOL_MATCHES: usize = 50;
+const MAX_SYMBOL_FILE_BYTES: u64 = 1024 * 1024;
 /// 永远不可查阅的目录：朝廷事件簿与版本库元数据。
 const DENIED_DIRS: &[&str] = &[".ziyuan", ".git", ".jj"];
 /// 搜索时跳过（但可直接读取）的目录：构建产物。测试副本也不复制它们。
@@ -94,12 +102,17 @@ pub fn sealed_tools(
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     for capability in &seal.capabilities {
         match capability {
-            // 能读文件就能看目录：`list_files` 随 `read_file` 授予，不另设权限，玉玺编码不变。
+            // 能读文件就能看目录与符号大纲：`list_files`、`file_outline` 随 `read_file` 授予，不另设权限，玉玺编码不变。
             Capability::ReadFile => {
                 tools.push(Box::new(ReadFile(sandbox.clone())));
                 tools.push(Box::new(ListFiles(sandbox.clone())));
+                tools.push(Box::new(FileOutline(sandbox.clone())));
             }
-            Capability::SearchCode => tools.push(Box::new(SearchCode(sandbox.clone()))),
+            // `find_symbols` 随 `search_code` 授予，不另设权限，玉玺编码不变。
+            Capability::SearchCode => {
+                tools.push(Box::new(SearchCode(sandbox.clone())));
+                tools.push(Box::new(FindSymbols(sandbox.clone())));
+            }
             // `replace_text` 随 `write_file` 授予，不另设权限，玉玺编码不变。
             Capability::WriteFile => {
                 tools.push(Box::new(WriteFile(sandbox.clone())));
@@ -541,6 +554,35 @@ impl Sandbox {
         Ok(())
     }
 
+    /// 收集 `path` 下可扫描符号的文件（跳过禁区、构建产物与符号链接）。
+    fn collect_symbol_files(
+        &self,
+        path: &Path,
+        out: &mut BTreeMap<String, Option<PathBuf>>,
+    ) -> io::Result<()> {
+        if is_denied(&self.root, path) {
+            return Ok(());
+        }
+        if !path.is_dir() {
+            out.insert(self.display(path), Some(path.to_path_buf()));
+            return Ok(());
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let (file_type, name) = (entry.file_type()?, entry.file_name());
+            let entry_path = entry.path();
+            if is_denied(&self.root, &entry_path) {
+                continue;
+            }
+            if file_type.is_dir() && !SKIPPED_DIRS.iter().any(|d| name == *d) {
+                self.collect_symbol_files(&entry_path, out)?;
+            } else if file_type.is_file() {
+                out.insert(self.display(&entry_path), Some(entry_path));
+            }
+        }
+        Ok(())
+    }
+
     fn search_file(
         &self,
         path: &Path,
@@ -791,6 +833,281 @@ impl Tool for SearchCode {
     }
 }
 
+struct FileOutline(Arc<Sandbox>);
+
+impl Tool for FileOutline {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "file_outline".into(),
+            description: format!(
+                "列出授权范围（{}）内单个代码或 Markdown 文件的符号大纲（函数、结构体、枚举、trait、impl、类、接口、常量、标题及行号）。支持 Rust、JS/TS、Python、Go、C/C++、Markdown；暂存改动优先于磁盘。可用 kind 按类别过滤，offset 与 limit 翻页（默认 {DEFAULT_OUTLINE_SYMBOLS} 条，最多 {MAX_OUTLINE_SYMBOLS} 条）。",
+                self.0.scope_label()
+            ),
+            input_schema_json: format!(
+                r#"{{"type":"object","properties":{{"path":{{"type":"string","description":"相对项目根目录的文件路径"}},"kind":{{"type":"string","description":"可选：只看某类符号，如 fn、struct、enum、trait、impl、class、interface、type、const、mod、macro、heading"}},"offset":{{"type":"integer","description":"跳过前若干个符号，从 0 起"}},"limit":{{"type":"integer","description":"本页条数，1 到 {MAX_OUTLINE_SYMBOLS}"}}}},"required":["path"],"additionalProperties":false}}"#
+            ),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(args_json, &["path", "kind", "offset", "limit"])?;
+        let relative = required_string(&args, "path")?;
+        let kind = optional_string(&args, "kind")?
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty());
+        let offset = optional_i64(&args, "offset")?.unwrap_or(0);
+        if offset < 0 {
+            return Err("offset 不能为负".into());
+        }
+        let limit = match optional_i64(&args, "limit")? {
+            None => DEFAULT_OUTLINE_SYMBOLS as i64,
+            Some(n) if (1..=MAX_OUTLINE_SYMBOLS as i64).contains(&n) => n,
+            Some(_) => return Err(format!("limit 须在 1 到 {MAX_OUTLINE_SYMBOLS} 之间").into()),
+        };
+        let (display_path, text) = if let Some(staged) = self.0.staged(&relative) {
+            let (_, key) = self.0.resolve_write(&relative)?;
+            (key, staged)
+        } else {
+            let resolved = self.0.resolve(&relative)?;
+            if resolved.is_dir() {
+                return Err(format!("{relative} 是目录，请指定单个文件或使用 find_symbols").into());
+            }
+            let len = fs::metadata(&resolved)?.len();
+            if len > MAX_OUTLINE_BYTES as u64 {
+                return Err(format!("文件过大（{len} 字节），请改用 read_file 按行读取").into());
+            }
+            let bytes = fs::read(&resolved)?;
+            let text =
+                String::from_utf8(bytes).map_err(|_| "不是 UTF-8 文本文件，无法提取符号大纲")?;
+            (self.0.display(&resolved), text)
+        };
+        let Some((lang, all)) = symbols::extract_for_path(Path::new(&display_path), &text) else {
+            return Ok(format!(
+                "{display_path}：暂不支持该文件类型的符号大纲（支持 Rust、JS/TS、Python、Go、C/C++、Markdown），可用 read_file 查看"
+            ));
+        };
+        let filtered: Vec<_> = match kind.as_deref() {
+            Some(filter) => all
+                .into_iter()
+                .filter(|sym| symbols::kind_matches(sym.kind, filter))
+                .collect(),
+            None => all,
+        };
+        if filtered.is_empty() {
+            return Ok(format!(
+                "{display_path}（{}）：未识别到匹配的符号",
+                lang.label()
+            ));
+        }
+        let total = filtered.len();
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(total);
+        let lim = usize::try_from(limit).unwrap_or(DEFAULT_OUTLINE_SYMBOLS);
+        let slice = &filtered[start..(start + lim).min(total)];
+        if slice.is_empty() {
+            return Ok(format!(
+                "{display_path}（{}）：共 {total} 个符号，offset={start} 已超出范围",
+                lang.label()
+            ));
+        }
+        let mut out = format!(
+            "{display_path}（{}，共 {total} 个符号，显示第 {}–{} 个）
+",
+            lang.label(),
+            start + 1,
+            start + slice.len()
+        );
+        for sym in slice {
+            let indent = "  ".repeat(sym.depth.min(4));
+            out.push_str(&format!(
+                "{}: {indent}[{}] {} — {}
+",
+                sym.line, sym.kind, sym.name, sym.signature
+            ));
+        }
+        if start + slice.len() < total {
+            out.push_str(&format!(
+                "[还有 {} 个符号，可用 offset={} 翻页]",
+                total - (start + slice.len()),
+                start + slice.len()
+            ));
+        } else {
+            out.pop();
+        }
+        Ok(out)
+    }
+}
+
+struct FindSymbols(Arc<Sandbox>);
+
+impl Tool for FindSymbols {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "find_symbols".into(),
+            description: format!(
+                "在授权范围（{}）内的代码与 Markdown 文件中按符号名查找定义（函数、结构体、枚举、trait、impl、类、接口、常量、标题），返回 `路径:行号: [类别] 限定名 — 签名`。只匹配符号定义而非注释或普通引用；暂存改动优先于磁盘。可用 path 限目录或文件、kind 限类别、exact 精确匹配、ignore_case 忽略大小写、offset 与 limit 翻页（一页最多 {MAX_SYMBOL_MATCHES} 条）。先按授权范围和禁区过滤，跳过 target 与 node_modules。",
+                self.0.scope_label()
+            ),
+            input_schema_json: format!(
+                r#"{{"type":"object","properties":{{"query":{{"type":"string","description":"要查找的符号名或子串"}},"path":{{"type":"string","description":"可选：只查这个相对目录或文件；省略则查整个授权范围"}},"kind":{{"type":"string","description":"可选：只看某类符号，如 fn、struct、enum、trait、impl、class、interface、type、const、mod、macro、heading"}},"exact":{{"type":"boolean","description":"为 true 时要求符号短名完全一致"}},"ignore_case":{{"type":"boolean","description":"为 true 时忽略大小写"}},"offset":{{"type":"integer","description":"跳过前若干条匹配，从 0 起"}},"limit":{{"type":"integer","description":"本页条数，1 到 {MAX_SYMBOL_MATCHES}"}}}},"required":["query"],"additionalProperties":false}}"#
+            ),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(
+            args_json,
+            &[
+                "query",
+                "path",
+                "kind",
+                "exact",
+                "ignore_case",
+                "offset",
+                "limit",
+            ],
+        )?;
+        let query = required_string(&args, "query")?;
+        if query.trim().is_empty() {
+            return Err("query 不能为空".into());
+        }
+        let kind = optional_string(&args, "kind")?
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty());
+        let exact = optional_bool(&args, "exact")?.unwrap_or(false);
+        let ignore_case = optional_bool(&args, "ignore_case")?.unwrap_or(false);
+        let offset = optional_i64(&args, "offset")?.unwrap_or(0);
+        if offset < 0 {
+            return Err("offset 不能为负".into());
+        }
+        let limit = match optional_i64(&args, "limit")? {
+            None => MAX_SYMBOL_MATCHES as i64,
+            Some(n) if (1..=MAX_SYMBOL_MATCHES as i64).contains(&n) => n,
+            Some(_) => return Err(format!("limit 须在 1 到 {MAX_SYMBOL_MATCHES} 之间").into()),
+        };
+        let path = optional_string(&args, "path")?;
+        let roots = if let Some(relative) = path.as_deref() {
+            if relative.trim().is_empty() || relative.trim() == "." {
+                self.0.scope.clone()
+            } else {
+                let start = self.0.resolve(relative)?;
+                if under_skipped(&self.0.root, &start) {
+                    return Err(format!("不搜索构建产物: {relative}").into());
+                }
+                vec![start]
+            }
+        } else {
+            self.0.scope.clone()
+        };
+
+        // 收集范围内全部候选文件（磁盘 + 暂存新建），按相对路径有序遍历。
+        let mut files: BTreeMap<String, Option<PathBuf>> = BTreeMap::new();
+        for root in &roots {
+            self.0.collect_symbol_files(root, &mut files)?;
+        }
+        let prefixes: Vec<String> = roots.iter().map(|d| self.0.display(d)).collect();
+        let staged_snapshot: BTreeMap<String, String> = {
+            let staged = self.0.staged.lock().expect("暂存区锁未中毒");
+            staged
+                .iter()
+                .map(|(k, v)| (k.clone(), v.after.clone()))
+                .collect()
+        };
+        for rel in staged_snapshot.keys() {
+            let under = prefixes
+                .iter()
+                .any(|p| p == "." || rel == p || rel.starts_with(&format!("{p}/")));
+            if under {
+                files.entry(rel.clone()).or_insert(None);
+            }
+        }
+
+        let mut page = MatchPage {
+            offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(MAX_SYMBOL_MATCHES),
+            stop_when_full: false,
+            total: 0,
+            more: false,
+            hits: Vec::new(),
+        };
+        let q_lower = query.to_lowercase();
+
+        for (rel, disk_path) in files {
+            if symbols::Language::from_path(Path::new(&rel)).is_none() {
+                continue;
+            }
+            let text = if let Some(staged) = staged_snapshot.get(&rel) {
+                staged.clone()
+            } else if let Some(disk) = disk_path {
+                let Ok(meta) = fs::metadata(&disk) else {
+                    continue;
+                };
+                if meta.len() > MAX_SYMBOL_FILE_BYTES {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&disk) else {
+                    continue;
+                };
+                text
+            } else {
+                continue;
+            };
+            let Some((_, syms)) = symbols::extract_for_path(Path::new(&rel), &text) else {
+                continue;
+            };
+            for sym in syms {
+                if let Some(filter) = kind.as_deref()
+                    && !symbols::kind_matches(sym.kind, filter)
+                {
+                    continue;
+                }
+                let qualified = sym.qualified_name();
+                let matched = if exact {
+                    if ignore_case {
+                        sym.name.to_lowercase() == q_lower
+                    } else {
+                        sym.name == query
+                    }
+                } else if ignore_case {
+                    sym.name.to_lowercase().contains(&q_lower)
+                        || qualified.to_lowercase().contains(&q_lower)
+                } else {
+                    sym.name.contains(&query) || qualified.contains(&query)
+                };
+                if matched {
+                    page.consider(format!(
+                        "{rel}:{}: [{}] {} — {}",
+                        sym.line, sym.kind, qualified, sym.signature
+                    ));
+                }
+            }
+        }
+
+        if page.total == 0 {
+            return Ok("未找到匹配的符号".into());
+        }
+        if page.hits.is_empty() {
+            return Ok(format!(
+                "共 {} 个符号，offset={} 已超出范围",
+                page.total, page.offset
+            ));
+        }
+        let from = page.offset + 1;
+        let to = page.offset + page.hits.len();
+        let mut out = page.hits.join(
+            "
+",
+        );
+        if page.total > page.hits.len() || page.offset > 0 {
+            out.push_str(&format!(
+                "
+[共 {} 个符号，当前第 {from}–{to} 个]",
+                page.total
+            ));
+        }
+        Ok(out)
+    }
+}
+
 struct WriteFile(Arc<Sandbox>);
 
 impl Tool for WriteFile {
@@ -912,7 +1229,7 @@ impl Tool for RunTests {
         ToolSpec {
             name: Capability::RunTests.code().into(),
             description: format!(
-                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾（未通过时作为工具错误返回）。命令不能改。若输出是 cargo test 且未通过，另附失败测试名和断言摘录；其他格式只给输出末尾。"
+                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾（未通过时作为工具错误返回）。命令不能改。若输出是 cargo test、pytest、node --test、go test 或 jest/vitest 且未通过，另附失败测试名和断言摘录；其他格式只给输出末尾。"
             ),
             input_schema_json: r#"{"type":"object","properties":{},"additionalProperties":false}"#
                 .into(),
@@ -1030,7 +1347,7 @@ impl RunTests {
         let mut report = format!("测试 `{command}`：{verdict}（{haoshe}）\n输出{note}：\n{tail}");
         if !passed {
             let scan = read_lossy_from(&mut log, len.saturating_sub(MAX_FAILURE_SCAN))?;
-            if let Some(failures) = failures::cargo_failure_note(&scan) {
+            if let Some(failures) = failures::failure_note(&scan) {
                 report.push('\n');
                 report.push_str(&failures);
             }
@@ -1724,7 +2041,7 @@ mod tests {
             .unwrap()
             .tools;
         let names: Vec<_> = only_read.iter().map(|t| t.spec().name).collect();
-        assert_eq!(names, ["read_file", "list_files"]);
+        assert_eq!(names, ["read_file", "list_files", "file_outline"]);
         assert!(only_read[0].execute(r#"{"path":"src/main.rs"}"#).is_ok());
         let err = only_read[0]
             .execute(r#"{"path":"docs/a.md"}"#)
@@ -2137,6 +2454,164 @@ mod tests {
         apply_changes(&project, &[file_change("src/new.rs", "x\n")]).unwrap();
         assert!(stale.exists(), "apply_changes 不做清理");
         assert!(project.join("src/new.rs").is_file());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_outline_and_find_symbols_respect_scope_denied_and_staged_files() {
+        let dir = workspace("symbols");
+        let root = dir.join("project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("web")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "// fn fake_in_comment() {}
+pub struct Engine;
+impl Engine {
+    pub fn boot(&self) {}
+}
+pub fn helper() {}
+",
+        )
+        .unwrap();
+        fs::write(
+            root.join("web/app.mjs"),
+            "export class Panel {
+  render() {}
+}
+export function bootUi() {}
+",
+        )
+        .unwrap();
+        fs::write(
+            root.join("target/gen.rs"),
+            "pub fn generated_boot() {}
+",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".env"),
+            "pub fn secret_boot() {}
+",
+        )
+        .unwrap();
+
+        let sealed = sealed_tools(
+            &root,
+            &seal(
+                &[
+                    Capability::ReadFile,
+                    Capability::SearchCode,
+                    Capability::WriteFile,
+                ],
+                &["."],
+            ),
+            None,
+        )
+        .unwrap();
+        let get = |name: &str| {
+            sealed
+                .tools
+                .iter()
+                .find(|t| t.spec().name == name)
+                .expect(name)
+        };
+
+        // 1. file_outline 列出结构与方法，跳过注释；支持 kind 过滤。
+        let outline = get("file_outline")
+            .execute(r#"{"path":"src/lib.rs"}"#)
+            .unwrap();
+        assert!(
+            outline.contains("Engine") && outline.contains("boot"),
+            "{outline}"
+        );
+        assert!(!outline.contains("fake_in_comment"), "{outline}");
+        let only_fn = get("file_outline")
+            .execute(r#"{"path":"src/lib.rs","kind":"function"}"#)
+            .unwrap();
+        assert!(
+            only_fn.contains("boot") && only_fn.contains("helper"),
+            "{only_fn}"
+        );
+        assert!(!only_fn.contains("[struct]"), "{only_fn}");
+
+        // 2. find_symbols 跳过 target 与 .env，支持 ignore_case、exact、path 过滤。
+        let found = get("find_symbols")
+            .execute(r#"{"query":"boot","ignore_case":true}"#)
+            .unwrap();
+        assert!(
+            found.contains("src/lib.rs:4: [fn] impl Engine > boot"),
+            "{found}"
+        );
+        assert!(found.contains("web/app.mjs:4: [fn] bootUi"), "{found}");
+        assert!(
+            !found.contains("generated_boot") && !found.contains("secret_boot"),
+            "{found}"
+        );
+
+        let exact = get("find_symbols")
+            .execute(r#"{"query":"boot","exact":true}"#)
+            .unwrap();
+        assert!(exact.contains("src/lib.rs:4:"), "{exact}");
+        assert!(!exact.contains("bootUi"), "{exact}");
+
+        // 3. 暂存新建文件对 file_outline 与 find_symbols 立即可见。
+        get("write_file")
+            .execute(
+                r#"{"path":"src/extra.py","content":"def staged_boot():
+    return 1
+"}"#,
+            )
+            .unwrap();
+        let staged_outline = get("file_outline")
+            .execute(r#"{"path":"src/extra.py"}"#)
+            .unwrap();
+        assert!(staged_outline.contains("staged_boot"), "{staged_outline}");
+        let staged_found = get("find_symbols")
+            .execute(r#"{"query":"staged_boot","path":"src"}"#)
+            .unwrap();
+        assert!(
+            staged_found.contains("src/extra.py:1: [fn] staged_boot"),
+            "{staged_found}"
+        );
+
+        // 4. 越界与禁区拒绝。
+        assert!(get("file_outline").execute(r#"{"path":".env"}"#).is_err());
+        assert!(
+            get("file_outline")
+                .execute(r#"{"path":"../outside.rs"}"#)
+                .is_err()
+        );
+        assert!(
+            get("find_symbols")
+                .execute(r#"{"query":"x","path":"target"}"#)
+                .is_err()
+        );
+
+        let narrow = sealed_tools(
+            &root,
+            &seal(&[Capability::ReadFile, Capability::SearchCode], &["src"]),
+            None,
+        )
+        .unwrap();
+        let narrow_outline = narrow
+            .tools
+            .iter()
+            .find(|t| t.spec().name == "file_outline")
+            .unwrap();
+        let narrow_find = narrow
+            .tools
+            .iter()
+            .find(|t| t.spec().name == "find_symbols")
+            .unwrap();
+        assert!(narrow_outline.execute(r#"{"path":"web/app.mjs"}"#).is_err());
+        let narrow_hits = narrow_find.execute(r#"{"query":"boot"}"#).unwrap();
+        assert!(
+            narrow_hits.contains("src/lib.rs") && !narrow_hits.contains("web/app.mjs"),
+            "{narrow_hits}"
+        );
+
         fs::remove_dir_all(dir).unwrap();
     }
 }

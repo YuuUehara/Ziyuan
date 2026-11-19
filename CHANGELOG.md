@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.18.0 — 2026-11-20
+
+- **轻量代码符号大纲与定义查找**：
+  - 新增只读工具 `file_outline`（随 `read_file` 授予，不另设玉玺代码）：提取单个 Rust／JavaScript／TypeScript／Python／Go／C／C++／Markdown 文件的符号大纲、所属容器（如 `impl`、`trait`、`class`）与行号，支持 `kind` 过滤与 `offset`/`limit` 翻页。
+  - 新增只读工具 `find_symbols`（随 `search_code` 授予，不另设玉玺代码）：按符号名跨文件查找定义，跳过行／块注释（含 Rust 嵌套块注释）、原始／多行字符串与 Markdown 代码块，支持 `path`、`kind`、`exact`、`ignore_case`、`offset`、`limit`。
+  - 两个工具均严格遵循玉玺查阅范围与禁区（`.ziyuan`、`.git`、`.jj`、`.env*`），跳过 `target` 与 `node_modules`，不追踪符号链接，且优先读取本次任务已暂存的修改与新建文件。
+- **多测试框架失败摘录**：
+  - 修复 `cargo test` 在 Rust 1.89+ 输出带线程 ID（`thread 'name' (12345) panicked at`）时无法提取断言摘录的问题。
+  - 扩展 `run_tests` 失败摘录至 `pytest`、`node --test`（spec 与 TAP 格式）、`go test` 与 `jest`/`vitest`；未识别格式仍仅返回输出末尾，测试通过与否及都察院核验仍以退出码为准。
+- 同步更新[使用指南](docs/guide.md)、[路线图](docs/roadmap.md)与命令行帮助，登记版本 `1.18.0`（不新增事件类型，不提高旧事件簿读取门槛）；本地验证见 [1.18.0 验收记录](docs/acceptance/1.18.0.md)。
+
 ## 1.17.0 — 2026-11-20
 
 - **都察院逐段审 diff 与验功修复**：
