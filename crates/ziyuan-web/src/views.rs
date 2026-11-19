@@ -54,6 +54,7 @@ pub(crate) async fn state(
             Ok(value)
         })
         .await?;
+    value["jj_workspace"] = json!(ziyuan_app::supports_jj_workspace(&app.0.config.root));
     value["running"] = json!(running);
     value["watching"] = json!(app.watching());
     value["github"] = json!(app.0.config.github.as_ref().map(|g| g.repo().to_owned()));

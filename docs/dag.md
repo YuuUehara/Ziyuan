@@ -5,7 +5,7 @@
 ## 改动概览
 
 - `EdictDag` 是追加事件，与 `EdictSplit` 在同一提议中写入；旧事件不改。
-- 写子诏令按稳定拓扑顺序自动串行（同样可办时按提交顺序）；只读子诏令仍可并行。
+- 写子诏令默认按稳定拓扑顺序自动串行（同样可办时按提交顺序）；在可用 `jj` 版本库中可显式启用并行写（`--parallel-writes` / Web 勾选「并行写」），各写子诏令执行期自动获独立临时 `jj workspace` 隔离；只读子诏令始终可并行。
 - 依赖须已完成且无改动或改动已准奏落盘，不能把暂存回奏当作已可读的产物。上游失败、撤销或驳回改动会使下游保持受阻，不自动重试或降级；皇帝可撤销受阻子诏令，让尚书按各件结局汇总。
 - 节点可携尝试次数上限、期限、度支、约定产出、另行批红要求与幂等键。到期或次数用尽时记失败；约定产出写入承办与汇总提示。
 - CLI `--json`、Web `/api/state` 与 TUI 展示依赖及受阻状态。
@@ -30,6 +30,7 @@
 ziyuan split 3
 ziyuan split 3 4:改 storage 7:改 runtime
 ziyuan split 3 --plan docs/examples/dag-plan.json
+ziyuan split 3 --parallel-writes --plan docs/examples/dag-plan.json
 ziyuan run
 ```
 
@@ -37,7 +38,9 @@ ziyuan run
 
 字段：`worker` 为本部在任非尚书官员 ID，`text` 为任务内容，`dependencies` 是**当前数组中从 1 开始的节点序号，不是诏令 ID**；可向后引用，但不可成环。可选字段为 `attempts`（正整数次数上限）、`deadline`（Unix 秒；Web 输入本地时间后转换）、`budget`（正整数 tokens 软限额）、`artifact`（约定产出提示，不是文件存在性保证）、`approval_required`（内阁制下另须批红）及 `idempotency_key`（父任务内唯一的非空节点键）。写权限计划会按拓扑顺序补齐串行安全边，不强制数组正向依赖；只读计划可并行。`court --json`、`tasks --json` 和 Web `/api/state` 可查询保存结果。
 
-API：`POST /api/tasks/{id}/split` 的正文为 `{ "schedule": [...] }`，返回 `{ "subtasks": [实际诏令ID, ...] }`。空正文或 `{}` 仍是既有尚书分办。只读令牌不可提交。
+API：`POST /api/tasks/{id}/split` 的正文为 `{ "schedule": [...], "parallel_writes"?: bool }`，返回 `{ "subtasks": [实际诏令ID, ...] }`。空正文或 `{}` 仍是既有尚书分办。只读令牌不可提交。
+
+**并行写与 `jj workspace` 隔离（`1.20.0`）**：当同一批 `ziyuan run` 并发执行 ≥ 2 件含写／测权限的诏令且项目位于 `jj` 版本库中时，调度前自动为每件写诏令经 `jj workspace add --name ziyuan-ws-* -r @ <临时目录>` 检出独立工作副本，工具与 `run_tests` 均在各自副本内运行，执行线程彻底退出后随租约（`WorkspaceLease`）自动 `jj workspace forget` 并清理临时目录（同时自动回收历史异常中断残留的孤立工作副本）。可通过环境变量 `ZIYUAN_JJ_WORKSPACE=auto|always|off` 控制（默认 `auto`）。在 `split` 中显式启用 `--parallel-writes` / `parallel_writes: true` 时，若项目不在可用 `jj` 版本库中将直接失败关闭；即使并行写执行成功，落盘仍须皇帝逐件准奏，互不重叠的文件各自落盘，改到同一文件时后准奏者因 `FileChange.before` 原文已变而被安全拒绝、不会静默覆盖。
 
 **创建后排程不可变**：相同父任务重复提交同一有效方案，返回原子任务 ID、不追加事件；依赖排序和冗余的自动安全边不算变化。内容、官员或有效元数据变化则拒绝，不能借重试改写已开始的 DAG。需要换方案时另建父诏令；已有未结束任务可先撤销。节点键不在不同父任务之间去重，也不保证模型调用、工具调用或任意外部副作用恰好一次。GitHub 回报/PR 与本地提交的专用幂等机制仍独立工作。
 

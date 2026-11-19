@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ziyuan_core::{CensorVerdict, CourtEvent, Edict, TaskId, Threat, TokenUsage, Verdict};
 use ziyuan_governance::{GovernanceError, TaskStatus};
 use ziyuan_runtime::{
-    CancelToken, Job, Outcome, Progress, Scheduler, Treasury, WorkerBackend, guard,
+    CancelToken, Job, Outcome, Progress, Scheduler, Treasury, WorkerBackend, WorkspaceLease, guard,
 };
 use ziyuan_storage::EventStore;
 
@@ -243,6 +243,8 @@ impl<S: EventStore> Session<S> {
                             ..edict.clone()
                         },
                         model,
+                        workspace_override: None,
+                        workspace_lease: None,
                     });
                     running.push((edict, path));
                     on_update(RunUpdate::Assigned(task));
@@ -257,6 +259,46 @@ impl<S: EventStore> Session<S> {
                     }))
                 }
                 _ => unreachable!("指派只产生 TaskAssigned 或 TaskFailed"),
+            }
+        }
+
+        let is_write_job = |job: &Job| {
+            job.edict
+                .seal
+                .capabilities
+                .iter()
+                .any(|c| c.is_works_only())
+        };
+        let write_count = jobs.iter().filter(|j| is_write_job(j)).count();
+        let isolate_writes = match crate::vcs::jj_workspace_mode() {
+            crate::vcs::JjWorkspaceMode::Off => false,
+            crate::vcs::JjWorkspaceMode::Always => write_count >= 1,
+            crate::vcs::JjWorkspaceMode::Auto => write_count >= 2,
+        };
+        if isolate_writes
+            && let Some(root) = scheduler.backend().workspace_root()
+            && crate::vcs::supports_jj_workspace(root)
+        {
+            let _ = crate::vcs::prune_stale_workspaces(root);
+            for (idx, job) in jobs.iter_mut().enumerate() {
+                if !is_write_job(job) {
+                    continue;
+                }
+                match crate::vcs::EphemeralJjWorkspace::create(root, job.edict.id) {
+                    Ok(ws) => {
+                        let ws_name = ws.name().to_owned();
+                        job.workspace_override = Some(ws.path().to_path_buf());
+                        job.workspace_lease = Some(WorkspaceLease::new(ws));
+                        if let Some((_, path)) = running.get_mut(idx) {
+                            path.push(format!("独立 jj 工作副本：{ws_name}"));
+                        }
+                    }
+                    Err(err) => {
+                        if let Some((_, path)) = running.get_mut(idx) {
+                            path.push(format!("未建独立 jj 工作副本（{err}），退回主目录"));
+                        }
+                    }
+                }
             }
         }
 

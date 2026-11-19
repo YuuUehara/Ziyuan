@@ -3,6 +3,8 @@
 //! 后端是同步的（模型 HTTP 调用会阻塞），因此每个任务在阻塞线程池中执行；
 //! 取消是协作式的：调度器立即给出结论，后端在下一次检查 [`ExecutionHooks::is_cancelled`] 时停下。
 use crate::{ExecutionHooks, Treasury, WorkerBackend};
+use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -46,6 +48,22 @@ pub struct Limits {
     pub timeout: Duration,
 }
 
+/// 独立工作副本租约：随 [`Job`] 移入执行线程，待后端彻底返回后自动释放清理。
+#[derive(Clone)]
+pub struct WorkspaceLease(Arc<dyn fmt::Debug + Send + Sync>);
+
+impl WorkspaceLease {
+    pub fn new<T: fmt::Debug + Send + Sync + 'static>(guard: T) -> Self {
+        Self(Arc::new(guard))
+    }
+}
+
+impl fmt::Debug for WorkspaceLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// 一件已指派的诏令。
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -64,6 +82,10 @@ pub struct Job {
     pub urgent: bool,
     /// 翰林院实录（同一次执行的各件共用）；非空时承办者多一件只读工具 `search_records`。
     pub records: Arc<Vec<Record>>,
+    /// 独立工作副本目录（如并发写诏令的临时 jj workspace）；`None` 用后端主目录。
+    pub workspace_override: Option<PathBuf>,
+    /// 独立工作副本租约，保证工作线程退出前不会提前清理目录。
+    pub workspace_lease: Option<WorkspaceLease>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,6 +432,8 @@ mod tests {
             treasury: None,
             urgent: false,
             records: Arc::default(),
+            workspace_override: None,
+            workspace_lease: None,
         }
     }
 

@@ -256,29 +256,46 @@ pub(crate) async fn draft(
     .await
 }
 
-/// 尚书分办（会等待模型返回），或提交御定排程 `{ schedule: [...] }`。
+/// 尚书分办（会等待模型返回），或提交御定排程 `{ schedule: [...], parallel_writes?: bool }`。
 pub(crate) async fn split(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, ApiError> {
     let body = body.map(|Json(body)| body).unwrap_or_else(|| json!({}));
-    if !body
-        .as_object()
-        .is_some_and(|object| object.keys().all(|key| key == "schedule"))
-    {
-        return Err(ApiError::bad("分办请求只接受 schedule 字段"));
+    if !body.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .all(|key| key == "schedule" || key == "parallel_writes")
+    }) {
+        return Err(ApiError::bad(
+            "分办请求只接受 schedule、parallel_writes 字段",
+        ));
     }
+    let parallel_writes = match body.get("parallel_writes") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| ApiError::bad("parallel_writes 须为布尔值"))?,
+    };
     let schedule = body
         .get("schedule")
         .map(|value| serde_json::from_value::<Vec<ziyuan_app::ScheduledSubtask>>(value.clone()))
         .transpose()
         .map_err(|e| ApiError::bad(format!("排程格式不合法：{e}")))?;
     let backend = app.0.config.backend.clone();
+    let root = app.0.config.root.clone();
     app.mutate(move |s| {
         let subtasks = match schedule {
-            Some(plan) => s.split_scheduled(TaskId(id), plan)?,
-            None => s.plan_split(TaskId(id), backend.as_ref())?,
+            Some(plan) => {
+                s.split_scheduled_with_options(TaskId(id), plan, parallel_writes, Some(&root))?
+            }
+            None => s.plan_split_with_options(
+                TaskId(id),
+                backend.as_ref(),
+                parallel_writes,
+                Some(&root),
+            )?,
         };
         Ok(json!({ "subtasks": subtasks.iter().map(|t| t.0).collect::<Vec<_>>() }))
     })

@@ -790,6 +790,8 @@ mod tests {
                 summary: "旧奏".into(),
                 verdict: "待评定".into(),
             }]),
+            workspace_override: None,
+            workspace_lease: None,
         };
         assert_eq!(
             backend.execute(&job, &()).unwrap(),

@@ -1601,3 +1601,58 @@ async fn censure_hunk_reviews_and_from_plan_endpoint_work_end_to_end() {
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn web_state_reports_jj_workspace_and_split_validates_parallel_writes() {
+    let (base, _root) = start("parallel-writes").await;
+    let t = Some(TOKEN);
+    let (status, st) = call(&base, "/state", t, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(st["jj_workspace"], json!(false));
+
+    let (status, _) = call(
+        &base,
+        "/edicts",
+        t,
+        Some(json!({
+            "text": "写任务并行分办校验",
+            "department": "works",
+            "tools": ["read_file", "write_file"]
+        })),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // parallel_writes 非布尔值被拒。
+    let (status, body) = call(
+        &base,
+        "/tasks/1/split",
+        t,
+        Some(json!({
+            "parallel_writes": "yes",
+            "schedule": [
+                { "worker": 4, "text": "子一" },
+                { "worker": 4, "text": "子二" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+
+    // 非 jj 目录请求写任务并行分办必须拒绝。
+    let (status, body) = call(
+        &base,
+        "/tasks/1/split",
+        t,
+        Some(json!({
+            "parallel_writes": true,
+            "schedule": [
+                { "worker": 4, "text": "子一" },
+                { "worker": 4, "text": "子二" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("jj"), "{body}");
+}

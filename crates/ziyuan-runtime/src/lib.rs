@@ -7,7 +7,7 @@ use ziyuan_core::{Capability, FileChange, Persona, Price, Threat, TokenUsage, mi
 
 mod scheduler;
 mod treasury;
-pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler};
+pub use scheduler::{CancelToken, Job, Limits, Outcome, Progress, Scheduler, WorkspaceLease};
 pub use treasury::Treasury;
 
 /// 后端/模型/工具 Adapter 的错误类型：由具体实现决定内部结构。
@@ -210,15 +210,15 @@ impl WorkerBackend for AgentBackend {
         let (actor, edict) = (&job.actor, &job.edict);
         let switched = self.switch_to(job.model.as_deref())?;
         let model = switched.as_deref().unwrap_or(self.model.as_ref());
-        let mut sealed =
-            tools::sealed_tools(&self.root, &edict.seal, self.test_command.as_deref())?;
+        let tool_root = job.workspace_override.as_deref().unwrap_or(&self.root);
+        let mut sealed = tools::sealed_tools(tool_root, &edict.seal, self.test_command.as_deref())?;
         if !job.records.is_empty() {
             sealed.tools.push(tools::record_search(job.records.clone()));
         }
         // 外藩工具：按玉玺授权启动所需的 MCP 服务，本件办完（`sealed` 析构）即关。
         sealed
             .tools
-            .extend(mcp::sealed_tools(&self.root, &edict.seal.mcp)?);
+            .extend(mcp::sealed_tools(tool_root, &edict.seal.mcp)?);
         let nonce = guard::nonce();
         let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
             "你可以用 write_file 整篇改写文件，或用 replace_text 替换其中唯一一段旧文本（找不到、或出现不止一处，就不要改）。\

@@ -910,17 +910,33 @@ pub(crate) fn execute(
             }
             println!("纪要已记入事件簿，票拟与承办时附上，供参考；派工与玉玺不变。");
         }
-        Command::Split(task, plan, file) => {
+        Command::Split {
+            task,
+            plan,
+            file,
+            parallel_writes,
+        } => {
+            let root = env::current_dir()?;
             let subtasks = if let Some(file) = file {
                 let json = std::fs::read_to_string(&file)
                     .map_err(|e| format!("无法读取排程方案 {file}：{e}"))?;
                 let schedule: Vec<ziyuan_app::ScheduledSubtask> = serde_json::from_str(&json)
                     .map_err(|e| format!("无效的排程方案 {file}：{e}"))?;
-                session.split_scheduled(task, schedule)?
+                session.split_scheduled_with_options(
+                    task,
+                    schedule,
+                    parallel_writes,
+                    Some(&root),
+                )?
             } else if plan.is_empty() {
-                session.plan_split(task, worker_backend()?.as_ref())?
+                session.plan_split_with_options(
+                    task,
+                    worker_backend()?.as_ref(),
+                    parallel_writes,
+                    Some(&root),
+                )?
             } else {
-                session.split(task, plan)?
+                session.split_with_options(task, plan, parallel_writes, Some(&root))?
             };
             let court = session.court();
             let note = court
@@ -952,7 +968,11 @@ pub(crate) fn execute(
                 };
                 println!("  #{} → {name}：{}{order}", id.0, sub.edict.text);
             }
-            if chained {
+            if parallel_writes {
+                println!(
+                    "已启用并行写：执行时各写子诏令自动获独立 jj 工作副本，落盘仍须逐件准奏。"
+                );
+            } else if chained {
                 println!("写子诏令查阅范围重叠，已按上述次序自动串行；上游失败则下游受阻。");
             }
             println!("`ziyuan run` 执行；子诏令全部结束后由尚书汇总回奏。");

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::Path;
 use ziyuan_core::{
     Agent, AgentId, CourtEvent, DagNode, Office, Persona, Record, Speech, TaskId, TokenUsage,
     search_records,
@@ -472,15 +473,58 @@ impl<S: EventStore> Session<S> {
     }
 
     /// 御定分办：皇帝亲自把待办诏令拆给本部官员，`plan` 为 (承办者, 子诏令内容)。
-    /// 写子诏令（玉玺含动土木之权）查阅范围彼此重叠，自动按 ID 次序串行。返回子诏令 ID。
+    /// 写子诏令（玉玺含动土木之权）默认自动按 ID 次序串行。返回子诏令 ID。
     pub fn split(
         &mut self,
         task: TaskId,
         plan: Vec<(AgentId, String)>,
     ) -> Result<Vec<TaskId>, AppError> {
+        self.split_with_options(task, plan, false, None)
+    }
+
+    /// 御定分办；当 `parallel_writes` 为真且父诏令含写/测权限时，要求项目位于可用 jj 版本库中
+    /// （执行期各写子诏令自动获独立 jj 工作副本），不再强行补齐串行依赖。
+    pub fn split_with_options(
+        &mut self,
+        task: TaskId,
+        plan: Vec<(AgentId, String)>,
+        parallel_writes: bool,
+        root: Option<&Path>,
+    ) -> Result<Vec<TaskId>, AppError> {
         self.commit(|court| {
+            let parent = court
+                .task(task)
+                .ok_or(GovernanceError::UnknownEdict(task))?;
+            let writes = parent
+                .edict
+                .seal
+                .capabilities
+                .iter()
+                .any(|c| c.is_works_only());
             let note = "御定分办".to_owned();
-            court.propose_split_serial_writes(task, plan.clone(), note, None, TokenUsage::default())
+            if parallel_writes && writes {
+                if !root.is_some_and(crate::vcs::supports_jj_workspace) {
+                    return Err(GovernanceError::InvalidDag(
+                        "并行写分办需要 jj 版本库提供独立工作副本（请先初始化 jj 或关闭并行写）"
+                            .into(),
+                    ));
+                }
+                Ok(vec![court.propose_split(
+                    task,
+                    plan.clone(),
+                    note,
+                    None,
+                    TokenUsage::default(),
+                )?])
+            } else {
+                court.propose_split_serial_writes(
+                    task,
+                    plan.clone(),
+                    note,
+                    None,
+                    TokenUsage::default(),
+                )
+            }
         })?;
         Ok(self.subtasks_of(task))
     }
@@ -496,11 +540,34 @@ impl<S: EventStore> Session<S> {
         task: TaskId,
         plan: Vec<ScheduledSubtask>,
     ) -> Result<Vec<TaskId>, AppError> {
+        self.split_scheduled_with_options(task, plan, false, None)
+    }
+
+    /// 御定排程分办；`parallel_writes` 为真时允许无显式依赖的写子诏令并发执行，
+    /// 须在可用 jj 版本库（`supports_jj_workspace(root)`）下使用，否则拒绝。
+    pub fn split_scheduled_with_options(
+        &mut self,
+        task: TaskId,
+        plan: Vec<ScheduledSubtask>,
+        parallel_writes: bool,
+        root: Option<&Path>,
+    ) -> Result<Vec<TaskId>, AppError> {
         self.reload()?;
         self.commit(|court| {
             let parent = court
                 .task(task)
                 .ok_or(GovernanceError::UnknownEdict(task))?;
+            let writes = parent
+                .edict
+                .seal
+                .capabilities
+                .iter()
+                .any(|c| c.is_works_only());
+            if parallel_writes && writes && !root.is_some_and(crate::vcs::supports_jj_workspace) {
+                return Err(GovernanceError::InvalidDag(
+                    "并行写分办需要 jj 版本库提供独立工作副本（请先初始化 jj 或关闭并行写）".into(),
+                ));
+            }
             let basic: Vec<_> = plan.iter().map(|s| (s.worker, s.text.clone())).collect();
             let ids = if let Some(split) = &parent.split {
                 if split.subtasks.len() != plan.len() {
@@ -520,13 +587,8 @@ impl<S: EventStore> Session<S> {
                 };
                 subtasks.iter().map(|s| s.id).collect()
             };
-            let writes = parent
-                .edict
-                .seal
-                .capabilities
-                .iter()
-                .any(|c| c.is_works_only());
-            let nodes = scheduled_nodes(&plan, &ids, writes)?;
+            let serialize_writes = writes && !parallel_writes;
+            let nodes = scheduled_nodes(&plan, &ids, serialize_writes)?;
             if parent.split.is_some() {
                 let identical = plan.iter().zip(&nodes).all(|(sub, node)| {
                     court.task(node.task).is_some_and(|old| {
@@ -563,11 +625,34 @@ impl<S: EventStore> Session<S> {
         task: TaskId,
         backend: &dyn WorkerBackend,
     ) -> Result<Vec<TaskId>, AppError> {
+        self.plan_split_with_options(task, backend, false, None)
+    }
+
+    /// 尚书分办；`parallel_writes` 为真时允许写子诏令并发执行（需可用 jj 版本库，否则拒绝）。
+    pub fn plan_split_with_options(
+        &mut self,
+        task: TaskId,
+        backend: &dyn WorkerBackend,
+        parallel_writes: bool,
+        root: Option<&Path>,
+    ) -> Result<Vec<TaskId>, AppError> {
         self.reload()?;
         let court = &self.court;
         let entry = court
             .task(task)
             .ok_or(GovernanceError::UnknownEdict(task))?;
+        let writes = entry
+            .edict
+            .seal
+            .capabilities
+            .iter()
+            .any(|c| c.is_works_only());
+        if parallel_writes && writes && !root.is_some_and(crate::vcs::supports_jj_workspace) {
+            return Err(GovernanceError::InvalidDag(
+                "并行写分办需要 jj 版本库提供独立工作副本（请先初始化 jj 或关闭并行写）".into(),
+            )
+            .into());
+        }
         let department = entry.edict.department;
         let (minister, office) = court
             .department_head(department)
@@ -647,13 +732,23 @@ impl<S: EventStore> Session<S> {
             note
         };
         self.commit(|court| {
-            court.propose_split_serial_writes(
-                task,
-                plan.clone(),
-                note.clone(),
-                model.clone(),
-                usage,
-            )
+            if parallel_writes && writes {
+                Ok(vec![court.propose_split(
+                    task,
+                    plan.clone(),
+                    note.clone(),
+                    model.clone(),
+                    usage,
+                )?])
+            } else {
+                court.propose_split_serial_writes(
+                    task,
+                    plan.clone(),
+                    note.clone(),
+                    model.clone(),
+                    usage,
+                )
+            }
         })?;
         Ok(self.subtasks_of(task))
     }

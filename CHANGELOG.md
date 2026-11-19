@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.20.0 — 2026-11-20
+
+- **并行写诏令工作副本隔离（`jj workspace`）**：
+  - `ziyuan-runtime` 为 `Job` 增加可选 `workspace_override` 与 RAII 租约 `WorkspaceLease`（随工作线程彻底退出后自动释放，超时或取消时绝不提前删除仍在使用的目录）；`AgentBackend::execute` 按 `workspace_override` 运行全部项目工具与 MCP 服务，同时保持 `workspace_root()` 指向主项目目录以便 `.ziyuan/` 校验。
+  - `ziyuan-app` 新增 `EphemeralJjWorkspace`、`supports_jj_workspace`、`prune_stale_workspaces` 与 `ZIYUAN_JJ_WORKSPACE=auto|always|off`（默认 `auto`）：当同一批 `Session::run` 并发执行 ≥ 2 件含写／测权限的诏令且位于 `jj` 版本库时，自动为每件写诏令从 `@` 检出独立临时 `jj workspace`，结束后自动 `jj workspace forget` 并清理临时目录，不留孤立工作副本或多余空提交。
+  - 写分办新增显式并行开关：`ziyuan split <id> --parallel-writes`（及三壳补全与帮助）、`Session::{split,split_scheduled,plan_split}_with_options`、Web `POST /api/tasks/{id}/split` 可选 `parallel_writes` 字段，以及 `/api/state` 的 `jj_workspace` 能力标识与「御定排程」勾选框。非 `jj` 仓库下请求写并行分办失败关闭；并行写落盘仍须皇帝逐件准奏，冲突文件按既有 `FileChange.before` 核验安全拒绝、绝不静默覆盖。
+- 同步更新 [DAG 排程速查](docs/dag.md)、[路线图](docs/roadmap.md)与命令行帮助，登记版本 `1.20.0`（不新增事件类型，不提高旧事件簿读取门槛）；本地验证见 [1.20.0 验收记录](docs/acceptance/1.20.0.md)。
+
 ## 1.19.0 — 2026-11-20
 
 - **Windows 原生号舍（`ziyuan-sandbox-windows`）W1b–W1d 隔离验收与安全库接口**：

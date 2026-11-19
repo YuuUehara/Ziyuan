@@ -42,11 +42,11 @@ pub(crate) const HELP: &str = concat!(
   ziyuan model <官职> <模型|default>   为官职指定承办模型（同一服务地址与 Key）
   ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] [--mcp <授权>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
-  ziyuan split <诏令ID> [官员ID:子诏令]...
-  ziyuan split <诏令ID> --plan <JSON文件>  创建排程；依赖为数组内从 1 起的索引，重试须同案
+  ziyuan split <诏令ID> [--parallel-writes] [官员ID:子诏令]...
+  ziyuan split <诏令ID> [--parallel-writes] --plan <JSON文件>  创建排程；依赖为数组内从 1 起的索引，重试须同案
                                        多官协作：尚书（模型）把待办诏令拆给本部官员分办，或皇帝御定；
-                                       子诏令并发执行（写子诏令范围重叠自动串行，上游失败则下游受阻），
-                                       全部结束后尚书汇总回奏
+                                       子诏令并发执行（写子诏令默认自动串行；在 jj 版本库加 --parallel-writes
+                                       可并行执行并在独立 jj 工作副本中隔离），全部结束后尚书汇总回奏
   ziyuan debate <诏令ID> [--rounds 2] [官员ID]...
                                        廷议：数位在任官员（默认宰辅、本部长官、御史）按各自性格文风
                                        就待办诏令轮流辩论；纪要供票拟与承办参考，不改变派工与玉玺
@@ -334,7 +334,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
          edict) words="--plan --from-plan --no-tests --template --dept --scope --tools --mcp --queue" ;;
-         split) words="--plan" ;;
+         split) words="--plan --parallel-writes" ;;
          text) words="{text_words} {text_flags}" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
@@ -374,6 +374,7 @@ complete -F _ziyuan ziyuan
                 format!("{} -l from-plan -x", seen("edict")),
                 format!("{} -l no-tests", seen("edict")),
                 format!("{} -l plan -r", seen("split")),
+                format!("{} -l parallel-writes", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
                 format!("{} -a '{}'", seen("text"), TEXT_COMPLETION_WORDS),

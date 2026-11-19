@@ -56,7 +56,10 @@ pub use preview::{PreviewFile, PreviewHunk, PreviewLine, PreviewSpan, preview_ch
 pub use reports::{describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report};
 pub use run::{EXECUTOR_BUSY, NEGLECT_THRESHOLD, RunUpdate, TaskReport, WatchOptions, WatchUpdate};
 pub use time::{format_time, parse_time, tz_offset};
-pub use vcs::{VcsCommit, commit_files, commit_message};
+pub use vcs::{
+    EphemeralJjWorkspace, JJ_WORKSPACE_ENV, JjWorkspaceMode, VcsCommit, commit_files,
+    commit_message, jj_workspace_mode, prune_stale_workspaces, supports_jj_workspace,
+};
 
 use std::fmt;
 use std::sync::OnceLock;

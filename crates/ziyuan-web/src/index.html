@@ -1261,8 +1261,9 @@
   <form id="schedule-form">
     <h2 id="schedule-title">御定排程</h2>
     <div class="schedule-content">
-      <p class="hint">分为 2–8 件。依赖填此表节点序号（如 1,2），不是诏令 ID；写任务自动补齐串行依赖。前件改动须准奏，后件才开工。</p>
+      <p class="hint">分为 2–8 件。依赖填此表节点序号（如 1,2），不是诏令 ID；写任务默认自动补齐串行依赖（前件改动须准奏，后件才开工）。</p>
       <p class="hint">提交后不能修改这份分办安排，失败也不会自动重试。重试时沿用本批标识可避免重复登记；外部工具是否会重复执行，仍须另行确认。</p>
+      <label class="check" id="schedule-parallel-wrap" hidden><input id="schedule-parallel-writes" type="checkbox">并行写（各写子诏令自动在独立 jj 工作副本中隔离执行，不再强行串行）</label>
       <div id="schedule-nodes"></div>
       <p id="schedule-error" role="alert"></p>
     </div>
@@ -4592,7 +4593,8 @@ $("schedule-form").addEventListener("submit", async (event) => {
         budget: integer("budget"), artifact: field("artifact").value.trim() || null,
         approval_required: field("approval_required").checked, idempotency_key: field("idempotency_key").value.trim() || null };
     });
-    const result = await api(`/tasks/${schedulingTask}/split`, { schedule });
+    const payload = $("schedule-parallel-writes").checked ? { schedule, parallel_writes: true } : { schedule };
+    const result = await api(`/tasks/${schedulingTask}/split`, payload);
     $("schedule-dialog").close();
     toast(`已分办为 ${result.subtasks.map((id) => "#" + id).join("、")}`);
     await refresh();
@@ -4646,6 +4648,10 @@ document.addEventListener("click", (event) => {
     act(api(`/tasks/${d.redraft}/redraft`, { worker: Number($("redraft-" + d.redraft).value) }), "已御笔改票");
   } else if (d.schedule) {
     schedulingTask = Number(d.schedule);
+    const parentTask = state.tasks.find((item) => item.id === schedulingTask);
+    const parentWrites = !!(parentTask && (parentTask.seal.tools || []).some((cap) => cap === "write_file" || cap === "run_tests"));
+    $("schedule-parallel-writes").checked = false;
+    $("schedule-parallel-wrap").hidden = !(state.jj_workspace && parentWrites);
     $("schedule-title").textContent = `诏令 #${schedulingTask} · 御定排程`;
     $("schedule-nodes").innerHTML = "";
     $("schedule-error").textContent = "";

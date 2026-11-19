@@ -97,7 +97,12 @@ pub(crate) enum Command {
     /// 诏令、左右并排、不经 delta。
     Diff(TaskId, bool, bool),
     /// 空列表表示由尚书拆分。
-    Split(TaskId, Vec<(AgentId, String)>, Option<String>),
+    Split {
+        task: TaskId,
+        plan: Vec<(AgentId, String)>,
+        file: Option<String>,
+        parallel_writes: bool,
+    },
     /// 诏令、与议官员（空为默认人选）、轮数。
     Debate(TaskId, Vec<AgentId>, usize),
     /// `None` 表示全部已完成、未复核的诏令。
@@ -379,26 +384,50 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             }
         }
         "split" => {
-            const USAGE: &str =
-                "用法: ziyuan split <诏令ID> [官员ID:子诏令]... | --plan <JSON文件>";
+            const USAGE: &str = "用法: ziyuan split <诏令ID> [--parallel-writes] ([官员ID:子诏令]... | --plan <JSON文件>)";
             let (id, parts) = args.split_first().ok_or(USAGE)?;
             let task = TaskId(id.parse().map_err(|_| USAGE)?);
-            if parts.iter().any(|part| part.starts_with("--")) {
-                return match parts {
-                    [flag, file] if flag == "--plan" && !file.starts_with("--") => {
-                        Ok(Command::Split(task, Vec::new(), Some(file.clone())))
+            let mut parallel_writes = false;
+            let mut file = None;
+            let mut rest = Vec::new();
+            let mut it = parts.iter();
+            while let Some(part) = it.next() {
+                if part == "--parallel-writes" {
+                    if parallel_writes {
+                        return Err(USAGE.into());
                     }
-                    _ => Err(USAGE.into()),
-                };
+                    parallel_writes = true;
+                } else if part == "--plan" {
+                    if file.is_some() {
+                        return Err(USAGE.into());
+                    }
+                    let next = it.next().ok_or(USAGE)?;
+                    if next.starts_with("--") {
+                        return Err(USAGE.into());
+                    }
+                    file = Some(next.clone());
+                } else if part.starts_with("--") {
+                    return Err(USAGE.into());
+                } else {
+                    rest.push(part);
+                }
             }
-            let plan = parts
-                .iter()
+            if file.is_some() && !rest.is_empty() {
+                return Err(USAGE.into());
+            }
+            let plan = rest
+                .into_iter()
                 .map(|part| {
                     let (agent, text) = part.split_once([':', '：']).ok_or(USAGE)?;
                     Ok((agent_id(agent)?, text.to_owned()))
                 })
                 .collect::<Result<_, Box<dyn Error>>>()?;
-            Command::Split(task, plan, None)
+            Command::Split {
+                task,
+                plan,
+                file,
+                parallel_writes,
+            }
         }
         "debate" => {
             const USAGE: &str = "用法: ziyuan debate <诏令ID> [--rounds 1-3] [官员ID]...";
@@ -949,15 +978,51 @@ mod scheduled_tests {
 
     #[test]
     fn split_forms_are_exclusive_and_legacy_forms_remain() {
-        assert!(
-            matches!(command(&["split", "7"]).unwrap(), Command::Split(TaskId(7), p, None) if p.is_empty())
-        );
-        assert!(
-            matches!(command(&["split", "7", "4:first", "4：second"]).unwrap(), Command::Split(TaskId(7), p, None) if p.len() == 2)
-        );
-        assert!(
-            matches!(command(&["split", "7", "--plan", "plan.json"]).unwrap(), Command::Split(TaskId(7), p, Some(f)) if p.is_empty() && f == "plan.json")
-        );
+        assert!(matches!(
+            command(&["split", "7"]).unwrap(),
+            Command::Split {
+                task: TaskId(7),
+                plan,
+                file: None,
+                parallel_writes: false,
+            } if plan.is_empty()
+        ));
+        assert!(matches!(
+            command(&["split", "7", "4:first", "4：second"]).unwrap(),
+            Command::Split {
+                task: TaskId(7),
+                plan,
+                file: None,
+                parallel_writes: false,
+            } if plan.len() == 2
+        ));
+        assert!(matches!(
+            command(&["split", "7", "--plan", "plan.json"]).unwrap(),
+            Command::Split {
+                task: TaskId(7),
+                plan,
+                file: Some(f),
+                parallel_writes: false,
+            } if plan.is_empty() && f == "plan.json"
+        ));
+        assert!(matches!(
+            command(&["split", "7", "--parallel-writes", "--plan", "plan.json"]).unwrap(),
+            Command::Split {
+                task: TaskId(7),
+                plan,
+                file: Some(f),
+                parallel_writes: true,
+            } if plan.is_empty() && f == "plan.json"
+        ));
+        assert!(matches!(
+            command(&["split", "7", "--parallel-writes", "4:a", "4:b"]).unwrap(),
+            Command::Split {
+                task: TaskId(7),
+                plan,
+                file: None,
+                parallel_writes: true,
+            } if plan.len() == 2
+        ));
         for args in [
             vec!["split", "7", "--plan"],
             vec!["split", "7", "--plan", "p.json", "4:x"],
@@ -965,6 +1030,7 @@ mod scheduled_tests {
             vec!["split", "7", "--plan", "p.json", "--plan", "q.json"],
             vec!["split", "7", "--other", "p.json"],
             vec!["split", "7", "--plan", "--plan"],
+            vec!["split", "7", "--parallel-writes", "--parallel-writes"],
         ] {
             assert!(command(&args).is_err(), "{args:?}");
         }
