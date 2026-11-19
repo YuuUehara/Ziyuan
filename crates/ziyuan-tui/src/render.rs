@@ -8,9 +8,10 @@ use ratatui::widgets::{
     Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use ziyuan_app::{
-    AnsiStyle, DeltaStyle, HistoryEntry, HistoryFilter, ansi_lines, changes_version,
-    describe_record, estimate_cost, format_time, history_entries, preview_changes, seal_note,
-    skipped_note, stale_files, suspicion_status, tz_offset, unified_hunks,
+    AnsiStyle, DeltaStyle, HistoryEntry, HistoryFilter, HunkVerdict, ansi_lines,
+    can_execute_from_plan, changes_version, describe_record, estimate_cost, format_time,
+    history_entries, parse_hunk_reviews, preview_changes, seal_note, skipped_note, stale_files,
+    suspicion_status, total_hunks, tz_offset, unified_hunks,
 };
 use ziyuan_core::FileChange;
 use ziyuan_core::{
@@ -587,6 +588,11 @@ impl App {
             if self.diff_view != DiffView::Builtin && delta.is_none() {
                 lines.push(Line::from("git-delta 未能渲染，改用内置预览（z 切换）").dim());
             }
+            let hunk_reviews = task
+                .censure
+                .as_ref()
+                .map(|c| parse_hunk_reviews(&c.note, total_hunks(&changes.files)))
+                .unwrap_or_default();
             // 与 Web 同一份预览：行号、按语言着色，成对删增行中改动的字词加底色。
             for (file, stale) in preview_changes(&changes.files).into_iter().zip(stale) {
                 let created = if file.created { "（新建）" } else { "" };
@@ -600,6 +606,20 @@ impl App {
                 lines.push(Line::from(head));
                 for hunk in &file.hunks {
                     lines.push(Line::from(format!("@@ 第 {} 段 @@", hunk.number)).dim());
+                    if let Some(review) = hunk_reviews.get(&hunk.number) {
+                        let color = match review.verdict {
+                            HunkVerdict::Reject => Color::Red,
+                            HunkVerdict::Warn => Color::Yellow,
+                            HunkVerdict::Ok => Color::Cyan,
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  [御史·{}] ", review.verdict.label()),
+                                Style::new().fg(color).bold(),
+                            ),
+                            Span::styled(review.note.clone(), Style::new().fg(color)),
+                        ]));
+                    }
                     if let Some(rendered) =
                         delta.as_ref().and_then(|d| d.get(hunk.number as usize - 1))
                     {
@@ -658,6 +678,9 @@ impl App {
                 }
                 if task.censure.is_none() {
                     lines.push(Line::from("按 i 请都察院复核").dim());
+                }
+                if can_execute_from_plan(task) {
+                    lines.push(Line::from("按 P 依此条陈授写权（下发工部）").dim());
                 }
             }
             TaskStatus::Failed { reason, .. } => {
@@ -951,6 +974,13 @@ impl App {
             ],
             (
                 Some(Modal::Input {
+                    kind: InputKind::FromPlan(_),
+                    ..
+                }),
+                _,
+            ) => &[("Enter", "下发工部"), ("↑↓", "换项"), ("Esc", "取消")],
+            (
+                Some(Modal::Input {
                     kind: InputKind::Recruit,
                     ..
                 }),
@@ -965,6 +995,7 @@ impl App {
             (None, Tab::Edicts) => &[
                 ("n", "下诏"),
                 ("T", "模板"),
+                ("P", "依条陈写"),
                 ("r", "执行"),
                 ("s", "停止"),
                 ("c", "撤销"),
@@ -1040,6 +1071,7 @@ impl App {
             } => {
                 let (title, prompt, with_department) = match kind {
                     InputKind::Edict => ("下诏", "诏令内容：", true),
+                    InputKind::FromPlan(_) => ("依条陈授写权（工部）", "补充指示（可空）：", false),
                     InputKind::Recruit => ("招募官员", "姓名（留空随机）：", true),
                     InputKind::Review(_, verdict) => (
                         if *verdict == Verdict::Accepted {
@@ -1056,18 +1088,22 @@ impl App {
                     InputKind::HumanEdit => ("人工译文", "这一段的译文：", false),
                 };
                 let title = match kind {
-                    InputKind::Review(task, _) | InputKind::Skip(task) => {
+                    InputKind::Review(task, _)
+                    | InputKind::Skip(task)
+                    | InputKind::FromPlan(task) => {
                         format!("{title} · 诏令 #{}", task.0)
                     }
                     InputKind::Rename(agent) => format!("{title} · 官员 #{}", agent.0),
                     _ => title.to_owned(),
                 };
-                let edict = matches!(kind, InputKind::Edict);
+                let edict = matches!(kind, InputKind::Edict | InputKind::FromPlan(_));
                 let popup = centered(
                     area,
                     72,
-                    if edict {
+                    if matches!(kind, InputKind::Edict) {
                         11
+                    } else if matches!(kind, InputKind::FromPlan(_)) {
+                        10
                     } else if with_department {
                         6
                     } else {

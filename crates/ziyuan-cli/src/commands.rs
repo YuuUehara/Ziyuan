@@ -5,9 +5,10 @@ use std::error::Error;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use ziyuan_app::{
-    ABOLITION_NOTE, EXECUTOR_BUSY, RunUpdate, Session, WatchOptions, WatchUpdate, demotion_note,
-    describe_record, duzhi_report, format_time, history_entries, kaocheng_grade, kaocheng_report,
-    render_diffs, seal_note, skipped_note, suspicion_status, tz_offset,
+    ABOLITION_NOTE, EXECUTOR_BUSY, HunkReview, RunUpdate, Session, WatchOptions, WatchUpdate,
+    demotion_note, describe_record, duzhi_report, format_time, history_entries, kaocheng_grade,
+    kaocheng_report, parse_hunk_reviews, render_diffs, seal_note, skipped_note, suspicion_status,
+    total_hunks, tz_offset,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, GovernanceMode, NO_ART, Persona, Seal, TaskId, missing_sections,
@@ -188,6 +189,65 @@ pub(crate) fn execute(
             }
             drop(executor);
         }
+        Command::EdictFromPlan {
+            plan,
+            scope,
+            run_tests,
+            queue,
+            extra,
+        } => {
+            let executor = if queue { None } else { Some(lock_executor()?) };
+            let scope_override = (!scope.is_empty()).then_some(scope);
+            let (edict, draft) = session.issue_from_plan(
+                plan,
+                &env::current_dir()?,
+                scope_override,
+                run_tests,
+                extra,
+            )?;
+            if draft.fallback_scope {
+                println!(
+                    "提示：未能从诏令 #{} 回奏中识别出具体路径，沿用原范围：{}（可用 --scope 收窄）。",
+                    plan.0,
+                    draft.scope.join("、")
+                );
+            } else if !draft.new_paths.is_empty() {
+                println!(
+                    "提示：拟新建文件 {} 尚不在盘上，已收拢到最近已存在父目录：{}。",
+                    draft.new_paths.join("、"),
+                    draft.scope.join("、")
+                );
+            }
+            let backend = if queue { None } else { Some(worker_backend()?) };
+            if let Some(backend) = &backend
+                && session.court().mode() == GovernanceMode::Cabinet
+            {
+                session.draft(edict.id, backend.as_ref())?;
+                print_draft(session, edict.id);
+                if session.court().in_retreat() {
+                    println!("陛下修道，司礼监代批红。");
+                } else {
+                    session.approve(edict.id)?;
+                    println!("朱笔批红。");
+                }
+            }
+            if queue {
+                println!(
+                    "已依条陈 #{} 下发工部诏令 #{}（入队）{}",
+                    plan.0,
+                    edict.id.0,
+                    seal_note(&edict.seal)
+                );
+            } else {
+                let limits = Limits {
+                    max_concurrent: 1,
+                    ..DEFAULT_LIMITS
+                };
+                let backend = backend.expect("立即执行时已构造后端");
+                run_tasks(session, Some(&[edict.id]), backend, limits)?;
+            }
+            drop(executor);
+        }
         Command::Run(limits, Some(options)) => {
             let _executor = lock_executor()?;
             hold_court(session, worker_backend()?, limits, &options)?;
@@ -339,6 +399,11 @@ pub(crate) fn execute(
                 "验功所据：{}",
                 ziyuan_app::test_evidence(entry, session.history()?)
             );
+            let hunk_reviews = entry
+                .censure
+                .as_ref()
+                .map(|c| parse_hunk_reviews(&c.note, total_hunks(&changes.files)))
+                .unwrap_or_default();
             // 在终端且找到 git-delta 时经它显示（段头附段号）；管道、--plain 或 delta 出错时印统一 diff。
             let shown = !plain
                 && io::stdout().is_terminal()
@@ -349,8 +414,22 @@ pub(crate) fn execute(
                         .map_err(|e| eprintln!("git-delta 显示失败，改印统一 diff：{e}"))
                         .is_ok()
                 });
-            if !shown {
+            if shown {
+                if !hunk_reviews.is_empty() {
+                    println!("都察院逐段意见：");
+                    for review in hunk_reviews.values() {
+                        println!(
+                            "  第 {} 段 [{}]：{}",
+                            review.hunk,
+                            review.verdict.label(),
+                            review.note
+                        );
+                    }
+                }
+            } else if plain || hunk_reviews.is_empty() {
                 print!("{}", render_diffs(&changes.files).concat());
+            } else {
+                print_annotated_diffs(&render_diffs(&changes.files).concat(), &hunk_reviews);
             }
             if changes.state == ChangeState::Proposed {
                 println!(
@@ -1232,4 +1311,17 @@ pub(crate) fn hold_court(
     runtime.shutdown_background();
     result?;
     Ok(())
+}
+
+fn print_annotated_diffs(diff: &str, reviews: &std::collections::BTreeMap<u32, HunkReview>) {
+    for line in diff.lines() {
+        println!("{line}");
+        if let Some(rest) = line.strip_prefix("@@ 第 ")
+            && let Some((num, _)) = rest.split_once(" 段")
+            && let Ok(n) = num.trim().parse::<u32>()
+            && let Some(review) = reviews.get(&n)
+        {
+            println!("  [御史·{}] {}", review.verdict.label(), review.note);
+        }
+    }
 }

@@ -821,3 +821,126 @@ async fn edict_form_sets_scope_and_tools_like_the_cli() {
     assert!(app.court().task(TaskId(4)).is_none());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tui_shows_hunk_censure_and_issues_write_edict_from_plan() {
+    let (mut app, _messages, root) = temp_app("plan-censure");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn old() {}\n").unwrap();
+
+    // 建一件已完成的只读条陈诏令 #1。
+    {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let tpl = s
+            .court()
+            .template(ziyuan_governance::PLAN_TEMPLATE)
+            .unwrap();
+        let plan = s
+            .issue_templated(
+                ziyuan_governance::PLAN_TEMPLATE,
+                tpl.department,
+                format!("{}改 old", tpl.text),
+                tpl.seal,
+            )
+            .unwrap()
+            .id;
+        let worker = s
+            .court()
+            .route(&s.court().task(plan).unwrap().edict)
+            .unwrap()
+            .worker;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                ziyuan_core::CourtEvent::TaskAssigned {
+                    task: plan,
+                    worker,
+                    model: None,
+                },
+                ziyuan_core::CourtEvent::TaskCompleted {
+                    task: plan,
+                    worker,
+                    summary: "拟改路径：\n- src/a.rs\n\n改动方案：重命名 old。".into(),
+                },
+            ],
+        )
+        .unwrap();
+    }
+    app.reload();
+    let shown = screen_at(&app, 100, 45);
+    assert!(shown.contains("按 P 依此条陈授写权"), "{shown}");
+
+    // 按 P 打开预填好的工部写诏令弹窗，直接回车下发。
+    press(&mut app, "P");
+    let modal = screen(&app);
+    assert!(modal.contains("依条陈授写权"), "{modal}");
+    assert!(modal.contains("src/a.rs"), "{modal}");
+    press(&mut app, "只改命名\n");
+    let task2 = app.court().task(TaskId(2)).expect("应下发工部诏令 #2");
+    assert_eq!(task2.edict.department, Department::Works);
+    assert_eq!(task2.edict.seal.scope, ["src/a.rs"]);
+    assert!(
+        task2
+            .edict
+            .seal
+            .capabilities
+            .contains(&Capability::WriteFile)
+    );
+    assert!(task2.edict.text.contains("皇帝补充指示：只改命名"));
+
+    // 为诏令 #2 记下改动与御史逐段意见，验证 TUI 在段头下渲染御史批注。
+    {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let censor = s.recruit(None, Department::Justice).unwrap();
+        s.appoint(censor, Office::Censor).unwrap();
+        let worker = s
+            .court()
+            .route(&s.court().task(TaskId(2)).unwrap().edict)
+            .unwrap()
+            .worker;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                ziyuan_core::CourtEvent::TaskAssigned {
+                    task: TaskId(2),
+                    worker,
+                    model: None,
+                },
+                ziyuan_core::CourtEvent::ChangesProposed {
+                    task: TaskId(2),
+                    changes: vec![ziyuan_core::FileChange {
+                        path: "src/a.rs".into(),
+                        before: Some("fn old() {}\n".into()),
+                        after: "fn new() {}\n".into(),
+                    }],
+                },
+                ziyuan_core::CourtEvent::TaskCompleted {
+                    task: TaskId(2),
+                    worker,
+                    summary: "已改 src/a.rs:1".into(),
+                },
+                ziyuan_core::CourtEvent::CensorReported {
+                    task: TaskId(2),
+                    censor,
+                    verdict: ziyuan_core::CensorVerdict::Impeached,
+                    note: "弹劾\n第 1 段：驳回建议——未保留旧签名".into(),
+                    evidence: Default::default(),
+                    model: None,
+                    usage: Default::default(),
+                },
+            ],
+        )
+        .unwrap();
+    }
+    app.reload();
+    let rendered = screen_at(&app, 100, 45);
+    assert!(
+        rendered.contains("[御史/驳回建议]") && rendered.contains("未保留旧签名"),
+        "{rendered}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

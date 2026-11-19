@@ -16,8 +16,10 @@ pub(crate) const HELP: &str = concat!(
   ziyuan recruit [姓名] <部门>         招募新官（不给姓名则随机取名；须另行 appoint 任职）
   ziyuan rename <官员ID> [--name 姓名] [--courtesy 字] [--art 号]
                                        改名、改字或改号（如徐珵改名徐有贞）；字号未改过的由官员 ID 而定
-  ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具>] [--mcp <授权>] [--queue] <内容>
-                                       下诏并立即执行；--queue 只入队（默认模拟后端；见下方环境变量）
+  ziyuan edict [--plan] [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具>] [--mcp <授权>] [--queue] <内容>
+                                       下诏并立即执行；--plan 按内置「条陈」只读出方案；--queue 只入队（默认模拟后端；见下方环境变量）
+  ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]
+                                       批复只读条陈并下发工部写诏令：自动按条陈收窄范围（可 --scope 改定），默认授 write_file 与 run_tests
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan run --watch [--poll 5] [--no-censor]
@@ -53,9 +55,9 @@ pub(crate) const HELP: &str = concat!(
   ziyuan approve <诏令ID|all>          内阁制下批红（批红后方可执行；未票拟即批红为中旨，按旧例派工）
   ziyuan appoint <官员ID> <官职>       任命（如 first-secretary / minister:works）
   ziyuan diff <诏令ID> [--side-by-side] [--plain]
-                                       查看工部呈报的改动（统一 diff）；在终端且找到 git-delta
+                                       查看工部呈报的改动（统一 diff；已复核时附都察院逐段意见）；在终端且找到 git-delta
                                        （ZIYUAN_DELTA 或 PATH 上实测可用的 delta）时经它显示，
-                                       --side-by-side 左右并排，--plain 不经 delta
+                                       --side-by-side 左右并排，--plain 印纯 diff 不经 delta
   ziyuan apply <诏令ID> [--skip 1,3] [--commit]
                                        准奏：把呈报的改动写入项目（文件在此期间被改过则拒绝）；
                                        --skip 逐段驳回 diff 中所列段号，其余落盘；
@@ -63,7 +65,7 @@ pub(crate) const HELP: &str = concat!(
   ziyuan discard <诏令ID>              驳回呈报的改动，不写入
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
-  ziyuan censor <诏令ID|all>           都察院复核回奏：核验引用与测试，御史背书或弹劾
+  ziyuan censor <诏令ID|all>           都察院复核回奏：核验引用与测试，御史背书或弹劾，有改动时逐段点评 diff
   ziyuan budget [court|<官职>|<诏令ID> <tokens|default>]
                                        户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支（default 取消）；
                                        不带参数则出具度支奏销（按用途、模型、官员汇总花费）
@@ -71,7 +73,7 @@ pub(crate) const HELP: &str = concat!(
                                        兵部驿传：外部事件（CI 失败、新 issue）入队为诏令，`-` 读标准输入；
                                        默认玉玺（只读），仍须批红、受度支约束；只入队，不执行
   ziyuan urgent <诏令ID>               八百里加急：插队先行，时限加倍
-  ziyuan template                      翰林院：列出诏令模板（内置「审查unsafe」「补测试」「写文档」）
+  ziyuan template                      翰林院：列出诏令模板（内置「审查unsafe」「补测试」「写文档」「条陈」）
   ziyuan template save <名> [--dept works] [--scope <路径>]... [--tools <工具,…>|none] --criteria <甲；乙> <内容>
                                        存模板（同名覆盖，可覆盖内置的）；验收标准以「；」分条
   ziyuan template rm <名>              撤去自定的模板（内置的恢复原样）
@@ -169,6 +171,8 @@ pub(crate) const HELP: &str = concat!(
 示例：
   ziyuan init
   ziyuan edict --dept works "检查 Rust 项目的 unsafe 代码"
+  ziyuan edict --plan "给 censorate 加上逐段 diff 意见"
+  ziyuan edict --from-plan 1 --queue "注意保持事件簿兼容"
   ziyuan reform direct
   ziyuan edict --dept works "重新检查"
   ziyuan reform cabinet
@@ -322,12 +326,13 @@ pub(crate) fn completions(shell: Shell) -> String {
     --dept) words="{departments}" ;;
     --kind) words="word passage" ;;
     --tools) words="{tools} none" ;;
-    --plan) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+    --plan) [ "${{COMP_WORDS[1]}}" = "split" ] && {{ COMPREPLY=($(compgen -f -- "$cur")); return; }} ;;
     *) case "${{COMP_WORDS[1]}}" in
          appoint|model|ceiling|nominate|recommend) words="{offices}" ;;
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
+         edict) words="--plan --from-plan --no-tests --template --dept --scope --tools --mcp --queue" ;;
          split) words="--plan" ;;
          text) words="{text_words} {text_flags}" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
@@ -364,6 +369,9 @@ complete -F _ziyuan ziyuan
                 format!("{} -a '{departments}'", seen("recruit")),
                 format!("{} -a '{modes}'", seen("reform")),
                 format!("{} -a 'bash zsh fish'", seen("completions")),
+                format!("{} -l plan", seen("edict")),
+                format!("{} -l from-plan -x", seen("edict")),
+                format!("{} -l no-tests", seen("edict")),
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),

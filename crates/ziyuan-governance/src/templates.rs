@@ -13,7 +13,10 @@ pub struct TemplateUse {
     pub criteria: Vec<String>,
 }
 
-/// 内置的翰林院模板：审查 unsafe、补测试、写文档。可以同名覆盖，不能撤去。
+/// 内置「条陈」模板名：只读拟定改动方案，经皇帝批复后再授写权下发工部。
+pub const PLAN_TEMPLATE: &str = "条陈";
+
+/// 内置的翰林院模板：审查 unsafe、补测试、写文档、条陈。可以同名覆盖，不能撤去。
 pub fn builtin_templates() -> Vec<(&'static str, Template)> {
     let seal = |tools: &[Capability]| Seal {
         capabilities: tools.iter().copied().collect(),
@@ -61,6 +64,18 @@ pub fn builtin_templates() -> Vec<(&'static str, Template)> {
                     "文档与代码现状一致，不写不存在的功能",
                     "说明用法并给出示例",
                     "只改动文档文件",
+                ],
+            ),
+        ),
+        (
+            PLAN_TEMPLATE,
+            template(
+                "先阅代码拟定条陈，本次只读不改文件。请在回奏中以「拟改路径：」单独成段，逐行列出每个拟修改或拟新建文件的相对路径，随后说明各处改动方案（附现有代码行号）、验证方式与风险：",
+                &[ReadFile, SearchCode],
+                &[
+                    "在「拟改路径：」下逐行列出每个拟修改或新建文件的相对路径",
+                    "逐处说明改动目标、做法与边界，并引用现有代码的文件与行号",
+                    "说明验证方案（测试或核对方式）及潜在风险",
                 ],
             ),
         ),

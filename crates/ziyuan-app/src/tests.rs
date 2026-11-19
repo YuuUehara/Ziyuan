@@ -830,7 +830,7 @@ async fn templates_carry_criteria_to_the_worker_and_the_censor() {
         .into_iter()
         .map(|t| t.0)
         .collect();
-    assert_eq!(names, ["审查unsafe", "补测试", "写文档"]);
+    assert_eq!(names, ["审查unsafe", "补测试", "写文档", "条陈"]);
     let mut custom = session.court().template("审查unsafe").unwrap();
     custom.criteria = vec!["列出行号".into(), "说明前提".into()];
     session.save_template("审查unsafe", custom).unwrap();
@@ -3328,4 +3328,270 @@ fn real_git_delta_renders_hunks_when_configured() {
             );
         }
     }
+}
+
+#[test]
+fn test_evidence_invalidates_after_replace_text() {
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let seal = Seal {
+        capabilities: [
+            Capability::ReadFile,
+            Capability::WriteFile,
+            Capability::RunTests,
+        ]
+        .into(),
+        scope: vec![".".into()],
+        mcp: Default::default(),
+    };
+    let task = session
+        .issue(Department::Works, "补丁改文件".into(), seal)
+        .unwrap()
+        .id;
+    let worker = session
+        .court()
+        .route(&session.court().task(task).unwrap().edict)
+        .unwrap()
+        .worker;
+    let history = vec![
+        CourtEvent::TaskAssigned {
+            task,
+            worker,
+            model: None,
+        },
+        CourtEvent::ToolInvoked {
+            task,
+            tool: "run_tests".into(),
+            args_json: "{}".into(),
+            ok: true,
+        },
+        CourtEvent::ToolInvoked {
+            task,
+            tool: "replace_text".into(),
+            args_json: r#"{"path":"src/lib.rs"}"#.into(),
+            ok: true,
+        },
+    ];
+    let ev = test_evidence(session.court().task(task).unwrap(), &history);
+    assert_eq!(ev.last_result, Some(true));
+    assert!(!ev.applicable, "replace_text 之后应使当次测试失效：{ev}");
+    assert!(ev.reason.contains("暂存写入"), "{ev}");
+}
+
+#[test]
+fn parse_hunk_reviews_handles_verdicts_and_ignores_invalid_hunks() {
+    let note = "背书\n总体符合诏令。\n第 1 段：无异议——改动简洁准确\n- 第 2 段：关注——边界条件需复核\n3. 第 3 段：驳回建议——误删了空值校验\n第 99 段：驳回建议——超出总段数应忽略\n正文里提到第 1 段代码很好，这不是逐段意见。";
+    let parsed = parse_hunk_reviews(note, 3);
+    assert_eq!(parsed.len(), 3, "{parsed:?}");
+    assert_eq!(parsed[&1].verdict, HunkVerdict::Ok);
+    assert_eq!(parsed[&1].note, "改动简洁准确");
+    assert_eq!(parsed[&2].verdict, HunkVerdict::Warn);
+    assert_eq!(parsed[&2].note, "边界条件需复核");
+    assert_eq!(parsed[&3].verdict, HunkVerdict::Reject);
+    assert_eq!(parsed[&3].note, "误删了空值校验");
+}
+
+#[test]
+fn censor_fences_diff_and_prompts_hunk_reviews() {
+    struct HunkCensorBackend(std::sync::Mutex<(String, String)>);
+    impl WorkerBackend for HunkCensorBackend {
+        fn execute(&self, _: &Job, _: &dyn ExecutionHooks) -> Result<String, BoxError> {
+            unreachable!()
+        }
+        fn complete(
+            &self,
+            _model: Option<&str>,
+            system: &str,
+            user: &str,
+        ) -> Result<(String, TokenUsage), BoxError> {
+            *self.0.lock().unwrap() = (system.to_owned(), user.to_owned());
+            Ok((
+                "背书\n总评：第一段可准，第二段有风险。\n第 1 段：无异议——补齐导入\n第 2 段：驳回建议——未处理空输入".into(),
+                TokenUsage::default(),
+            ))
+        }
+    }
+
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let censor = session.recruit(None, Department::Justice).unwrap();
+    session.appoint(censor, Office::Censor).unwrap();
+    let seal = Seal {
+        capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+        scope: vec![".".into()],
+        mcp: Default::default(),
+    };
+    let task = session
+        .issue(Department::Works, "修改 src/a.rs".into(), seal)
+        .unwrap()
+        .id;
+    let worker = session
+        .court()
+        .route(&session.court().task(task).unwrap().edict)
+        .unwrap()
+        .worker;
+    let before = (1..=30)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut lines: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+    lines[1] = "line 2 edited".into();
+    lines[27] = "line 28 edited".into();
+    let after = lines.join("\n") + "\n";
+    session
+        .commit(|_| {
+            Ok(vec![
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task,
+                    changes: vec![FileChange {
+                        path: "src/a.rs".into(),
+                        before: Some(before.clone()),
+                        after: after.clone(),
+                    }],
+                },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker,
+                    summary: "已修改 src/a.rs 两处。".into(),
+                },
+            ])
+        })
+        .unwrap();
+
+    let backend = HunkCensorBackend(std::sync::Mutex::new((String::new(), String::new())));
+    let verdict = session
+        .censor(task, &std::env::temp_dir(), &backend)
+        .unwrap();
+    assert_eq!(verdict, CensorVerdict::Endorsed);
+    let (system, user) = backend.0.lock().unwrap().clone();
+    assert!(system.contains("replace_text"), "{system}");
+    assert!(system.contains("第 n 段：驳回建议"), "{system}");
+    assert!(user.contains("改动概览（共 1 个文件，2 段）"), "{user}");
+    assert!(user.contains("回奏与呈报改动"), "{user}");
+    assert!(
+        user.contains("@@ 第 1 段") && user.contains("@@ 第 2 段"),
+        "{user}"
+    );
+    let note = &session
+        .court()
+        .task(task)
+        .unwrap()
+        .censure
+        .as_ref()
+        .unwrap()
+        .note;
+    let reviews = parse_hunk_reviews(note, 2);
+    assert_eq!(reviews[&1].verdict, HunkVerdict::Ok);
+    assert_eq!(reviews[&2].verdict, HunkVerdict::Reject);
+}
+
+#[test]
+fn plan_workflow_extracts_paths_rolls_up_new_files_and_issues_works_edict() {
+    let root = std::env::temp_dir().join(format!("ziyuan-plan-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let mut store = MemoryEventLog::default();
+    let mut session = Session::found(&mut store).unwrap();
+    let tpl = session
+        .court()
+        .template(ziyuan_governance::PLAN_TEMPLATE)
+        .expect("内置条陈模板");
+    assert!(!tpl.seal.capabilities.contains(&Capability::WriteFile));
+
+    let plan_task = session
+        .issue_templated(
+            ziyuan_governance::PLAN_TEMPLATE,
+            tpl.department,
+            format!("{}新增计划模块", tpl.text),
+            tpl.seal,
+        )
+        .unwrap()
+        .id;
+    // 未完成时拒绝转写诏令。
+    assert!(
+        session
+            .issue_from_plan(plan_task, &root, None, true, String::new())
+            .is_err()
+    );
+
+    let worker = session
+        .court()
+        .route(&session.court().task(plan_task).unwrap().edict)
+        .unwrap()
+        .worker;
+    let plan_summary = "拟改路径：\n- `src/lib.rs`（导出新模块）\n- `src/plan.rs`（新建模块）\n- `../secret.txt`（越界，应忽略）\n- `.env.local`（禁区，应忽略）\n\n改动方案：\n1. 在 src/lib.rs:1 导出模块。\n验证方案：cargo test";
+    session
+        .commit(|_| {
+            Ok(vec![
+                CourtEvent::TaskAssigned {
+                    task: plan_task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::TaskCompleted {
+                    task: plan_task,
+                    worker,
+                    summary: plan_summary.into(),
+                },
+            ])
+        })
+        .unwrap();
+
+    let entry = session.court().task(plan_task).unwrap();
+    assert!(can_execute_from_plan(entry));
+    let draft = draft_plan_execution(entry, &root).unwrap();
+    assert!(draft.is_plan_template);
+    assert!(!draft.fallback_scope);
+    assert_eq!(draft.mentioned_paths, ["src/lib.rs", "src/plan.rs"]);
+    assert_eq!(draft.new_paths, ["src/plan.rs"]);
+    // src/plan.rs 收拢到父目录 src，从而涵盖了 src/lib.rs。
+    assert_eq!(draft.scope, ["src"]);
+
+    let (edict, used) = session
+        .issue_from_plan(plan_task, &root, None, false, "只改核心逻辑".into())
+        .unwrap();
+    assert_eq!(edict.department, Department::Works);
+    assert_eq!(edict.seal.scope, ["src"]);
+    assert!(edict.seal.capabilities.contains(&Capability::WriteFile));
+    assert!(!edict.seal.capabilities.contains(&Capability::RunTests));
+    assert!(edict.text.contains("依条陈诏令 #1"));
+    assert!(edict.text.contains("皇帝补充指示：只改核心逻辑"));
+    assert_eq!(used.scope, ["src"]);
+
+    // 已有写权的诏令不能再作为条陈。
+    let write_task = edict.id;
+    session
+        .commit(|_| {
+            Ok(vec![
+                CourtEvent::TaskAssigned {
+                    task: write_task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::TaskCompleted {
+                    task: write_task,
+                    worker,
+                    summary: "done".into(),
+                },
+            ])
+        })
+        .unwrap();
+    assert!(!can_execute_from_plan(
+        session.court().task(write_task).unwrap()
+    ));
+    assert!(
+        session
+            .issue_from_plan(write_task, &root, None, true, String::new())
+            .is_err()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -81,6 +81,30 @@ pub(crate) async fn issue(
     .await
 }
 
+/// 依已完成的只读诏令（条陈）授写权下发工部：`{ scope?: [..], run_tests?: bool, extra?: string }`。
+pub(crate) async fn from_plan(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let scope = string_list(&body["scope"]);
+    let scope_override = (!scope.is_empty()).then_some(scope);
+    let run_tests = body["run_tests"].as_bool().unwrap_or(true);
+    let extra = body["extra"].as_str().unwrap_or_default().to_owned();
+    app.mutate(move |s| {
+        let (edict, draft) =
+            s.issue_from_plan(TaskId(id), &root, scope_override, run_tests, extra)?;
+        Ok(json!({
+            "id": edict.id.0,
+            "scope": draft.scope,
+            "fallback_scope": draft.fallback_scope,
+            "new_paths": draft.new_paths,
+        }))
+    })
+    .await
+}
+
 /// 翰林院存模板：`{ name, department, text, tools?, scope?, criteria: [..] }`（同名覆盖）。
 pub(crate) async fn save_template(
     State(app): State<AppState>,

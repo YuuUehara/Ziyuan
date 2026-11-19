@@ -39,6 +39,14 @@ pub(crate) enum Command {
         /// `--template`：按翰林院模板下诏；未显式给出的部门、工具、范围取模板的。
         template: Option<TemplateChoice>,
     },
+    /// 依已完成的只读条陈诏令授写权下发工部。
+    EdictFromPlan {
+        plan: TaskId,
+        scope: Vec<String>,
+        run_tests: bool,
+        queue: bool,
+        extra: String,
+    },
     /// 翰林院：列出模板。
     Templates,
     /// 外藩名册。
@@ -657,9 +665,13 @@ pub(crate) struct TemplateChoice {
 }
 
 pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
-    const USAGE: &str = "用法: ziyuan edict [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] [--queue] <诏令内容>";
+    const USAGE: &str = "用法: ziyuan edict [--plan] [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] [--queue] <诏令内容>
+  或: ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]";
     let mut department = None;
     let mut queue = false;
+    let mut plan_mode = false;
+    let mut from_plan: Option<TaskId> = None;
+    let mut no_tests = false;
     let mut seal = Seal::default();
     let mut scope = Vec::new();
     let (mut template, mut tools_given, mut mcp_given) = (None, false, false);
@@ -668,6 +680,22 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             "--queue" => {
                 args.remove(0);
                 queue = true;
+            }
+            "--plan" => {
+                args.remove(0);
+                plan_mode = true;
+            }
+            "--no-tests" => {
+                args.remove(0);
+                no_tests = true;
+            }
+            "--from-plan" => {
+                if args.len() < 2 {
+                    return Err(USAGE.into());
+                }
+                args.remove(0);
+                let value = args.remove(0);
+                from_plan = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
             }
             "--dept" | "--scope" | "--tools" | "--template" | "--mcp" => {
                 if args.len() < 2 {
@@ -691,6 +719,33 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             }
             _ => break,
         }
+    }
+    if let Some(plan) = from_plan {
+        if plan_mode || template.is_some() || department.is_some() || tools_given || mcp_given {
+            return Err(
+                "`--from-plan` 固定下发工部写诏令，不能同时使用 --plan / --template / --dept / --tools / --mcp"
+                    .into(),
+            );
+        }
+        return Ok(Command::EdictFromPlan {
+            plan,
+            scope,
+            run_tests: !no_tests,
+            queue,
+            extra: args.join(" "),
+        });
+    }
+    if no_tests {
+        return Err("`--no-tests` 只能配合 `--from-plan` 使用".into());
+    }
+    if plan_mode {
+        if template.is_some() {
+            return Err("`--plan` 已按内置「条陈」模板下诏，不能同时指定 `--template`".into());
+        }
+        if tools_given && seal.capabilities.iter().any(|c| c.is_works_only()) {
+            return Err("条陈阶段只读，不得授予 write_file 或 run_tests".into());
+        }
+        template = Some(ziyuan_governance::PLAN_TEMPLATE.to_owned());
     }
     let template = template.map(|name| TemplateChoice {
         name,
@@ -913,5 +968,54 @@ mod scheduled_tests {
         ] {
             assert!(command(&args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn edict_plan_and_from_plan_flags_validate_cleanly() {
+        match command(&["edict", "--plan", "--queue", "先出改动方案"]).unwrap() {
+            Command::Edict {
+                template: Some(choice),
+                queue: true,
+                text,
+                ..
+            } => {
+                assert_eq!(choice.name, ziyuan_governance::PLAN_TEMPLATE);
+                assert_eq!(text, "先出改动方案");
+            }
+            _ => panic!("expected Command::Edict with plan template"),
+        }
+        assert!(command(&["edict", "--plan", "--tools", "write_file", "x"]).is_err());
+        assert!(command(&["edict", "--plan", "--template", "写文档", "x"]).is_err());
+        assert!(command(&["edict", "--no-tests", "x"]).is_err());
+
+        match command(&[
+            "edict",
+            "--from-plan",
+            "5",
+            "--scope",
+            "crates/ziyuan-app",
+            "--no-tests",
+            "--queue",
+            "按方案实施",
+        ])
+        .unwrap()
+        {
+            Command::EdictFromPlan {
+                plan,
+                scope,
+                run_tests,
+                queue,
+                extra,
+            } => {
+                assert_eq!(plan, TaskId(5));
+                assert_eq!(scope, ["crates/ziyuan-app"]);
+                assert!(!run_tests);
+                assert!(queue);
+                assert_eq!(extra, "按方案实施");
+            }
+            _ => panic!("expected Command::EdictFromPlan"),
+        }
+        assert!(command(&["edict", "--from-plan", "5", "--dept", "rites"]).is_err());
+        assert!(command(&["edict", "--from-plan", "5", "--plan"]).is_err());
     }
 }

@@ -18,6 +18,7 @@ pub mod memory;
 pub mod memory_provider;
 pub mod notes;
 mod personnel;
+mod plan;
 mod preview;
 mod reports;
 mod run;
@@ -29,7 +30,10 @@ pub mod translation;
 mod vcs;
 
 pub use cabinet::{ScheduledSubtask, criteria_note, debate_minutes};
-pub use censorate::{ACQUITTAL_NOTE, TestEvidence, suspicion_status, test_evidence};
+pub use censorate::{
+    ACQUITTAL_NOTE, HunkReview, HunkVerdict, TestEvidence, parse_hunk_reviews, suspicion_status,
+    test_evidence, total_hunks,
+};
 pub use courier::{PullReport, changelog_commits};
 pub use delta::{
     AnsiStyle, Delta, DeltaStyle, DeltaTheme, ansi_html, ansi_lines, delta, unified_diff,
@@ -47,6 +51,7 @@ pub use follow::{
 pub use history::{HistoryEntry, HistoryFilter, describe_event, history_entries};
 pub use huidian::{HUIDIAN_EVERY, huidian_tag};
 pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note, vacancies};
+pub use plan::{PlanDraft, can_execute_from_plan, draft_plan_execution, plan_edict_text};
 pub use preview::{PreviewFile, PreviewHunk, PreviewLine, PreviewSpan, preview_changes};
 pub use reports::{describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report};
 pub use run::{EXECUTOR_BUSY, NEGLECT_THRESHOLD, RunUpdate, TaskReport, WatchOptions, WatchUpdate};

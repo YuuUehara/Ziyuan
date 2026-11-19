@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use ziyuan_app::Session;
-use ziyuan_core::{Department, Seal, TaskId, TokenUsage};
+use ziyuan_core::{
+    CensorVerdict, CourtEvent, Department, FileChange, Office, Seal, TaskId, TokenUsage,
+};
 use ziyuan_runtime::{BoxError, ExecutionHooks, Job, Limits, WorkerBackend};
-use ziyuan_storage::EventLog;
+use ziyuan_storage::{EventLog, EventStore};
 
 use std::time::Duration;
 use ziyuan_runtime::DemoBackend;
@@ -884,8 +886,8 @@ async fn templates_are_saved_listed_and_applied() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["审查unsafe", "补测试", "写文档", "查锁"]);
-    let custom = &state["templates"][3];
+    assert_eq!(names, ["审查unsafe", "补测试", "写文档", "条陈", "查锁"]);
+    let custom = &state["templates"][4];
     assert_eq!(
         (custom["builtin"].as_bool(), custom["scope"].clone()),
         (Some(false), json!(["src"]))
@@ -1450,4 +1452,152 @@ async fn scheduled_split_validates_metadata_and_retries_without_duplicate_tasks(
     let mut changed = plan;
     changed["schedule"][1]["text"] = json!("改变任务内容");
     assert_eq!(call(&base, "/tasks/1/split", t, Some(changed)).await.0, 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn censure_hunk_reviews_and_from_plan_endpoint_work_end_to_end() {
+    let (base, root) = start("plan-hunk").await;
+    let t = Some(TOKEN);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn old() {}\n").unwrap();
+
+    // 1. 建一件已完成的「条陈」只读诏令，验证 /state 带出 plan_draft，/from-plan 下发工部写诏令。
+    let (status, issued) = call(
+        &base,
+        "/edicts",
+        t,
+        Some(json!({
+            "department": "works",
+            "text": "先出方案",
+            "template": "条陈"
+        })),
+    )
+    .await;
+    assert_eq!((status, issued["id"].as_u64()), (200, Some(1)));
+
+    {
+        let s = Session::open(EventLog::new(&root)).unwrap();
+        let worker = s
+            .court()
+            .route(&s.court().task(TaskId(1)).unwrap().edict)
+            .unwrap()
+            .worker;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task: TaskId(1),
+                    worker,
+                    model: None,
+                },
+                CourtEvent::TaskCompleted {
+                    task: TaskId(1),
+                    worker,
+                    summary: "拟改路径：\n- src/a.rs\n\n改动方案：修改 old。".into(),
+                },
+            ],
+        )
+        .unwrap();
+    }
+
+    let (_, state) = call(&base, "/state", t, None).await;
+    let plan_task = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == 1)
+        .unwrap();
+    assert_eq!(plan_task["plan_draft"]["is_plan_template"], true);
+    assert_eq!(plan_task["plan_draft"]["scope"], json!(["src/a.rs"]));
+
+    // 观政只读令牌不能依条陈授写权。
+    assert_eq!(
+        call(&base, "/tasks/1/from-plan", Some(VIEWER), Some(json!({})))
+            .await
+            .0,
+        403
+    );
+
+    let (status, created) = call(
+        &base,
+        "/tasks/1/from-plan",
+        t,
+        Some(json!({ "run_tests": false, "extra": "注意边界" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["id"], 2);
+    assert_eq!(created["scope"], json!(["src/a.rs"]));
+
+    // 2. 给诏令 #2 记下改动与带逐段意见的都察院复核，验证 /state 把意见挂在对应 hunk 上。
+    {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let censor = s.recruit(None, Department::Justice).unwrap();
+        s.appoint(censor, Office::Censor).unwrap();
+        let worker = s
+            .court()
+            .route(&s.court().task(TaskId(2)).unwrap().edict)
+            .unwrap()
+            .worker;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task: TaskId(2),
+                    worker,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task: TaskId(2),
+                    changes: vec![FileChange {
+                        path: "src/a.rs".into(),
+                        before: Some("fn old() {}\n".into()),
+                        after: "fn new() {}\n".into(),
+                    }],
+                },
+                CourtEvent::TaskCompleted {
+                    task: TaskId(2),
+                    worker,
+                    summary: "已改 src/a.rs:1".into(),
+                },
+                CourtEvent::CensorReported {
+                    task: TaskId(2),
+                    censor,
+                    verdict: CensorVerdict::Impeached,
+                    note: "弹劾\n存在命名风险。\n第 1 段：驳回建议——未保留旧函数兼容".into(),
+                    evidence: Default::default(),
+                    model: None,
+                    usage: Default::default(),
+                },
+            ],
+        )
+        .unwrap();
+    }
+
+    let (_, state) = call(&base, "/state", t, None).await;
+    let write_task = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == 2)
+        .unwrap();
+    assert_eq!(
+        write_task["changes"]["files"][0]["hunks"][0]["censure"]["verdict"],
+        "reject"
+    );
+    assert_eq!(
+        write_task["changes"]["files"][0]["hunks"][0]["censure"]["note"],
+        "未保留旧函数兼容"
+    );
+    assert_eq!(write_task["censure"]["hunks"][0]["hunk"], 1);
+
+    let html = include_str!("index.html");
+    assert!(html.contains("hunk-censure") && html.contains("data-uncheck-rejected"));
+    assert!(html.contains("data-from-plan") && html.contains("plan-exec"));
+
+    std::fs::remove_dir_all(root).unwrap();
 }

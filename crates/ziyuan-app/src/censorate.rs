@@ -1,8 +1,10 @@
 //! 都察院与刑部：复核回奏、复勘密报与平反。
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use ziyuan_core::{
-    Capability, CensorVerdict, CourtEvent, Evidence, Office, Persona, TaskId, TokenUsage,
+    Capability, CensorVerdict, CourtEvent, Evidence, FileChange, Office, Persona, TaskId,
+    TokenUsage,
 };
 use ziyuan_governance::{ChangeState, GovernanceError, Suspicion, Task, TaskStatus};
 use ziyuan_runtime::{BoxError, WorkerBackend, guard};
@@ -14,6 +16,228 @@ use crate::{AppError, Session, truncate};
 
 /// 平反时的史官记。
 pub const ACQUITTAL_NOTE: &str = "史官记：成化二年，复于少保官，遣官赐祭——冤者得白，虽迟犹胜于无。";
+
+/// 工具是否会修改暂存文件（`write_file` 与随其授予的 `replace_text`）。
+fn is_write_tool(tool: &str) -> bool {
+    tool == Capability::WriteFile.code() || tool == "replace_text"
+}
+
+/// 都察院对某一段 diff 改动的意见等级。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HunkVerdict {
+    /// 建议驳回该段（有缺陷、风险或越界）。
+    Reject,
+    /// 提醒皇帝关注核对。
+    Warn,
+    /// 御史无异议。
+    Ok,
+}
+
+impl HunkVerdict {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::Warn => "warn",
+            Self::Ok => "ok",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reject => "驳回建议",
+            Self::Warn => "关注",
+            Self::Ok => "无异议",
+        }
+    }
+
+    fn severity(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Warn => 1,
+            Self::Reject => 2,
+        }
+    }
+}
+
+/// 都察院对单段 diff（1-based 段号）的结构化批注，由 `Censure::note` 解析得出。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HunkReview {
+    pub hunk: u32,
+    pub verdict: HunkVerdict,
+    pub note: String,
+}
+
+/// 一份呈报改动的总段数（与 [`render_diffs`] 段号上限一致）。
+pub fn total_hunks(files: &[FileChange]) -> u32 {
+    files.iter().map(|f| f.hunks().len() as u32).sum()
+}
+
+/// 从都察院批语中解析逐段 diff 意见（形如「第 n 段：驳回建议——理由」/「第 n 段：关注——理由」/
+/// 「第 n 段：无异议——理由」）。忽略超出 `1..=total_hunks` 的段号。
+pub fn parse_hunk_reviews(note: &str, total_hunks: u32) -> BTreeMap<u32, HunkReview> {
+    let mut out: BTreeMap<u32, HunkReview> = BTreeMap::new();
+    if total_hunks == 0 {
+        return out;
+    }
+    for raw in note.lines() {
+        let Some((hunk, body)) = parse_hunk_line(raw) else {
+            continue;
+        };
+        if hunk == 0 || hunk > total_hunks {
+            continue;
+        }
+        let (verdict, text) = classify_hunk_body(body);
+        let entry = HunkReview {
+            hunk,
+            verdict,
+            note: text,
+        };
+        match out.get(&hunk) {
+            Some(existing) if existing.verdict.severity() > entry.verdict.severity() => {}
+            _ => {
+                out.insert(hunk, entry);
+            }
+        }
+    }
+    out
+}
+
+fn parse_hunk_line(raw: &str) -> Option<(u32, &str)> {
+    let mut s = raw.trim();
+    // 去掉常见列表前缀（如「- 」「* 」「1. 」「(1)」「【」）。
+    loop {
+        let trimmed = s
+            .trim_start_matches(['-', '*', '•', '·', '【', '[', '(', '（', ' '])
+            .trim_start();
+        let after_num = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+        if after_num.len() != trimmed.len() && after_num.starts_with(['.', '、', ')', '）', ']'])
+        {
+            s = after_num[after_num.chars().next()?.len_utf8()..].trim_start();
+            continue;
+        }
+        if trimmed.len() != s.len() {
+            s = trimmed;
+            continue;
+        }
+        break;
+    }
+    let rest = s.strip_prefix('第')?.trim_start();
+    let digits_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits_len == 0 {
+        return None;
+    }
+    let hunk: u32 = rest[..digits_len].parse().ok()?;
+    let rest = rest[digits_len..].trim_start().strip_prefix('段')?;
+    let rest = rest.trim_start_matches(['】', ']', ')', '）', ' ']);
+    // 必须紧接冒号、破折号或空白，避免误把正文中「第 2 段代码……」当作逐段意见。
+    let sep = rest.chars().next()?;
+    let after_sep = if matches!(sep, '：' | ':' | '—' | '-') {
+        rest.trim_start_matches(['：', ':', '—', '-', ' '])
+    } else if raw.trim().starts_with('第') && sep.is_whitespace() {
+        rest.trim_start()
+    } else {
+        return None;
+    };
+    let body = after_sep.trim();
+    (!body.is_empty()).then_some((hunk, body))
+}
+
+fn classify_hunk_body(body: &str) -> (HunkVerdict, String) {
+    let (head, tail) = split_verdict_tag(body);
+    let probe = if tail.is_some() { head } else { body };
+    let verdict = if probe.contains("驳回")
+        || probe.contains("勿准")
+        || probe.contains("不准")
+        || probe.contains("不应落盘")
+    {
+        HunkVerdict::Reject
+    } else if probe.contains("无异议")
+        || probe.contains("可准")
+        || probe.contains("妥当")
+        || probe.contains("无问题")
+    {
+        HunkVerdict::Ok
+    } else {
+        HunkVerdict::Warn
+    };
+    let clean = match tail {
+        Some(rest) if !rest.is_empty() && is_tag_like(head) => rest.to_owned(),
+        _ => body.to_owned(),
+    };
+    (verdict, clean)
+}
+
+fn split_verdict_tag(body: &str) -> (&str, Option<&str>) {
+    for sep in ["——", "--", "—", "：", ":"] {
+        if let Some((head, tail)) = body.split_once(sep) {
+            return (head.trim(), Some(tail.trim()));
+        }
+    }
+    (body, None)
+}
+
+fn is_tag_like(head: &str) -> bool {
+    head.chars().count() <= 8
+        && [
+            "驳回",
+            "勿准",
+            "不准",
+            "关注",
+            "留意",
+            "风险",
+            "疑点",
+            "问题",
+            "无异议",
+            "可准",
+            "妥当",
+            "无问题",
+            "建议",
+        ]
+        .iter()
+        .any(|k| head.contains(k))
+}
+
+/// 呈报改动的概览：文件数、总段数，以及每个文件对应的段号区间与增删行数。
+fn changes_overview(files: &[FileChange]) -> (u32, String) {
+    let mut total = 0u32;
+    let mut lines = Vec::with_capacity(files.len());
+    for file in files {
+        let hunks = file.hunks();
+        let count = hunks.len() as u32;
+        let first = total + 1;
+        total += count;
+        let adds: usize = hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .filter(|(m, _)| *m == '+')
+            .count();
+        let dels: usize = hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .filter(|(m, _)| *m == '-')
+            .count();
+        let kind = if file.before.is_none() {
+            "新建"
+        } else {
+            "改写"
+        };
+        let range = match count {
+            0 => "无改动段".to_owned(),
+            1 => format!("第 {first} 段"),
+            _ => format!("第 {first}–{total} 段"),
+        };
+        lines.push(format!(
+            "- {}（{kind}）：{range}（+{adds} -{dels}）",
+            file.path
+        ));
+    }
+    let header = format!(
+        "改动概览（共 {} 个文件，{total} 段）：\n{}\n",
+        files.len(),
+        lines.join("\n")
+    );
+    (total, header)
+}
 
 /// 历史测试结果与本件工具时序的适用性；不是被测内容或外部依赖的快照证明。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +274,7 @@ pub fn test_evidence(task: &Task, history: &[CourtEvent]) -> TestEvidence {
         Some(i)
             if calls[i + 1..]
                 .iter()
-                .any(|(tool, _, ok)| *ok && tool == Capability::WriteFile.code()) =>
+                .any(|(tool, _, ok)| *ok && is_write_tool(tool)) =>
         {
             (false, "测试后又有成功暂存写入，当前改动须另验")
         }
@@ -318,12 +542,13 @@ impl<S: EventStore> Session<S> {
             TaskStatus::Completed { summary, .. } => summary,
             _ => "",
         };
+        let has_changes = entry.changes.as_ref().is_some_and(|c| !c.files.is_empty());
         let system = format!(
             "你是紫垣朝廷都察院左都御史{}，独立复核官员的回奏，风闻亦须核实。\n\
              依据诏令、回奏、工具调用记录与证据核验，判断回奏是否属实、是否办成了诏令所命之事。\n\
              回复第一行必须是「背书」或「弹劾」二字之一，其后用不超过 150 字说明理由。\n\
              证据核验由程序完成、确凿可信：查无实据的引用要分辨是捏造，还是官员如实说明其不存在；\
-             测试未通过而回奏称已办成者，应予弹劾。\n{}{}{}",
+             测试未通过而回奏称已办成者，应予弹劾。\n{}{}{}{}",
             censor.name,
             // 实测中御史曾把「改动只暂存、未落盘」当作与 write_file 成功相矛盾。
             if entry
@@ -332,27 +557,39 @@ impl<S: EventStore> Session<S> {
                 .capabilities
                 .contains(&Capability::WriteFile)
             {
-                "write_file 只把改动暂存在内存中（run_tests 在叠加暂存改动的副本上跑），须皇帝准奏才写入项目；\
-                 记录中 write_file 成功，即是暂存成功，回奏称「改动未落盘」「仅暂存」属实，不是矛盾，不得据此弹劾。\n"
+                "write_file 与 replace_text 只把改动暂存在内存中（run_tests 在叠加暂存改动的副本上跑），须皇帝准奏才写入项目；\
+                 记录中 write_file 或 replace_text 成功，即是暂存成功，回奏称「改动未落盘」「仅暂存」属实，不是矛盾，不得据此弹劾。\n"
             } else {
                 ""
             },
             if entry.template.is_some() {
-                "本诏令按翰林院模板验收：第二行起逐条写「第 n 条：达成／未达成——理由」（每条不超过 60 字），\
+                "本诏令按翰林院模板验收：另起行逐条写「第 n 条：达成／未达成——理由」（每条不超过 60 字），\
                  任何一条未达成或无从查证，应予弹劾。\n"
+            } else {
+                ""
+            },
+            if has_changes {
+                "本诏令有呈报改动：请对照每段 diff（段号见「@@ 第 n 段 @@」），对存在缺陷、风险、越界或与诏令不符的段，\
+                 另起行写「第 n 段：驳回建议——理由」或「第 n 段：关注——理由」（每段不超过 80 字；\
+                 确认无问题的段可写「第 n 段：无异议——理由」或省略）。\n"
             } else {
                 ""
             },
             Persona::of(censor.id).prompt()
         );
         let nonce = guard::nonce();
+        let fenced_label = if has_changes {
+            "回奏与呈报改动"
+        } else {
+            "回奏"
+        };
         let mut user = format!(
             "诏令 #{}（{}）：{}\n玉玺：{}\n承办：{handler}\n\n{}\n回奏：\n{}\n\n工具调用：\n",
             task.0,
             entry.edict.department.label(),
             entry.edict.text,
             entry.edict.seal,
-            guard::warning("回奏", &nonce),
+            guard::warning(fenced_label, &nonce),
             guard::fence(&truncate(summary, 6000), &nonce),
         );
         for (tool, args, ok) in tool_calls(&history, task) {
@@ -380,6 +617,7 @@ impl<S: EventStore> Session<S> {
             user.push_str(&format!("- {line}\n"));
         }
         if let Some(changes) = &entry.changes {
+            let (_, overview) = changes_overview(&changes.files);
             let diff: String = render_diffs(&changes.files).concat();
             let state = match changes.state {
                 ChangeState::Proposed => "暂存待准奏，尚未写入项目",
@@ -387,8 +625,8 @@ impl<S: EventStore> Session<S> {
                 ChangeState::Discarded => "已驳回，未写入",
             };
             user.push_str(&format!(
-                "\n呈报改动（{state}）：\n{}\n",
-                truncate(&diff, 6000)
+                "\n呈报改动（{state}）：\n{overview}{}\n",
+                guard::fence(&truncate(&diff, 12000), &nonce)
             ));
         }
         let current_evidence = Evidence {
@@ -408,8 +646,13 @@ impl<S: EventStore> Session<S> {
             .and_then(|()| backend.complete(model.as_deref(), &system, &user));
         let (verdict, note, model, usage) = match answer {
             Ok((reply, usage)) => {
-                // 逐条核验的批语较长。
-                let limit = if entry.template.is_some() { 1200 } else { 600 };
+                // 逐条验收与逐段 diff 意见的批语较长。
+                let limit = match (entry.template.is_some(), has_changes) {
+                    (true, true) => 2400,
+                    (false, true) => 1800,
+                    (true, false) => 1200,
+                    (false, false) => 600,
+                };
                 let reply = truncate(reply.trim(), limit);
                 match parse_censure(&reply) {
                     Some(verdict) => (verdict, reply, model, usage),

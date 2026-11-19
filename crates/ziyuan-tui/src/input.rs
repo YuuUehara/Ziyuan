@@ -3,7 +3,9 @@
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::BTreeSet;
 use std::path::Path;
-use ziyuan_app::{ABOLITION_NOTE, duzhi_report, kaocheng_report, skipped_note};
+use ziyuan_app::{
+    ABOLITION_NOTE, draft_plan_execution, duzhi_report, kaocheng_report, skipped_note,
+};
 use ziyuan_core::{Capability, Department, GovernanceMode, Seal, Verdict};
 use ziyuan_runtime::Outcome;
 use ziyuan_runtime::tools::temp_cleanup::Problem;
@@ -252,6 +254,40 @@ impl App {
                 );
             }
             KeyCode::Char('i') => self.start_censor(task),
+            KeyCode::Char('P') => {
+                let Some(entry) = self.court().task(task) else {
+                    return;
+                };
+                match draft_plan_execution(entry, &self.config.root) {
+                    Ok(draft) => {
+                        let works = Department::ALL
+                            .iter()
+                            .position(|&d| d == Department::Works)
+                            .unwrap_or(0);
+                        if draft.fallback_scope {
+                            self.info(format!(
+                                "未识别出具体路径，暂沿用原范围：{}（可编辑收窄）",
+                                draft.scope.join("、")
+                            ));
+                        } else if !draft.new_paths.is_empty() {
+                            self.info(format!(
+                                "拟新建文件 {} 已收拢至父目录：{}",
+                                draft.new_paths.join("、"),
+                                draft.scope.join("、")
+                            ));
+                        }
+                        self.modal = Some(Modal::Input {
+                            kind: InputKind::FromPlan(task),
+                            text: String::new(),
+                            department: works,
+                            scope: draft.scope.join(","),
+                            tools: "read_file,search_code,write_file,run_tests".into(),
+                            field: 0,
+                        });
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
             KeyCode::Char('x') => self.start_recheck(task),
             KeyCode::Char('X') => {
                 // 不指定序号：平反刑部复勘判为误报的各处；规则在治理层。
@@ -432,8 +468,9 @@ impl App {
                 tools,
                 field,
             } => {
-                let edict = matches!(kind, InputKind::Edict);
-                let target = match (edict, *field) {
+                let multi = matches!(kind, InputKind::Edict | InputKind::FromPlan(_));
+                let switch_dept = matches!(kind, InputKind::Edict | InputKind::Recruit);
+                let target = match (multi, *field) {
                     (true, 1) => scope,
                     (true, 2) => tools,
                     _ => text,
@@ -443,13 +480,15 @@ impl App {
                     KeyCode::Backspace => {
                         target.pop();
                     }
-                    KeyCode::Tab => *department = (*department + 1) % Department::ALL.len(),
-                    KeyCode::BackTab => {
+                    KeyCode::Tab if switch_dept => {
+                        *department = (*department + 1) % Department::ALL.len()
+                    }
+                    KeyCode::BackTab if switch_dept => {
                         *department =
                             (*department + Department::ALL.len() - 1) % Department::ALL.len()
                     }
-                    KeyCode::Up if edict => *field = (*field + 2) % 3,
-                    KeyCode::Down if edict => *field = (*field + 1) % 3,
+                    KeyCode::Up if multi => *field = (*field + 2) % 3,
+                    KeyCode::Down if multi => *field = (*field + 1) % 3,
                     _ => {}
                 }
             }
@@ -512,6 +551,56 @@ impl App {
                 if let Some(id) = self.mutate(
                     |s| Ok(s.issue(department, text, seal)?.id),
                     |id| format!("诏令 #{} 已入队（按 r 执行）", id.0),
+                ) {
+                    self.selected_task = Some(id);
+                    self.detail_scroll = 0;
+                }
+            }
+            InputKind::FromPlan(plan_task) => {
+                let seal = match edict_seal(&self.config.root, &scope, &tools) {
+                    Ok(seal) if seal.capabilities.contains(&Capability::WriteFile) => seal,
+                    Ok(_) => {
+                        self.error("依条陈授写权须包含 write_file");
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field,
+                        });
+                        return;
+                    }
+                    Err(reason) => {
+                        self.error(reason);
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field,
+                        });
+                        return;
+                    }
+                };
+                let run_tests = seal.capabilities.contains(&Capability::RunTests);
+                let scope_override = (!scope.trim().is_empty()).then_some(seal.scope);
+                let root = self.config.root.clone();
+                if let Some(id) = self.mutate(
+                    |s| {
+                        Ok(
+                            s.issue_from_plan(plan_task, &root, scope_override, run_tests, text)?
+                                .0
+                                .id,
+                        )
+                    },
+                    |id| {
+                        format!(
+                            "已依条陈 #{} 下发工部诏令 #{}（按 r 执行）",
+                            plan_task.0, id.0
+                        )
+                    },
                 ) {
                     self.selected_task = Some(id);
                     self.detail_scroll = 0;

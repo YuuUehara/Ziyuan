@@ -302,6 +302,15 @@
   pre.diff .hunk { color: var(--muted); background: var(--well); margin: 4px 0; padding: 2px 12px; font-family: var(--sans); font-size: 12px; }
   pre.diff .pick { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 0 12px; font-size: 12px; color: var(--ink); cursor: pointer; }
   pre.diff .pick input { margin: 0; }
+  pre.diff .hunk-censure { display: block; margin: 0 0 4px; padding: 3px 12px; font-family: var(--sans); font-size: 12px; white-space: pre-wrap; border-left: 3px solid var(--info); background: var(--well); color: var(--ink); }
+  pre.diff .hunk-censure.warn { border-left-color: var(--gold, #9a6b2f); }
+  pre.diff .hunk-censure.reject { border-left-color: var(--bad); background: var(--del, #f8e8e4); }
+  pre.diff .hunk-censure.ok { border-left-color: var(--info); color: var(--muted); }
+  .plan-exec { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--gold, #9a6b2f); border-radius: var(--radius); background: var(--well); font-size: 13px; }
+  .plan-exec summary { cursor: pointer; font-family: var(--serif); font-weight: 600; color: var(--ink); }
+  .plan-exec .plan-form { display: grid; gap: 8px; margin-top: 8px; }
+  .plan-exec .plan-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .plan-exec input[type="text"] { flex: 1; min-width: 180px; }
   #schedule-dialog { box-sizing: border-box; width: min(760px, calc(100vw - 32px)); max-height: 86vh; overflow: hidden; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
   #schedule-dialog::backdrop { background: #1f282655; }
   #text-new-project-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
@@ -1547,12 +1556,15 @@ function taskHtml(t) {
     const c = t.changes;
     const stateLabel = { proposed: "待准奏", applied: "已落盘", discarded: "已驳回" }[c.state];
     const pending = c.state === "proposed";
-    // 段头：待准奏时附勾选框（默认准）；已处置的标出准或驳回。
+    // 段头：待准奏时附勾选框（默认准）；已处置的标出准或驳回；都察院有逐段意见时紧随段头展示。
     const hunkLine = (h) => {
       const n = h.number;
-      const box = pending ? `<label class="pick"><input type="checkbox" checked data-keep id="hunk-${t.id}-${n}" class="hunk-${t.id}" data-n="${n}"> 准此段</label>` : "";
+      const box = pending ? `<label class="pick"><input type="checkbox" checked data-keep id="hunk-${t.id}-${n}" class="hunk-${t.id}" data-n="${n}" data-censure="${h.censure ? esc(h.censure.verdict) : ""}"> 准此段</label>` : "";
       const mark = { approved: ` <span class="badge completed">此段已准</span>`, rejected: ` <span class="badge failed">此段驳回</span>` }[h.status] || "";
-      return `<span class="hunk">@@ 第 ${n} 段 · 原第 ${h.lines[0]?.old ?? 1} 行 @@${box}${mark}</span>`;
+      const note = h.censure
+        ? `<span class="hunk-censure ${esc(h.censure.verdict)}"><b>御史·${esc(h.censure.label)}</b>：${esc(h.censure.note)}</span>`
+        : "";
+      return `<span class="hunk">@@ 第 ${n} 段 · 原第 ${h.lines[0]?.old ?? 1} 行 @@${box}${mark}</span>${note}`;
     };
     // 每行：原、新行号，增删记号，按语言着色的代码；成对的删增行中改动的字词加底色。
     const codeLine = (l) => {
@@ -1605,11 +1617,39 @@ function taskHtml(t) {
       // 原文已被别处改动的，准奏必被拒：不给准奏按钮，只能驳回。
       const stale = c.files.some((f) => f.stale);
       const blocked = stale ? " disabled title=\"有文件的原文自呈报以来已被改动，准奏会被拒；可驳回后重下诏令\"" : "";
+      const hasRejected = c.files.some((f) => f.hunks.some((h) => h.censure && h.censure.verdict === "reject"));
+      const uncheckBtn = hasRejected
+        ? `<button class="small" data-uncheck-rejected="${t.id}" title="仅取消勾选御史建议驳回的段，仍须陛下确认后准奏">取消勾选御史建议驳回的段</button>`
+        : "";
       body += `<div class="review-row">${stale ? `<span class="hint">有文件的原文已变，不能准奏</span>` : ""}<span style="flex:1"></span>
+        ${uncheckBtn}
         <button class="small gold" data-apply="${t.id}" data-version="${c.version}"${blocked}>准奏落盘</button>
         <button class="small" data-apply="${t.id}" data-version="${c.version}" data-commit="1" title="落盘后只把这些文件记为一个 jj（或 git）提交"${blocked}>准奏并提交</button>
         <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
     }
+  }
+  if (t.plan_draft) {
+    const p = t.plan_draft;
+    const title = p.is_plan_template ? "依条陈授写权（下发工部）" : "依此回奏授写权（下发工部）";
+    const hint = p.fallback_scope
+      ? "未能从回奏中识别出具体路径，暂沿用原范围；建议手动收窄范围后再批复。"
+      : p.new_paths.length
+        ? `拟新建文件（${p.new_paths.map(esc).join("、")}）尚不在盘上，已收拢到最近已存在父目录；改动仍须暂存，逐段准奏才落盘。`
+        : "已按条陈自动收窄工部范围；改动仍须暂存，逐段准奏才落盘。";
+    body += `<details class="plan-exec write" id="plan-exec-${t.id}" ${p.is_plan_template ? "open" : ""}>
+      <summary>${title}</summary>
+      <div class="plan-form">
+        <div class="hint">${hint}</div>
+        <div class="plan-row">
+          <input type="text" id="plan-scope-${t.id}" data-keep value="${esc(p.scope.join(", "))}" placeholder="工部范围（相对路径，逗号分隔）">
+          <label class="shrink"><input type="checkbox" id="plan-tests-${t.id}" checked data-keep> 附授 <code>run_tests</code></label>
+        </div>
+        <div class="plan-row">
+          <input type="text" id="plan-extra-${t.id}" data-keep placeholder="补充指示（可选）">
+          <button type="button" class="small gold shrink" data-from-plan="${t.id}">批复并下发工部</button>
+        </div>
+      </div>
+    </details>`;
   }
   const hub = [
     t.replied ? `<a class="hint" href="${esc(t.replied)}" target="_blank" rel="noopener">已回报 GitHub</a>` : "",
@@ -4642,6 +4682,32 @@ document.addEventListener("click", (event) => {
   } else if (d.diffJump) {
     const target = $(d.diffJump);
     if (target) { target.open = true; target.scrollIntoView({ behavior: "smooth", block: "start" }); }
+  } else if (d.uncheckRejected) {
+    const boxes = [...document.querySelectorAll(`.hunk-${d.uncheckRejected}`)];
+    let count = 0;
+    boxes.forEach((b) => {
+      if (b.dataset.censure === "reject" && b.checked) {
+        b.checked = false;
+        count += 1;
+      }
+    });
+    toast(count ? `已取消勾选 ${count} 段御史建议驳回的改动（尚未落盘）` : "御史建议驳回的段已全部取消勾选");
+  } else if (d.fromPlan) {
+    const id = d.fromPlan;
+    const scope = (($("plan-scope-" + id) || {}).value || "")
+      .split(/[\n,，、]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const run_tests = !!($("plan-tests-" + id) || {}).checked;
+    const extra = (($("plan-extra-" + id) || {}).value || "").trim();
+    el.disabled = true;
+    act(api(`/tasks/${id}/from-plan`, { scope, run_tests, extra })).then((r) => {
+      el.disabled = false;
+      if (!r) return;
+      selected = r.id;
+      toast(`已依条陈 #${id} 下发工部诏令 #${r.id}（范围：${r.scope.join("、")}）`);
+      refresh();
+    });
   } else if (d.apply) {
     const skip = [...document.querySelectorAll(`.hunk-${d.apply}`)].filter((b) => !b.checked).map((b) => Number(b.dataset.n));
     const what = skip.length ? `（驳回第 ${skip.join("、")} 段，其余落盘）` : "";

@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    TaskReport, base_hash, changes_version, demotion_note, estimate_cost, kaocheng_grade,
-    render_diffs, stale_files,
+    TaskReport, base_hash, can_execute_from_plan, changes_version, demotion_note,
+    draft_plan_execution, estimate_cost, kaocheng_grade, parse_hunk_reviews, render_diffs,
+    stale_files, total_hunks,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Department, GovernanceMode, Office, Persona, Seal, TaskId, TokenUsage,
@@ -21,19 +22,31 @@ pub fn mark_stale(value: &mut Value, court: &Court, root: &Path) {
         return;
     };
     for entry in tasks {
-        let Some(changes) = entry["id"]
-            .as_u64()
-            .and_then(|id| court.task(TaskId(id)))
-            .and_then(|t| t.changes.as_ref())
-            .filter(|c| c.state == ChangeState::Proposed)
-        else {
+        let Some(task) = entry["id"].as_u64().and_then(|id| court.task(TaskId(id))) else {
             continue;
         };
-        let stale = stale_files(root, &changes.files);
-        if let Some(files) = entry["changes"]["files"].as_array_mut() {
-            for (file, stale) in files.iter_mut().zip(stale) {
-                file["stale"] = json!(stale);
+        if let Some(changes) = task
+            .changes
+            .as_ref()
+            .filter(|c| c.state == ChangeState::Proposed)
+        {
+            let stale = stale_files(root, &changes.files);
+            if let Some(files) = entry["changes"]["files"].as_array_mut() {
+                for (file, stale) in files.iter_mut().zip(stale) {
+                    file["stale"] = json!(stale);
+                }
             }
+        }
+        if can_execute_from_plan(task)
+            && let Ok(draft) = draft_plan_execution(task, root)
+        {
+            entry["plan_draft"] = json!({
+                "is_plan_template": draft.is_plan_template,
+                "mentioned_paths": draft.mentioned_paths,
+                "scope": draft.scope,
+                "fallback_scope": draft.fallback_scope,
+                "new_paths": draft.new_paths,
+            });
         }
     }
 }
@@ -268,37 +281,49 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                     "context_version": l.context_version,
                     "output_path": l.output_path,
                 })),
-                "changes": t.changes.as_ref().map(|c| json!({
-                    "state": match c.state {
-                        ChangeState::Proposed => "proposed",
-                        ChangeState::Applied => "applied",
-                        ChangeState::Discarded => "discarded",
-                    },
-                    "skipped": c.skipped,
-                    // 准奏时回传，服务端据以确认审阅的正是记下的这份改动。
-                    "version": changes_version(&c.files),
-                    "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| {
-                        let count = |kind: char| preview.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == kind).count();
-                        json!({
-                            "path": f.path,
-                            "created": f.before.is_none(),
-                            "base_hash": base_hash(f),
-                            "additions": count('+'),
-                            "deletions": count('-'),
-                            "diff": diff,
-                            // 着色、带行号与词级标记的预览，段号与 diff 相同；status 为该段的处置。
-                            "hunks": preview.hunks.iter().map(|h| {
-                                let rejected = c.state == ChangeState::Discarded || c.skipped.contains(&h.number);
-                                let status = match c.state {
-                                    ChangeState::Proposed => "pending",
-                                    _ if rejected => "rejected",
-                                    _ => "approved",
-                                };
-                                json!({ "number": h.number, "status": status, "lines": h.lines })
-                            }).collect::<Vec<_>>(),
-                        })
-                    }).collect::<Vec<_>>(),
-                })),
+                "changes": t.changes.as_ref().map(|c| {
+                    let hunk_reviews = t
+                        .censure
+                        .as_ref()
+                        .map(|ce| parse_hunk_reviews(&ce.note, total_hunks(&c.files)))
+                        .unwrap_or_default();
+                    json!({
+                        "state": match c.state {
+                            ChangeState::Proposed => "proposed",
+                            ChangeState::Applied => "applied",
+                            ChangeState::Discarded => "discarded",
+                        },
+                        "skipped": c.skipped,
+                        // 准奏时回传，服务端据以确认审阅的正是记下的这份改动。
+                        "version": changes_version(&c.files),
+                        "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| {
+                            let count = |kind: char| preview.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == kind).count();
+                            json!({
+                                "path": f.path,
+                                "created": f.before.is_none(),
+                                "base_hash": base_hash(f),
+                                "additions": count('+'),
+                                "deletions": count('-'),
+                                "diff": diff,
+                                // 着色、带行号与词级标记的预览，段号与 diff 相同；status 为该段的处置。
+                                "hunks": preview.hunks.iter().map(|h| {
+                                    let rejected = c.state == ChangeState::Discarded || c.skipped.contains(&h.number);
+                                    let status = match c.state {
+                                        ChangeState::Proposed => "pending",
+                                        _ if rejected => "rejected",
+                                        _ => "approved",
+                                    };
+                                    let censure = hunk_reviews.get(&h.number).map(|r| json!({
+                                        "verdict": r.verdict.code(),
+                                        "label": r.verdict.label(),
+                                        "note": r.note,
+                                    }));
+                                    json!({ "number": h.number, "status": status, "censure": censure, "lines": h.lines })
+                                }).collect::<Vec<_>>(),
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                }),
                 "worker": worker.and_then(name),
                 // 礼部：回奏缺了哪些体例段落（发回重写后仍缺的照收并标注）。
                 "missing_sections": match &t.status {
@@ -336,15 +361,35 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                     "text": sp.text,
                     "model": sp.model,
                 })).collect::<Vec<_>>()).collect::<Vec<_>>(),
-                "censure": t.censure.as_ref().map(|c| json!({
-                    "verdict": c.verdict.code(),
-                    "label": c.verdict.label(),
-                    "censor": name(c.censor),
-                    "note": c.note,
-                    "evidence": c.evidence.to_string(),
-                    "verified": c.evidence.verified(),
-                    "model": c.model,
-                })),
+                "censure": t.censure.as_ref().map(|c| {
+                    let hunks: Vec<Value> = t
+                        .changes
+                        .as_ref()
+                        .map(|ch| {
+                            parse_hunk_reviews(&c.note, total_hunks(&ch.files))
+                                .into_values()
+                                .map(|r| {
+                                    json!({
+                                        "hunk": r.hunk,
+                                        "verdict": r.verdict.code(),
+                                        "label": r.verdict.label(),
+                                        "note": r.note,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    json!({
+                        "verdict": c.verdict.code(),
+                        "label": c.verdict.label(),
+                        "censor": name(c.censor),
+                        "note": c.note,
+                        "evidence": c.evidence.to_string(),
+                        "verified": c.evidence.verified(),
+                        "model": c.model,
+                        "hunks": hunks,
+                    })
+                }),
                 "usage": usage_json(t.usage),
                 "model": t.model,
                 "cost": cost(vec![t]),

@@ -19,7 +19,7 @@ pub use edicts::{ChangeState, Changes, Route};
 pub use exam::{ExamRecord, PalaceExam};
 pub use personnel::{Candidate, Caning, NominationBallot};
 pub use replay::founding_events;
-pub use templates::{TemplateUse, builtin_templates};
+pub use templates::{PLAN_TEMPLATE, TemplateUse, builtin_templates};
 pub use translation::{Signoff, human_approval_request_hash, human_binding_request_hash};
 
 use serde::{Deserialize, Serialize};

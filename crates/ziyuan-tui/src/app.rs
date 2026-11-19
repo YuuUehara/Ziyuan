@@ -99,6 +99,8 @@ pub(crate) enum ConfirmKind {
 #[derive(Clone, Copy)]
 pub(crate) enum InputKind {
     Edict,
+    /// 依已完成只读条陈授写权下发工部。
+    FromPlan(TaskId),
     Recruit,
     Review(TaskId, Verdict),
     /// 逐段准奏：输入要驳回的段号。
