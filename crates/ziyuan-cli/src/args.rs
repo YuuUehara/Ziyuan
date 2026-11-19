@@ -103,6 +103,16 @@ pub(crate) enum Command {
         file: Option<String>,
         parallel_writes: bool,
     },
+    /// 运行中向已分办的原诏令追加子诏令。
+    DagAdd {
+        parent: TaskId,
+        subtask: ziyuan_app::AddedSubtask,
+    },
+    /// 运行中调整待办子诏令的前置依赖。
+    DagDeps {
+        subtask: TaskId,
+        dependencies: Vec<TaskId>,
+    },
     /// 诏令、与议官员（空为默认人选）、轮数。
     Debate(TaskId, Vec<AgentId>, usize),
     /// `None` 表示全部已完成、未复核的诏令。
@@ -427,6 +437,104 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
                 plan,
                 file,
                 parallel_writes,
+            }
+        }
+        "dag" => {
+            const USAGE: &str = "用法: ziyuan dag add <父诏令ID> <官员ID:子诏令> [--deps <ID,ID>] [--artifact <产出>] [--attempts <N>] [--budget <N>] [--deadline <Unix秒>] [--approval] [--key <标识>] | ziyuan dag deps <子诏令ID> (--deps <ID,ID> | --clear)";
+            let (action, rest) = args.split_first().ok_or(USAGE)?;
+            match action.as_str() {
+                "add" => {
+                    let (parent_raw, rest) = rest.split_first().ok_or(USAGE)?;
+                    let parent = TaskId(parent_raw.parse().map_err(|_| USAGE)?);
+                    let (spec, flags) = rest.split_first().ok_or(USAGE)?;
+                    let (agent, text) = spec.split_once([':', '：']).ok_or(USAGE)?;
+                    let worker = agent_id(agent)?;
+                    let mut dependencies = Vec::new();
+                    let mut attempts = None;
+                    let mut deadline = None;
+                    let mut budget = None;
+                    let mut artifact = None;
+                    let mut approval_required = false;
+                    let mut idempotency_key = None;
+                    let mut it = flags.iter();
+                    while let Some(flag) = it.next() {
+                        match flag.as_str() {
+                            "--deps" => {
+                                let list = it.next().ok_or(USAGE)?;
+                                for item in list.split([',', '，']).filter(|x| !x.trim().is_empty())
+                                {
+                                    let raw = item.trim().trim_start_matches('#');
+                                    dependencies.push(TaskId(raw.parse().map_err(|_| USAGE)?));
+                                }
+                            }
+                            "--attempts" => {
+                                let v = it.next().ok_or(USAGE)?;
+                                attempts = Some(v.parse().map_err(|_| USAGE)?);
+                            }
+                            "--deadline" => {
+                                let v = it.next().ok_or(USAGE)?;
+                                deadline = Some(v.parse().map_err(|_| USAGE)?);
+                            }
+                            "--budget" => {
+                                let v = it.next().ok_or(USAGE)?;
+                                budget = Some(v.parse().map_err(|_| USAGE)?);
+                            }
+                            "--artifact" => {
+                                artifact = Some(it.next().ok_or(USAGE)?.clone());
+                            }
+                            "--key" => {
+                                idempotency_key = Some(it.next().ok_or(USAGE)?.clone());
+                            }
+                            "--approval" => {
+                                approval_required = true;
+                            }
+                            _ => return Err(USAGE.into()),
+                        }
+                    }
+                    Command::DagAdd {
+                        parent,
+                        subtask: ziyuan_app::AddedSubtask {
+                            worker,
+                            text: text.to_owned(),
+                            dependencies,
+                            attempts,
+                            deadline,
+                            budget,
+                            artifact,
+                            approval_required,
+                            idempotency_key,
+                        },
+                    }
+                }
+                "deps" => {
+                    let (sub_raw, flags) = rest.split_first().ok_or(USAGE)?;
+                    let subtask = TaskId(sub_raw.parse().map_err(|_| USAGE)?);
+                    match flags {
+                        [flag] if flag == "--clear" => Command::DagDeps {
+                            subtask,
+                            dependencies: Vec::new(),
+                        },
+                        [flag, list] if flag == "--deps" => {
+                            let dependencies = list
+                                .split([',', '，'])
+                                .filter(|x| !x.trim().is_empty())
+                                .map(|item| {
+                                    let raw = item.trim().trim_start_matches('#');
+                                    raw.parse().map(TaskId).map_err(|_| USAGE.into())
+                                })
+                                .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+                            if dependencies.is_empty() {
+                                return Err(USAGE.into());
+                            }
+                            Command::DagDeps {
+                                subtask,
+                                dependencies,
+                            }
+                        }
+                        _ => return Err(USAGE.into()),
+                    }
+                }
+                _ => return Err(USAGE.into()),
             }
         }
         "debate" => {
@@ -974,6 +1082,66 @@ mod scheduled_tests {
 
     fn command(args: &[&str]) -> Result<Command, Box<dyn Error>> {
         parse(args.iter().map(|s| (*s).to_owned()).collect())
+    }
+
+    #[test]
+    fn dag_add_and_deps_parse_and_reject_bad_forms() {
+        match command(&[
+            "dag",
+            "add",
+            "3",
+            "4:补写回归测试",
+            "--deps",
+            "5,#6",
+            "--artifact",
+            "tests/x.rs",
+            "--attempts",
+            "2",
+            "--budget",
+            "4000",
+            "--approval",
+            "--key",
+            "k1",
+        ])
+        .unwrap()
+        {
+            Command::DagAdd { parent, subtask } => {
+                assert_eq!(parent, TaskId(3));
+                assert_eq!(subtask.worker, AgentId(4));
+                assert_eq!(subtask.text, "补写回归测试");
+                assert_eq!(subtask.dependencies, vec![TaskId(5), TaskId(6)]);
+                assert_eq!(subtask.artifact.as_deref(), Some("tests/x.rs"));
+                assert_eq!(subtask.attempts, Some(2));
+                assert_eq!(subtask.budget, Some(4000));
+                assert!(subtask.approval_required);
+                assert_eq!(subtask.idempotency_key.as_deref(), Some("k1"));
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(matches!(
+            command(&["dag", "deps", "6", "--deps", "5"]).unwrap(),
+            Command::DagDeps {
+                subtask: TaskId(6),
+                dependencies
+            } if dependencies == vec![TaskId(5)]
+        ));
+        assert!(matches!(
+            command(&["dag", "deps", "6", "--clear"]).unwrap(),
+            Command::DagDeps {
+                subtask: TaskId(6),
+                dependencies
+            } if dependencies.is_empty()
+        ));
+        for bad in [
+            vec!["dag"],
+            vec!["dag", "add", "3"],
+            vec!["dag", "add", "3", "badspec"],
+            vec!["dag", "deps", "6"],
+            vec!["dag", "deps", "6", "--deps", ""],
+            vec!["dag", "deps", "6", "--clear", "--deps", "5"],
+        ] {
+            assert!(command(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

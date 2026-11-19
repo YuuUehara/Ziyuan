@@ -2120,3 +2120,134 @@ fn human_finalization_references_an_approval_receipt_and_replays() {
     wrong.approval_operation_id = "2".repeat(32);
     assert_eq!(rejected(&court, wrong), "人工定稿引用的准奏回执不符");
 }
+
+#[test]
+fn runtime_dag_add_subtask_and_rewire_deps_enforce_all_invariants() {
+    let mut court = Court::replay(&founding_events(1)).unwrap();
+    let apply = |court: &mut Court, e: CourtEvent| court.apply(&e).unwrap();
+    let edict = court
+        .new_edict(Department::Works, "长链排查".into(), Seal::default())
+        .unwrap();
+    let parent = edict.id;
+    apply(&mut court, CourtEvent::EdictIssued(Box::new(edict)));
+
+    let node = |task: u64, deps: Vec<u64>, key: Option<&str>| DagNode {
+        task: TaskId(task),
+        dependencies: deps.into_iter().map(TaskId).collect(),
+        attempts: None,
+        deadline: None,
+        budget: None,
+        artifact: None,
+        approval_required: false,
+        idempotency_key: key.map(str::to_owned),
+    };
+    let events = court
+        .propose_split_dag(
+            parent,
+            vec![(AgentId(4), "步一".into()), (AgentId(2), "步二".into())],
+            "御定分办".into(),
+            None,
+            TokenUsage::default(),
+            vec![node(2, vec![], Some("k1")), node(3, vec![2], Some("k2"))],
+        )
+        .unwrap();
+    for ev in events {
+        apply(&mut court, ev);
+    }
+
+    // 1. 步一失败后，步二受阻；皇帝可清除步二对步一的依赖使其解除受阻。
+    apply(
+        &mut court,
+        CourtEvent::TaskAssigned {
+            task: TaskId(2),
+            worker: AgentId(4),
+            model: None,
+        },
+    );
+    apply(
+        &mut court,
+        CourtEvent::TaskFailed {
+            task: TaskId(2),
+            reason: "上游报错".into(),
+        },
+    );
+    assert_eq!(
+        court.blocked_by(court.task(TaskId(3)).unwrap()),
+        Some(TaskId(2))
+    );
+    assert!(court.runnable_tasks().is_empty());
+
+    // 不能修改已失败（非 Pending）子诏令的依赖。
+    assert!(court.propose_dag_update_deps(TaskId(2), vec![]).is_err());
+
+    // 清除 #3 的前置依赖后，#3 立即解除受阻并变为可执行。
+    let ev = court.propose_dag_update_deps(TaskId(3), vec![]).unwrap();
+    apply(&mut court, ev);
+    assert_eq!(court.blocked_by(court.task(TaskId(3)).unwrap()), None);
+    assert_eq!(court.runnable_tasks(), [TaskId(3)]);
+
+    // 2. 运行中追加子诏令 #4 依赖 #3；再试图让 #3 依赖 #4 必须因成环被拒。
+    let add_ev = court
+        .propose_dag_add_subtask(
+            parent,
+            AgentId(4),
+            "补救复查".into(),
+            node(0, vec![3], Some("k3")),
+        )
+        .unwrap();
+    apply(&mut court, add_ev);
+    assert_eq!(
+        court.blocked_by(court.task(TaskId(4)).unwrap()),
+        Some(TaskId(3))
+    );
+    // 成环与自身依赖均拒。
+    assert!(
+        court
+            .propose_dag_update_deps(TaskId(3), vec![TaskId(4)])
+            .is_err()
+    );
+    assert!(
+        court
+            .propose_dag_update_deps(TaskId(3), vec![TaskId(3)])
+            .is_err()
+    );
+    // 重复幂等键被拒。
+    assert!(
+        court
+            .propose_dag_add_subtask(
+                parent,
+                AgentId(4),
+                "重键".into(),
+                node(0, vec![], Some("k3"))
+            )
+            .is_err()
+    );
+
+    // 3. 继续追加至 8 件成功，第 9 件必须被拒（坚守单层 2–8 上限）。
+    for idx in 5..=9 {
+        let ev = court
+            .propose_dag_add_subtask(
+                parent,
+                AgentId(4),
+                format!("步{idx}"),
+                node(0, vec![], None),
+            )
+            .unwrap();
+        apply(&mut court, ev);
+    }
+    assert_eq!(
+        court
+            .task(parent)
+            .unwrap()
+            .split
+            .as_ref()
+            .unwrap()
+            .subtasks
+            .len(),
+        8
+    );
+    let ninth = court
+        .propose_dag_add_subtask(parent, AgentId(4), "第9件".into(), node(0, vec![], None))
+        .unwrap_err();
+    assert!(ninth.to_string().contains("8 件上限"), "{ninth}");
+}

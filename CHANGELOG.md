@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.21.0 — 2026-11-20
+
+- **运行中调整 DAG（追加子诏令与调整待办子诏令依赖）**：
+  - `ziyuan-core` 与 `ziyuan-storage` 新增事件 `CourtEvent::DagSubtaskAdded`（`DAGADD`）与 `CourtEvent::DagDependenciesUpdated`（`DAGDEPS`），在 `RELEASES` 登记版本 `1.21.0`（序号 55）并补齐 `compat.tsv` 兼容样本与编解码往返测试；未使用运行中调整的旧事件簿不提高读取门槛。
+  - `ziyuan-governance` 新增 `Court::propose_dag_add_subtask` 与 `Court::propose_dag_update_deps` 及重放逻辑：仅允许在原诏令仍为 `Pending` 且已分办时生效；追加子诏令严守单层 2–8 件上限、本部在任官员资格、非空内容、唯一幂等键与完整无环校验；依赖调整仅允许作用于尚未开始（`Pending`）的子诏令，拒绝改写已指派／已完成／已失败／已撤销节点，并支持在上游失败或撤销后通过改线／清依赖立即解除下游阻塞。
+  - `ziyuan-app` 新增 `AddedSubtask`、`Session::dag_add_subtask`、`Session::dag_update_deps` 及起居注事件摘要。
+  - `ziyuan-cli` 新增 `ziyuan dag add <父诏令ID> <官员ID:子诏令> [--deps ...] [--artifact ...] [--attempts ...] [--budget ...] [--deadline ...] [--approval] [--key ...]` 与 `ziyuan dag deps <子诏令ID> (--deps ... | --clear)`（含三壳补全与帮助）。
+  - `ziyuan-web` 新增仅皇帝令牌可用的 `POST /api/tasks/{id}/dag/add` 与 `POST /api/tasks/{id}/dag/deps`，并在已分办未结束诏令卡片中提供「运行中追加子诏令」折叠区与待办子诏令「改依赖」按钮（观政只读模式隐藏）。
+- 同步更新 [DAG 排程速查](docs/dag.md)、[路线图](docs/roadmap.md)与命令行帮助；本地验证见 [1.21.0 验收记录](docs/acceptance/1.21.0.md)。
+
 ## 1.20.0 — 2026-11-20
 
 - **并行写诏令工作副本隔离（`jj workspace`）**：

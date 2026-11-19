@@ -97,6 +97,8 @@ pub(crate) fn event_tasks(event: &CourtEvent) -> Vec<TaskId> {
         EdictDag { task, nodes } => std::iter::once(*task)
             .chain(nodes.iter().map(|n| n.task))
             .collect(),
+        DagSubtaskAdded { task, subtask, .. } => vec![*task, subtask.id],
+        DagDependenciesUpdated { task, subtask, .. } => vec![*task, *subtask],
         EdictDrafted { task, .. }
         | CourtDebated { task, .. }
         | EdictApproved { task }
@@ -278,6 +280,44 @@ pub fn describe_event(event: &CourtEvent) -> String {
                 .map(|s| format!("#{}→#{}", s.id.0, s.worker.0))
                 .collect();
             format!("诏令 #{} 分办：{}", task.0, parts.join("、"))
+        }
+        CourtEvent::DagSubtaskAdded {
+            task,
+            subtask,
+            node,
+        } => {
+            let deps = if node.dependencies.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "（先办 {}）",
+                    node.dependencies
+                        .iter()
+                        .map(|d| format!("#{}", d.0))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            };
+            format!(
+                "诏令 #{} 追加子诏令 #{}→#{}{deps}",
+                task.0, subtask.id.0, subtask.worker.0
+            )
+        }
+        CourtEvent::DagDependenciesUpdated {
+            task,
+            subtask,
+            dependencies,
+        } => {
+            if dependencies.is_empty() {
+                format!("诏令 #{} 调整排程：清除 #{} 的前置依赖", task.0, subtask.0)
+            } else {
+                let deps = dependencies
+                    .iter()
+                    .map(|d| format!("#{}", d.0))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                format!("诏令 #{} 调整排程：#{} 先办 {deps}", task.0, subtask.0)
+            }
         }
         CourtEvent::EdictDag { task, nodes } => {
             let parts: Vec<_> = nodes

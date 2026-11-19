@@ -1656,3 +1656,94 @@ async fn web_state_reports_jj_workspace_and_split_validates_parallel_writes() {
     assert_eq!(status, 400, "{body}");
     assert!(body["error"].as_str().unwrap().contains("jj"), "{body}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_dag_add_and_deps_endpoints_enforce_auth_and_update_state() {
+    let (base, _root) = start("dag-runtime").await;
+    let t = Some(TOKEN);
+    let (status, _) = call(
+        &base,
+        "/edicts",
+        t,
+        Some(json!({ "text": "动态排程", "department": "works" })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, split) = call(
+        &base,
+        "/tasks/1/split",
+        t,
+        Some(json!({
+            "schedule": [
+                { "worker": 4, "text": "甲" },
+                { "worker": 4, "text": "乙", "dependencies": [1] }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{split}");
+
+    // 只读令牌必须被拒。
+    assert_eq!(
+        call(
+            &base,
+            "/tasks/1/dag/add",
+            Some(VIEWER),
+            Some(json!({ "worker": 4, "text": "丙" }))
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(
+            &base,
+            "/tasks/3/dag/deps",
+            Some(VIEWER),
+            Some(json!({ "dependencies": [] }))
+        )
+        .await
+        .0,
+        403
+    );
+
+    // 追加子诏令 #4，依赖 #3。
+    let (status, added) = call(
+        &base,
+        "/tasks/1/dag/add",
+        t,
+        Some(json!({ "worker": 4, "text": "丙", "dependencies": [3], "artifact": "out.md" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{added}");
+    assert_eq!(added["subtask"], 4);
+    assert_eq!(added["subtasks"], json!([2, 3, 4]));
+
+    // 成环修改被拒（#3 依赖 #4，而 #4 已依赖 #3）。
+    let (status, body) = call(
+        &base,
+        "/tasks/3/dag/deps",
+        t,
+        Some(json!({ "dependencies": [4] })),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+
+    // 清除 #3 的依赖后，/api/state 反映 #3 不再受阻，#4 仍受 #3 所阻。
+    let (status, updated) = call(
+        &base,
+        "/tasks/3/dag/deps",
+        t,
+        Some(json!({ "dependencies": [] })),
+    )
+    .await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["dependencies"], json!([]));
+
+    let (_, st) = call(&base, "/state", t, None).await;
+    let tasks = st["tasks"].as_array().unwrap();
+    let t3 = tasks.iter().find(|x| x["id"] == 3).unwrap();
+    let t4 = tasks.iter().find(|x| x["id"] == 4).unwrap();
+    assert!(t3["blocked_by"].is_null());
+    assert_eq!(t4["blocked_by"], 3);
+}

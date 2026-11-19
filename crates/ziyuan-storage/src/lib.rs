@@ -749,7 +749,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 54] = [
+pub const RELEASES: [&str; 55] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -818,6 +818,8 @@ pub const RELEASES: [&str; 54] = [
     "1.19.0",
     // 1.20.0 沿用事件类型与读取门槛。
     "1.20.0",
+    // 1.21.0 新增运行中调整 DAG 事件（DAGADD、DAGDEPS），序号 55。
+    "1.21.0",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。

@@ -398,3 +398,86 @@ async fn scheduled_staged_handoff_requires_apply_and_survives_reload() {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn runtime_dag_add_and_rewire_persist_across_reopen_and_history() {
+    let dir = std::env::temp_dir().join(format!("ziyuan-dag-mut-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::found(ziyuan_storage::EventLog::new(&dir)).unwrap();
+    let parent = s
+        .issue(Department::Works, "动态排程测试".into(), seal(false))
+        .unwrap()
+        .id;
+    let subs = s.split_scheduled(parent, two()).unwrap();
+    assert_eq!(subs.len(), 2);
+
+    // 运行中追加第三件子诏令，依赖第二件。
+    let added = s
+        .dag_add_subtask(
+            parent,
+            ziyuan_app::AddedSubtask {
+                worker: AgentId(4),
+                text: "收尾核验".into(),
+                dependencies: vec![subs[1]],
+                attempts: Some(2),
+                deadline: None,
+                budget: Some(3000),
+                artifact: Some("final.md".into()),
+                approval_required: false,
+                idempotency_key: Some("third".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        s.court().blocked_by(s.court().task(added).unwrap()),
+        Some(subs[1])
+    );
+
+    // 调整第二件依赖为空，再重新打开事件簿核对回放一致与起居注记录。
+    s.dag_update_deps(subs[1], vec![]).unwrap();
+    assert_eq!(s.court().blocked_by(s.court().task(subs[1]).unwrap()), None);
+
+    // 校验事件簿最低读取版本升至 1.21.0。
+    let log = ziyuan_storage::EventLog::new(&dir);
+    let report = log.inspect().unwrap();
+    assert_eq!(
+        ziyuan_storage::release_name(report.readable_since),
+        "1.21.0"
+    );
+
+    drop(s);
+    let reopened = Session::open(ziyuan_storage::EventLog::new(&dir)).unwrap();
+    assert_eq!(
+        reopened
+            .court()
+            .task(parent)
+            .unwrap()
+            .split
+            .as_ref()
+            .unwrap()
+            .subtasks,
+        vec![subs[0], subs[1], added]
+    );
+    assert_eq!(
+        reopened
+            .court()
+            .blocked_by(reopened.court().task(subs[1]).unwrap()),
+        None
+    );
+    assert_eq!(
+        reopened
+            .court()
+            .blocked_by(reopened.court().task(added).unwrap()),
+        Some(subs[1])
+    );
+    let entries = ziyuan_app::history_entries(
+        reopened.history().unwrap(),
+        &ziyuan_app::HistoryFilter::default(),
+    )
+    .unwrap();
+    assert!(entries.iter().any(|e| e.text.contains("追加子诏令")));
+    assert!(entries.iter().any(|e| e.text.contains("调整排程")));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

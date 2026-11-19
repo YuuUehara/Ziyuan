@@ -302,6 +302,50 @@ pub(crate) async fn split(
     .await
 }
 
+/// 运行中向已分办且未结束的原诏令追加一件子诏令（总数仍不超过 8 件）。
+pub(crate) async fn dag_add(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let input: ziyuan_app::AddedSubtask = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad(format!("追加子诏令参数不合法：{e}")))?;
+    app.mutate(move |s| {
+        let new_id = s.dag_add_subtask(TaskId(id), input)?;
+        let subtasks: Vec<u64> = s
+            .court()
+            .task(TaskId(id))
+            .and_then(|t| t.split.as_ref())
+            .map(|sp| sp.subtasks.iter().map(|t| t.0).collect())
+            .unwrap_or_default();
+        Ok(json!({ "subtask": new_id.0, "subtasks": subtasks }))
+    })
+    .await
+}
+
+/// 运行中调整一件待办（Pending）子诏令的前置依赖 `{ dependencies: [id, ...] }`。
+pub(crate) async fn dag_deps(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if !body
+        .as_object()
+        .is_some_and(|obj| obj.len() == 1 && obj.contains_key("dependencies"))
+    {
+        return Err(ApiError::bad("调整依赖请求只接受 dependencies 字段"));
+    }
+    let deps: Vec<TaskId> = serde_json::from_value(body["dependencies"].clone())
+        .map_err(|e| ApiError::bad(format!("dependencies 须为诏令 ID 数组：{e}")))?;
+    app.mutate(move |s| {
+        s.dag_update_deps(TaskId(id), deps.clone())?;
+        let mut sorted: Vec<u64> = deps.into_iter().map(|t| t.0).collect();
+        sorted.sort();
+        Ok(json!({ "task": id, "dependencies": sorted }))
+    })
+    .await
+}
+
 /// 廷议（会等待全部发言）：每段发言以 SSE `speech` 事件实时推送，结束后整场记入事件簿。
 /// 请求体可给 `rounds`（1–3，默认 2）与 `members`（官员 ID，默认宰辅、本部长官与御史）。
 pub(crate) async fn debate(

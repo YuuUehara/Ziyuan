@@ -47,6 +47,10 @@ pub(crate) const HELP: &str = concat!(
                                        多官协作：尚书（模型）把待办诏令拆给本部官员分办，或皇帝御定；
                                        子诏令并发执行（写子诏令默认自动串行；在 jj 版本库加 --parallel-writes
                                        可并行执行并在独立 jj 工作副本中隔离），全部结束后尚书汇总回奏
+  ziyuan dag add <父诏令ID> <官员ID:子诏令> [--deps <ID,ID>] [--artifact <产出>] [--attempts <N>] [--budget <N>] [--deadline <Unix秒>] [--approval] [--key <标识>]
+  ziyuan dag deps <子诏令ID> (--deps <ID,ID> | --clear)
+                                       运行中调整已分办的排程：向未结束原诏令追加子诏令（总数不超过 8 件），
+                                       或调整尚未开始（Pending）子诏令的前置依赖（不得成环）
   ziyuan debate <诏令ID> [--rounds 2] [官员ID]...
                                        廷议：数位在任官员（默认宰辅、本部长官、御史）按各自性格文风
                                        就待办诏令轮流辩论；纪要供票拟与承办参考，不改变派工与玉玺
@@ -244,6 +248,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "mcp",
     "budget",
     "split",
+    "dag",
     "debate",
     "censor",
     "apply",
@@ -335,6 +340,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          completions) words="bash zsh fish" ;;
          edict) words="--plan --from-plan --no-tests --template --dept --scope --tools --mcp --queue" ;;
          split) words="--plan --parallel-writes" ;;
+         dag) words="add deps --deps --clear --artifact --attempts --budget --deadline --approval --key" ;;
          text) words="{text_words} {text_flags}" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
@@ -375,6 +381,15 @@ complete -F _ziyuan ziyuan
                 format!("{} -l no-tests", seen("edict")),
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l parallel-writes", seen("split")),
+                format!("{} -a 'add deps'", seen("dag")),
+                format!("{} -l deps -r", seen("dag")),
+                format!("{} -l clear", seen("dag")),
+                format!("{} -l artifact -r", seen("dag")),
+                format!("{} -l attempts -r", seen("dag")),
+                format!("{} -l budget -r", seen("dag")),
+                format!("{} -l deadline -r", seen("dag")),
+                format!("{} -l approval", seen("dag")),
+                format!("{} -l key -r", seen("dag")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
                 format!("{} -a '{}'", seen("text"), TEXT_COMPLETION_WORDS),

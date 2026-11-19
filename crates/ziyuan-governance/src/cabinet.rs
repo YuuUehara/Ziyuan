@@ -238,6 +238,206 @@ impl Court {
         }
         Ok(())
     }
+
+    /// 收集某已分办原诏令当前全部子诏令的有效 DAG 节点（未排程的子诏令补为空节点）。
+    fn current_dag_nodes(&self, subtasks: &[TaskId]) -> Vec<DagNode> {
+        subtasks
+            .iter()
+            .map(|&id| {
+                self.tasks
+                    .get(&id)
+                    .and_then(|t| t.dag.clone())
+                    .unwrap_or(DagNode {
+                        task: id,
+                        dependencies: Vec::new(),
+                        attempts: None,
+                        deadline: None,
+                        budget: None,
+                        artifact: None,
+                        approval_required: false,
+                        idempotency_key: None,
+                    })
+            })
+            .collect()
+    }
+
+    /// 校验运行中向已分办原诏令追加一件子诏令。
+    pub(crate) fn check_dag_add_subtask(
+        &self,
+        parent: TaskId,
+        worker: AgentId,
+        text: &str,
+        node: &DagNode,
+    ) -> Result<(), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&parent)
+            .ok_or(GovernanceError::UnknownEdict(parent))?;
+        let Some(split) = &entry.split else {
+            return Err(GovernanceError::InvalidDag(format!(
+                "诏令 #{} 未分办，无从追加子诏令",
+                parent.0
+            )));
+        };
+        if entry.status != TaskStatus::Pending {
+            return Err(GovernanceError::InvalidDag(format!(
+                "原诏令 #{} 已开始汇总或已结束，不能再追加子诏令",
+                parent.0
+            )));
+        }
+        if split.subtasks.len() >= 8 {
+            return Err(GovernanceError::InvalidDag(
+                "分办子诏令已达 8 件上限，不可继续追加".into(),
+            ));
+        }
+        if text.trim().is_empty() {
+            return Err(GovernanceError::InvalidSplit("子诏令内容不能为空".into()));
+        }
+        let department = entry.edict.department;
+        let staff = self.draft_candidates(department);
+        if !staff.iter().any(|(a, _)| a.id == worker) {
+            return Err(GovernanceError::NotEligible { worker, department });
+        }
+        let dep_set: BTreeSet<TaskId> = node.dependencies.iter().copied().collect();
+        if dep_set.len() != node.dependencies.len() {
+            return Err(GovernanceError::InvalidDag(
+                "依赖列表不得包含重复诏令".into(),
+            ));
+        }
+        if let Some(key) = &node.idempotency_key {
+            if key.trim().is_empty() {
+                return Err(GovernanceError::InvalidDag("幂等键不得为空".into()));
+            }
+            let duplicate = split.subtasks.iter().any(|id| {
+                self.tasks
+                    .get(id)
+                    .and_then(|t| t.dag.as_ref())
+                    .and_then(|d| d.idempotency_key.as_deref())
+                    == Some(key.as_str())
+            });
+            if duplicate {
+                return Err(GovernanceError::InvalidDag(
+                    "幂等键在同一原诏令内不得重复".into(),
+                ));
+            }
+        }
+        let mut all_subtasks: BTreeSet<TaskId> = split.subtasks.iter().copied().collect();
+        all_subtasks.insert(node.task);
+        let mut all_nodes = self.current_dag_nodes(&split.subtasks);
+        all_nodes.push(node.clone());
+        Self::check_dag(&all_nodes, &all_subtasks)
+    }
+
+    /// 运行中追加子诏令：原诏令须已分办且未结束，总子诏令数仍不超过 8 件。
+    pub fn propose_dag_add_subtask(
+        &self,
+        parent: TaskId,
+        worker: AgentId,
+        text: String,
+        mut node: DagNode,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let id = TaskId(self.next_task_id);
+        node.task = id;
+        let dep_set: BTreeSet<TaskId> = node.dependencies.iter().copied().collect();
+        if dep_set.len() != node.dependencies.len() {
+            return Err(GovernanceError::InvalidDag(
+                "依赖列表不得包含重复诏令".into(),
+            ));
+        }
+        node.dependencies.sort();
+        self.check_dag_add_subtask(parent, worker, &text, &node)?;
+        Ok(CourtEvent::DagSubtaskAdded {
+            task: parent,
+            subtask: Subtask { id, worker, text },
+            node,
+        })
+    }
+
+    /// 校验运行中修改一件尚未开始（Pending）子诏令的前置依赖。
+    pub(crate) fn check_dag_update_deps(
+        &self,
+        parent: TaskId,
+        subtask: TaskId,
+        dependencies: &[TaskId],
+    ) -> Result<(), GovernanceError> {
+        let entry = self
+            .tasks
+            .get(&parent)
+            .ok_or(GovernanceError::UnknownEdict(parent))?;
+        let Some(split) = &entry.split else {
+            return Err(GovernanceError::InvalidDag(format!(
+                "诏令 #{} 未分办，无从调整依赖",
+                parent.0
+            )));
+        };
+        if entry.status != TaskStatus::Pending {
+            return Err(GovernanceError::InvalidDag(format!(
+                "原诏令 #{} 已开始汇总或已结束，不能再调整依赖",
+                parent.0
+            )));
+        }
+        if !split.subtasks.contains(&subtask) {
+            return Err(GovernanceError::InvalidDag(format!(
+                "诏令 #{} 不是 #{} 的子诏令",
+                subtask.0, parent.0
+            )));
+        }
+        let child = self
+            .tasks
+            .get(&subtask)
+            .ok_or(GovernanceError::UnknownEdict(subtask))?;
+        if child.status != TaskStatus::Pending {
+            return Err(GovernanceError::InvalidDag(format!(
+                "子诏令 #{} 已开始或已结束，不能再修改依赖",
+                subtask.0
+            )));
+        }
+        let dep_set: BTreeSet<TaskId> = dependencies.iter().copied().collect();
+        if dep_set.len() != dependencies.len() {
+            return Err(GovernanceError::InvalidDag(
+                "依赖列表不得包含重复诏令".into(),
+            ));
+        }
+        let all_subtasks: BTreeSet<TaskId> = split.subtasks.iter().copied().collect();
+        let mut all_nodes = self.current_dag_nodes(&split.subtasks);
+        for node in &mut all_nodes {
+            if node.task == subtask {
+                node.dependencies = dependencies.to_vec();
+            }
+        }
+        Self::check_dag(&all_nodes, &all_subtasks)
+    }
+
+    /// 运行中调整一件待办（Pending）子诏令的前置依赖（不得成环，只能指向同父子诏令）。
+    pub fn propose_dag_update_deps(
+        &self,
+        subtask: TaskId,
+        mut dependencies: Vec<TaskId>,
+    ) -> Result<CourtEvent, GovernanceError> {
+        let child = self
+            .tasks
+            .get(&subtask)
+            .ok_or(GovernanceError::UnknownEdict(subtask))?;
+        let Some(parent) = child.parent else {
+            return Err(GovernanceError::InvalidDag(
+                "仅可调整分办子诏令的前置依赖".into(),
+            ));
+        };
+        let dep_set: BTreeSet<TaskId> = dependencies.iter().copied().collect();
+        if dep_set.len() != dependencies.len() {
+            return Err(GovernanceError::InvalidDag(
+                "依赖列表不得包含重复诏令".into(),
+            ));
+        }
+        dependencies.sort();
+        self.check_dag_update_deps(parent, subtask, &dependencies)?;
+        Ok(CourtEvent::DagDependenciesUpdated {
+            task: parent,
+            subtask,
+            dependencies,
+        })
+    }
+
     /// 批红：内阁制下，诏令经内阁票拟（派工路线）后须皇帝批红才能执行。
     pub fn propose_approval(&self, task: TaskId) -> Result<CourtEvent, GovernanceError> {
         if self.mode != GovernanceMode::Cabinet {

@@ -458,6 +458,93 @@ impl Court {
                     child.dag = Some(node.clone());
                 }
             }
+            CourtEvent::DagSubtaskAdded {
+                task,
+                subtask,
+                node,
+            } => {
+                if node.task != subtask.id {
+                    return Err(GovernanceError::InvalidDag(
+                        "追加子诏令节点 ID 与子诏令 ID 不一致".into(),
+                    ));
+                }
+                if self.tasks.contains_key(&subtask.id) {
+                    return Err(GovernanceError::DuplicateEdict(subtask.id));
+                }
+                self.check_dag_add_subtask(*task, subtask.worker, &subtask.text, node)?;
+                let parent = self.tasks.get(task).expect("已确认存在").clone();
+                self.next_task_id = self.next_task_id.max(subtask.id.0 + 1);
+                self.tasks.insert(
+                    subtask.id,
+                    Task {
+                        edict: Edict {
+                            id: subtask.id,
+                            text: subtask.text.clone(),
+                            ..parent.edict.clone()
+                        },
+                        status: TaskStatus::Pending,
+                        tool_calls: 0,
+                        tool_failures: 0,
+                        usage: TokenUsage::default(),
+                        review: None,
+                        approved: false,
+                        model: None,
+                        draft: None,
+                        changes: None,
+                        censure: None,
+                        parent: Some(*task),
+                        courier: None,
+                        replied: None,
+                        pull_request: None,
+                        reply_op: None,
+                        pull_request_op: None,
+                        urgent: parent.urgent,
+                        template: None,
+                        assignee: Some(subtask.worker),
+                        split: None,
+                        dag: (!node.is_trivial()).then(|| node.clone()),
+                        attempts: 0,
+                        proxied: false,
+                        debates: Vec::new(),
+                        budget: node.budget,
+                        suspicions: Vec::new(),
+                        translation: None,
+                        references: None,
+                    },
+                );
+                let entry = self.tasks.get_mut(task).expect("已确认存在");
+                entry
+                    .split
+                    .as_mut()
+                    .expect("已确认分办")
+                    .subtasks
+                    .push(subtask.id);
+            }
+            CourtEvent::DagDependenciesUpdated {
+                task,
+                subtask,
+                dependencies,
+            } => {
+                self.check_dag_update_deps(*task, *subtask, dependencies)?;
+                let child = self.tasks.get_mut(subtask).expect("已确认存在");
+                if let Some(dag) = &mut child.dag {
+                    dag.dependencies = dependencies.clone();
+                    if dag.is_trivial() {
+                        child.dag = None;
+                    }
+                } else if !dependencies.is_empty() {
+                    child.dag = Some(ziyuan_core::DagNode {
+                        task: *subtask,
+                        dependencies: dependencies.clone(),
+                        attempts: None,
+                        deadline: None,
+                        budget: child.budget,
+                        artifact: None,
+                        approval_required: false,
+                        idempotency_key: None,
+                    });
+                }
+            }
             CourtEvent::ExamTaken {
                 agent,
                 exam,

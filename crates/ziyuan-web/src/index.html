@@ -1262,7 +1262,7 @@
     <h2 id="schedule-title">御定排程</h2>
     <div class="schedule-content">
       <p class="hint">分为 2–8 件。依赖填此表节点序号（如 1,2），不是诏令 ID；写任务默认自动补齐串行依赖（前件改动须准奏，后件才开工）。</p>
-      <p class="hint">提交后不能修改这份分办安排，失败也不会自动重试。重试时沿用本批标识可避免重复登记；外部工具是否会重复执行，仍须另行确认。</p>
+      <p class="hint">提交后可在原诏令未结束前追加子诏令（总数不超过 8 件）或调整待办子诏令的前置依赖；失败不会自动重试。重试时沿用本批标识可避免重复登记；外部工具是否会重复执行，仍须另行确认。</p>
       <label class="check" id="schedule-parallel-wrap" hidden><input id="schedule-parallel-writes" type="checkbox">并行写（各写子诏令自动在独立 jj 工作副本中隔离执行，不再强行串行）</label>
       <div id="schedule-nodes"></div>
       <p id="schedule-error" role="alert"></p>
@@ -1496,10 +1496,19 @@ function taskHtml(t) {
   }
   if (t.split) {
     const s = t.split;
-    const rows = s.subtasks.map((sub) =>
-      `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}${sub.deps && sub.deps.length ? `（先办 ${sub.deps.map((d) => `#${d}`).join("、")}）` : ""}${sub.blocked_by ? ` <span class="badge failed" title="上游须完成且改动须已准奏；失败、撤销或驳回会保持受阻">受 #${sub.blocked_by} 所阻</span>` : ""}</li>`).join("");
-    const state = t.status === "pending" ? (s.open ? `${s.open} 件未结` : "待尚书汇总") : "已汇总";
-    body += `<div class="split"><b>多官分办</b>　${esc(s.note)}（${state}）<ul>${rows}</ul></div>`;
+    const canAdjust = !state.viewer && t.status === "pending";
+    const rows = s.subtasks.map((sub) => {
+      const editDeps = canAdjust && sub.status === "pending"
+        ? ` <button class="small" data-dag-deps="${sub.id}" data-current-deps="${(sub.deps || []).join(",")}">改依赖</button>` : "";
+      return `<li>#${sub.id} <span class="badge ${sub.status}">${statusLabel[sub.status]}</span> ${esc(sub.worker || "?")}：${esc(sub.text)}${sub.deps && sub.deps.length ? `（先办 ${sub.deps.map((d) => `#${d}`).join("、")}）` : ""}${sub.blocked_by ? ` <span class="badge failed" title="上游须完成且改动须已准奏；失败、撤销或驳回会保持受阻">受 #${sub.blocked_by} 所阻</span>` : ""}${editDeps}</li>`;
+    }).join("");
+    const staff = canAdjust
+      ? state.officials.filter((o) => o.office && o.speciality.label === t.department && !o.office.code.startsWith("minister:"))
+      : [];
+    const addBox = canAdjust && s.subtasks.length < 8 && staff.length
+      ? `<details class="plan-exec"><summary>运行中追加子诏令（${s.subtasks.length}/8）</summary><div class="plan-exec-body"><label>承办官员<select id="dag-add-worker-${t.id}">${staff.map((o) => `<option value="${o.id}">#${o.id} ${esc(o.name)} · ${esc(o.office.label)}</option>`).join("")}</select></label><label>子诏令内容<input id="dag-add-text-${t.id}" type="text" placeholder="写明查办事项"></label><label>前置依赖（同批诏令 ID，逗号分隔，可选）<input id="dag-add-deps-${t.id}" type="text" placeholder="如 ${s.subtasks.map((x) => x.id).slice(0, 2).join(",")}"></label><label>约定产出（可选）<input id="dag-add-artifact-${t.id}" type="text" placeholder="如 docs/report.md"></label><button class="small gold" type="button" data-dag-add="${t.id}">确认追加</button></div></details>` : "";
+    const splitState = t.status === "pending" ? (s.open ? `${s.open} 件未结` : "待尚书汇总") : "已汇总";
+    body += `<div class="split"><b>多官分办</b>　${esc(s.note)}（${splitState}）<ul>${rows}</ul>${addBox}</div>`;
   }
   const speechHtml = (sp) =>
     `<p><span class="who">${esc(sp.office)}${esc(sp.name || "?")}</span> <span class="persona">${esc(sp.persona)}</span>：${esc(sp.text)}</p>`;
@@ -4662,6 +4671,24 @@ document.addEventListener("click", (event) => {
     el.disabled = true;
     el.textContent = "尚书拆分中…";
     act(api(`/tasks/${d.split}/split`, {})).then((r) => r && toast(`诏令 #${d.split} 已分办为 ${r.subtasks.length} 件`));
+  } else if (d.dagAdd) {
+    const pid = Number(d.dagAdd);
+    const worker = Number($(`dag-add-worker-${pid}`).value);
+    const text = $(`dag-add-text-${pid}`).value.trim();
+    if (!text) return toast("子诏令内容不能为空", true);
+    const depsRaw = $(`dag-add-deps-${pid}`).value.trim();
+    const dependencies = depsRaw ? depsRaw.split(/[,，]/).map((v) => v.trim().replace(/^#/, "")).filter(Boolean).map(Number) : [];
+    if (dependencies.some((n) => !Number.isSafeInteger(n) || n < 1)) return toast("前置依赖须为同批子诏令 ID，以逗号分隔", true);
+    const artifact = $(`dag-add-artifact-${pid}`).value.trim() || null;
+    act(api(`/tasks/${pid}/dag/add`, { worker, text, dependencies, artifact }))
+      .then((r) => r && toast(`已向诏令 #${pid} 追加子诏令 #${r.subtask}`));
+  } else if (d.dagDeps) {
+    const sid = Number(d.dagDeps);
+    const input = prompt(`调整子诏令 #${sid} 的前置依赖（同批子诏令 ID，逗号分隔；留空即清除依赖）：`, d.currentDeps || "");
+    if (input === null) return;
+    const dependencies = input.trim() ? input.split(/[,，]/).map((v) => v.trim().replace(/^#/, "")).filter(Boolean).map(Number) : [];
+    if (dependencies.some((n) => !Number.isSafeInteger(n) || n < 1)) return toast("前置依赖须为同批子诏令 ID，以逗号分隔", true);
+    act(api(`/tasks/${sid}/dag/deps`, { dependencies }), `已调整子诏令 #${sid} 的前置依赖`);
   } else if (d.debate) {
     const id = d.debate;
     debating[id] = [];

@@ -29,7 +29,7 @@ mod time;
 pub mod translation;
 mod vcs;
 
-pub use cabinet::{ScheduledSubtask, criteria_note, debate_minutes};
+pub use cabinet::{AddedSubtask, ScheduledSubtask, criteria_note, debate_minutes};
 pub use censorate::{
     ACQUITTAL_NOTE, HunkReview, HunkVerdict, TestEvidence, parse_hunk_reviews, suspicion_status,
     test_evidence, total_hunks,

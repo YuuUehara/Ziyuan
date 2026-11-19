@@ -16,6 +16,28 @@ use crate::{AppError, Session, truncate};
 
 /// Creation-time scheduling input. Dependencies are 1-based positions in this plan,
 /// not task IDs. Keys identify nodes within this parent, not arbitrary tool calls.
+/// 运行中向已分办原诏令追加子诏令时的输入（依赖填同父子诏令的实际 ID）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddedSubtask {
+    pub worker: AgentId,
+    pub text: String,
+    #[serde(default)]
+    pub dependencies: Vec<TaskId>,
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    #[serde(default)]
+    pub deadline: Option<u64>,
+    #[serde(default)]
+    pub budget: Option<u64>,
+    #[serde(default)]
+    pub artifact: Option<String>,
+    #[serde(default)]
+    pub approval_required: bool,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduledSubtask {
@@ -751,6 +773,50 @@ impl<S: EventStore> Session<S> {
             }
         })?;
         Ok(self.subtasks_of(task))
+    }
+
+    /// 运行中向已分办且未结束的原诏令追加一件子诏令（总数仍不超过 8 件）。
+    /// 返回新子诏令的 ID。
+    pub fn dag_add_subtask(
+        &mut self,
+        parent: TaskId,
+        input: AddedSubtask,
+    ) -> Result<TaskId, AppError> {
+        self.reload()?;
+        let mut created = None;
+        self.commit(|court| {
+            let node = DagNode {
+                task: TaskId(0),
+                dependencies: input.dependencies.clone(),
+                attempts: input.attempts,
+                deadline: input.deadline,
+                budget: input.budget,
+                artifact: input.artifact.clone(),
+                approval_required: input.approval_required,
+                idempotency_key: input.idempotency_key.clone(),
+            };
+            let event =
+                court.propose_dag_add_subtask(parent, input.worker, input.text.clone(), node)?;
+            if let CourtEvent::DagSubtaskAdded { ref subtask, .. } = event {
+                created = Some(subtask.id);
+            }
+            Ok(vec![event])
+        })?;
+        Ok(created.expect("已提交追加子诏令事件"))
+    }
+
+    /// 运行中调整一件待办（Pending）子诏令的前置依赖（不得成环；空列表即清除依赖）。
+    pub fn dag_update_deps(
+        &mut self,
+        subtask: TaskId,
+        dependencies: Vec<TaskId>,
+    ) -> Result<(), AppError> {
+        self.reload()?;
+        self.commit(|court| {
+            let event = court.propose_dag_update_deps(subtask, dependencies.clone())?;
+            Ok(vec![event])
+        })?;
+        Ok(())
     }
 
     pub(crate) fn subtasks_of(&self, task: TaskId) -> Vec<TaskId> {

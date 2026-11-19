@@ -977,6 +977,51 @@ pub(crate) fn execute(
             }
             println!("`ziyuan run` 执行；子诏令全部结束后由尚书汇总回奏。");
         }
+        Command::DagAdd { parent, subtask } => {
+            let new_id = session.dag_add_subtask(parent, subtask)?;
+            let court = session.court();
+            let sub = court.task(new_id).expect("刚追加子诏令");
+            let name = sub
+                .assignee
+                .and_then(|a| court.agent(a))
+                .map_or("?", |a| a.name.as_str());
+            let deps = sub
+                .dag
+                .as_ref()
+                .map(|d| d.dependencies.as_slice())
+                .unwrap_or_default();
+            let order = if deps.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "（先办 {}）",
+                    deps.iter()
+                        .map(|d| format!("#{}", d.0))
+                        .collect::<Vec<_>>()
+                        .join("、")
+                )
+            };
+            println!(
+                "已向诏令 #{} 追加子诏令 #{} → {name}：{}{order}",
+                parent.0, new_id.0, sub.edict.text
+            );
+        }
+        Command::DagDeps {
+            subtask,
+            dependencies,
+        } => {
+            session.dag_update_deps(subtask, dependencies.clone())?;
+            if dependencies.is_empty() {
+                println!("已清除子诏令 #{} 的前置依赖。", subtask.0);
+            } else {
+                let list = dependencies
+                    .iter()
+                    .map(|d| format!("#{}", d.0))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                println!("已调整子诏令 #{} 的前置依赖：先办 {list}。", subtask.0);
+            }
+        }
         Command::Redraft(task, worker, note) => {
             session.redraft(task, worker, note)?;
             print_draft(session, task);

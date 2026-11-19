@@ -219,6 +219,34 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         }
         // 排程节点见 `encode_dag`；与 `EdictSplit` 一同写入。
         EdictDag { task, nodes } => format!("v1\tDAG\t{}\t{}", task.0, encode_dag(nodes)),
+        DagSubtaskAdded {
+            task,
+            subtask,
+            node,
+        } => format!(
+            "v1\tDAGADD\t{}\t{}\t{}\t{}\t{}",
+            task.0,
+            subtask.id.0,
+            subtask.worker.0,
+            to_hex(&subtask.text),
+            encode_dag(std::slice::from_ref(node))
+        ),
+        DagDependenciesUpdated {
+            task,
+            subtask,
+            dependencies,
+        } => {
+            let deps = if dependencies.is_empty() {
+                "-".to_owned()
+            } else {
+                dependencies
+                    .iter()
+                    .map(|d| d.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            };
+            format!("v1\tDAGDEPS\t{}\t{}\t{deps}", task.0, subtask.0)
+        }
         // 发言为 `官员ID;官职;内容hex;输入;输出;模型hex（无模型为空）`，以逗号分隔。
         CourtDebated { task, speeches } => {
             format!("v1\tDEBATED\t{}\t{}", task.0, encode_speeches(speeches))
@@ -894,6 +922,45 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             task: TaskId(id(2)?),
             nodes: decode_dag(field(3)?)?,
         },
+        "DAGADD" => {
+            let task = TaskId(id(2)?);
+            let sub_id = TaskId(id(3)?);
+            let worker = AgentId(id(4)?);
+            let text = from_hex(field(5)?)?;
+            let nodes = decode_dag(field(6)?)?;
+            let [node]: [DagNode; 1] = nodes
+                .try_into()
+                .map_err(|_| "追加子诏令须恰好含一个排程节点".to_owned())?;
+            if node.task != sub_id {
+                return Err("追加子诏令节点 ID 与子诏令 ID 不一致".into());
+            }
+            DagSubtaskAdded {
+                task,
+                subtask: Subtask {
+                    id: sub_id,
+                    worker,
+                    text,
+                },
+                node,
+            }
+        }
+        "DAGDEPS" => {
+            let task = TaskId(id(2)?);
+            let subtask = TaskId(id(3)?);
+            let raw = field(4)?;
+            let dependencies = if raw == "-" {
+                Vec::new()
+            } else {
+                raw.split('+')
+                    .map(|d| d.parse::<u64>().map(TaskId).map_err(|e| e.to_string()))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            DagDependenciesUpdated {
+                task,
+                subtask,
+                dependencies,
+            }
+        }
         "DEBATED" => CourtDebated {
             task: TaskId(id(2)?),
             speeches: decode_speeches(field(3)?)?,
@@ -1125,6 +1192,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictSplit { model: None, .. } => 7,
         EdictSplit { .. } => 8,
         EdictDag { .. } => 4,
+        DagSubtaskAdded { .. } => 7,
+        DagDependenciesUpdated { .. } => 5,
         CensorReported { .. } => 12,
         SuspicionReviewed { model: None, .. } => 9,
         SuspicionReviewed { .. } => 10,
@@ -1182,6 +1251,8 @@ pub(crate) fn kind_of(event: &CourtEvent) -> &'static str {
         EdictDrafted { .. } => "DRAFTED",
         EdictSplit { .. } => "SPLIT",
         EdictDag { .. } => "DAG",
+        DagSubtaskAdded { .. } => "DAGADD",
+        DagDependenciesUpdated { .. } => "DAGDEPS",
         CourtDebated { .. } => "DEBATED",
         EdictApproved { .. } => "APPROVED",
         TaskAssigned { .. } => "ASSIGNED",
@@ -1302,6 +1373,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         HumanSubmissionBound { .. } => 24,
         HumanTranslationApproved { .. } => 25,
         HumanTranslationFinalized { .. } => 26,
+        DagSubtaskAdded { .. } | DagDependenciesUpdated { .. } => 55,
     })
 }
 
@@ -1517,7 +1589,8 @@ mod tests {
             assert_eq!(encode_event(&event).split('\t').nth(1), Some(kind));
             seen.insert(kind.to_owned());
         }
-        assert_eq!(seen.len(), 52, "每种事件类型至少一条样本");
+        assert_eq!(seen.len(), 54, "每种事件类型至少一条样本");
+        assert_eq!(crate::release_name(55), "1.21.0");
         assert_eq!(crate::release_name(17), "1.2.0");
         assert_eq!(crate::release_name(10), "0.10.0");
         assert_eq!(crate::release_name(11), "1.0.0-rc.1");
@@ -1810,6 +1883,34 @@ mod tests {
                         idempotency_key: None,
                     },
                 ],
+            },
+            CourtEvent::DagSubtaskAdded {
+                task,
+                subtask: Subtask {
+                    id: TaskId(10),
+                    worker: AgentId(4),
+                    text: "追加\t子诏令".into(),
+                },
+                node: DagNode {
+                    task: TaskId(10),
+                    dependencies: vec![TaskId(8), TaskId(9)],
+                    attempts: Some(3),
+                    deadline: Some(1_792_909_200),
+                    budget: Some(2_000),
+                    artifact: Some("补测报告".into()),
+                    approval_required: true,
+                    idempotency_key: Some("add-1".into()),
+                },
+            },
+            CourtEvent::DagDependenciesUpdated {
+                task,
+                subtask: TaskId(9),
+                dependencies: vec![TaskId(8)],
+            },
+            CourtEvent::DagDependenciesUpdated {
+                task,
+                subtask: TaskId(10),
+                dependencies: vec![],
             },
             CourtEvent::CourtDebated {
                 task,

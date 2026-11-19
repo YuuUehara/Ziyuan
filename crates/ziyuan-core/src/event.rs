@@ -251,6 +251,18 @@ pub enum CourtEvent {
         task: TaskId,
         nodes: Vec<DagNode>,
     },
+    /// 运行中向已分办且尚未结束的原诏令追加一件子诏令（总数仍不超过 8 件）。
+    DagSubtaskAdded {
+        task: TaskId,
+        subtask: Subtask,
+        node: DagNode,
+    },
+    /// 运行中调整一件尚未开始（Pending）的子诏令的前置依赖（不得成环，原诏令须未结束）。
+    DagDependenciesUpdated {
+        task: TaskId,
+        subtask: TaskId,
+        dependencies: Vec<TaskId>,
+    },
     /// 廷议：数位在任官员就一件待办诏令依次发言辩论，纪要供票拟与承办参考。
     /// 只影响措辞与论证，不改变派工与玉玺。每段发言的用量计入诏令。
     CourtDebated {
