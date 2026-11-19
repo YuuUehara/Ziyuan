@@ -1,7 +1,8 @@
-//! Private FFI boundary for a trusted self-reexecution experiment only.
+//! Private FFI boundary for Windows LPAC + Job Object isolation (ADR-0001).
 use std::{
-    ffi::OsStr,
-    fs::{File, OpenOptions},
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
     mem::{size_of, zeroed},
     os::windows::{
@@ -10,10 +11,13 @@ use std::{
     },
     path::{Path, PathBuf},
     ptr::{null, null_mut},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::{
     Foundation::*,
+    Networking::WinSock::{WSACleanup, WSADATA, WSAEACCES, WSASYSCALLFAILURE, WSAStartup},
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -31,6 +35,10 @@ use windows_sys::Win32::{
         WindowsProgramming::PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT,
     },
 };
+
+use crate::{ExitOutcome, LaunchSpec, RunResult, SandboxCapability};
+
+static PROFILE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value.as_ref().encode_wide().chain(Some(0)).collect()
@@ -67,6 +75,37 @@ unsafe fn own(handle: HANDLE) -> io::Result<OwnedHandle> {
     }
 }
 
+/// Rejects any path where the target or any non-root ancestor is a Win32 reparse point
+/// (symlink, junction, or mount point). Fails closed if attributes cannot be queried.
+fn reject_reparse_point(path: &Path) -> io::Result<()> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path must be absolute: {}", path.display()),
+        ));
+    }
+    for ancestor in path.ancestors() {
+        if ancestor.parent().is_none() {
+            break;
+        }
+        // SAFETY: `wide(ancestor)` produces a NUL-terminated UTF-16 path living through the call.
+        let attrs = unsafe { GetFileAttributesW(wide(ancestor).as_ptr()) };
+        if attrs == INVALID_FILE_ATTRIBUTES {
+            return Err(io::Error::last_os_error());
+        }
+        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing reparse point in sandbox path: {}",
+                    ancestor.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 struct Profile {
     name: Vec<u16>,
     sid: PSID,
@@ -80,7 +119,8 @@ impl Profile {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos();
-        let name = wide(format!("Ziyuan.W1a.{}.{}", std::process::id(), stamp));
+        let seq = PROFILE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = wide(format!("Ziyuan.W1.{}.{seq}.{stamp}", std::process::id()));
         let mut sid = null_mut();
         // SAFETY: three terminated strings live through the call; no capabilities;
         // successful creation returns a unique SID allocated by the API.
@@ -113,9 +153,8 @@ impl Profile {
             while *folder.add(len) != 0 {
                 len += 1;
             }
-            profile.path = PathBuf::from(std::ffi::OsString::from_wide(
-                std::slice::from_raw_parts(folder, len),
-            ));
+            profile.path =
+                PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(folder, len)));
             CoTaskMemFree(folder.cast());
         }
         Ok(profile)
@@ -141,7 +180,7 @@ impl Drop for Profile {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
             eprintln!(
-                "W1a profile cleanup failed for {}: {error}",
+                "W1 profile cleanup failed for {}: {error}",
                 String::from_utf16_lossy(&self.name[..self.name.len() - 1])
             );
         }
@@ -232,7 +271,7 @@ impl Child {
 impl Drop for Child {
     fn drop(&mut self) {
         if let Err(error) = self.stop() {
-            eprintln!("W1a: {error}");
+            eprintln!("W1: {error}");
         }
     }
 }
@@ -255,6 +294,74 @@ fn token_flag(process: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<u32
         ))?;
     }
     Ok(flag)
+}
+
+fn token_capability_count(process: HANDLE) -> io::Result<u32> {
+    let mut token = null_mut();
+    let mut bytes = 0u32;
+    // SAFETY: live process (or pseudo handle), unique owned token; sizing query
+    // determines exact aligned buffer size for `TOKEN_GROUPS` (`TokenCapabilities`).
+    unsafe {
+        checked(OpenProcessToken(process, TOKEN_QUERY, &mut token))?;
+        let token = own(token)?;
+        let ok = GetTokenInformation(
+            token.as_raw_handle(),
+            TokenCapabilities,
+            null_mut(),
+            0,
+            &mut bytes,
+        );
+        if ok != 0 {
+            return Ok(0);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
+            return Err(err);
+        }
+        if (bytes as usize) < size_of::<u32>() {
+            return Err(io::Error::other("TokenCapabilities buffer too small"));
+        }
+        let mut storage = vec![Aligned { _bytes: [0; 16] }; (bytes as usize).div_ceil(16)];
+        checked(GetTokenInformation(
+            token.as_raw_handle(),
+            TokenCapabilities,
+            storage.as_mut_ptr().cast(),
+            bytes,
+            &mut bytes,
+        ))?;
+        Ok((*storage.as_ptr().cast::<TOKEN_GROUPS>()).GroupCount)
+    }
+}
+
+fn job_active_processes(job: HANDLE) -> io::Result<u32> {
+    // SAFETY: POD Win32 struct permits zero initialization.
+    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+    // SAFETY: `job` is a live Job handle; `info` is zero-initialized POD of exact expected size.
+    unsafe {
+        checked(QueryInformationJobObject(
+            job,
+            JobObjectBasicAccountingInformation,
+            (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+            size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            null_mut(),
+        ))?;
+    }
+    Ok(info.ActiveProcesses)
+}
+
+fn terminate_job_and_drain(job: HANDLE, timeout: Duration) -> io::Result<u32> {
+    // SAFETY: `job` is a live Job handle; terminates all processes and descendants in the Job.
+    unsafe {
+        checked(TerminateJobObject(job, 125))?;
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        let active = job_active_processes(job)?;
+        if active == 0 || Instant::now() >= deadline {
+            return Ok(active);
+        }
+        thread::sleep(Duration::from_millis(15));
+    }
 }
 
 // A version-scoped behavioral probe, NOT a generic "is LPAC" token API.
@@ -367,8 +474,7 @@ fn child_probe(ordinary: bool) -> io::Result<()> {
     let directory = std::env::current_dir()?;
     let environment_ok = std::env::var_os("SystemRoot").is_some_and(|value| !value.is_empty())
         && std::env::var_os("LOCALAPPDATA").is_some_and(|value| {
-            // This checks the supplied environment value, not filesystem
-            // isolation or reparse-point safety (which remain W1b work).
+            // Confirms task-private LOCALAPPDATA supplied by the launcher.
             PathBuf::from(value).starts_with(&directory)
         })
         && std::env::var_os("ZIYUAN_W1A_HOST_ONLY").is_none();
@@ -433,6 +539,7 @@ fn token_information(class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<Aligned>>
 }
 
 fn admit_dependency(root: &Path, app_sid: PSID, writable: bool) -> io::Result<()> {
+    reject_reparse_point(root)?;
     let storage = token_information(TokenUser)?;
     // SAFETY: exact API class, aligned live storage including the pointed-to SID.
     let user = unsafe { sid_text((*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid)? };
@@ -447,7 +554,7 @@ fn admit_dependency(root: &Path, app_sid: PSID, writable: bool) -> io::Result<()
     ));
     let mut descriptor = null_mut();
     // SAFETY: converted descriptor and embedded DACL remain live until the
-    // setting call ends. Its inheritable ACEs also protect the two owned files.
+    // setting call ends. Its inheritable ACEs also protect child files.
     unsafe {
         checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -528,6 +635,37 @@ fn low_integrity(path: &Path) -> io::Result<()> {
         LocalFree(descriptor);
         result
     }
+}
+
+/// Admits a task-private directory tree with protected DACL + explicit low IL,
+/// rejecting any reparse point encountered within the tree.
+fn admit_tree(root: &Path, app_sid: PSID, writable: bool) -> io::Result<()> {
+    admit_dependency(root, app_sid, writable)?;
+    low_integrity(root)?;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 16 {
+            return Err(io::Error::other(
+                "admitted directory tree exceeds max depth",
+            ));
+        }
+        for entry in fs::read_dir(&dir)? {
+            visited += 1;
+            if visited > 2048 {
+                return Err(io::Error::other(
+                    "admitted directory tree exceeds max entry count",
+                ));
+            }
+            let path = entry?.path();
+            reject_reparse_point(&path)?;
+            low_integrity(&path)?;
+            if path.is_dir() {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_low_integrity(root: &Path) -> io::Result<()> {
@@ -704,10 +842,10 @@ fn dependency_child(host: &Path) -> io::Result<()> {
     // The non-image data file avoids mistaking a mapped executable's delete
     // restriction for our policy. Successful mutation is always a failed probe.
     for (name, result) in [
-        ("delete", std::fs::remove_file(root.join("data.txt"))),
+        ("delete", fs::remove_file(root.join("data.txt"))),
         (
             "rename",
-            std::fs::rename(root.join("data.txt"), root.join("replaced.txt")),
+            fs::rename(root.join("data.txt"), root.join("replaced.txt")),
         ),
         (
             "create",
@@ -729,27 +867,609 @@ fn dependency_child(host: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn quote_windows_arg(arg: &str) -> io::Result<String> {
+    if arg.contains('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "argument contains NUL byte",
+        ));
+    }
+    if !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '"'))
+    {
+        return Ok(arg.to_owned());
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..backslashes * 2 + 1 {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(ch);
+            }
+        }
+    }
+    for _ in 0..backslashes * 2 {
+        out.push('\\');
+    }
+    out.push('"');
+    Ok(out)
+}
+
+fn build_environment(
+    profile_dir: &Path,
+    temp_dir: &Path,
+    extra: &[(String, String)],
+) -> io::Result<Vec<u16>> {
+    let root = std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            io::Error::other("SystemRoot unavailable; refusing to inherit the host environment")
+        })?;
+    let mut map: BTreeMap<String, (String, OsString)> = BTreeMap::new();
+    map.insert(
+        "LOCALAPPDATA".into(),
+        ("LOCALAPPDATA".into(), profile_dir.as_os_str().to_owned()),
+    );
+    map.insert("SYSTEMROOT".into(), ("SystemRoot".into(), root));
+    map.insert(
+        "TEMP".into(),
+        ("TEMP".into(), temp_dir.as_os_str().to_owned()),
+    );
+    map.insert(
+        "TMP".into(),
+        ("TMP".into(), temp_dir.as_os_str().to_owned()),
+    );
+    const RESERVED: [&str; 8] = [
+        "SYSTEMROOT",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "APPDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+    ];
+    for (k, v) in extra {
+        if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid sandbox environment variable name/value: {k:?}"),
+            ));
+        }
+        let upper = k.to_ascii_uppercase();
+        if RESERVED.contains(&upper.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("refusing override of reserved sandbox env var: {k}"),
+            ));
+        }
+        map.insert(upper, (k.clone(), OsString::from(v)));
+    }
+    let mut block = Vec::new();
+    for (key, value) in map.into_values() {
+        let mut entry = OsString::from(key);
+        entry.push("=");
+        entry.push(value);
+        block.extend(wide(entry));
+    }
+    block.push(0);
+    Ok(block)
+}
+
+fn create_kill_on_close_job() -> io::Result<OwnedHandle> {
+    // SAFETY: unnamed Job handle transferred to OwnedHandle; POD limit struct omits breakaway.
+    unsafe {
+        let job = own(CreateJobObjectW(null(), null()))?;
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        checked(SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of_val(&limits) as u32,
+        ))?;
+        Ok(job)
+    }
+}
+
+pub(crate) fn probe_capability() -> SandboxCapability {
+    let check = (|| -> io::Result<()> {
+        if std::env::var_os("SystemRoot").is_none_or(|v| v.is_empty()) {
+            return Err(io::Error::other("SystemRoot unavailable"));
+        }
+        // SAFETY: borrowed pseudo handle, never closed.
+        let host = unsafe { GetCurrentProcess() };
+        if !aap_access(host)? {
+            return Err(io::Error::other("host AAP access probe failed"));
+        }
+        let mut profile = Profile::create()?;
+        let job = create_kill_on_close_job()?;
+        let capabilities = SECURITY_CAPABILITIES {
+            AppContainerSid: profile.sid,
+            Capabilities: null_mut(),
+            CapabilityCount: 0,
+            Reserved: 0,
+        };
+        let policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+        let mut attributes = Attributes::new()?;
+        attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+            &policy,
+        )?;
+        drop(attributes);
+        drop(job);
+        profile.cleanup()?;
+        Ok(())
+    })();
+    match check {
+        Ok(()) => SandboxCapability::FileSystemAndNetworkIsolated,
+        Err(error) => SandboxCapability::Unavailable {
+            reason: error.to_string(),
+        },
+    }
+}
+
+pub(crate) fn run_sandboxed(
+    spec: &LaunchSpec,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<RunResult> {
+    run_sandboxed_inner(spec, cancel, false)
+}
+
+fn run_sandboxed_inner(
+    spec: &LaunchSpec,
+    cancel: Option<&AtomicBool>,
+    ordinary_control: bool,
+) -> io::Result<RunResult> {
+    if spec.timeout.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox timeout must be greater than zero",
+        ));
+    }
+    reject_reparse_point(&spec.program)?;
+    if !spec.program.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("sandbox program is not a file: {}", spec.program.display()),
+        ));
+    }
+    if let Some(cwd) = &spec.cwd {
+        reject_reparse_point(cwd)?;
+        if !cwd.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("sandbox cwd is not a directory: {}", cwd.display()),
+            ));
+        }
+    }
+    for dir in spec.writable_dirs.iter().chain(&spec.readonly_dirs) {
+        reject_reparse_point(dir)?;
+        if !dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("admitted path is not a directory: {}", dir.display()),
+            ));
+        }
+    }
+
+    let mut profile = Profile::create()?;
+    let temp_dir = profile.path.join("tmp");
+    fs::create_dir(&temp_dir)?;
+
+    for dir in &spec.writable_dirs {
+        admit_tree(dir, profile.sid, true)?;
+    }
+    for dir in &spec.readonly_dirs {
+        admit_tree(dir, profile.sid, false)?;
+    }
+
+    let output_path = profile.path.join("child-output.txt");
+    let output_file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&output_path)?;
+    let input = File::open("NUL")?;
+    let job = create_kill_on_close_job()?;
+
+    // SAFETY: mark only the two allowlisted stdio handles inheritable.
+    unsafe {
+        for handle in [output_file.as_raw_handle(), input.as_raw_handle()] {
+            checked(SetHandleInformation(
+                handle,
+                HANDLE_FLAG_INHERIT,
+                HANDLE_FLAG_INHERIT,
+            ))?;
+        }
+    }
+
+    let capabilities = SECURITY_CAPABILITIES {
+        AppContainerSid: profile.sid,
+        Capabilities: null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    };
+    let policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+    let handles = [input.as_raw_handle(), output_file.as_raw_handle()];
+    let mut attributes = Attributes::new()?;
+    attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
+    if !ordinary_control {
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+            &policy,
+        )?;
+    }
+    attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
+
+    let application = wide(&spec.program);
+    let cwd = spec.cwd.as_deref().unwrap_or(&profile.path);
+    let directory = wide(cwd);
+    let program_arg = quote_windows_arg(&spec.program.to_string_lossy())?;
+    let mut cmdline = program_arg;
+    for arg in &spec.args {
+        cmdline.push(' ');
+        cmdline.push_str(&quote_windows_arg(arg)?);
+    }
+    let mut command = wide(cmdline);
+    let environment = build_environment(&profile.path, &temp_dir, &spec.env)?;
+
+    // SAFETY: extended startup cb, valid aligned attributes, mutable command buffer,
+    // allowlisted Unicode environment, all living through CreateProcessW.
+    let child = unsafe {
+        let mut startup: STARTUPINFOEXW = zeroed();
+        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = input.as_raw_handle();
+        startup.StartupInfo.hStdOutput = output_file.as_raw_handle();
+        startup.StartupInfo.hStdError = output_file.as_raw_handle();
+        startup.lpAttributeList = attributes.ptr();
+        let mut info: PROCESS_INFORMATION = zeroed();
+        checked(CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            CREATE_SUSPENDED
+                | EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW,
+            environment.as_ptr().cast(),
+            directory.as_ptr(),
+            &startup.StartupInfo,
+            &mut info,
+        ))?;
+        Child {
+            process: own(info.hProcess)?,
+            thread: own(info.hThread)?,
+        }
+    };
+
+    let run_outcome = (|| -> io::Result<ExitOutcome> {
+        // SAFETY: process is suspended; Job membership, LPAC identity, zero capabilities,
+        // and handle allowlist are verified before any user code can execute.
+        unsafe {
+            checked(AssignProcessToJobObject(
+                job.as_raw_handle(),
+                child.process.as_raw_handle(),
+            ))?;
+        }
+        if !in_job(child.process.as_raw_handle(), job.as_raw_handle())?
+            || token_flag(child.process.as_raw_handle(), TokenIsAppContainer)? != 1
+            || aap_access(child.process.as_raw_handle())? != ordinary_control
+            || token_capability_count(child.process.as_raw_handle())? != 0
+            || !handle_available(child.process.as_raw_handle(), output_file.as_raw_handle())?
+        {
+            return Err(io::Error::other(
+                "suspended LPAC / Job / capability / handle verification failed",
+            ));
+        }
+        // SAFETY: primary thread is suspended and all pre-resume invariants passed.
+        unsafe {
+            if ResumeThread(child.thread.as_raw_handle()) == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        let started = Instant::now();
+        loop {
+            if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                return Ok(ExitOutcome::Cancelled);
+            }
+            if started.elapsed() >= spec.timeout {
+                return Ok(ExitOutcome::TimedOut);
+            }
+            // SAFETY: owned live process handle polled with short bounded wait.
+            let wait = unsafe { WaitForSingleObject(child.process.as_raw_handle(), 20) };
+            if wait == WAIT_OBJECT_0 {
+                let mut code = 0u32;
+                // SAFETY: process has exited; query its exit code.
+                unsafe {
+                    checked(GetExitCodeProcess(child.process.as_raw_handle(), &mut code))?;
+                }
+                return Ok(ExitOutcome::Exited(code));
+            }
+            if wait != WAIT_TIMEOUT {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    })();
+
+    // Always terminate the full Job tree and drain active descendants before
+    // closing handles or cleaning up the profile (covers timeout, cancel, and
+    // orphaned grandchildren holding stdout).
+    let active_processes_after =
+        terminate_job_and_drain(job.as_raw_handle(), Duration::from_secs(5))?;
+    let stop_result = child.stop();
+    drop(child);
+    drop(job);
+    drop(attributes);
+    drop(input);
+    drop(output_file);
+
+    let output = fs::read(&output_path).unwrap_or_default();
+    let mut cleanup_warnings = Vec::new();
+    if let Err(err) = fs::remove_file(&output_path) {
+        cleanup_warnings.push(format!("output file cleanup: {err}"));
+    }
+    if let Err(err) = fs::remove_dir_all(&temp_dir) {
+        cleanup_warnings.push(format!("temp dir cleanup: {err}"));
+    }
+    if active_processes_after == 0 {
+        if let Err(err) = profile.cleanup() {
+            cleanup_warnings.push(format!("profile cleanup: {err}"));
+        }
+    } else {
+        profile.registered = false;
+        cleanup_warnings.push(format!(
+            "retained profile due to {active_processes_after} active processes"
+        ));
+    }
+
+    stop_result?;
+    let outcome = run_outcome?;
+    Ok(RunResult {
+        outcome,
+        output,
+        active_processes_after,
+        cleanup_warnings,
+    })
+}
+
+fn winsock_child_probe(tcp4: &str, udp4: &str, tcp6: &str) -> io::Result<()> {
+    // SAFETY: borrowed pseudo handle, never closed.
+    let caps = token_capability_count(unsafe { GetCurrentProcess() })?;
+    if caps != 0 {
+        return Err(io::Error::other(format!(
+            "expected 0 token capabilities in LPAC, got {caps}"
+        )));
+    }
+    // Probe WSAStartup directly before calling std::net so LPAC's kernel-level
+    // Winsock initialization denial (WSASYSCALLFAILURE / WSAEACCES) is observed
+    // cleanly rather than triggering std::net's internal assert_eq!(ret, 0) panic.
+    // SAFETY: POD WSADATA permits zero initialization; valid version 2.2 pointer.
+    let mut wsa: WSADATA = unsafe { zeroed() };
+    let wsa_ret = unsafe { WSAStartup(0x0202, &mut wsa) };
+    if wsa_ret == WSASYSCALLFAILURE || wsa_ret == WSAEACCES {
+        println!("NET_WINSOCK_INIT_DENIED={wsa_ret}");
+        println!("{}", crate::network::NETWORK_EVIDENCE);
+        io::stdout().flush()?;
+        return Ok(());
+    }
+    if wsa_ret != 0 {
+        return Err(io::Error::other(format!(
+            "unexpected WSAStartup error inside LPAC: {wsa_ret}"
+        )));
+    }
+    let result = crate::network::child_probe(tcp4, udp4, tcp6, caps);
+    // SAFETY: matches successful WSAStartup above.
+    unsafe {
+        WSACleanup();
+    }
+    result
+}
+
+fn run_lifecycle_probe(mode: &str) -> io::Result<()> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let seq = PROFILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let stage =
+        std::env::temp_dir().join(format!("ziyuan-w1d-{}-{seq}-{stamp}", std::process::id()));
+    fs::create_dir(&stage)?;
+    let program = stage.join("w1d-probe.exe");
+    fs::copy(std::env::current_exe()?, &program)?;
+    let child_mode = if mode == "--lifecycle-orphan" {
+        "orphan"
+    } else {
+        "hold"
+    };
+    let cancel_flag = AtomicBool::new(false);
+    let started = Instant::now();
+    let spec = LaunchSpec {
+        program: program.clone(),
+        args: vec![
+            "--child".into(),
+            "true".into(),
+            "--grandchild-hold".into(),
+            child_mode.into(),
+        ],
+        cwd: None,
+        writable_dirs: Vec::new(),
+        readonly_dirs: vec![stage.clone()],
+        env: Vec::new(),
+        timeout: match mode {
+            "--lifecycle-timeout" => Duration::from_millis(1200),
+            "--lifecycle-cancel" => Duration::from_secs(15),
+            "--lifecycle-orphan" => Duration::from_secs(15),
+            _ => Duration::from_secs(5),
+        },
+    };
+    let result = if mode == "--lifecycle-cancel" {
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(700));
+                cancel_flag.store(true, Ordering::SeqCst);
+            });
+            run_sandboxed_inner(&spec, Some(&cancel_flag), true)
+        })?
+    } else {
+        run_sandboxed_inner(&spec, None, true)?
+    };
+    let elapsed = started.elapsed();
+    let _ = fs::remove_dir_all(&stage);
+
+    let text = String::from_utf8_lossy(&result.output);
+    if !text.contains("GRANDCHILD_SPAWNED=1") {
+        return Err(io::Error::other(format!(
+            "grandchild spawn evidence missing ({mode}): {text:?}"
+        )));
+    }
+    if result.active_processes_after != 0 {
+        return Err(io::Error::other(format!(
+            "Job still had {} active processes after termination",
+            result.active_processes_after
+        )));
+    }
+    if elapsed > Duration::from_secs(10) {
+        return Err(io::Error::other(format!(
+            "lifecycle probe hung waiting for grandchild: elapsed={elapsed:?}"
+        )));
+    }
+    match (mode, result.outcome) {
+        ("--lifecycle-timeout", ExitOutcome::TimedOut) => {
+            println!(
+                "LIFECYCLE_TIMEOUT=1 GRANDCHILD_SPAWNED=1 JOB_ACTIVE_AFTER=0 PROFILE_CLEANED=1"
+            );
+        }
+        ("--lifecycle-cancel", ExitOutcome::Cancelled) => {
+            println!(
+                "LIFECYCLE_CANCEL=1 GRANDCHILD_SPAWNED=1 JOB_ACTIVE_AFTER=0 PROFILE_CLEANED=1"
+            );
+        }
+        ("--lifecycle-orphan", ExitOutcome::Exited(0)) => {
+            println!(
+                "LIFECYCLE_ORPHAN=1 GRANDCHILD_SPAWNED=1 JOB_ACTIVE_AFTER=0 PROFILE_CLEANED=1"
+            );
+        }
+        (_, other) => {
+            return Err(io::Error::other(format!(
+                "unexpected outcome for {mode}: {other:?}, output={text:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 1 && args[0] == "--grandchild-sleep" {
+        thread::sleep(Duration::from_secs(60));
+        return Ok(());
+    }
     if args.len() == 2 && args[0] == "--child" {
         return child_probe(args[1].parse().map_err(io::Error::other)?);
     }
+    if args.len() == 3 && args[..3] == ["--child", "false", "--lpac-sleep"] {
+        child_probe(false)?;
+        writeln!(io::stdout(), "LPAC_SLEEP_ENTERED=1")?;
+        io::stdout().flush()?;
+        thread::sleep(Duration::from_secs(60));
+        return Ok(());
+    }
+    if args.len() == 4 && args[..3] == ["--child", "true", "--grandchild-hold"] {
+        child_probe(true)?;
+        let exe =
+            std::env::current_exe().map_err(|e| io::Error::other(format!("current_exe: {e}")))?;
+        let app = wide(&exe);
+        let mut cmd = wide(format!("\"{}\" --grandchild-sleep", exe.display()));
+        // SAFETY: valid terminated UTF-16 strings; grandchild inherits stdout so
+        // Job termination must kill it before the parent can remove output/profile.
+        unsafe {
+            let mut si: STARTUPINFOW = zeroed();
+            si.cb = size_of::<STARTUPINFOW>() as u32;
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = io::stdin().as_raw_handle();
+            si.hStdOutput = io::stdout().as_raw_handle();
+            si.hStdError = io::stderr().as_raw_handle();
+            let mut pi: PROCESS_INFORMATION = zeroed();
+            checked(CreateProcessW(
+                app.as_ptr(),
+                cmd.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                CREATE_NO_WINDOW,
+                null(),
+                null(),
+                &si,
+                &mut pi,
+            ))?;
+            drop(own(pi.hThread)?);
+            drop(own(pi.hProcess)?);
+        }
+        writeln!(io::stdout(), "GRANDCHILD_SPAWNED=1")?;
+        io::stdout().flush()?;
+        if args[3] == "hold" {
+            thread::sleep(Duration::from_secs(60));
+        }
+        // In "orphan" mode, primary exits immediately while grandchild stays alive holding stdout.
+        return Ok(());
+    }
+    if args.len() == 6 && args[..3] == ["--child", "false", "--network-probe"] {
+        child_probe(false)?;
+        winsock_child_probe(&args[3], &args[4], &args[5])?;
+        return Ok(());
+    }
     if args.len() == 5
         && args[..2] == ["--child", "false"]
-        && matches!(args[2].as_str(), "--file-probe" | "--readonly-dependency")
+        && matches!(
+            args[2].as_str(),
+            "--file-probe" | "--readonly-dependency" | "--boundary-probe"
+        )
     {
         child_probe(false)?;
         crate::files::child(args[3].as_ref(), args[4].as_ref())?;
         if args[2] == "--readonly-dependency" {
             dependency_child(args[3].as_ref())?;
         }
+        if args[2] == "--boundary-probe" {
+            crate::files::boundary_child(args[3].as_ref())?;
+        }
         return Ok(());
+    }
+    if args.len() == 1
+        && matches!(
+            args[0].as_str(),
+            "--lifecycle-timeout" | "--lifecycle-cancel" | "--lifecycle-orphan"
+        )
+    {
+        return run_lifecycle_probe(&args[0]);
     }
     let fault = args == ["--fail-before-resume"];
     let ordinary = args == ["--ordinary-appcontainer-control"];
     let readonly = args == ["--readonly-dependency"];
-    let file_probe = args == ["--file-probe"] || readonly;
-    if !args.is_empty() && !fault && !ordinary && !file_probe {
+    let boundary = args == ["--boundary-probe"];
+    let network_probe = args == ["--network-probe"];
+    let file_probe = args == ["--file-probe"] || readonly || boundary;
+    if !args.is_empty() && !fault && !ordinary && !file_probe && !network_probe {
         return Err(io::Error::other("unknown probe arguments"));
     }
     // SAFETY: borrowed pseudo handle, never closed or inherited.
@@ -763,6 +1483,13 @@ pub(super) fn run() -> io::Result<()> {
         return Err(io::Error::other("host AAP access control failed"));
     }
     println!("HOST_AAP_ACCESS=1");
+    let net_listeners = if network_probe {
+        let listeners = crate::network::HostListeners::start()?;
+        println!("HOST_NET_CONTROLS=1");
+        Some(listeners)
+    } else {
+        None
+    };
     let mut profile = Profile::create()?;
     let mut peer_profile = if file_probe {
         Some(Profile::create()?)
@@ -800,7 +1527,7 @@ pub(super) fn run() -> io::Result<()> {
         root.join("probe.exe")
     } else {
         let program = profile.path.join("w1a-probe.exe");
-        std::fs::copy(std::env::current_exe()?, &program)?;
+        fs::copy(std::env::current_exe()?, &program)?;
         program
     };
     let output_path = profile.path.join("child-output.txt");
@@ -810,25 +1537,11 @@ pub(super) fn run() -> io::Result<()> {
         .write(true)
         .open(&output_path)?;
     let input = File::open("NUL")?;
-    // SAFETY: newly created unnamed event and Job transfer unique ownership.
-    // No named/shared host resources or host ACLs are changed.
-    let (sentinel, job) = unsafe {
-        (
-            own(CreateEventW(null(), 1, 1, null()))?,
-            own(CreateJobObjectW(null(), null()))?,
-        )
-    };
-    // SAFETY: POD Win32 structures permit zero initialization. Job flags omit
-    // both breakaway variants. All handles stay owned until the child is done.
+    // SAFETY: newly created unnamed event transfers unique ownership.
+    let sentinel = unsafe { own(CreateEventW(null(), 1, 1, null()))? };
+    let job = create_kill_on_close_job()?;
+    // SAFETY: mark stdio + sentinel inheritable so HANDLE_LIST filtering is tested.
     unsafe {
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        checked(SetInformationJobObject(
-            job.as_raw_handle(),
-            JobObjectExtendedLimitInformation,
-            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-            size_of_val(&limits) as u32,
-        ))?;
         for handle in [
             output.as_raw_handle(),
             input.as_raw_handle(),
@@ -878,6 +1591,8 @@ pub(super) fn run() -> io::Result<()> {
     if let Some(files) = &fixtures {
         let mode = if readonly {
             "--readonly-dependency"
+        } else if boundary {
+            "--boundary-probe"
         } else {
             "--file-probe"
         };
@@ -886,20 +1601,27 @@ pub(super) fn run() -> io::Result<()> {
             files.host_path().display(),
             files.peer_path().display()
         ));
+    } else if let Some(listeners) = &net_listeners {
+        let tcp6 = listeners
+            .tcp6_addr()
+            .map_or_else(|| "none".to_owned(), |addr| addr.to_string());
+        command.push_str(&format!(
+            " --network-probe {} {} {}",
+            listeners.tcp4_addr(),
+            listeners.udp4_addr(),
+            tcp6
+        ));
     }
     let mut command = wide(command);
-    // AppContainer startup also needs LOCALAPPDATA. It is task-private, never
-    // copied from the host. Entries are in Unicode name order; each wide call
-    // supplies an entry NUL, then push terminates the whole environment block.
     let root = std::env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             io::Error::other("SystemRoot unavailable; refusing to inherit the host environment")
         })?;
-    let mut entry = std::ffi::OsString::from("LOCALAPPDATA=");
+    let mut entry = OsString::from("LOCALAPPDATA=");
     entry.push(&profile.path);
     let mut environment = wide(entry);
-    let mut entry = std::ffi::OsString::from("SystemRoot=");
+    let mut entry = OsString::from("SystemRoot=");
     entry.push(root);
     environment.extend(wide(entry));
     environment.push(0);
@@ -934,8 +1656,6 @@ pub(super) fn run() -> io::Result<()> {
             thread: own(info.hThread)?,
         }
     };
-    // This executable only runs its own trusted single-process probe. Full
-    // descendant termination, cancellation and resource leases belong to W1d.
     let mut injected = false;
     let result = (|| -> io::Result<()> {
         // SAFETY: process is suspended; it cannot execute user code before Job
@@ -949,21 +1669,18 @@ pub(super) fn run() -> io::Result<()> {
         if !in_job(child.process.as_raw_handle(), job.as_raw_handle())?
             || token_flag(child.process.as_raw_handle(), TokenIsAppContainer)? != 1
             || aap_access(child.process.as_raw_handle())? != ordinary
+            || token_capability_count(child.process.as_raw_handle())? != 0
         {
             return Err(io::Error::other("suspended identity / Job mismatch"));
         }
-        // Check the child's table from the parent: deliberately referencing an
-        // absent handle inside a strict-checking child may raise an exception.
-        // A valid inherited output handle is the same-API positive control.
         if !handle_available(child.process.as_raw_handle(), output.as_raw_handle())?
             || handle_available(child.process.as_raw_handle(), sentinel.as_raw_handle())?
         {
             return Err(io::Error::other("suspended handle allowlist mismatch"));
         }
         println!("CHILD_OUTPUT_HANDLE=1 CHILD_SENTINEL_ABSENT=1");
-        // SAFETY: documented strict-handle policy is one DWORD of flags. The
-        // aligned output lives through this read-only query; no policy is changed.
         let mut strict_flags = 0u32;
+        // SAFETY: documented strict-handle policy is one DWORD of flags.
         unsafe {
             checked(GetProcessMitigationPolicy(
                 child.process.as_raw_handle(),
@@ -996,10 +1713,9 @@ pub(super) fn run() -> io::Result<()> {
         }
         Ok(())
     })();
-    // Confirm this trusted child has stopped before removing its resources.
-    // Failure here deliberately retains the profile for diagnosis, not reuse.
+    let _ = terminate_job_and_drain(job.as_raw_handle(), Duration::from_secs(5));
     if let Err(error) = child.stop() {
-        eprintln!("W1a retained profile: {}", profile.path.display());
+        eprintln!("W1 retained profile: {}", profile.path.display());
         profile.registered = false;
         if let Some(peer) = &mut peer_profile {
             eprintln!("W1b retained peer profile: {}", peer.path.display());
@@ -1016,24 +1732,26 @@ pub(super) fn run() -> io::Result<()> {
     drop(input);
     drop(output);
     drop(sentinel);
-    let text = std::fs::read_to_string(&output_path)?;
+    let text = fs::read_to_string(&output_path)?;
     if result.is_err() && !text.is_empty() {
-        // Only our trusted probe's fixed evidence/error output, never an
-        // arbitrary user command or a dump of the host environment.
-        eprintln!("W1a child evidence: {text}");
+        eprintln!("W1 child evidence: {text}");
     }
     let files_result = match &fixtures {
         Some(files) if result.is_ok() => files.verify(),
         _ => Ok(()),
     };
-    std::fs::remove_file(&program)?;
+    let net_result = match &net_listeners {
+        Some(listeners) if result.is_ok() => listeners.verify_zero_child_traffic(),
+        _ => Ok(()),
+    };
+    fs::remove_file(&program)?;
     if let Some(files) = &mut fixtures {
         files.cleanup()?;
     }
     if let Some(peer) = &mut peer_profile {
         peer.cleanup()?;
     }
-    std::fs::remove_file(&output_path)?;
+    fs::remove_file(&output_path)?;
     profile.cleanup()?;
     if fault {
         match result {
@@ -1053,6 +1771,7 @@ pub(super) fn run() -> io::Result<()> {
     } else {
         result?;
         files_result?;
+        net_result?;
         let mut expected = format!(
             "CHILD_ENTERED=1\nAPP=1 AAP_ACCESS={} JOB=1 ENV=1",
             u8::from(ordinary)
@@ -1065,7 +1784,20 @@ pub(super) fn run() -> io::Result<()> {
             expected.push('\n');
             expected.push_str(DEPENDENCY_EVIDENCE);
         }
-        if text.trim() != expected {
+        if boundary {
+            expected.push('\n');
+            expected.push_str(crate::files::BOUNDARY_EVIDENCE);
+        }
+        if network_probe {
+            let trimmed = text.trim();
+            let has_header = trimmed.starts_with(&expected);
+            let has_net = trimmed.ends_with(crate::network::NETWORK_EVIDENCE);
+            if !has_header || !has_net {
+                return Err(io::Error::other(format!(
+                    "unexpected network child evidence: {text:?}"
+                )));
+            }
+        } else if text.trim() != expected {
             return Err(io::Error::other(format!(
                 "unexpected child evidence: {text:?}"
             )));
@@ -1078,6 +1810,9 @@ pub(super) fn run() -> io::Result<()> {
         }
         if readonly {
             println!("DEPENDENCY_UNCHANGED=1 DEPENDENCY_CLEANED=1");
+        }
+        if network_probe {
+            println!("HOST_NET_ZERO_HITS=1");
         }
     }
     Ok(())

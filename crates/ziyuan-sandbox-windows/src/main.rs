@@ -1,20 +1,9 @@
-//! W1a self-reexecution probe, not an arbitrary-command launcher.
-//! No runtime/MCP dependency may use this as a production sandbox.
-#[cfg(windows)]
-mod files;
-#[cfg(windows)]
-#[allow(unsafe_code)]
-mod windows;
+//! Standalone W1a/W1b/W1c/W1d native Windows probe binary.
+//! Delegates to `ziyuan_sandbox_windows::run_probe_cli`.
 
 fn main() {
-    #[cfg(windows)]
-    if let Err(error) = windows::run() {
-        eprintln!("W1a probe failed: {error}");
-        std::process::exit(1);
-    }
-    #[cfg(not(windows))]
-    {
-        eprintln!("W1a requires native Windows; no isolation was performed");
+    if let Err(error) = ziyuan_sandbox_windows::run_probe_cli() {
+        eprintln!("W1 probe failed: {error}");
         std::process::exit(1);
     }
 }

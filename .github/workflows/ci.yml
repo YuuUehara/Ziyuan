@@ -98,7 +98,7 @@ jobs:
       - run: ${{ matrix.command }}
       - name: R0 离线字面量检索基线（合成材料，非产品索引）
         run: cargo run -p ziyuan-runtime --example code_search_baseline --locked
-      - name: W1a 原生启动证据（实验探针，非生产号舍）
+      - name: W1a–W1d Windows 原生隔离探针与安全 API（实验 crate，非生产号舍）
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh
         run: |

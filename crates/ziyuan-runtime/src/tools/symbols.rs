@@ -701,6 +701,8 @@ fn extract_python(text: &str) -> Vec<Symbol> {
     let mut triple_quote: Option<&'static str> = None;
     // (容器名, 缩进空格数)
     let mut classes: Vec<(String, usize)> = Vec::new();
+    // 正在函数体内的缩进栈，用于跳过嵌套局部 def。
+    let mut fn_indents: Vec<usize> = Vec::new();
 
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -719,21 +721,26 @@ fn extract_python(text: &str) -> Vec<Symbol> {
         while classes.last().is_some_and(|(_, ci)| indent <= *ci) {
             classes.pop();
         }
+        while fn_indents.last().is_some_and(|fi| indent <= *fi) {
+            fn_indents.pop();
+        }
 
         let parent = classes.last().map(|(n, _)| n.clone());
         let sym_depth = classes.len();
         if let Some(rest) = strip_word(trimmed, "class")
             && let Some((name, _)) = take_ident(rest)
         {
-            symbols.push(Symbol {
-                line: line_no,
-                kind: "class",
-                name: name.to_owned(),
-                parent,
-                signature: clip_sig(trimmed.trim_end_matches(':')),
-                depth: sym_depth,
-            });
-            classes.push((format!("class {name}"), indent));
+            if fn_indents.is_empty() {
+                symbols.push(Symbol {
+                    line: line_no,
+                    kind: "class",
+                    name: name.to_owned(),
+                    parent,
+                    signature: clip_sig(trimmed.trim_end_matches(':')),
+                    depth: sym_depth,
+                });
+                classes.push((format!("class {name}"), indent));
+            }
             continue;
         }
         let fn_rest = strip_word(trimmed, "async")
@@ -744,7 +751,7 @@ fn extract_python(text: &str) -> Vec<Symbol> {
         {
             // 仅收顶层函数与类直接方法，跳过嵌套局部 def。
             let expected_member = classes.last().is_some_and(|(_, ci)| indent > *ci);
-            if indent == 0 || expected_member {
+            if fn_indents.is_empty() && (indent == 0 || expected_member) {
                 symbols.push(Symbol {
                     line: line_no,
                     kind: "fn",
@@ -753,6 +760,7 @@ fn extract_python(text: &str) -> Vec<Symbol> {
                     signature: clip_sig(trimmed.trim_end_matches(':')),
                     depth: sym_depth,
                 });
+                fn_indents.push(indent);
             }
         }
     }

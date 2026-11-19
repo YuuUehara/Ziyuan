@@ -1,6 +1,32 @@
 #![cfg(windows)]
 
-use std::process::Command;
+use std::{
+    fs, io,
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use ziyuan_sandbox_windows::{
+    ExitOutcome, LaunchSpec, SandboxCapability, probe_capability, run_sandboxed,
+};
+
+static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn unique_temp_dir(label: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "ziyuan-w1-test-{label}-{}-{seq}-{stamp}",
+        std::process::id()
+    ));
+    fs::create_dir(&dir).unwrap();
+    dir
+}
 
 #[test]
 fn startup_distinguishes_aap_policy_and_excludes_unselected_handles() {
@@ -46,7 +72,7 @@ fn rejected_startup_never_runs_the_suspended_child() {
 
 #[test]
 fn private_files_work_while_host_and_peer_files_are_access_denied() {
-    for argument in ["--file-probe", "--readonly-dependency"] {
+    for argument in ["--file-probe", "--readonly-dependency", "--boundary-probe"] {
         let output = Command::new(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"))
             .arg(argument)
             .env("ZIYUAN_W1A_HOST_ONLY", "synthetic-host-secret")
@@ -77,5 +103,219 @@ fn private_files_work_while_host_and_peer_files_are_access_denied() {
             ));
             assert!(stdout.contains("DEPENDENCY_UNCHANGED=1 DEPENDENCY_CLEANED=1"));
         }
+        if argument == "--boundary-probe" {
+            assert!(
+                stdout.contains(
+                    "BOUNDARY_CASE_DENIED=1 BOUNDARY_UNICODE_RW=1 BOUNDARY_LONG_PATH_RW=1"
+                ),
+                "{stdout}{stderr}"
+            );
+        }
     }
+}
+
+#[test]
+fn lpac_blocks_tcp4_udp4_and_ipv6_loopback_with_zero_host_hits() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"))
+        .arg("--network-probe")
+        .env("ZIYUAN_W1A_HOST_ONLY", "synthetic-host-secret")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("{stdout}{stderr}");
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("HOST_NET_CONTROLS=1"));
+    assert!(stdout.contains("APP=1 AAP_ACCESS=0 JOB=1 ENV=1"));
+    assert!(stdout.contains("NET_CAPS=0 NET_TCP4_DENIED=1 NET_UDP4_DENIED=1 NET_IPV6_CHECKED=1"));
+    assert!(stdout.contains("HOST_NET_ZERO_HITS=1"));
+    assert!(stdout.contains("PROFILE_CLEANED=1"));
+}
+
+#[test]
+fn lifecycle_timeout_cancel_and_orphan_grandchild_all_terminate_cleanly() {
+    for (flag, expected_marker) in [
+        ("--lifecycle-timeout", "LIFECYCLE_TIMEOUT=1"),
+        ("--lifecycle-cancel", "LIFECYCLE_CANCEL=1"),
+        ("--lifecycle-orphan", "LIFECYCLE_ORPHAN=1"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("{stdout}{stderr}");
+        assert!(output.status.success(), "{stdout}{stderr}");
+        assert!(stdout.contains(expected_marker), "{stdout}{stderr}");
+        assert!(stdout.contains("GRANDCHILD_SPAWNED=1"));
+        assert!(stdout.contains("JOB_ACTIVE_AFTER=0"));
+        assert!(stdout.contains("PROFILE_CLEANED=1"));
+    }
+}
+
+#[test]
+fn safe_api_rejects_reparse_points_and_reserved_env_overrides() {
+    let root = unique_temp_dir("reparse");
+    let target = root.join("real_target");
+    let junction = root.join("junction_link");
+    fs::create_dir(&target).unwrap();
+    let probe_bin = target.join("probe.exe");
+    fs::copy(env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"), &probe_bin).unwrap();
+
+    // Create an NTFS directory junction without requiring administrator privileges.
+    let status = Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &junction.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+
+    let spec = LaunchSpec {
+        program: junction.join("probe.exe"),
+        args: vec!["--child".into(), "false".into()],
+        cwd: None,
+        writable_dirs: Vec::new(),
+        readonly_dirs: vec![junction.clone()],
+        env: Vec::new(),
+        timeout: Duration::from_secs(5),
+    };
+    let err = run_sandboxed(&spec, None).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "got: {err}");
+    assert!(
+        err.to_string().contains("reparse point"),
+        "unexpected error: {err}"
+    );
+
+    // Reserved environment override must also fail closed.
+    let bad_env_spec = LaunchSpec {
+        program: probe_bin,
+        args: vec!["--child".into(), "false".into()],
+        cwd: None,
+        writable_dirs: Vec::new(),
+        readonly_dirs: vec![target.clone()],
+        env: vec![("SystemRoot".into(), "C:\\Bogus".into())],
+        timeout: Duration::from_secs(5),
+    };
+    let env_err = run_sandboxed(&bad_env_spec, None).unwrap_err();
+    assert_eq!(
+        env_err.kind(),
+        io::ErrorKind::PermissionDenied,
+        "got: {env_err}"
+    );
+
+    // Remove the junction before removing the parent directory.
+    let _ = fs::remove_dir(&junction);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn safe_api_probes_capability_and_runs_parallel_isolated_tasks() {
+    assert_eq!(
+        probe_capability(),
+        SandboxCapability::FileSystemAndNetworkIsolated
+    );
+
+    let bin = env!("CARGO_BIN_EXE_ziyuan-sandbox-windows");
+    let handles: Vec<_> = (0..3)
+        .map(|idx| {
+            thread::spawn(move || {
+                let stage = unique_temp_dir(&format!("parallel-{idx}"));
+                let exe = stage.join("probe.exe");
+                fs::copy(bin, &exe).unwrap();
+                let spec = LaunchSpec {
+                    program: exe,
+                    args: vec!["--child".into(), "false".into()],
+                    cwd: None,
+                    writable_dirs: Vec::new(),
+                    readonly_dirs: vec![stage.clone()],
+                    env: vec![("ZIYUAN_TASK_SLOT".into(), idx.to_string())],
+                    timeout: Duration::from_secs(10),
+                };
+                let result = run_sandboxed(&spec, None).unwrap();
+                let _ = fs::remove_dir_all(&stage);
+                result
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        let res = handle.join().unwrap();
+        let text = String::from_utf8_lossy(&res.output);
+        assert_eq!(res.outcome, ExitOutcome::Exited(0), "output: {text}");
+        assert_eq!(res.active_processes_after, 0);
+        assert!(
+            res.cleanup_warnings.is_empty(),
+            "warnings: {:?}",
+            res.cleanup_warnings
+        );
+        assert!(text.contains("CHILD_ENTERED=1"), "{text}");
+        assert!(text.contains("APP=1 AAP_ACCESS=0 JOB=1 ENV=1"), "{text}");
+    }
+}
+
+#[test]
+fn strict_lpac_safe_api_enforces_timeout_and_cancellation() {
+    let bin = env!("CARGO_BIN_EXE_ziyuan-sandbox-windows");
+    let stage = unique_temp_dir("lpac-lifecycle");
+    let exe = stage.join("probe.exe");
+    fs::copy(bin, &exe).unwrap();
+
+    // 1. Strict LPAC wall-clock timeout
+    let timeout_spec = LaunchSpec {
+        program: exe.clone(),
+        args: vec!["--child".into(), "false".into(), "--lpac-sleep".into()],
+        cwd: None,
+        writable_dirs: Vec::new(),
+        readonly_dirs: vec![stage.clone()],
+        env: Vec::new(),
+        timeout: Duration::from_millis(800),
+    };
+    let res = run_sandboxed(&timeout_spec, None).unwrap();
+    let text = String::from_utf8_lossy(&res.output);
+    assert_eq!(res.outcome, ExitOutcome::TimedOut, "output: {text}");
+    assert_eq!(res.active_processes_after, 0);
+    assert!(
+        res.cleanup_warnings.is_empty(),
+        "{:?}",
+        res.cleanup_warnings
+    );
+    assert!(text.contains("APP=1 AAP_ACCESS=0 JOB=1 ENV=1"), "{text}");
+    assert!(text.contains("LPAC_SLEEP_ENTERED=1"), "{text}");
+
+    // 2. Strict LPAC caller cancellation
+    let cancel = AtomicBool::new(false);
+    let cancel_spec = LaunchSpec {
+        program: exe,
+        args: vec!["--child".into(), "false".into(), "--lpac-sleep".into()],
+        cwd: None,
+        writable_dirs: Vec::new(),
+        readonly_dirs: vec![stage.clone()],
+        env: Vec::new(),
+        timeout: Duration::from_secs(15),
+    };
+    let res = thread::scope(|scope| {
+        scope.spawn(|| {
+            thread::sleep(Duration::from_millis(600));
+            cancel.store(true, Ordering::SeqCst);
+        });
+        run_sandboxed(&cancel_spec, Some(&cancel)).unwrap()
+    });
+    let text = String::from_utf8_lossy(&res.output);
+    assert_eq!(res.outcome, ExitOutcome::Cancelled, "output: {text}");
+    assert_eq!(res.active_processes_after, 0);
+    assert!(
+        res.cleanup_warnings.is_empty(),
+        "{:?}",
+        res.cleanup_warnings
+    );
+    assert!(text.contains("APP=1 AAP_ACCESS=0 JOB=1 ENV=1"), "{text}");
+    assert!(text.contains("LPAC_SLEEP_ENTERED=1"), "{text}");
+
+    let _ = fs::remove_dir_all(&stage);
 }

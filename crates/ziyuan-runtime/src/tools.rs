@@ -2558,11 +2558,7 @@ export function bootUi() {}
 
         // 3. 暂存新建文件对 file_outline 与 find_symbols 立即可见。
         get("write_file")
-            .execute(
-                r#"{"path":"src/extra.py","content":"def staged_boot():
-    return 1
-"}"#,
-            )
+            .execute(r#"{"path":"src/extra.py","content":"def staged_boot():\n    return 1\n"}"#)
             .unwrap();
         let staged_outline = get("file_outline")
             .execute(r#"{"path":"src/extra.py"}"#)

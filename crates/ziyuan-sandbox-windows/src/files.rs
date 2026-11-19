@@ -3,6 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,12 +17,17 @@ const SENTINEL: &[u8] = b"synthetic-host-marker-v1\n";
 const PRIVATE_INPUT: &[u8] = b"private-input-v1\n";
 const PRIVATE_OUTPUT: &[u8] = b"private-output-v1\n";
 
+static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(1);
+
 pub(super) const CHILD_EVIDENCE: &str = "FILE_PRIVATE_READ=1 FILE_PRIVATE_WRITE=1 FILE_TEMP_WRITE=1\n\
 FILE_DENIED=source READ_WIN32=5 WRITE_WIN32=5\n\
 FILE_DENIED=journal READ_WIN32=5 WRITE_WIN32=5\n\
 FILE_DENIED=credential READ_WIN32=5 WRITE_WIN32=5\n\
 FILE_DENIED=vcs READ_WIN32=5 WRITE_WIN32=5\n\
 FILE_DENIED=peer READ_WIN32=5 WRITE_WIN32=5";
+
+pub(super) const BOUNDARY_EVIDENCE: &str =
+    "BOUNDARY_CASE_DENIED=1 BOUNDARY_UNICODE_RW=1 BOUNDARY_LONG_PATH_RW=1";
 
 struct Directory {
     path: PathBuf,
@@ -76,9 +82,10 @@ impl Fixtures {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos();
+        let seq = FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed);
         let fixtures = Self {
             host: Directory::create(std::env::temp_dir().join(format!(
-                "ziyuan-w1b-{}-{stamp} 空格资料",
+                "ziyuan-w1b-{}-{seq}-{stamp} 空格资料",
                 std::process::id()
             )))?,
             private: Directory::create(profile.join("w1b-files"))?,
@@ -236,7 +243,7 @@ pub(super) fn writable_dependency_control(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn denied(label: &str, path: &Path) -> io::Result<()> {
+fn denied_silent(label: &str, path: &Path) -> io::Result<()> {
     let read = fs::read(path);
     // Request write access but never truncate or modify a protected file,
     // even if the experiment unexpectedly grants the request.
@@ -248,6 +255,11 @@ fn denied(label: &str, path: &Path) -> io::Result<()> {
             "{label}: expected ERROR_ACCESS_DENIED; read={read_code:?}, write={write_code:?}"
         )));
     }
+    Ok(())
+}
+
+fn denied(label: &str, path: &Path) -> io::Result<()> {
+    denied_silent(label, path)?;
     println!("FILE_DENIED={label} READ_WIN32=5 WRITE_WIN32=5");
     Ok(())
 }
@@ -281,5 +293,47 @@ pub(super) fn child(host: &Path, peer: &Path) -> io::Result<()> {
         denied(label, &host.join(path))?;
     }
     denied("peer", &peer.join("peer.txt"))?;
+    io::stdout().flush()
+}
+
+/// W1b boundary checks: case-insensitive host denial, Unicode + spaces in private dir,
+/// and deep nested path (>160 chars) inside the task-private directory.
+pub(super) fn boundary_child(host: &Path) -> io::Result<()> {
+    // 1. Case-insensitive denial on NTFS (SOURCE.RS and .GIT/CONFIG).
+    denied_silent("source_upper", &host.join("SOURCE.RS"))?;
+    denied_silent("vcs_upper", &host.join(".GIT").join("CONFIG"))?;
+
+    let private = std::env::current_dir()?.join("w1b-files");
+
+    // 2. Unicode + whitespace path inside private tree.
+    let unicode_dir = private.join("中文 边界 目录");
+    fs::create_dir_all(&unicode_dir)?;
+    let unicode_file = unicode_dir.join("测试 文档.txt");
+    fs::write(&unicode_file, PRIVATE_OUTPUT)?;
+    if fs::read(&unicode_file)? != PRIVATE_OUTPUT {
+        return Err(io::Error::other("unicode private file readback mismatch"));
+    }
+
+    // 3. Long nested path (>160 chars total) inside private tree.
+    let mut deep = private.clone();
+    for segment in [
+        "segment_alpha_0123456789_abcdef",
+        "segment_beta_0123456789_abcdefg",
+        "segment_gamma_0123456789_abcdef",
+        "segment_delta_0123456789_abcdef",
+    ] {
+        deep.push(segment);
+    }
+    fs::create_dir_all(&deep)?;
+    let deep_file = deep.join("deep_payload.txt");
+    if deep_file.as_os_str().len() < 160 {
+        return Err(io::Error::other("expected deep test path >= 160 chars"));
+    }
+    fs::write(&deep_file, PRIVATE_OUTPUT)?;
+    if fs::read(&deep_file)? != PRIVATE_OUTPUT {
+        return Err(io::Error::other("deep private file readback mismatch"));
+    }
+
+    println!("{BOUNDARY_EVIDENCE}");
     io::stdout().flush()
 }

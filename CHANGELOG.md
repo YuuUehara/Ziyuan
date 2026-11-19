@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.19.0 — 2026-11-20
+
+- **Windows 原生号舍（`ziyuan-sandbox-windows`）W1b–W1d 隔离验收与安全库接口**：
+  - W1b 文件与路径边界：新增大小写不敏感拒绝（`SOURCE.RS`、`.GIT/CONFIG`）、Unicode＋空格私有路径、`>=160` 字符深层嵌套路径读写以及 NTFS 目录联接（reparse point）拒绝核验。
+  - W1c 网络阻断：建立本机 IPv4 TCP／IPv4 UDP／IPv6 TCP 监听与宿主正向连通对照，确认 LPAC 令牌 `TokenCapabilities == 0`、内核级拒绝 Winsock 初始化（Windows 11 实测 `WSASYSCALLFAILURE` 10107，或套接字层 `WSAEACCES` 10013）且三类监听零抵达。
+  - W1d 生命周期与并发：确认严格 LPAC 下超时、主动取消与三路并行隔离执行均实现 `ActiveProcesses == 0` 且 profile 清零，并补充普通 0 能力 AppContainer＋`KILL_ON_JOB_CLOSE` Job 的超时／取消／父退孙留孙进程树终止实测；在 [ADR-0001](docs/adr/0001-windows-sandbox.md) 如实记录 Windows 11 零能力严格 LPAC 拒绝 `CreateProcessW` 的内核行为供 W2 评审。
+  - 提炼 W2 就绪的安全 Rust 库接口（`SandboxCapability`、`LaunchSpec`、`ExitOutcome`、`RunResult`、`probe_capability`、`run_sandboxed`），所有 Win32 FFI 仍完全隔离在 `ziyuan-sandbox-windows` 私有模块，根工作区维持 `unsafe_code = "forbid"`。
+  - `ziyuan-sandbox-windows` 保持 `publish = false` 且不接入生产 `ziyuan-runtime`，Windows 受保护执行继续按 ADR-0001 方案 A 失败关闭。
+- 修复 `file_outline`／`find_symbols` 在 Python 类方法内未跳过嵌套局部 `def` 的问题，并补全 `reference_execution` 集成测试工具清单。
+- 同步更新 [ADR-0001](docs/adr/0001-windows-sandbox.md)、[路线图](docs/roadmap.md) 与 CI 说明，登记版本 `1.19.0`（不新增事件类型，不提高旧事件簿读取门槛）；本地验证见 [1.19.0 验收记录](docs/acceptance/1.19.0.md)。
+
 ## 1.18.0 — 2026-11-20
 
 - **轻量代码符号大纲与定义查找**：

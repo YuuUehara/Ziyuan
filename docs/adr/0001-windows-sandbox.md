@@ -93,8 +93,10 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 
 - **W0（已完成）**：完成威胁模型、LPAC＋Job 方案选型及边界协议；选定以独立平台 crate 推进，不改生产 `runtime`／`MCP` 行为。
 - **W1a 启动与句柄探针（Server 2025 CI 基线已通过）**：独立探针以 LPAC 属性、`SystemRoot`＋任务私有 `LOCALAPPDATA`、挂起创建＋kill-on-close Job 及显式标准流句柄白名单运行；在 Windows Server 2025 Datacenter（`10.0.26100`）基线上通过普通 AppContainer、LPAC（`AAP_ACCESS=0`）与恢复前故障清理三组对照。
-- **W1b 文件隔离探针（合成读写矩阵已通过；只读依赖小批待完成原生验证）**：合成矩阵确认 LPAC 子进程可读写自身准入副本，对宿主源码、`.ziyuan`、模拟 `.ssh`/`.git` 与 peer 哨兵返回 `ERROR_ACCESS_DENIED`（5）。只读依赖目录（禁继承、显式 DACL 与低完整性标签）已完成实现与文件身份（`FileIdInfo`）校验，尚待原生 Windows CI 复验。
-- **仍未完成**：普通非管理员用户及桌面 Windows 11 对照、大小写／长路径／重解析点与换链边界、网络阻断（W1c）、完整进程树与取消生命周期（W1d）、独立 unsafe／安全审阅与长期维护确认。在此之前不接入生产、不升级能力等级。
+- **W1b 文件、依赖与路径边界探针（原生 Windows 11 非管理员桌面与 CI 已通过）**：合成矩阵确认 LPAC 子进程可读写自身准入副本，对宿主源码、`.ziyuan`、模拟 `.ssh`/`.git` 与 peer 哨兵返回 `ERROR_ACCESS_DENIED`（5）；只读依赖目录（禁继承保护 DACL、显式低完整性标签 `S-1-16-4096` 与 `FileIdInfo` 句柄身份核验）全部通过；补齐大小写变体（`SOURCE.RS`、`.GIT/CONFIG`）拒绝、Unicode／空格路径、`>=160` 字符嵌套长路径读写以及 NTFS 目录联接（junction）重解析点拒绝（`PermissionDenied`）。
+- **W1c 网络阻断探针（原生 Windows 11 非管理员桌面已通过）**：在宿主本机建立 IPv4 TCP、IPv4 UDP 与 IPv6 TCP 回环监听并先通过宿主正向连通对照后归零计数；LPAC 子进程核验 `TokenCapabilities == 0`，在 Windows 11 上调用 `WSAStartup` 即被内核拒绝（`WSASYSCALLFAILURE` 10107），且三类宿主监听器均确认零连接／零数据包抵达（`HOST_NET_ZERO_HITS=1`）。（仅测本机回环监听，不据此宣称公网出站已实测。）
+- **W1d 生命周期、并发隔离与安全库接口（原生 Windows 11 非管理员桌面已通过）**：`ziyuan-sandbox-windows` 对外暴露无裸句柄的安全 Rust API（`SandboxCapability`、`LaunchSpec`、`ExitOutcome`、`RunResult`、`probe_capability`、`run_sandboxed`），所有 Win32 FFI 仍封装在私有 `windows` 模块。实测通过：严格 LPAC（`AAP_ACCESS=0`、`TokenCapabilities=0`）超时与主动取消有界收尾（`ActiveProcesses == 0` 且 profile 清零）、三路并行独立 LPAC 任务互不干扰、保留环境变量覆盖与重解析点拒绝；另在普通 0 能力 AppContainer＋`KILL_ON_JOB_CLOSE` Job 对照中验证超时、主动取消与父退孙留（孙进程持有继承 stdout 句柄）均由 `TerminateJobObject`＋进程数归零干净收尾。实测同时记录一项 Windows 11 LPAC 关键约束：零能力严格 LPAC 内直接调用 `CreateProcessW` 会被内核以 `ERROR_ACCESS_DENIED`（5）拒绝（触发 `Security-LessPrivilegedAppContainer` EventID 1），因此 W2 接入需派生子进程（如 `cargo test` 调用 `rustc`）的构建工具前，须另行评审最小非网络 capability 或代理进程方案。
+- **仍未完成（W2 生产接入门槛）**：独立第三方 unsafe／安全审阅、长期平台维护责任确认、针对需派生子进程构建工具链的 W2 能力边界评审，以及 `ziyuan-sandbox-windows` 在 crates.io 首次手工发布与 Trusted Publishing 配置。在全部达标前，生产 `ziyuan-runtime` 不依赖本 crate，Windows 受保护执行继续保持方案 A 失败关闭。
 
 ## 参考
 
