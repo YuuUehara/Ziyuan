@@ -1068,7 +1068,7 @@
               <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（只看名称、译法与备注，隐藏范围与称谓规则）</label></p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
-              <div class="materials-qa-bar"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字</option><option value="term_inconsistent">术语</option><option value="person_inconsistent">人物名</option><option value="paragraph_id_mismatch">段号</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
+              <div class="materials-qa-bar"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="no_translation">没有有效译稿</option><option value="missing_paragraph">缺段</option><option value="paragraph_id_mismatch">段号不一致</option><option value="duplicate_paragraph">段号重复</option><option value="extra_paragraph">多段</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字不一致</option><option value="duplicate_text">重复译文</option><option value="term_inconsistent">术语不一致</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
               <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
               <div id="materials-tm-result" class="materials-report" aria-live="polite"></div>
               <div id="materials-comment-result" class="materials-report" aria-live="polite"></div>
@@ -1093,7 +1093,7 @@
             </section>
             <section class="text-memory" id="text-memory" aria-label="当前项目译文记忆">
               <h3>译文记忆 <small class="hint">仅当前项目 · 已定稿段落</small></h3>
-              <p class="hint">参考不是指令，朱批与术语优先，本地方法不理解文意。默认不开启、不外发；服务端设 ZIYUAN_MEMORY_PROVIDER=local 后才可用。这里只查当前项目，跨项目请用命令行。</p>
+              <p class="hint">参考不是指令，朱批与术语优先。默认不开启、不外发。服务端把 ZIYUAN_MEMORY_PROVIDER 设为 local 或 deterministic 时只在本机计算，两种方法都不理解文意；设为 remote 时须先按项目运行 ziyuan text memory authorize，否则拒绝并且不联网。这里只查当前项目，跨项目请用命令行。</p>
               <p class="hint" id="memory-status" role="status" aria-live="polite">请选择项目。</p>
               <div class="actions"><button class="small" id="memory-build" type="button">重建当前项目记忆</button></div>
               <p class="hint">重建只收录当前项目，替换工作区记忆缓存；不会改动原文、译稿或定稿状态。</p>
@@ -2085,7 +2085,7 @@ $("materials-qa")?.addEventListener("click", async () => {
   }
 });
 function renderQaIssues() {
-  const labels = { no_translation: "没有有效译稿", missing_paragraph: "缺段", paragraph_id_mismatch: "段号不一致", extra_paragraph: "多段", duplicate_paragraph: "段号重复", empty_translation: "空译", untranslated: "疑似未翻译", number_mismatch: "数字不一致", duplicate_text: "重复译文", term_inconsistent: "术语不一致", person_inconsistent: "人物名不一致" };
+  const labels = { no_translation: "没有有效译稿", missing_paragraph: "缺段", paragraph_id_mismatch: "段号不一致", extra_paragraph: "多段", duplicate_paragraph: "段号重复", empty_translation: "空译", untranslated: "疑似未翻译", number_mismatch: "数字不一致", duplicate_text: "重复译文", term_inconsistent: "术语不一致" };
   const filter = $("materials-qa-filter")?.value || "";
   const host = $("materials-qa-result");
   host.replaceChildren();
@@ -2163,7 +2163,7 @@ $("materials-prepare")?.addEventListener("click", async () => {
   try {
     const result = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/prepare", {});
     setMaterialState("save", "服务器：已准备（未批准）");
-    $("materials-status").textContent = "已准备生产资料（" + result.bytes + " 字节）；尚未批准。下一步：在译书操作区点「批准上下文」，或运行 ziyuan text context approve " + textProjectId;
+    $("materials-status").textContent = "已准备生产资料（" + result.bytes + " 字节）；尚未批准。下一步：在同一工具栏点「批准上下文」，或运行 ziyuan text context approve " + textProjectId;
   } catch (e) {
     setMaterialState("save", "服务器：准备失败");
     $("materials-status").textContent = "准备失败：" + materialAdvice(e.body?.error || e.message);
@@ -3847,7 +3847,7 @@ async function loadMemoryStatus(facts) {
     if (request !== memoryRequest || project !== textProjectId) return;
     memoryAvailable = status.available;
     $("memory-status").textContent = !status.available
-      ? "本地记忆未启用或配置不可用。请在服务端设 ZIYUAN_MEMORY_PROVIDER=local 后重启服务；不会自动改用远程模型。"
+      ? "译文记忆未启用或配置不可用。请在服务端把 ZIYUAN_MEMORY_PROVIDER 设为 local 或 deterministic，或完成 remote 的授权与嵌入配置后重启服务。未设置时不会改用聊天模型，也不会联网。"
       : status.problem || `当前项目缓存 ${status.records} 段；${!status.indexed ? "尚未建立索引，请重建。" : status.stale ? "工作区缓存已过期，请重建；检索会剔除不再有效的定稿。" : "缓存已建立。"}`;
   } catch (e) {
     if (request !== memoryRequest || project !== textProjectId) return;

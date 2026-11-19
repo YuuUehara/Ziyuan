@@ -375,7 +375,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
   function create(context) {
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
-    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段在右侧填写译文，按 Ctrl+S 可快捷保存草稿；选中右侧译文文字可在栏下加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
+    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段在右侧填写译文，按 Ctrl+S（macOS 为 Cmd+S）可快捷保存草稿；选中右侧译文文字可在栏下加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
     const entry={draft:d,root,rows:[],buttons:new Map(),request:0,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};

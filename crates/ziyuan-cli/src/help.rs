@@ -263,6 +263,25 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "note",
 ];
 
+/// `ziyuan text` 后可补的子命令，与 `ziyuan text help` 的第一层命令及常用下一词一致。
+const TEXT_COMPLETION_WORDS: &str = "\
+init import preview import-docx import-epub import-srt \
+export-finished export-originals export-docx export-epub export-srt \
+show usage check human recovery evidence verification \
+translate review revise references zhupi finalize reopen context status resume \
+qa termbase concordance tm comment compare version memory \
+backup restore source-update issue read preflight search draft-replace tmx help \
+save submit approve apply authorize build list add update delete adopt suggest \
+reply assign resolve record prepare diff export-tbx import-tbx compare-draft prune \
+temps finish abandon";
+
+const TEXT_COMPLETION_FLAGS: &str = "\
+--json --yes --confirm --chapter --format --output --file --ruby --heading-level \
+--text-paragraphs --split-long-paragraphs --chapter-title --scope --kind --selection \
+--submission --references --limit --provider --project --query --block --candidate \
+--dept --reason --clear --show --keep --include-manual --author --language --title \
+--source --rights --version --date --endpoint --model --revision --dim";
+
 /// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
 pub(crate) fn completions(shell: Shell) -> String {
     let words = |items: Vec<String>| items.join(" ");
@@ -307,7 +326,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
          split) words="--plan" ;;
-         text) words="init import show check recovery human save submit apply translate review revise zhupi finalize reopen context approve status resume memory build search help --project --query --limit --dept --reason --clear --show --yes --json" ;;
+         text) words="{text_words} {text_flags}" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
          apply) words="--skip --commit" ;;
@@ -321,7 +340,9 @@ pub(crate) fn completions(shell: Shell) -> String {
 }}
 complete -F _ziyuan ziyuan
 "#,
-        json_cases = JSON_COMMANDS.join("|")
+        json_cases = JSON_COMMANDS.join("|"),
+        text_words = TEXT_COMPLETION_WORDS,
+        text_flags = TEXT_COMPLETION_FLAGS,
     );
     match shell {
         Shell::Bash => bash,
@@ -343,11 +364,14 @@ complete -F _ziyuan ziyuan
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
-                format!("{} -a 'init import show check recovery human save submit apply translate review revise zhupi finalize reopen context approve status resume memory build search help'", seen("text")),
+                format!("{} -a '{}'", seen("text"), TEXT_COMPLETION_WORDS),
                 format!("{} -l project -r", seen("text")),
                 format!("{} -l query -r", seen("text")),
                 format!("{} -l limit -r", seen("text")),
-                format!("{} -a 'add list show edit remove promote help'", seen("note")),
+                format!(
+                    "{} -a 'add list show edit remove promote help'",
+                    seen("note")
+                ),
                 format!("{} -l kind -x -a 'word passage'", seen("note")),
                 format!("{} -l source -r", seen("note")),
                 format!("{} -l zh -r", seen("note")),
@@ -395,5 +419,36 @@ mod tests {
         }
         let script = completions(Shell::Bash);
         assert!(script.contains("minister:works") && script.contains("write_file"));
+    }
+
+    #[test]
+    fn text_completion_lists_current_text_subcommands() {
+        let bash = completions(Shell::Bash);
+        let fish = completions(Shell::Fish);
+        for word in TEXT_COMPLETION_WORDS.split_whitespace() {
+            assert!(bash.contains(word), "bash 缺少 {word}");
+            assert!(fish.contains(word), "fish 缺少 {word}");
+        }
+        for word in [
+            "import-docx",
+            "source-update",
+            "preflight",
+            "comment",
+            "version",
+            "evidence",
+            "verification",
+            "tmx",
+            "termbase",
+            "memory",
+            "human",
+        ] {
+            let err = crate::text_commands::parse(vec![(*word).to_owned()]).err();
+            if let Some(err) = err {
+                assert!(
+                    !err.to_string().contains("未知的 text 子命令"),
+                    "{word}: {err}"
+                );
+            }
+        }
     }
 }

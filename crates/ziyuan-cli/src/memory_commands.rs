@@ -178,7 +178,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
             });
             if !json {
                 let label = if status.index.is_none() {
-                    "尚未建库；先设置 ZIYUAN_MEMORY_PROVIDER=local，再运行 text memory build"
+                    "尚未建库。把 ZIYUAN_MEMORY_PROVIDER 设为 local 或 deterministic 后运行 text memory build；remote 须先 text memory authorize"
                 } else if status.stale {
                     "资料已有变化，建议重建；搜索时仍会排除失效参考"
                 } else {
