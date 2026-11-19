@@ -2788,3 +2788,17 @@ async fn web_import_accepts_whole_book_txt_over_two_mib_and_rejects_above_eight_
     assert_eq!(code, 400, "{err}");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn web_dialogs_and_materials_editor_use_theme_styles() {
+    let html = crate::INDEX_HTML;
+    assert!(html.contains("#material-wizard {"));
+    assert!(html.contains("#material-wizard::backdrop {"));
+    assert!(html.contains("input:not([type]), input[type=text]"));
+    assert!(html.contains("type=\"text\" id=\"wizard-name\""));
+    assert!(html.contains("type=\"text\" id=\"wizard-values\""));
+    assert!(html.contains("type=\"text\" id=\"wizard-note\""));
+    assert!(html.contains(".materials-editor [data-role=\"tab\"][aria-selected=\"true\"]"));
+    assert!(html.contains(".records-list li.hint { list-style: none;"));
+    assert!(html.contains(".side .row + .row, #config-current + .row { margin-top: 8px; }"));
+}

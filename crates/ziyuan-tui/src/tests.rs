@@ -775,8 +775,20 @@ async fn edict_form_sets_scope_and_tools_like_the_cli() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     press(&mut app, "n");
     let shown = screen(&app);
+    assert!(
+        shown.contains("▶ 诏令内容：") || shown.contains("> 诏令内容："),
+        "{shown}"
+    );
     assert!(shown.contains("范围（空为整个项目）"), "{shown}");
     assert!(shown.contains("工具（空为只读，none 为不授）"), "{shown}");
+    assert!(shown.contains("换项"), "{shown}");
+    press(&mut app, "↓");
+    let moved = screen(&app);
+    assert!(
+        moved.contains("▶ 范围（空为整个项目）：") || moved.contains("> 范围（空为整个项目）："),
+        "{moved}"
+    );
+    press(&mut app, "↑");
     press(&mut app, "查目录\n");
     let task = app.court().task(TaskId(1)).unwrap();
     assert_eq!(task.edict.department, Department::Works);

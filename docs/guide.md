@@ -102,7 +102,7 @@ ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 
 ## 奉天门：Web 界面
 
-![奉天门首屏：左为翰林院与诸殿导航，中为诏令列表，右为所选诏令的全文与工部奏本](images/web-overview.png)
+![奉天门首屏：左为翰林院与诸殿导航，中为诏令列表，右为所选诏令的全文与批答](images/web-overview.png)
 
 
 ```bash
@@ -282,7 +282,7 @@ ziyuan censor 3                                     # 或 ziyuan censor all
 
 ## 多官协作：分办与汇总
 
-![rc.2 DAG 分办：第二件子诏令须先等 #2，父诏令显示「受 #2 所阻」](images/web-dag.png)
+![多官分办：第二件子诏令须先等 #2，父诏令显示「受 #2 所阻」](images/web-dag.png)
 
 ```bash
 ziyuan split 3                          # 尚书（其官职的模型）把待办诏令拆给本部官员
@@ -296,7 +296,7 @@ ziyuan run                              # 子诏令并发执行，全部结束�
 - rc.3 起可用 `ziyuan split 3 --plan docs/examples/dag-plan.json` 或 Web「御定排程」在创建时配置依赖、期限、尝试次数、度支、约定产出、批红要求和节点键；依赖填本批节点序号，不是任务 ID。期限已过或尝试次数已尽时直接记失败，不自动重试；约定产出仅为提示。相同方案重试不重复建任务，冲突方案拒绝；创建后不可改写。节点键不保证任意工具调用去重。输入示例、字段与恢复边界见 [DAG 修改速查表](dag.md)。
 - 内阁制下子诏令随原诏令批红。演示后端不能拆分，可用御定分办。Web 的「尚书分办」，TUI 的 `f`。拆分的 token 单独计价，计入原诏令的花费。
 
-![rc.3 · 御定排程沿用细框与主题，标题及操作栏固定，正文独立滚动](images/web-dag-schedule.png)
+![御定排程沿用细框与主题，标题及操作栏固定，正文独立滚动](images/web-dag-schedule.png)
 
 ## 户部度支：预算与限额
 

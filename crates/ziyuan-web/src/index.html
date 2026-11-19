@@ -307,6 +307,9 @@
   #text-new-project-dialog { box-sizing: border-box; width: min(560px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
   #text-new-project-dialog::backdrop { background: #1f282655; }
   #text-new-project-dialog .row { flex-wrap: wrap; }
+  #material-wizard { box-sizing: border-box; width: min(460px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; background: var(--sheet); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 24px; }
+  #material-wizard::backdrop { background: #1f282655; }
+  #material-wizard h3 { margin: 0 0 12px; }
   #schedule-form { display: flex; flex-direction: column; max-height: calc(86vh - 50px); }
   #schedule-title { flex-shrink: 0; margin: 0 0 12px; }
   .schedule-content { min-height: 0; overflow: auto; padding: 4px; margin: 0 -4px; }
@@ -344,7 +347,7 @@
   /* ---- 表单与按钮：墨色细框，只有「采纳」钤朱 ---- */
   label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
   label:first-child { margin-top: 0; }
-  input[type=text], input[type=number], input[type=password], input[type=datetime-local], input[type=file], select, textarea {
+  input:not([type]), input[type=text], input[type=number], input[type=password], input[type=datetime-local], input[type=file], select, textarea {
     width: 100%; font: inherit; color: var(--ink); background: var(--sheet);
     border: 1px solid var(--line); border-radius: var(--radius); padding: 7px 9px;
   }
@@ -434,6 +437,7 @@
   .side { border-left: 1px solid var(--line); padding-left: 20px; }
   .side + .side { margin-top: 20px; }
   #hall-wenhua .side { border-left: 0; padding-left: 0; margin: 0; }
+  .side .row + .row, #config-current + .row { margin-top: 8px; }
   .officials-layout h3 { margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
   .officials-layout h3:first-child { margin-top: 0; }
   .officials-layout h3 small { font-family: var(--sans); letter-spacing: 0; font-weight: normal; color: var(--muted); }
@@ -446,6 +450,7 @@
   /* ---- 武英殿与起居注 ---- */
   .records-list { margin: 12px 0 0; padding-left: 22px; max-height: 60vh; overflow: auto; font-size: 13.5px; }
   .records-list li { margin-bottom: 8px; }
+  .records-list li.hint { list-style: none; margin-left: -22px; }
   #records-q { flex: 1; }
   .history-filter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 14px 20px 0; }
   .history-filter input[type=text] { width: 9em; padding: 4px 8px; font-size: 13px; }
@@ -468,7 +473,7 @@
   #subscription-input { flex: 1 1 220px; min-width: 0; }
   #subscription-settings-form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 18px; }
   #subscription-settings-form label { margin: 0; }
-  #subscription-settings-form label.check { align-self: center; }
+  #subscription-settings-form label.check { display: inline-flex; align-items: center; gap: 5px; align-self: end; min-height: 36px; color: var(--ink); font-size: 13px; }
   #subscription-interval { max-width: 120px; display: block; }
   #subscription-status, #subscription-result { overflow-wrap: anywhere; }
   #subscription-panel { margin-top: 20px; }
@@ -578,6 +583,22 @@
 .assoc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .assoc-tag { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; font-size: 12px; }
 .assoc-tag-x { border: 0; background: none; padding: 0; cursor: pointer; color: var(--muted); font: inherit; }
+  .materials-editor { margin-top: 10px; }
+  .materials-editor [data-role="tabs"] { margin-top: 10px; }
+  .materials-editor [data-role="tab"][aria-selected="true"] { background: var(--ink); color: var(--sheet); border-color: var(--ink); }
+  .materials-editor [data-role="add"] { margin-top: 10px; }
+  .materials-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .materials-list [data-role="item"] { text-align: left; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .materials-list [data-role="item"][aria-selected="true"] { background: var(--tint); color: var(--tint-ink); border-color: var(--line-strong); font-weight: 600; }
+  .materials-form { margin-top: 12px; }
+  .materials-form [data-role="entry-form"] { padding: 12px 14px; background: var(--well); border: 1px solid var(--line); border-radius: var(--radius); }
+  .materials-form fieldset { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin: 12px 0 0; background: var(--sheet); }
+  .materials-form legend { font-family: var(--serif); font-size: 13px; color: var(--tint-ink); padding: 0 6px; }
+  .materials-form .material-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .materials-form .material-item:last-of-type { border-bottom: 0; }
+  .materials-form .material-item > button, .materials-form fieldset > button[data-add] { margin-top: 8px; }
+  .materials-form label:has(> input[type="checkbox"]) { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; }
+  .materials-form label:has(> input[type="checkbox"]) input[type="checkbox"] { width: auto; margin: 0; }
 #text-materials-editor.simple-mode fieldset[data-legend="出处"], #text-materials-editor.simple-mode fieldset[data-legend="适用范围"], #text-materials-editor.simple-mode fieldset[data-legend="说话人"], #text-materials-editor.simple-mode fieldset[data-legend="称呼规则"], #text-materials-editor.simple-mode fieldset[data-legend="关联术语"], #text-materials-editor.simple-mode fieldset[data-legend="语气"], #text-materials-editor.simple-mode fieldset[data-legend="生效位置"] { display: none; }
 .text-materials pre {
     white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; max-height: 220px;
@@ -689,14 +710,15 @@
     .header-stats { gap: 2px 14px; }
     .header-stats .stat + .stat::before { display: none; }
     .halls { flex-direction: row; overflow-x: auto; padding: 0; }
-    .halls a { border-left: 0; border-bottom: 2px solid transparent; padding: 8px 9px; flex: 1 0 auto; text-align: center; }
+    .halls a { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-left: 0; border-bottom: 2px solid transparent; padding: 8px 10px; flex: 1 0 auto; text-align: center; }
     .halls a b { font-size: 15px; letter-spacing: 1px; }
-    .halls a i { top: 2px; right: 0; }
+    .halls a i { position: static; flex: 0 0 auto; }
     .halls a.current { border-bottom-color: var(--seal); }
     .halls a span { display: none; }
     main { padding: 16px; }
     header { padding: 10px 16px; }
     .header-actions { margin-left: 0; }
+    .themes { margin-left: 0; }
   }
 
   #text-card .continuity-tools { min-width:0; margin:12px 0; padding:10px 14px; background:var(--well); border:1px solid var(--line); border-radius:var(--radius); box-sizing:border-box; }
@@ -1014,10 +1036,10 @@
                 <form method="dialog" class="write">
                   <h3>向导式新建</h3>
                   <label>类型<select id="wizard-kind"><option value="terms">术语</option><option value="persons">人物</option></select></label>
-                  <label>原文／姓名<input id="wizard-name" data-keep placeholder="例如：勇者"></label>
-                  <label>允许译法／别名<input id="wizard-values" data-keep placeholder="多个用分号分隔"></label>
-                  <label>备注<input id="wizard-note" data-keep placeholder="可留空"></label>
-                  <div class="actions"><button class="small" id="wizard-add" type="button">添加</button><button class="small" type="submit">取消</button></div>
+                  <label>原文／姓名<input type="text" id="wizard-name" data-keep placeholder="例如：勇者"></label>
+                  <label>允许译法／别名<input type="text" id="wizard-values" data-keep placeholder="多个用分号分隔"></label>
+                  <label>备注<input type="text" id="wizard-note" data-keep placeholder="可留空"></label>
+                  <div class="actions"><button class="small primary" id="wizard-add" type="button">添加</button><button class="small" type="submit">取消</button></div>
                   <p class="hint" id="wizard-status" role="status" aria-live="polite"></p>
                 </form>
               </dialog>
@@ -1965,7 +1987,7 @@ $("materials-tm-list")?.addEventListener("click", async () => {
   const host=$("materials-tm-result");host.replaceChildren();
   const check=()=>{if(project!==textProjectId)throw new Error("项目已变，请重新读取翻译记忆");};
   const task=async(fn)=>{try{check();await fn();$("materials-status").textContent="翻译记忆已更新；未修改译稿。";if(project===textProjectId)$("materials-tm-list").click();}catch(e){$("materials-status").textContent=e.message;}};
-  const input=(label,value="")=>{const e=document.createElement("input");e.placeholder=label;e.setAttribute("aria-label",label);e.value=value;return e;};
+  const input=(label,value="")=>{const e=document.createElement("input");e.type="text";e.placeholder=label;e.setAttribute("aria-label",label);e.value=value;return e;};
   const button=(label,fn)=>{const e=document.createElement("button");e.type="button";e.className="small write";e.textContent=label;e.onclick=()=>task(fn);return e;};
   const form=document.createElement("div");form.className="row write";const source=input("记忆原文"),target=input("认可译法");
   form.append(source,target,button("新增记忆",()=>api("/text/"+encodeURIComponent(project)+"/tm",{source:source.value,target:target.value})),button("从当前有效定稿建库",()=>api("/text/"+encodeURIComponent(project)+"/tm/build",{})));host.append(form);

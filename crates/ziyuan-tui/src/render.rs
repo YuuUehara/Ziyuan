@@ -1067,7 +1067,7 @@ impl App {
                     area,
                     72,
                     if edict {
-                        9
+                        11
                     } else if with_department {
                         6
                     } else {
@@ -1099,18 +1099,40 @@ impl App {
                 let mut cursor_width = 0;
                 for (label, value, id) in fields {
                     lines.push(Line::default());
-                    let input = Line::from(vec![
-                        Span::styled(label, Style::new().fg(GOLD)),
-                        Span::raw(value.to_owned()),
-                    ]);
-                    if id == *field || !edict {
+                    let active = id == *field || !edict;
+                    let input = if edict {
+                        let marker = if active { "▶ " } else { "  " };
+                        let label_style = if active {
+                            Style::new().fg(GOLD).bold()
+                        } else {
+                            Style::new().fg(GOLD).dim()
+                        };
+                        Line::from(vec![
+                            Span::styled(marker, label_style),
+                            Span::styled(label, label_style),
+                            Span::raw(value.to_owned()),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::styled(label, Style::new().fg(GOLD)),
+                            Span::raw(value.to_owned()),
+                        ])
+                    };
+                    if active {
                         cursor_line = lines.len();
                         cursor_width = input.width();
                     }
                     lines.push(input);
                 }
+                if edict {
+                    lines.push(Line::default());
+                    lines.push(Line::from(
+                        Span::raw("↑↓ 换项 · Enter 下诏 · Esc 取消").dim(),
+                    ));
+                }
                 let cursor_x = popup.x + 2 + cursor_width as u16;
-                let cursor_y = popup.y + 1 + cursor_line as u16;
+                let cursor_y =
+                    (popup.y + 1 + cursor_line as u16).min(popup.bottom().saturating_sub(2));
                 frame.render_widget(Clear, popup);
                 frame.render_widget(Paragraph::new(lines).block(modal_block(title)), popup);
                 frame
