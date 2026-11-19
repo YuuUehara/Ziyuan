@@ -20,12 +20,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
 
+mod failures;
 mod replace;
 pub mod temp_cleanup;
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
-/// 单次 `search_code` 最多返回的匹配行数。
+/// 单次 `search_code` 一页最多返回的匹配行数。
 const MAX_MATCHES: usize = 50;
 /// 单次 `list_files` 最多列出的文件数。
 const MAX_LISTED: usize = 300;
@@ -35,9 +36,10 @@ const DENIED_DIRS: &[&str] = &[".ziyuan", ".git", ".jj"];
 const SKIPPED_DIRS: &[&str] = &["target", "node_modules"];
 /// 单次 `write_file` 最多写入的字节数。
 const MAX_WRITE_BYTES: usize = 256 * 1024;
-/// `run_tests` 的时限与返回的输出末尾字节数。
+/// `run_tests` 的时限、返回的输出末尾字节数，以及从末尾回扫 cargo 失败摘录的上限。
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_TEST_OUTPUT: u64 = 8 * 1024;
+const MAX_FAILURE_SCAN: u64 = 1024 * 1024;
 /// 测试子进程可继承的环境变量；其余（API Key 等）一概不传。
 const TEST_ENV: &[&str] = &[
     "PATH",
@@ -98,7 +100,11 @@ pub fn sealed_tools(
                 tools.push(Box::new(ListFiles(sandbox.clone())));
             }
             Capability::SearchCode => tools.push(Box::new(SearchCode(sandbox.clone()))),
-            Capability::WriteFile => tools.push(Box::new(WriteFile(sandbox.clone()))),
+            // `replace_text` 随 `write_file` 授予，不另设权限，玉玺编码不变。
+            Capability::WriteFile => {
+                tools.push(Box::new(WriteFile(sandbox.clone())));
+                tools.push(Box::new(ReplaceText(sandbox.clone())));
+            }
             Capability::RunTests => tools.push(Box::new(RunTests(sandbox.clone()))),
         }
     }
@@ -162,21 +168,23 @@ impl Tool for SearchRecords {
     }
 }
 
-/// 审计所记的工具参数：`write_file` 的全文已在奏本中，只记行数与字节数。
+/// 审计所记的工具参数：写入类工具的全文已在奏本中，只记行数与字节数。
 pub fn audit_args(tool: &str, args_json: &str) -> String {
-    if tool != "write_file" {
+    if tool != "write_file" && tool != "replace_text" {
         return args_json.to_owned();
     }
     let Ok(mut args) = serde_json::from_str::<Value>(args_json) else {
         return args_json.to_owned();
     };
-    if let Some(content) = args.get("content").and_then(|c| c.as_str()) {
-        let summary = format!(
-            "〔{} 行，{} 字节，全文见奏本〕",
-            content.lines().count(),
-            content.len()
-        );
-        args["content"] = summary.into();
+    for key in ["content", "old", "new"] {
+        if let Some(content) = args.get(key).and_then(|c| c.as_str()) {
+            let summary = format!(
+                "〔{} 行，{} 字节，全文见奏本〕",
+                content.lines().count(),
+                content.len()
+            );
+            args[key] = summary.into();
+        }
     }
     args.to_string()
 }
@@ -480,10 +488,16 @@ impl Sandbox {
         labels.join("、")
     }
 
-    /// 深度优先搜索；返回是否因达到上限而提前停止。不进入符号链接。
-    fn search(&self, path: &Path, query: &str, out: &mut Vec<String>) -> io::Result<bool> {
+    /// 深度优先搜索；返回是否应停止（默认搜索凑满一页后不再往后数）。不进入符号链接。
+    fn search(
+        &self,
+        path: &Path,
+        query: &str,
+        ignore_case: bool,
+        page: &mut MatchPage,
+    ) -> io::Result<bool> {
         if !path.is_dir() {
-            return Ok(self.search_file(path, query, out));
+            return Ok(self.search_file(path, query, ignore_case, page));
         }
         let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|e| e.file_name());
@@ -491,14 +505,15 @@ impl Sandbox {
             let file_type = entry.file_type()?;
             let name = entry.file_name();
             let skipped = SKIPPED_DIRS.iter().any(|d| name == *d);
-            let truncated = if file_type.is_dir() && !skipped {
-                !is_denied(&self.root, &entry.path()) && self.search(&entry.path(), query, out)?
+            let stop = if file_type.is_dir() && !skipped {
+                !is_denied(&self.root, &entry.path())
+                    && self.search(&entry.path(), query, ignore_case, page)?
             } else if file_type.is_file() {
-                self.search_file(&entry.path(), query, out)
+                self.search_file(&entry.path(), query, ignore_case, page)
             } else {
                 false
             };
-            if truncated {
+            if stop {
                 return Ok(true);
             }
         }
@@ -526,7 +541,13 @@ impl Sandbox {
         Ok(())
     }
 
-    fn search_file(&self, path: &Path, query: &str, out: &mut Vec<String>) -> bool {
+    fn search_file(
+        &self,
+        path: &Path,
+        query: &str,
+        ignore_case: bool,
+        page: &mut MatchPage,
+    ) -> bool {
         // 禁区文件与非 UTF-8（二进制）文件直接跳过。
         if is_denied(&self.root, path) {
             return false;
@@ -536,15 +557,63 @@ impl Sandbox {
         };
         let relative = self.display(path);
         for (number, line) in text.lines().enumerate() {
-            if line.contains(query) {
-                if out.len() == MAX_MATCHES {
-                    return true;
-                }
-                out.push(format!("{relative}:{}: {}", number + 1, line.trim()));
+            if line_has(line, query, ignore_case)
+                && page.consider(format!("{relative}:{}: {}", number + 1, line.trim()))
+            {
+                return true;
             }
         }
         false
     }
+}
+
+/// 一页搜索结果。默认搜索在凑满一页后再遇到一条就停，以免改掉原来的截断语义。
+struct MatchPage {
+    offset: usize,
+    limit: usize,
+    stop_when_full: bool,
+    total: usize,
+    more: bool,
+    hits: Vec<String>,
+}
+
+impl MatchPage {
+    fn consider(&mut self, hit: String) -> bool {
+        if self.stop_when_full {
+            if self.hits.len() == self.limit {
+                self.more = true;
+                return true;
+            }
+            self.hits.push(hit);
+            self.total += 1;
+            return false;
+        }
+        if self.total >= self.offset && self.hits.len() < self.limit {
+            self.hits.push(hit);
+        }
+        self.total += 1;
+        false
+    }
+}
+
+fn line_has(line: &str, query: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        line.to_lowercase().contains(&query.to_lowercase())
+    } else {
+        line.contains(query)
+    }
+}
+
+/// 路径落在 `target` 或 `node_modules` 下。搜索不进入这些目录。
+fn under_skipped(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .map(|rel| {
+            rel.components().any(|c| {
+                let name = c.as_os_str().to_string_lossy();
+                SKIPPED_DIRS.contains(&name.as_ref())
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// `path` 相对 `root` 的任一组成部分是禁区目录或 `.env*`。
@@ -565,25 +634,32 @@ impl Tool for ReadFile {
         ToolSpec {
             name: Capability::ReadFile.code().into(),
             description: format!(
-                "读取项目内的文本文件（相对项目根目录的路径）。只能读取授权范围：{}。超过 {MAX_READ_BYTES} 字节会被截断。",
+                "读取项目内的文本文件（相对项目根目录的路径）。只能读取授权范围：{}。不给 offset 与 lines 时从开头读，超过 {MAX_READ_BYTES} 字节截断。给出 offset（从 1 起的行号）或 lines（行数）时按行窗口读取，并说明总行数和后面是否还有。",
                 self.0.scope_label()
             ),
-            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"}},"required":["path"],"additionalProperties":false}"#.into(),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"offset":{"type":"integer","description":"从第几行开始读，从 1 起"},"lines":{"type":"integer","description":"最多读几行"}},"required":["path"],"additionalProperties":false}"#.into(),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let relative = string_arg(args_json, "path")?;
+        let args = object_args(args_json, &["path", "offset", "lines"])?;
+        let relative = required_string(&args, "path")?;
+        let offset = optional_i64(&args, "offset")?;
+        let lines = optional_i64(&args, "lines")?;
         let bytes = match self.0.staged(&relative) {
             Some(text) => text.into_bytes(),
             None => fs::read(self.0.resolve(&relative)?)?,
         };
-        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_READ_BYTES)]);
-        if bytes.len() > MAX_READ_BYTES {
-            Ok(format!("{text}\n[已截断：文件共 {} 字节]", bytes.len()))
-        } else {
-            Ok(text.into_owned())
+        if offset.is_none() && lines.is_none() {
+            let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_READ_BYTES)]);
+            return if bytes.len() > MAX_READ_BYTES {
+                Ok(format!("{text}\n[已截断：文件共 {} 字节]", bytes.len()))
+            } else {
+                Ok(text.into_owned())
+            };
         }
+        let text = std::str::from_utf8(&bytes).map_err(|_| "不是文本文件，不能按行读取")?;
+        read_window(text, offset, lines)
     }
 }
 
@@ -652,34 +728,66 @@ impl Tool for SearchCode {
         ToolSpec {
             name: Capability::SearchCode.code().into(),
             description: format!(
-                "在授权范围（{}）内的文本文件中按字面量搜索（区分大小写），返回 `路径:行号: 内容`，最多 {MAX_MATCHES} 条。",
+                "在授权范围（{}）内的文本文件中按字面量搜索，返回 `路径:行号: 内容`。默认区分大小写，一页最多 {MAX_MATCHES} 条。可用 path 限定目录或文件，ignore_case 忽略大小写，offset 与 limit 翻页。先按授权范围和禁区过滤，不查 .git、.jj、.ziyuan、.env*、target、node_modules。",
                 self.0.scope_label()
             ),
-            input_schema_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"要查找的字面量文本"}},"required":["query"],"additionalProperties":false}"#.into(),
+            input_schema_json: format!(
+                r#"{{"type":"object","properties":{{"query":{{"type":"string","description":"要查找的字面量文本"}},"path":{{"type":"string","description":"只查这个相对目录或文件；省略则查整个授权范围"}},"ignore_case":{{"type":"boolean","description":"为 true 时忽略大小写"}},"offset":{{"type":"integer","description":"跳过前若干条匹配，从 0 起"}},"limit":{{"type":"integer","description":"本页条数，1 到 {MAX_MATCHES}"}}}},"required":["query"],"additionalProperties":false}}"#
+            ),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let query = string_arg(args_json, "query")?;
+        let args = object_args(
+            args_json,
+            &["query", "path", "ignore_case", "offset", "limit"],
+        )?;
+        let query = required_string(&args, "query")?;
         if query.is_empty() {
             return Err("query 不能为空".into());
         }
-        let mut matches = Vec::new();
-        let mut truncated = false;
-        for path in &self.0.scope {
-            if self.0.search(path, &query, &mut matches)? {
-                truncated = true;
+        let ignore_case = optional_bool(&args, "ignore_case")?.unwrap_or(false);
+        let offset = optional_i64(&args, "offset")?.unwrap_or(0);
+        if offset < 0 {
+            return Err("offset 不能为负".into());
+        }
+        let limit = match optional_i64(&args, "limit")? {
+            None => MAX_MATCHES as i64,
+            Some(n) if (1..=MAX_MATCHES as i64).contains(&n) => n,
+            Some(_) => return Err(format!("limit 须在 1 到 {MAX_MATCHES} 之间").into()),
+        };
+        let path = optional_string(&args, "path")?;
+        let enhanced = path.is_some()
+            || ignore_case
+            || args.contains_key("offset")
+            || args.contains_key("limit");
+        let mut page = MatchPage {
+            offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(MAX_MATCHES),
+            stop_when_full: !enhanced,
+            total: 0,
+            more: false,
+            hits: Vec::new(),
+        };
+        let roots = if let Some(relative) = path.as_deref() {
+            if relative.trim().is_empty() || relative.trim() == "." {
+                self.0.scope.clone()
+            } else {
+                let start = self.0.resolve(relative)?;
+                if under_skipped(&self.0.root, &start) {
+                    return Err(format!("不搜索构建产物: {relative}").into());
+                }
+                vec![start]
+            }
+        } else {
+            self.0.scope.clone()
+        };
+        for root in &roots {
+            if self.0.search(root, &query, ignore_case, &mut page)? {
                 break;
             }
         }
-        if matches.is_empty() {
-            return Ok("无匹配".into());
-        }
-        let mut out = matches.join("\n");
-        if truncated {
-            out.push_str(&format!("\n[已截断：仅显示前 {MAX_MATCHES} 条]"));
-        }
-        Ok(out)
+        Ok(format_matches(&page, enhanced))
     }
 }
 
@@ -729,6 +837,72 @@ impl Tool for WriteFile {
     }
 }
 
+struct ReplaceText(Arc<Sandbox>);
+
+impl Tool for ReplaceText {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "replace_text".into(),
+            description: format!(
+                "把授权范围（{}）内某个文本文件里唯一的一段 old 换成 new。找不到或出现不止一处就拒绝，不做模糊匹配，也不删除、改名或新建文件。改动只暂存，与 write_file 一样等准奏后才落盘。结果最多 {MAX_WRITE_BYTES} 字节。",
+                self.0.scope_label()
+            ),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"old":{"type":"string","description":"要替换的原文，必须在文件中恰好出现一次"},"new":{"type":"string","description":"替换后的文本，可以是空字符串"}},"required":["path","old","new"],"additionalProperties":false}"#.into(),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(args_json, &["path", "old", "new"])?;
+        let relative = required_string(&args, "path")?;
+        let old = required_string(&args, "old")?;
+        let new = required_string(&args, "new")?;
+        if old.is_empty() {
+            return Err("old 不能为空".into());
+        }
+        if old == new {
+            return Ok("新旧文本相同，未写入暂存".into());
+        }
+        let (path, key) = self.0.resolve_write(&relative)?;
+        if path.is_dir() {
+            return Err(format!("{key} 是目录").into());
+        }
+        let mut staged = self.0.staged.lock().expect("暂存区锁未中毒");
+        let (before, current) = if let Some(change) = staged.get(&key) {
+            (change.before.clone(), change.after.clone())
+        } else if path.exists() {
+            let text =
+                String::from_utf8(fs::read(&path)?).map_err(|_| format!("{key} 不是文本文件"))?;
+            (Some(text.clone()), text)
+        } else {
+            return Err(format!("{key} 不存在，不能替换").into());
+        };
+        let count = current.match_indices(&old).count();
+        if count == 0 {
+            return Err("找不到要替换的文本".into());
+        }
+        if count > 1 {
+            return Err(format!("匹配到 {count} 处，须唯一才能替换").into());
+        }
+        let after = current.replacen(&old, &new, 1);
+        if after.len() > MAX_WRITE_BYTES {
+            return Err(format!("替换后超过 {MAX_WRITE_BYTES} 字节").into());
+        }
+        staged.insert(
+            key.clone(),
+            FileChange {
+                path: key.clone(),
+                before,
+                after,
+            },
+        );
+        Ok(format!(
+            "已暂存 {key}：替换 1 处（{} 字节 → {} 字节）；诏令完成后呈报皇帝，准奏后才写入项目",
+            old.len(),
+            new.len()
+        ))
+    }
+}
+
 struct RunTests(Arc<Sandbox>);
 
 impl Tool for RunTests {
@@ -737,7 +911,7 @@ impl Tool for RunTests {
         ToolSpec {
             name: Capability::RunTests.code().into(),
             description: format!(
-                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾（未通过时作为工具错误返回）。不能指定其他命令。"
+                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾（未通过时作为工具错误返回）。命令不能改。若输出是 cargo test 且未通过，另附失败测试名和断言摘录；其他格式只给输出末尾。"
             ),
             input_schema_json: r#"{"type":"object","properties":{},"additionalProperties":false}"#
                 .into(),
@@ -837,10 +1011,7 @@ impl RunTests {
         }
         let mut log = fs::File::open(&log_path)?;
         let len = log.metadata()?.len();
-        log.seek(SeekFrom::Start(len.saturating_sub(MAX_TEST_OUTPUT)))?;
-        let mut tail = Vec::new();
-        log.read_to_end(&mut tail)?;
-        let tail = String::from_utf8_lossy(&tail);
+        let tail = read_lossy_from(&mut log, len.saturating_sub(MAX_TEST_OUTPUT))?;
         let passed = status.is_some_and(|s| s.success());
         let verdict = match status {
             None => format!("超时（{} 秒）被终止", TEST_TIMEOUT.as_secs()),
@@ -855,7 +1026,14 @@ impl RunTests {
         } else {
             String::new()
         };
-        let report = format!("测试 `{command}`：{verdict}（{haoshe}）\n输出{note}：\n{tail}");
+        let mut report = format!("测试 `{command}`：{verdict}（{haoshe}）\n输出{note}：\n{tail}");
+        if !passed {
+            let scan = read_lossy_from(&mut log, len.saturating_sub(MAX_FAILURE_SCAN))?;
+            if let Some(failures) = failures::cargo_failure_note(&scan) {
+                report.push('\n');
+                report.push_str(&failures);
+            }
+        }
         // 未通过记为工具失败：审计中 `run_tests` 的成败即测试的成败，供都察院核验。
         if passed {
             Ok(report)
@@ -883,6 +1061,180 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn read_lossy_from(file: &mut fs::File, start: u64) -> io::Result<String> {
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn object_args(
+    args_json: &str,
+    allowed: &[&str],
+) -> Result<serde_json::Map<String, Value>, BoxError> {
+    let args: Value = serde_json::from_str(args_json)?;
+    let Some(object) = args.as_object() else {
+        return Err("参数须是对象".into());
+    };
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(format!("不认识字段 `{key}`").into());
+    }
+    Ok(object.clone())
+}
+
+fn required_string(args: &serde_json::Map<String, Value>, key: &str) -> Result<String, BoxError> {
+    match args.get(key) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        _ => Err(format!("缺少字符串参数 `{key}`").into()),
+    }
+}
+
+fn optional_string(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, BoxError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!("`{key}` 须是字符串").into()),
+    }
+}
+
+fn optional_i64(args: &serde_json::Map<String, Value>, key: &str) -> Result<Option<i64>, BoxError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` 须是整数").into()),
+        Some(_) => Err(format!("`{key}` 须是整数").into()),
+    }
+}
+
+fn optional_bool(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<bool>, BoxError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(format!("`{key}` 须是布尔值").into()),
+    }
+}
+
+fn line_spans(text: &str) -> Vec<(usize, usize)> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            spans.push((start, index + 1));
+            start = index + 1;
+        }
+    }
+    if start < text.len() {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+fn clip_str(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn read_window(text: &str, offset: Option<i64>, lines: Option<i64>) -> Result<String, BoxError> {
+    let start = match offset.unwrap_or(1) {
+        n if n < 1 => return Err("offset 从 1 起".into()),
+        n => usize::try_from(n).map_err(|_| "offset 过大")?,
+    };
+    let want = match lines {
+        None => None,
+        Some(n) if n < 1 => return Err("lines 至少为 1".into()),
+        Some(n) => Some(usize::try_from(n).map_err(|_| "lines 过大")?),
+    };
+    let spans = line_spans(text);
+    let total = spans.len();
+    if total == 0 {
+        return Ok("〔共 0 行〕".into());
+    }
+    if start > total {
+        return Err(format!("行号超出范围：文件共 {total} 行").into());
+    }
+    let mut body = String::new();
+    let mut end = start - 1;
+    let mut byte_cut = false;
+    let last = want.map(|n| (start + n - 1).min(total)).unwrap_or(total);
+    for (number, &(from, to)) in spans
+        .iter()
+        .enumerate()
+        .skip(start - 1)
+        .take(last - (start - 1))
+    {
+        let piece = &text[from..to];
+        if body.len() + piece.len() > MAX_READ_BYTES {
+            let room = MAX_READ_BYTES.saturating_sub(body.len());
+            if room == 0 {
+                break;
+            }
+            body.push_str(clip_str(piece, room));
+            end = number + 1;
+            byte_cut = true;
+            break;
+        }
+        body.push_str(piece);
+        end = number + 1;
+    }
+    let more = byte_cut || end < total;
+    let tail = if byte_cut {
+        format!("已按 {MAX_READ_BYTES} 字节截断，后面还有")
+    } else if more {
+        "后面还有".into()
+    } else {
+        "已到末尾".into()
+    };
+    Ok(format!(
+        "〔第 {start}–{end} 行，共 {total} 行；{tail}〕\n{body}"
+    ))
+}
+
+fn format_matches(page: &MatchPage, enhanced: bool) -> String {
+    if page.hits.is_empty() {
+        return if enhanced && page.offset > 0 && page.total > 0 {
+            format!("无匹配（共 {} 条，偏移已越过末尾）", page.total)
+        } else {
+            "无匹配".into()
+        };
+    }
+    let mut out = String::new();
+    if enhanced {
+        let from = page.offset + 1;
+        let to = page.offset + page.hits.len();
+        let tail = if page.offset + page.hits.len() < page.total {
+            "；后面还有"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "〔第 {from}–{to} 条，共 {} 条{tail}〕\n",
+            page.total
+        ));
+    }
+    out.push_str(&page.hits.join("\n"));
+    if !enhanced && page.more {
+        out.push_str(&format!("\n[已截断：仅显示前 {MAX_MATCHES} 条]"));
+    }
+    out
 }
 
 fn string_arg(args_json: &str, key: &str) -> Result<String, BoxError> {
@@ -1055,6 +1407,260 @@ mod tests {
             "docs/a.md:1: unsafe doc\nsrc/main.rs:2: unsafe { run() }"
         );
         assert_eq!(search.execute(r#"{"query":"nothing"}"#).unwrap(), "无匹配");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_window_reports_line_counts_and_refuses_denied_paths() {
+        let dir = workspace("window");
+        let root = dir.join("project");
+        let read = tool(&root, &Seal::default(), "read_file");
+        let window = read
+            .execute(r#"{"path":"src/main.rs","offset":2,"lines":1}"#)
+            .unwrap();
+        assert!(
+            window.starts_with("〔第 2–2 行，共 3 行；后面还有〕\n    unsafe { run() }\n"),
+            "{window}"
+        );
+        let tail = read
+            .execute(r#"{"path":"src/main.rs","offset":3}"#)
+            .unwrap();
+        assert!(tail.contains("已到末尾") && tail.contains("}\n"), "{tail}");
+        assert!(
+            read.execute(r#"{"path":"src/main.rs","offset":9}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("行号超出范围")
+        );
+        assert!(
+            read.execute(r#"{"path":"src/main.rs","offset":0}"#)
+                .is_err()
+        );
+        assert!(read.execute(r#"{"path":"src/main.rs","lines":0}"#).is_err());
+        let err = read
+            .execute(r#"{"path":".env","offset":1,"lines":1}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("拒绝访问"), "{err}");
+        let err = read
+            .execute(r#"{"path":".ziyuan/court.log","lines":1}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("拒绝访问"), "{err}");
+        // 不给行窗口时仍是原来的全文，没有行数说明。
+        assert_eq!(
+            read.execute(r#"{"path":"docs/a.md"}"#).unwrap(),
+            "unsafe doc\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn search_can_limit_directory_case_and_page_without_leaving_scope() {
+        let dir = workspace("search-page");
+        let root = dir.join("project");
+        let search = tool(&root, &Seal::default(), "search_code");
+        let page = search
+            .execute(r#"{"query":"unsafe","path":"src","limit":1}"#)
+            .unwrap();
+        assert!(
+            page.starts_with("〔第 1–1 条，共 1 条〕\nsrc/main.rs:2:"),
+            "{page}"
+        );
+        assert!(!page.contains("docs/a.md"), "{page}");
+        let folded = search
+            .execute(r#"{"query":"UNSAFE","ignore_case":true,"path":"docs"}"#)
+            .unwrap();
+        assert!(folded.contains("docs/a.md:1:"), "{folded}");
+        let next = search
+            .execute(r#"{"query":"unsafe","offset":1,"limit":1}"#)
+            .unwrap();
+        assert!(
+            next.contains("第 2–2 条") && next.contains("src/main.rs"),
+            "{next}"
+        );
+        assert!(
+            search
+                .execute(r#"{"query":"unsafe","path":".env"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("拒绝访问")
+        );
+        assert!(
+            search
+                .execute(r#"{"query":"unsafe","path":".ziyuan"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("拒绝访问")
+        );
+        assert!(
+            search
+                .execute(r#"{"query":"unsafe","path":"target"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("不搜索构建产物")
+        );
+        assert!(
+            search
+                .execute(r#"{"query":"unsafe","path":"../secret.txt"}"#)
+                .is_err()
+        );
+        assert!(search.execute(r#"{"query":"unsafe","limit":0}"#).is_err());
+        assert!(search.execute(r#"{"query":"unsafe","offset":-1}"#).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_text_stages_one_unique_span_and_rejects_ambiguous_or_denied() {
+        let dir = workspace("replace");
+        let root = dir.join("project");
+        let sealed = sealed_tools(
+            &root,
+            &seal(&[Capability::ReadFile, Capability::WriteFile], &["src"]),
+            None,
+        )
+        .unwrap();
+        let find = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+        let replace = find("replace_text");
+        replace
+            .execute(r#"{"path":"src/main.rs","old":"unsafe { run() }","new":"run()"}"#)
+            .unwrap();
+        let read = find("read_file");
+        assert!(
+            read.execute(r#"{"path":"src/main.rs"}"#)
+                .unwrap()
+                .contains("run()")
+        );
+        assert!(
+            !read
+                .execute(r#"{"path":"src/main.rs"}"#)
+                .unwrap()
+                .contains("unsafe")
+        );
+        let changes = sealed.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "src/main.rs");
+        assert!(changes[0].before.as_deref().unwrap().contains("unsafe"));
+        assert!(changes[0].after.contains("    run()\n"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    unsafe { run() }\n}\n"
+        );
+        let err = replace
+            .execute(r#"{"path":"src/main.rs","old":"n","new":"N"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("须唯一"), "{err}");
+        assert!(
+            replace
+                .execute(r#"{"path":"src/main.rs","old":"不存在的句子","new":"x"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("找不到")
+        );
+        assert!(
+            replace
+                .execute(r#"{"path":".env","old":"unsafe","new":"x"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("拒绝访问")
+        );
+        assert!(
+            replace
+                .execute(r#"{"path":"docs/a.md","old":"unsafe","new":"x"}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("拒绝访问")
+        );
+        assert!(
+            replace
+                .execute(r#"{"path":"src/missing.rs","old":"a","new":"b"}"#)
+                .is_err()
+        );
+        let readonly = sealed_tools(&root, &Seal::default(), None).unwrap();
+        assert!(
+            !readonly
+                .tools
+                .iter()
+                .any(|tool| tool.spec().name == "replace_text")
+        );
+        let audited = audit_args(
+            "replace_text",
+            r#"{"path":"src/main.rs","old":"unsafe { run() }","new":"run()"}"#,
+        );
+        assert!(!audited.contains("unsafe { run() }"), "{audited}");
+        assert!(audited.contains("全文见奏本"), "{audited}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn run_tests_keeps_cargo_failure_names_when_the_assertion_is_not_in_the_tail() {
+        let dir = workspace("cargo-fail");
+        let root = dir.join("project");
+        let mut log = "noise\n".repeat(400);
+        log.push_str(
+            "thread 'tests::foo' panicked at src/lib.rs:4:5:\n\
+             assertion `left == right` failed\n  left: 1\n right: 2\n\n",
+        );
+        log.push_str(&"padding\n".repeat(2000));
+        log.push_str(
+            "failures:\n    tests::foo\n\n\
+             test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        );
+        fs::write(root.join("fixture.txt"), log).unwrap();
+        let show = if cfg!(windows) {
+            "type fixture.txt & exit /b 1"
+        } else {
+            "cat fixture.txt; exit 1"
+        };
+        let sealed =
+            sealed_tools(&root, &seal(&[Capability::RunTests], &["."]), Some(show)).unwrap();
+        let result = sealed.tools[0].execute("{}");
+        let output = match result {
+            Err(error)
+                if error
+                    .downcast_ref::<crate::haoshe::SandboxUnavailable>()
+                    .is_some() =>
+            {
+                RunTests(sealed.sandbox.clone())
+                    .run(crate::haoshe::Mode::Off)
+                    .unwrap_err()
+                    .to_string()
+            }
+            other => other.unwrap_err().to_string(),
+        };
+        let (head, note) = output
+            .split_once("〔失败测试〕")
+            .unwrap_or_else(|| panic!("应附上失败测试名：{output}"));
+        assert!(head.contains("未通过"), "{head}");
+        assert!(
+            !head.contains("left == right"),
+            "断言不在输出末尾时仍须单独摘出：{head}"
+        );
+        assert!(note.contains("- tests::foo"), "{note}");
+        assert!(note.contains("left == right"), "{note}");
+        // 非 cargo 的失败仍只给末尾，供都察院按工具成败判断。
+        let other = sealed_tools(
+            &root,
+            &seal(&[Capability::RunTests], &["."]),
+            Some("exit 3"),
+        )
+        .unwrap();
+        let output = match other.tools[0].execute("{}") {
+            Err(error)
+                if error
+                    .downcast_ref::<crate::haoshe::SandboxUnavailable>()
+                    .is_some() =>
+            {
+                RunTests(other.sandbox.clone())
+                    .run(crate::haoshe::Mode::Off)
+                    .unwrap_err()
+                    .to_string()
+            }
+            other => other.unwrap_err().to_string(),
+        };
+        assert!(output.contains("未通过（退出码 3）"), "{output}");
+        assert!(!output.contains("〔失败测试〕"), "{output}");
         fs::remove_dir_all(dir).unwrap();
     }
 

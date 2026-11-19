@@ -142,7 +142,10 @@ pub(crate) const HELP: &str = concat!(
   --mcp <授权>     外藩 MCP 工具（.ziyuan/mcp.json 登记的服务）：服务、服务/工具 或 * 的逗号列表；
                    默认不授。外部工具不受 --scope 约束，只授信得过的服务
   write_file、run_tests 只能授予工部：改动只暂存，诏令完成后呈报，须 `ziyuan apply` 准奏才落盘；
+  授了 write_file 就同时有 replace_text（替换文件中恰好一次出现的旧文本；找不到或多处则拒绝），不另设权限。
+  read_file 可不带参数整段读取；也可给行窗口 offset（从 1 起）和 lines。search_code 可给 path、ignore_case、offset、limit，一页最多 50 条。
   run_tests 在项目的临时副本（含暂存改动）中运行 ZIYUAN_TEST_COMMAND，不传 API Key 等环境变量。
+  cargo test 未通过时，结果另附失败测试名和断言摘录；其他命令仍只给输出末尾。
   无论玉玺如何，.ziyuan、.git、.jj 与 .env* 均不可读写。
 
 真实模型（OpenAI 兼容 Chat Completions API）：

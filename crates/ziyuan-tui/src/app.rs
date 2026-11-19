@@ -67,10 +67,15 @@ pub(crate) const TABS: [(Tab, &str); 4] = [
 
 pub(crate) enum Modal {
     /// 单行输入；`department` 只用于下诏与招募。
+    /// 下诏另有查阅范围和工具：空范围是整个项目，空工具是默认只读玉玺。
     Input {
         kind: InputKind,
         text: String,
         department: usize,
+        scope: String,
+        tools: String,
+        /// 0 内容，1 范围，2 工具。只有下诏会换项。
+        field: u8,
     },
     Choose {
         kind: ChooseKind,
@@ -129,6 +134,17 @@ pub(crate) fn nominable(court: &Court) -> Vec<Office> {
         .into_iter()
         .filter(|o| o.exists_in(court.mode()) && court.nomination_ballot(*o).is_ok())
         .collect()
+}
+
+pub(crate) fn text_input(kind: InputKind, text: String, department: usize) -> Modal {
+    Modal::Input {
+        kind,
+        text,
+        department,
+        scope: String::new(),
+        tools: String::new(),
+        field: 0,
+    }
 }
 
 /// 已有廷推、可枚卜的官职。

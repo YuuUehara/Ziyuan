@@ -1,15 +1,17 @@
 //! 按键处理：各标签页与弹窗的按键、输入与选择。
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use std::collections::BTreeSet;
+use std::path::Path;
 use ziyuan_app::{ABOLITION_NOTE, duzhi_report, kaocheng_report, skipped_note};
-use ziyuan_core::{Department, GovernanceMode, Seal, Verdict};
+use ziyuan_core::{Capability, Department, GovernanceMode, Seal, Verdict};
 use ziyuan_runtime::Outcome;
 use ziyuan_runtime::tools::temp_cleanup::Problem;
 
 use crate::App;
 use crate::app::{
     ChooseKind, ConfirmKind, DiffView, InputKind, Message, Modal, TABS, Tab, appointable, drawable,
-    nominable,
+    nominable, text_input,
 };
 
 /// 清理诊断的条数后缀；没有诊断时是空串。
@@ -187,11 +189,7 @@ impl App {
                 });
             }
             KeyCode::Char('R') => {
-                self.modal = Some(Modal::Input {
-                    kind: InputKind::Records,
-                    text: String::new(),
-                    department: 0,
-                });
+                self.modal = Some(text_input(InputKind::Records, String::new(), 0));
             }
             KeyCode::Char('T') if self.tab == Tab::Edicts => {
                 self.modal = Some(Modal::Choose {
@@ -205,11 +203,7 @@ impl App {
                     _ => InputKind::Edict,
                 };
                 let works = Department::ALL.iter().position(|&d| d == Department::Works);
-                self.modal = Some(Modal::Input {
-                    kind,
-                    text: String::new(),
-                    department: works.unwrap_or(0),
-                });
+                self.modal = Some(text_input(kind, String::new(), works.unwrap_or(0)));
             }
             code => match self.tab {
                 Tab::Edicts => self.edict_key(code),
@@ -303,11 +297,7 @@ impl App {
                 }
             }
             KeyCode::Char('W') => {
-                self.modal = Some(Modal::Input {
-                    kind: InputKind::Skip(task),
-                    text: String::new(),
-                    department: 0,
-                })
+                self.modal = Some(text_input(InputKind::Skip(task), String::new(), 0));
             }
             KeyCode::Char('u') => {
                 self.mutate(
@@ -333,11 +323,11 @@ impl App {
                 } else {
                     Verdict::Rejected
                 };
-                self.modal = Some(Modal::Input {
-                    kind: InputKind::Review(task, verdict),
-                    text: String::new(),
-                    department: 0,
-                });
+                self.modal = Some(text_input(
+                    InputKind::Review(task, verdict),
+                    String::new(),
+                    0,
+                ));
             }
             _ => {}
         }
@@ -393,11 +383,7 @@ impl App {
                     court.courtesy_name(agent),
                     court.art_name(agent)
                 );
-                self.modal = Some(Modal::Input {
-                    kind: InputKind::Rename(agent),
-                    text,
-                    department: 0,
-                });
+                self.modal = Some(text_input(InputKind::Rename(agent), text, 0));
             }
             KeyCode::Char('d') => {
                 self.mutate(
@@ -439,19 +425,34 @@ impl App {
         }
         match modal {
             Modal::Input {
-                text, department, ..
-            } => match key.code {
-                KeyCode::Char(c) => text.push(c),
-                KeyCode::Backspace => {
-                    text.pop();
+                kind,
+                text,
+                department,
+                scope,
+                tools,
+                field,
+            } => {
+                let edict = matches!(kind, InputKind::Edict);
+                let target = match (edict, *field) {
+                    (true, 1) => scope,
+                    (true, 2) => tools,
+                    _ => text,
+                };
+                match key.code {
+                    KeyCode::Char(c) => target.push(c),
+                    KeyCode::Backspace => {
+                        target.pop();
+                    }
+                    KeyCode::Tab => *department = (*department + 1) % Department::ALL.len(),
+                    KeyCode::BackTab => {
+                        *department =
+                            (*department + Department::ALL.len() - 1) % Department::ALL.len()
+                    }
+                    KeyCode::Up if edict => *field = (*field + 2) % 3,
+                    KeyCode::Down if edict => *field = (*field + 1) % 3,
+                    _ => {}
                 }
-                KeyCode::Tab => *department = (*department + 1) % Department::ALL.len(),
-                KeyCode::BackTab => {
-                    *department = (*department + Department::ALL.len() - 1) % Department::ALL.len()
-                }
-                KeyCode::Enter => self.submit_input(),
-                _ => {}
-            },
+            }
             Modal::Choose { selected, .. } => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => *selected = (*selected + count - 1) % count,
                 KeyCode::Down | KeyCode::Char('j') => *selected = (*selected + 1) % count,
@@ -461,6 +462,9 @@ impl App {
             // 已在本函数开头处理。
             Modal::Confirm(_) | Modal::Notice(_) => {}
         }
+        if key.code == KeyCode::Enter && matches!(self.modal, Some(Modal::Input { .. })) {
+            self.submit_input();
+        }
     }
 
     pub(crate) fn submit_input(&mut self) {
@@ -468,6 +472,9 @@ impl App {
             kind,
             text,
             department,
+            scope,
+            tools,
+            field,
         }) = self.modal.take()
         else {
             return;
@@ -480,14 +487,30 @@ impl App {
             return;
         }
         let text = text.trim().to_owned();
-        let department = Department::ALL[department];
+        let department_index = department;
+        let department = Department::ALL[department_index];
         match kind {
             InputKind::Edict if text.is_empty() => {
                 self.error("内容不能为空");
             }
             InputKind::Edict => {
+                let seal = match edict_seal(&self.config.root, &scope, &tools) {
+                    Ok(seal) => seal,
+                    Err(reason) => {
+                        self.error(reason);
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field,
+                        });
+                        return;
+                    }
+                };
                 if let Some(id) = self.mutate(
-                    |s| Ok(s.issue(department, text, Seal::default())?.id),
+                    |s| Ok(s.issue(department, text, seal)?.id),
                     |id| format!("诏令 #{} 已入队（按 r 执行）", id.0),
                 ) {
                     self.selected_task = Some(id);
@@ -630,11 +653,7 @@ impl App {
                     .get(self.human.selected)
                     .map(|paragraph| paragraph.text.clone())
                     .unwrap_or_default();
-                self.modal = Some(Modal::Input {
-                    kind: InputKind::HumanEdit,
-                    text,
-                    department: 0,
-                });
+                self.modal = Some(text_input(InputKind::HumanEdit, text, 0));
             }
             KeyCode::Char('s') => self.save_human(),
             KeyCode::Char('u') => self.confirm_human(ConfirmKind::HumanSubmit {
@@ -802,4 +821,44 @@ impl App {
                 .collect(),
         }
     }
+}
+
+/// 与命令行相同：工具按逗号分隔，`none` 为不授，留空为默认只读；范围须已存在，越界由治理层拒绝。
+fn edict_seal(root: &Path, scope_text: &str, tools_text: &str) -> Result<Seal, String> {
+    let mut seal = Seal::default();
+    if !tools_text.trim().is_empty() {
+        seal.capabilities = parse_tools(tools_text)?;
+    }
+    if !scope_text.trim().is_empty() {
+        let mut scope = Vec::new();
+        for part in scope_text.split([',', '，']) {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if !root.join(part).exists() {
+                return Err(format!("查阅范围不存在: {part}"));
+            }
+            scope.push(part.to_owned());
+        }
+        if scope.is_empty() {
+            return Err("查阅范围不存在".into());
+        }
+        seal.scope = scope;
+    }
+    Ok(seal)
+}
+
+fn parse_tools(value: &str) -> Result<BTreeSet<Capability>, String> {
+    if value == "none" {
+        return Ok(BTreeSet::new());
+    }
+    value
+        .split(',')
+        .map(|name| {
+            name.parse::<Capability>().map_err(|_| {
+                format!("未知工具: {name}（可用：read_file、search_code、write_file、run_tests）")
+            })
+        })
+        .collect()
 }

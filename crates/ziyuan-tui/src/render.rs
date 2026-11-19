@@ -939,7 +939,19 @@ impl App {
             // 只有下诏与招募可换部门。
             (
                 Some(Modal::Input {
-                    kind: InputKind::Edict | InputKind::Recruit,
+                    kind: InputKind::Edict,
+                    ..
+                }),
+                _,
+            ) => &[
+                ("Enter", "确定"),
+                ("Tab", "换部门"),
+                ("↑↓", "换项"),
+                ("Esc", "取消"),
+            ],
+            (
+                Some(Modal::Input {
+                    kind: InputKind::Recruit,
                     ..
                 }),
                 _,
@@ -1022,6 +1034,9 @@ impl App {
                 kind,
                 text,
                 department,
+                scope,
+                tools,
+                field,
             } => {
                 let (title, prompt, with_department) = match kind {
                     InputKind::Edict => ("下诏", "诏令内容：", true),
@@ -1047,7 +1062,18 @@ impl App {
                     InputKind::Rename(agent) => format!("{title} · 官员 #{}", agent.0),
                     _ => title.to_owned(),
                 };
-                let popup = centered(area, 64, if with_department { 6 } else { 5 });
+                let edict = matches!(kind, InputKind::Edict);
+                let popup = centered(
+                    area,
+                    72,
+                    if edict {
+                        9
+                    } else if with_department {
+                        6
+                    } else {
+                        5
+                    },
+                );
                 let mut lines = Vec::new();
                 if with_department {
                     let label = if matches!(kind, InputKind::Recruit) {
@@ -1064,17 +1090,31 @@ impl App {
                         Span::raw("  Tab 切换").dim(),
                     ]));
                 }
-                let input = Line::from(vec![
-                    Span::styled(prompt, Style::new().fg(GOLD)),
-                    Span::raw(text.clone()),
-                ]);
-                let cursor_x = popup.x + 2 + input.width() as u16;
-                let cursor_y = popup.y + 1 + lines.len() as u16 + 1;
-                lines.push(Line::default());
-                lines.push(input);
+                let mut fields = vec![(prompt, text.as_str(), 0u8)];
+                if edict {
+                    fields.push(("范围（空为整个项目）：", scope.as_str(), 1));
+                    fields.push(("工具（空为只读，none 为不授）：", tools.as_str(), 2));
+                }
+                let mut cursor_line = 0;
+                let mut cursor_width = 0;
+                for (label, value, id) in fields {
+                    lines.push(Line::default());
+                    let input = Line::from(vec![
+                        Span::styled(label, Style::new().fg(GOLD)),
+                        Span::raw(value.to_owned()),
+                    ]);
+                    if id == *field || !edict {
+                        cursor_line = lines.len();
+                        cursor_width = input.width();
+                    }
+                    lines.push(input);
+                }
+                let cursor_x = popup.x + 2 + cursor_width as u16;
+                let cursor_y = popup.y + 1 + cursor_line as u16;
                 frame.render_widget(Clear, popup);
                 frame.render_widget(Paragraph::new(lines).block(modal_block(title)), popup);
-                frame.set_cursor_position((cursor_x.min(popup.right() - 2), cursor_y));
+                frame
+                    .set_cursor_position((cursor_x.min(popup.right().saturating_sub(2)), cursor_y));
             }
             Modal::Choose { kind, selected } => {
                 let options = self.options(*kind);

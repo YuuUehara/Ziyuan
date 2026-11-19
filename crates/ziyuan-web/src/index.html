@@ -787,12 +787,12 @@
           <div class="checks">
             <label><input type="checkbox" id="tool-read_file" data-keep checked> 读文件 <code>read_file</code></label>
             <label><input type="checkbox" id="tool-search_code" data-keep checked> 搜代码 <code>search_code</code></label>
-            <label title="唯工部可授；改动暂存，准奏后才落盘"><input type="checkbox" id="tool-write_file" data-keep> 改文件 <code>write_file</code></label>
+            <label title="唯工部可授；改动暂存，准奏后才落盘。同时可用 replace_text，只替换恰好出现一次的旧文本"><input type="checkbox" id="tool-write_file" data-keep> 改文件 <code>write_file</code></label>
             <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> 跑测试 <code>run_tests</code></label>
           </div>
           <label for="edict-mcp">玉玺 · 外藩 MCP <span>（服务名逗号分隔，留空为不许；须在官职外藩上限内）</span></label>
           <input type="text" id="edict-mcp" data-keep placeholder="如 docs, fetch">
-          <p class="hint"><code>.ziyuan</code>、<code>.git</code>、<code>.jj</code> 与 <code>.env*</code> 无论玉玺如何均不可读。外部事件（如 CI）可凭令牌调用 <code>POST api/courier</code> 经兵部驿站入队。</p>
+          <p class="hint"><code>.ziyuan</code>、<code>.git</code>、<code>.jj</code> 与 <code>.env*</code> 无论玉玺如何均不可读。勾选改文件后，官员还能用 <code>replace_text</code> 替换恰好出现一次的旧文本。读文件可按行看后面的内容，搜代码可限目录、忽略大小写并翻页。<code>cargo test</code> 没通过时，结果里会留下失败测试名和断言。外部事件（如 CI）可凭令牌调用 <code>POST api/courier</code> 经兵部驿站入队。</p>
           <div class="actions">
             <button type="submit" class="primary" data-run="1">下诏并执行</button>
             <button type="submit" data-run="0">仅入队</button>
@@ -883,7 +883,7 @@
             <div class="row" style="flex-wrap:wrap">
               <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> 读文件 <code>read_file</code></label>
               <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> 搜代码 <code>search_code</code></label>
-              <label class="shrink"><input type="checkbox" id="ceiling-write_file" data-keep> 改文件 <code>write_file</code></label>
+              <label class="shrink" title="含 replace_text：只替换恰好出现一次的旧文本"><input type="checkbox" id="ceiling-write_file" data-keep> 改文件 <code>write_file</code></label>
               <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> 跑测试 <code>run_tests</code></label>
               <button class="small shrink" id="ceiling-set">设上限</button>
               <button class="small shrink" id="ceiling-clear">取消</button>

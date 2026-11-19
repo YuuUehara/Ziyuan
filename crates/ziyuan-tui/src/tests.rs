@@ -43,6 +43,7 @@ fn press(app: &mut App, keys: &str) {
             '\n' => KeyCode::Enter,
             '\t' => KeyCode::Tab,
             '↓' => KeyCode::Down,
+            '↑' => KeyCode::Up,
             '⎋' => KeyCode::Esc,
             '⌫' => KeyCode::Backspace,
             c => KeyCode::Char(c),
@@ -765,5 +766,46 @@ fn human_save_uses_a_fresh_id_after_the_panel_reopens() {
         !shown.contains("人工草稿请求身份已被不同内容使用"),
         "{shown}"
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn edict_form_sets_scope_and_tools_like_the_cli() {
+    let (mut app, _messages, root) = temp_app("edict-seal");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    press(&mut app, "n");
+    let shown = screen(&app);
+    assert!(shown.contains("范围（空为整个项目）"), "{shown}");
+    assert!(shown.contains("工具（空为只读，none 为不授）"), "{shown}");
+    press(&mut app, "查目录\n");
+    let task = app.court().task(TaskId(1)).unwrap();
+    assert_eq!(task.edict.department, Department::Works);
+    assert_eq!(task.edict.seal, Seal::default());
+
+    press(&mut app, "n↓src↓read_file↑↑只读文件\n");
+    let task = app.court().task(TaskId(2)).unwrap();
+    assert_eq!(task.edict.seal.scope, ["src".to_string()]);
+    assert_eq!(task.edict.seal.capabilities, [Capability::ReadFile].into());
+
+    press(&mut app, "n↓↓none↑↑无工具\n");
+    let task = app.court().task(TaskId(3)).unwrap();
+    assert!(task.edict.seal.capabilities.is_empty());
+
+    press(&mut app, "n\t↓↓write_file↑↑改文件\n");
+    let shown = screen(&app);
+    assert!(shown.contains("只能授予工部"), "{shown}");
+    assert!(app.court().task(TaskId(4)).is_none());
+    press(&mut app, "⎋");
+
+    press(&mut app, "n↓没有的目录↑查\n");
+    let shown = screen(&app);
+    assert!(shown.contains("查阅范围不存在: 没有的目录"), "{shown}");
+    assert!(app.court().task(TaskId(4)).is_none());
+    press(&mut app, "⎋");
+
+    press(&mut app, "n↓..↑越界\n");
+    let shown = screen(&app);
+    assert!(shown.contains("不含 `..`"), "{shown}");
+    assert!(app.court().task(TaskId(4)).is_none());
     let _ = std::fs::remove_dir_all(root);
 }

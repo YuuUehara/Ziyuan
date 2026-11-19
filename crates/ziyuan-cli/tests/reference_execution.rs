@@ -317,12 +317,19 @@ fn assert_writer_tools(request: &Value) {
         .map(|t| t["function"]["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    // Runtime's existing ReadFile capability also grants list_files. The
-    // finalized fixture supplies records, so search_records already exists.
-    // Require the identical, exact set for selected and no-reference controls.
+    // Runtime's existing ReadFile capability also grants list_files, and
+    // WriteFile also grants replace_text. The finalized fixture supplies
+    // records, so search_records already exists. Require the identical, exact
+    // set for selected and no-reference controls.
     assert_eq!(
         names,
-        ["list_files", "read_file", "search_records", "write_file"]
+        [
+            "list_files",
+            "read_file",
+            "replace_text",
+            "search_records",
+            "write_file"
+        ]
     );
 }
 fn assert_failed(fixture: &Fixture, task: TaskId) {
