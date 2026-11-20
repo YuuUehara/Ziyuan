@@ -944,5 +944,18 @@ async fn tui_shows_hunk_censure_and_issues_write_edict_from_plan() {
         rendered.contains("[御史/驳回建议]") && rendered.contains("未保留旧签名"),
         "{rendered}"
     );
+    assert!(rendered.contains("按 V 打回再改一轮"), "{rendered}");
+
+    // 按 V 打开打回再改一轮弹窗，输入修订指示并回车下发工部诏令 #3。
+    press(&mut app, "V");
+    let modal = screen(&app);
+    assert!(modal.contains("打回再改一轮"), "{modal}");
+    press(&mut app, "请保留旧签名\n");
+    let task3 = app.court().task(TaskId(3)).expect("应下发工部修订诏令 #3");
+    assert_eq!(task3.edict.department, Department::Works);
+    assert!(task3.edict.text.contains("打回修订诏令 #2"));
+    assert!(task3.edict.text.contains("请保留旧签名"));
+    assert!(task3.edict.text.contains("未保留旧签名"));
+
     let _ = std::fs::remove_dir_all(root);
 }

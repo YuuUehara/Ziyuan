@@ -749,7 +749,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 57] = [
+pub const RELEASES: [&str; 58] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -824,6 +824,8 @@ pub const RELEASES: [&str; 57] = [
     "1.22.0",
     // 1.23.0 扩展 CHANGES 支持删除标记（after 为 `-`），序号 57；不含删除的 CHANGES 仍为 0.3。
     "1.23.0",
+    // 1.24.0 新增「打回再改一轮」一键修订闭环（`edict --revise` / Web / TUI），零新增事件。
+    "1.24.0",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。

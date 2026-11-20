@@ -3722,3 +3722,150 @@ fn deleted_file_changes_persist_support_skip_and_invalidate_test_evidence() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn revise_edict_carries_diff_censure_review_and_note_and_preserves_seal() {
+    let root =
+        std::env::temp_dir().join(format!("ziyuan-revise-edict-loop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn old() {}\n").unwrap();
+
+    let mut session = Session::found(MemoryEventLog::default()).unwrap();
+    let censor = session.recruit(None, Department::Justice).unwrap();
+    session.appoint(censor, Office::Censor).unwrap();
+
+    // 只读条陈不能用 --revise。
+    let readonly = session
+        .issue(Department::Works, "先看代码".into(), Seal::default())
+        .unwrap()
+        .id;
+    let worker = session
+        .court()
+        .route(&session.court().task(readonly).unwrap().edict)
+        .unwrap()
+        .worker;
+    session
+        .commit(|_| {
+            Ok(vec![
+                CourtEvent::TaskAssigned {
+                    task: readonly,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::TaskCompleted {
+                    task: readonly,
+                    worker,
+                    summary: "已阅".into(),
+                },
+            ])
+        })
+        .unwrap();
+    assert!(!can_revise_task(session.court().task(readonly).unwrap()));
+    assert!(
+        session
+            .issue_revision(readonly, &root, None, None, String::new())
+            .is_err()
+    );
+
+    // 建一件工部写诏令（带 run_tests），呈报改动 + 都察院逐段驳回 + 皇帝驳回批语。
+    let write_seal = Seal {
+        capabilities: [
+            Capability::ReadFile,
+            Capability::SearchCode,
+            Capability::WriteFile,
+            Capability::RunTests,
+        ]
+        .into(),
+        scope: vec!["src/a.rs".into(), "src/gone.rs".into()],
+        mcp: std::collections::BTreeSet::new(),
+    };
+    let task_id = session
+        .issue(Department::Works, "重命名 old 为 new".into(), write_seal)
+        .unwrap()
+        .id;
+    let w = session
+        .court()
+        .route(&session.court().task(task_id).unwrap().edict)
+        .unwrap()
+        .worker;
+    session
+        .commit(|_| {
+            Ok(vec![
+                CourtEvent::TaskAssigned {
+                    task: task_id,
+                    worker: w,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task: task_id,
+                    changes: vec![FileChange {
+                        path: "src/a.rs".into(),
+                        before: Some("fn old() {}\n".into()),
+                        after: "fn new() {}\n".into(),
+                        deleted: false,
+                    }],
+                },
+                CourtEvent::TaskCompleted {
+                    task: task_id,
+                    worker: w,
+                    summary: "已修改 src/a.rs:1".into(),
+                },
+                CourtEvent::CensorReported {
+                    task: task_id,
+                    censor,
+                    verdict: CensorVerdict::Impeached,
+                    note: "弹劾\n第 1 段：驳回建议——未保留旧签名兼容".into(),
+                    evidence: Default::default(),
+                    model: None,
+                    usage: Default::default(),
+                },
+            ])
+        })
+        .unwrap();
+    session.discard_changes(task_id).unwrap();
+    session
+        .review(task_id, Verdict::Rejected, "请保留旧签名包装".into())
+        .unwrap();
+
+    assert!(can_revise_task(session.court().task(task_id).unwrap()));
+    let (revised, draft) = session
+        .issue_revision(
+            task_id,
+            &root,
+            None,
+            None,
+            "保留 old() 转发到 new() 并补单测".into(),
+        )
+        .unwrap();
+    assert_eq!(revised.department, Department::Works);
+    // src/gone.rs 已不存在，收拢至 src，因而整个范围去重收拢为 ["src"]。
+    assert_eq!(draft.scope, vec!["src"]);
+    assert_eq!(draft.rejected_hunks, vec![1]);
+    assert!(draft.run_tests);
+    assert!(revised.seal.capabilities.contains(&Capability::WriteFile));
+    assert!(revised.seal.capabilities.contains(&Capability::RunTests));
+    assert!(revised.text.contains("打回修订诏令 #"));
+    assert!(revised.text.contains("已驳回（未落盘）"));
+    assert!(revised.text.contains("-fn old() {}"));
+    assert!(revised.text.contains("+fn new() {}"));
+    assert!(revised.text.contains("未保留旧签名兼容"));
+    assert!(revised.text.contains("请保留旧签名包装"));
+    assert!(revised.text.contains("保留 old() 转发到 new() 并补单测"));
+
+    // 显式关闭 run_tests 并收窄范围。
+    let (revised2, draft2) = session
+        .issue_revision(
+            task_id,
+            &root,
+            Some(vec!["src/a.rs".into()]),
+            Some(false),
+            String::new(),
+        )
+        .unwrap();
+    assert_eq!(draft2.scope, vec!["src/a.rs"]);
+    assert!(!draft2.run_tests);
+    assert!(!revised2.seal.capabilities.contains(&Capability::RunTests));
+
+    let _ = std::fs::remove_dir_all(root);
+}

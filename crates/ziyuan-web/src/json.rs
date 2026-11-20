@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    TaskReport, base_hash, can_execute_from_plan, changes_version, demotion_note,
-    draft_plan_execution, estimate_cost, kaocheng_grade, parse_hunk_reviews, render_diffs,
-    stale_files, total_hunks,
+    TaskReport, base_hash, can_execute_from_plan, can_revise_task, changes_version, demotion_note,
+    draft_plan_execution, draft_revision, estimate_cost, kaocheng_grade, parse_hunk_reviews,
+    render_diffs, stale_files, total_hunks,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Department, GovernanceMode, Office, Persona, Seal, TaskId, TokenUsage,
@@ -46,6 +46,18 @@ pub fn mark_stale(value: &mut Value, court: &Court, root: &Path) {
                 "scope": draft.scope,
                 "fallback_scope": draft.fallback_scope,
                 "new_paths": draft.new_paths,
+            });
+        }
+        if can_revise_task(task)
+            && let Ok(draft) = draft_revision(task, root)
+        {
+            entry["revise_draft"] = json!({
+                "scope": draft.scope,
+                "run_tests": draft.run_tests,
+                "has_changes": draft.has_changes,
+                "rejected_hunks": draft.rejected_hunks,
+                "has_censure": draft.has_censure,
+                "has_review": draft.has_review,
             });
         }
     }

@@ -20,6 +20,8 @@ pub(crate) const HELP: &str = concat!(
                                        下诏并立即执行；--plan 按内置「条陈」只读出方案；--queue 只入队（默认模拟后端；见下方环境变量）
   ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]
                                        批复只读条陈并下发工部写诏令：自动按条陈收窄范围（可 --scope 改定），默认授 write_file 与 run_tests
+  ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]
+                                       打回已完成的工部诏令再改一轮：携带上轮 diff、都察院逐段意见与批语下发修订诏令
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan run --watch [--poll 5] [--no-censor]
@@ -178,6 +180,7 @@ pub(crate) const HELP: &str = concat!(
   ziyuan edict --dept works "检查 Rust 项目的 unsafe 代码"
   ziyuan edict --plan "给 censorate 加上逐段 diff 意见"
   ziyuan edict --from-plan 1 --queue "注意保持事件簿兼容"
+  ziyuan edict --revise 2 --queue --note "保留原接口并补单测"
   ziyuan reform direct
   ziyuan edict --dept works "重新检查"
   ziyuan reform cabinet
@@ -338,7 +341,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
-         edict) words="--plan --from-plan --no-tests --template --dept --scope --tools --mcp --queue" ;;
+         edict) words="--plan --from-plan --revise --note --no-tests --template --dept --scope --tools --mcp --queue" ;;
          split) words="--plan --parallel-writes" ;;
          dag) words="add deps --deps --clear --artifact --attempts --budget --deadline --approval --key" ;;
          text) words="{text_words} {text_flags}" ;;
@@ -378,6 +381,8 @@ complete -F _ziyuan ziyuan
                 format!("{} -a 'bash zsh fish'", seen("completions")),
                 format!("{} -l plan", seen("edict")),
                 format!("{} -l from-plan -x", seen("edict")),
+                format!("{} -l revise -x", seen("edict")),
+                format!("{} -l note -r", seen("edict")),
                 format!("{} -l no-tests", seen("edict")),
                 format!("{} -l plan -r", seen("split")),
                 format!("{} -l parallel-writes", seen("split")),

@@ -105,6 +105,30 @@ pub(crate) async fn from_plan(
     .await
 }
 
+/// 打回已完成的工部诏令再改一轮：`{ scope?: [..], run_tests?: bool, note?: string }`。
+pub(crate) async fn revise_edict(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let scope = string_list(&body["scope"]);
+    let scope_override = (!scope.is_empty()).then_some(scope);
+    let run_tests = body.get("run_tests").and_then(Value::as_bool);
+    let note = body["note"].as_str().unwrap_or_default().to_owned();
+    app.mutate(move |s| {
+        let (edict, draft) =
+            s.issue_revision(TaskId(id), &root, scope_override, run_tests, note)?;
+        Ok(json!({
+            "id": edict.id.0,
+            "scope": draft.scope,
+            "run_tests": draft.run_tests,
+            "rejected_hunks": draft.rejected_hunks,
+        }))
+    })
+    .await
+}
+
 /// 翰林院存模板：`{ name, department, text, tools?, scope?, criteria: [..] }`（同名覆盖）。
 pub(crate) async fn save_template(
     State(app): State<AppState>,

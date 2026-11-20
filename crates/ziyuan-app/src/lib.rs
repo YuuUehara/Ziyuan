@@ -21,6 +21,7 @@ mod personnel;
 mod plan;
 mod preview;
 mod reports;
+mod revise;
 mod run;
 mod session;
 pub mod subscriptions;
@@ -54,6 +55,7 @@ pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note
 pub use plan::{PlanDraft, can_execute_from_plan, draft_plan_execution, plan_edict_text};
 pub use preview::{PreviewFile, PreviewHunk, PreviewLine, PreviewSpan, preview_changes};
 pub use reports::{describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report};
+pub use revise::{ReviseDraft, can_revise_task, draft_revision, revision_edict_text};
 pub use run::{EXECUTOR_BUSY, NEGLECT_THRESHOLD, RunUpdate, TaskReport, WatchOptions, WatchUpdate};
 pub use time::{format_time, parse_time, tz_offset};
 pub use vcs::{

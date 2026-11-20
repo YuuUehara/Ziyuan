@@ -1597,9 +1597,48 @@ async fn censure_hunk_reviews_and_from_plan_endpoint_work_end_to_end() {
     );
     assert_eq!(write_task["censure"]["hunks"][0]["hunk"], 1);
 
+    assert_eq!(write_task["revise_draft"]["scope"], json!(["src/a.rs"]));
+    assert_eq!(write_task["revise_draft"]["rejected_hunks"], json!([1]));
+    // 观政令牌不能打回再改（403）。
+    let (status, _) = call(&base, "/tasks/2/revise", Some(VIEWER), Some(json!({}))).await;
+    assert_eq!(status, 403);
+    // 皇帝调用 /tasks/2/revise 下发工部修订诏令 #3。
+    let (status, res) = call(
+        &base,
+        "/tasks/2/revise",
+        t,
+        Some(json!({ "note": "请保留旧函数并补测试", "run_tests": false })),
+    )
+    .await;
+    assert_eq!(status, 200, "{res}");
+    assert_eq!(res["id"], 3);
+    assert_eq!(res["run_tests"], false);
+    assert_eq!(res["rejected_hunks"], json!([1]));
+
+    let (_, st2) = call(&base, "/state", t, None).await;
+    let revised = st2["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == 3)
+        .unwrap();
+    assert!(
+        revised["text"]
+            .as_str()
+            .unwrap()
+            .contains("请保留旧函数并补测试")
+    );
+    assert!(
+        revised["text"]
+            .as_str()
+            .unwrap()
+            .contains("未保留旧函数兼容")
+    );
+
     let html = include_str!("index.html");
     assert!(html.contains("hunk-censure") && html.contains("data-uncheck-rejected"));
     assert!(html.contains("data-from-plan") && html.contains("plan-exec"));
+    assert!(html.contains("data-revise") && html.contains("revise-exec-"));
 
     std::fs::remove_dir_all(root).unwrap();
 }

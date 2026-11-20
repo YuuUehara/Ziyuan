@@ -47,6 +47,14 @@ pub(crate) enum Command {
         queue: bool,
         extra: String,
     },
+    /// 打回已完成的工部诏令再改一轮：携带上轮 diff、都察院意见与皇帝批语。
+    EdictRevise {
+        source: TaskId,
+        scope: Vec<String>,
+        run_tests: Option<bool>,
+        queue: bool,
+        note: String,
+    },
     /// 翰林院：列出模板。
     Templates,
     /// 外藩名册。
@@ -803,11 +811,14 @@ pub(crate) struct TemplateChoice {
 
 pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     const USAGE: &str = "用法: ziyuan edict [--plan] [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] [--queue] <诏令内容>
-  或: ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]";
+  或: ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]
+  或: ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]";
     let mut department = None;
     let mut queue = false;
     let mut plan_mode = false;
     let mut from_plan: Option<TaskId> = None;
+    let mut revise: Option<TaskId> = None;
+    let mut note_flag: Option<String> = None;
     let mut no_tests = false;
     let mut seal = Seal::default();
     let mut scope = Vec::new();
@@ -834,6 +845,21 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
                 let value = args.remove(0);
                 from_plan = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
             }
+            "--revise" => {
+                if args.len() < 2 {
+                    return Err(USAGE.into());
+                }
+                args.remove(0);
+                let value = args.remove(0);
+                revise = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
+            }
+            "--note" => {
+                if args.len() < 2 {
+                    return Err(USAGE.into());
+                }
+                args.remove(0);
+                note_flag = Some(args.remove(0));
+            }
             "--dept" | "--scope" | "--tools" | "--template" | "--mcp" => {
                 if args.len() < 2 {
                     return Err(USAGE.into());
@@ -857,10 +883,19 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             _ => break,
         }
     }
+    if from_plan.is_some() && revise.is_some() {
+        return Err("`--from-plan` 与 `--revise` 不能同时使用".into());
+    }
     if let Some(plan) = from_plan {
-        if plan_mode || template.is_some() || department.is_some() || tools_given || mcp_given {
+        if plan_mode
+            || template.is_some()
+            || department.is_some()
+            || tools_given
+            || mcp_given
+            || note_flag.is_some()
+        {
             return Err(
-                "`--from-plan` 固定下发工部写诏令，不能同时使用 --plan / --template / --dept / --tools / --mcp"
+                "`--from-plan` 固定下发工部写诏令，不能同时使用 --plan / --template / --dept / --tools / --mcp / --note"
                     .into(),
             );
         }
@@ -872,8 +907,33 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             extra: args.join(" "),
         });
     }
+    if let Some(source) = revise {
+        if plan_mode || template.is_some() || department.is_some() || tools_given || mcp_given {
+            return Err(
+                "`--revise` 固定下发工部修订诏令，不能同时使用 --plan / --template / --dept / --tools / --mcp"
+                    .into(),
+            );
+        }
+        let trailing = args.join(" ");
+        let note = match (note_flag, trailing.is_empty()) {
+            (Some(n), true) => n,
+            (Some(n), false) if n.trim().is_empty() => trailing,
+            (Some(n), false) => format!("{n}\n{trailing}"),
+            (None, _) => trailing,
+        };
+        return Ok(Command::EdictRevise {
+            source,
+            scope,
+            run_tests: no_tests.then_some(false),
+            queue,
+            note,
+        });
+    }
+    if note_flag.is_some() {
+        return Err("`--note` 只能配合 `--revise` 使用".into());
+    }
     if no_tests {
-        return Err("`--no-tests` 只能配合 `--from-plan` 使用".into());
+        return Err("`--no-tests` 只能配合 `--from-plan` 或 `--revise` 使用".into());
     }
     if plan_mode {
         if template.is_some() {
@@ -1251,5 +1311,42 @@ mod scheduled_tests {
         }
         assert!(command(&["edict", "--from-plan", "5", "--dept", "rites"]).is_err());
         assert!(command(&["edict", "--from-plan", "5", "--plan"]).is_err());
+    }
+
+    #[test]
+    fn edict_revise_flags_validate_cleanly() {
+        match command(&[
+            "edict",
+            "--revise",
+            "7",
+            "--scope",
+            "src",
+            "--no-tests",
+            "--queue",
+            "--note",
+            "保留旧签名",
+            "并补单测",
+        ])
+        .unwrap()
+        {
+            Command::EdictRevise {
+                source,
+                scope,
+                run_tests,
+                queue,
+                note,
+            } => {
+                assert_eq!(source, TaskId(7));
+                assert_eq!(scope, ["src"]);
+                assert_eq!(run_tests, Some(false));
+                assert!(queue);
+                assert_eq!(note, "保留旧签名\n并补单测");
+            }
+            _ => panic!("expected Command::EdictRevise"),
+        }
+        assert!(command(&["edict", "--revise", "7", "--from-plan", "6"]).is_err());
+        assert!(command(&["edict", "--revise", "7", "--dept", "rites"]).is_err());
+        assert!(command(&["edict", "--revise", "7", "--plan"]).is_err());
+        assert!(command(&["edict", "--note", "只有说明", "普通诏令"]).is_err());
     }
 }

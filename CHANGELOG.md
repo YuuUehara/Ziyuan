@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.24.0 — 2026-11-20
+
+- **「打回再改一轮」一键修订闭环（零新增朝廷事件）**：
+  - `ziyuan-app` 新增 `revise` 模块（`ReviseDraft`、`can_revise_task`、`draft_revision`、`revision_edict_text`、`Session::issue_revision`）：针对已完成的工部代码诏令，自动汇总原诏令正文、上轮改动状态与截断统一 diff、都察院复核与重点逐段意见、皇帝上轮评定以及本次修订指示，并提醒先核对当前磁盘状态再呈报；盘上已删范围路径自动收拢到最近已存在父目录，沿用原 `run_tests` 与 MCP 授权（可显式覆盖）。仅写入常规 `EdictIssued`，不提高旧事件簿读取门槛；只读条陈与译书任务均明确拒绝。
+  - CLI 新增 `ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]`（与 `--from-plan`/`--plan`/`--template`/`--dept`/`--tools`/`--mcp` 互斥），同步更新帮助与 bash／zsh／fish 补全。
+  - Web 奉天门新增 `revise_draft` 状态字段与 `POST /api/tasks/{id}/revise`（观政令牌 403），奉天殿渲染「打回再改一轮（下发工部修订）」面板（遇改动已驳回、有驳回段、都察院弹劾或皇帝驳回时自动展开）。
+  - TUI 紫禁城诏令页新增 `V` 快捷键打开预填范围与工具的修订弹窗并下发工部修订诏令。
+- 登记版本 `1.24.0`（序号 58，不提高旧事件簿读取门槛）；同步更新 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.24.0 验收记录](docs/acceptance/1.24.0.md)。
+
 ## 1.23.0 — 2026-11-20
 
 - **工部单次批量补丁替换与文件删除／改名暂存（仍守「人看过才落盘」）**：

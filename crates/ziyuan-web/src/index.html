@@ -1670,6 +1670,30 @@ function taskHtml(t) {
         <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
     }
   }
+  if (t.revise_draft) {
+    const r = t.revise_draft;
+    const autoOpen = (t.changes && t.changes.state === "discarded")
+      || r.rejected_hunks.length > 0
+      || (t.censure && t.censure.verdict === "impeached")
+      || (t.review && t.review.verdict === "rejected");
+    const extraHint = r.rejected_hunks.length
+      ? `将自动附带上轮被驳回/御史建议驳回的第 ${r.rejected_hunks.join("、")} 段意见与 diff；改动仍须暂存，逐段准奏才落盘。`
+      : "将携带上轮改动 diff、都察院意见与批语下发新工部诏令；改动仍须暂存，逐段准奏才落盘。";
+    body += `<details class="plan-exec write" id="revise-exec-${t.id}" ${autoOpen ? "open" : ""}>
+      <summary>打回再改一轮（下发工部修订）</summary>
+      <div class="plan-form">
+        <div class="hint">${extraHint}</div>
+        <div class="plan-row">
+          <input type="text" id="revise-scope-${t.id}" data-keep value="${esc(r.scope.join(", "))}" placeholder="工部范围（相对路径，逗号分隔）">
+          <label class="shrink"><input type="checkbox" id="revise-tests-${t.id}" ${r.run_tests ? "checked" : ""} data-keep> 附授 <code>run_tests</code></label>
+        </div>
+        <div class="plan-row">
+          <input type="text" id="revise-note-${t.id}" data-keep placeholder="本次修订指示（可选，如改法、边界或需补的测试）">
+          <button type="button" class="small gold shrink" data-revise="${t.id}">打回再改一轮</button>
+        </div>
+      </div>
+    </details>`;
+  }
   if (t.plan_draft) {
     const p = t.plan_draft;
     const title = p.is_plan_template ? "依条陈授写权（下发工部）" : "依此回奏授写权（下发工部）";
@@ -4764,6 +4788,22 @@ document.addEventListener("click", (event) => {
       }
     });
     toast(count ? `已取消勾选 ${count} 段御史建议驳回的改动（尚未落盘）` : "御史建议驳回的段已全部取消勾选");
+  } else if (d.revise) {
+    const id = d.revise;
+    const scope = (($("revise-scope-" + id) || {}).value || "")
+      .split(/[\n,，、]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const run_tests = !!($("revise-tests-" + id) || {}).checked;
+    const note = (($("revise-note-" + id) || {}).value || "").trim();
+    el.disabled = true;
+    act(api(`/tasks/${id}/revise`, { scope, run_tests, note })).then((r) => {
+      el.disabled = false;
+      if (!r) return;
+      selected = r.id;
+      toast(`已打回诏令 #${id} 下发工部修订诏令 #${r.id}（范围：${r.scope.join("、")}）`);
+      refresh();
+    });
   } else if (d.fromPlan) {
     const id = d.fromPlan;
     const scope = (($("plan-scope-" + id) || {}).value || "")

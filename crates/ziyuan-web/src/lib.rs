@@ -37,7 +37,7 @@ use crate::auth::{index, login, require_token};
 use crate::edicts::{
     acquit, apply_changes, approve, cancel, censor, changelog, courier, dag_add, dag_deps, debate,
     discard_changes, draft, from_plan, github_pr, github_pull, github_reply, issue, recheck,
-    redraft, remove_template, review, save_template, split, urgent,
+    redraft, remove_template, review, revise_edict, save_template, split, urgent,
 };
 use crate::personnel::{
     abolish, appoint, budget, cane, crown, dismiss, exam, nominate, office_ceiling, office_model,
@@ -219,6 +219,7 @@ fn router_for(app: AppState) -> Router {
         .route("/tasks/{id}/redraft", post(redraft))
         .route("/tasks/{id}/censor", post(censor))
         .route("/tasks/{id}/from-plan", post(from_plan))
+        .route("/tasks/{id}/revise", post(revise_edict))
         .route("/tasks/{id}/recheck", post(recheck))
         .route("/tasks/{id}/acquit", post(acquit))
         .route("/records", get(records))

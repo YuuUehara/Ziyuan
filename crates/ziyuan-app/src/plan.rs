@@ -140,7 +140,7 @@ pub fn plan_edict_text(plan_task: &Task, scope: &[String], extra: &str) -> Strin
     out
 }
 
-fn push_unique(list: &mut Vec<String>, item: String) {
+pub(crate) fn push_unique(list: &mut Vec<String>, item: String) {
     if !list.contains(&item) {
         list.push(item);
     }
@@ -355,7 +355,7 @@ fn sanitize_path_candidate(raw: &str, allow_plain_name: bool) -> Option<String> 
     Some(normalized.to_owned())
 }
 
-fn nearest_existing_parent(root: &Path, relative: &str) -> String {
+pub(crate) fn nearest_existing_parent(root: &Path, relative: &str) -> String {
     let mut cur = Path::new(relative).parent();
     while let Some(parent) = cur {
         let text = parent.to_string_lossy().replace('\\', "/");
@@ -371,7 +371,7 @@ fn nearest_existing_parent(root: &Path, relative: &str) -> String {
 }
 
 /// 若已包含某个祖先目录（含 `.`），则去掉其下冗余的子路径，保持顺序稳定。
-fn collapse_scope(paths: Vec<String>) -> Vec<String> {
+pub(crate) fn collapse_scope(paths: Vec<String>) -> Vec<String> {
     if paths.iter().any(|p| p == ".") {
         return vec![".".to_owned()];
     }
@@ -397,6 +397,34 @@ fn collapse_scope(paths: Vec<String>) -> Vec<String> {
     out
 }
 
+pub(crate) fn validate_scope_override(
+    root: &Path,
+    custom: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    let mut normalized = Vec::new();
+    for raw in custom {
+        let p = raw.trim().replace('\\', "/");
+        if p.is_empty() {
+            return Err(GovernanceError::InvalidScope(raw).into());
+        }
+        let path = Path::new(&p);
+        let escapes = path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
+        if escapes
+            || p.split('/')
+                .any(|seg| DENIED.contains(&seg) || seg.starts_with(".env"))
+        {
+            return Err(GovernanceError::InvalidScope(p).into());
+        }
+        if !root.join(&p).exists() {
+            return Err(GovernanceError::Court(format!("查阅范围不存在：{p}")).into());
+        }
+        push_unique(&mut normalized, p);
+    }
+    Ok(normalized)
+}
+
 impl<S: EventStore> Session<S> {
     /// 依已完成的只读诏令（条陈）下发一件工部写诏令：自动收窄查阅范围（可由皇帝通过
     /// `scope_override` 改定），授予 `read_file`、`search_code`、`write_file`（以及可选
@@ -419,28 +447,7 @@ impl<S: EventStore> Session<S> {
         if let Some(custom) = scope_override
             && !custom.is_empty()
         {
-            let mut normalized = Vec::new();
-            for raw in custom {
-                let p = raw.trim().replace('\\', "/");
-                if p.is_empty() {
-                    return Err(GovernanceError::InvalidScope(raw).into());
-                }
-                let path = Path::new(&p);
-                let escapes = path
-                    .components()
-                    .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
-                if escapes
-                    || p.split('/')
-                        .any(|seg| DENIED.contains(&seg) || seg.starts_with(".env"))
-                {
-                    return Err(GovernanceError::InvalidScope(p).into());
-                }
-                if !root.join(&p).exists() {
-                    return Err(GovernanceError::Court(format!("查阅范围不存在：{p}")).into());
-                }
-                push_unique(&mut normalized, p);
-            }
-            draft.scope = normalized;
+            draft.scope = validate_scope_override(root, custom)?;
             draft.fallback_scope = false;
         }
         let mut capabilities: BTreeSet<Capability> = [

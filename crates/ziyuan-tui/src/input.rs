@@ -4,7 +4,8 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    ABOLITION_NOTE, draft_plan_execution, duzhi_report, kaocheng_report, skipped_note,
+    ABOLITION_NOTE, draft_plan_execution, draft_revision, duzhi_report, kaocheng_report,
+    skipped_note,
 };
 use ziyuan_core::{Capability, Department, GovernanceMode, Seal, Verdict};
 use ziyuan_runtime::Outcome;
@@ -254,6 +255,42 @@ impl App {
                 );
             }
             KeyCode::Char('i') => self.start_censor(task),
+            KeyCode::Char('V') => {
+                let Some(entry) = self.court().task(task) else {
+                    return;
+                };
+                match draft_revision(entry, &self.config.root) {
+                    Ok(draft) => {
+                        let works = Department::ALL
+                            .iter()
+                            .position(|&d| d == Department::Works)
+                            .unwrap_or(0);
+                        let tools = if draft.run_tests {
+                            "read_file,search_code,write_file,run_tests"
+                        } else {
+                            "read_file,search_code,write_file"
+                        };
+                        if !draft.rejected_hunks.is_empty() {
+                            let list = draft
+                                .rejected_hunks
+                                .iter()
+                                .map(u32::to_string)
+                                .collect::<Vec<_>>()
+                                .join("、");
+                            self.info(format!("将附带上轮第 {list} 段意见与 diff（输入修订指示）"));
+                        }
+                        self.modal = Some(Modal::Input {
+                            kind: InputKind::Revise(task),
+                            text: String::new(),
+                            department: works,
+                            scope: draft.scope.join(","),
+                            tools: tools.into(),
+                            field: 0,
+                        });
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
             KeyCode::Char('P') => {
                 let Some(entry) = self.court().task(task) else {
                     return;
@@ -468,7 +505,10 @@ impl App {
                 tools,
                 field,
             } => {
-                let multi = matches!(kind, InputKind::Edict | InputKind::FromPlan(_));
+                let multi = matches!(
+                    kind,
+                    InputKind::Edict | InputKind::FromPlan(_) | InputKind::Revise(_)
+                );
                 let switch_dept = matches!(kind, InputKind::Edict | InputKind::Recruit);
                 let target = match (multi, *field) {
                     (true, 1) => scope,
@@ -599,6 +639,56 @@ impl App {
                         format!(
                             "已依条陈 #{} 下发工部诏令 #{}（按 r 执行）",
                             plan_task.0, id.0
+                        )
+                    },
+                ) {
+                    self.selected_task = Some(id);
+                    self.detail_scroll = 0;
+                }
+            }
+            InputKind::Revise(source_task) => {
+                let seal = match edict_seal(&self.config.root, &scope, &tools) {
+                    Ok(seal) if seal.capabilities.contains(&Capability::WriteFile) => seal,
+                    Ok(_) => {
+                        self.error("打回修订工部诏令须包含 write_file");
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field,
+                        });
+                        return;
+                    }
+                    Err(reason) => {
+                        self.error(reason);
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field,
+                        });
+                        return;
+                    }
+                };
+                let run_tests = Some(seal.capabilities.contains(&Capability::RunTests));
+                let scope_override = (!scope.trim().is_empty()).then_some(seal.scope);
+                let root = self.config.root.clone();
+                if let Some(id) = self.mutate(
+                    |s| {
+                        Ok(
+                            s.issue_revision(source_task, &root, scope_override, run_tests, text)?
+                                .0
+                                .id,
+                        )
+                    },
+                    |id| {
+                        format!(
+                            "已打回诏令 #{} 下发工部修订诏令 #{}（按 r 执行）",
+                            source_task.0, id.0
                         )
                     },
                 ) {
