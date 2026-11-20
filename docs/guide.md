@@ -222,7 +222,8 @@ ziyuan edict --tools none "只凭诏令文本回答"
 工部诏令可以另授 `write_file`（改写或新建文件）与 `run_tests`（跑测试）。其他五部的诏令授这两项会被拒绝。
 
 ```bash
-export ZIYUAN_TEST_COMMAND="cargo test"      # 由皇帝设定，模型不能更改
+export ZIYUAN_TEST_COMMAND="cargo test"      # 默认测试命令（由皇帝设定，模型不能更改）
+export ZIYUAN_TEST_COMMANDS="check=cargo check;clippy=cargo clippy -- -D warnings;test=cargo test"  # 可选：命名白名单预设
 ziyuan edict --tools read_file,write_file,run_tests --scope src "修复 parse 的越界并补测试"
 ziyuan diff 3       # 查看呈报的统一 diff（终端中有 git-delta 则经它显示；--side-by-side 并排，--plain 不经 delta）
 ziyuan apply 3      # 准奏：写入项目
@@ -235,7 +236,7 @@ ziyuan edict --revise 3 --note "保留旧签名并补单测"   # 打回再改一
 - **只暂存，不落盘**：`write_file` 整篇改写或新建，`replace_text` 支持单处或原子批量唯一旧文本替换，`delete_file` / `rename_file` 暂存文件删除与移动。改动都留在内存里，同一诏令内 `read_file` / `list_files` / `search_code` 均看到暂存后的状态；诏令完成时作为奏本（`ChangesProposed`）记入事件簿，项目文件不变。
 - **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。核对逐字节进行：只改了行尾（CRLF/LF）、改成非 UTF-8 或二进制内容都算改动。原文已变的文件在 Web 与 TUI 的奏本中标「原文已变」（`--json` 中为 `stale: true`），Web 不给准奏按钮，只能驳回后重下诏令。Web 准奏时回传预览所示的改动版本（`changes.version`），与服务端记下的不符即拒绝，以免照着别的项目或旧页面准奏。工部可新建、改写、删除与改名 UTF-8 文本文件（仍不能写二进制文件；删除单文件记为 1 段，可 `--skip` 保留原文件）；符号链接按其指向判断，指向项目之外或禁区的一律拒绝。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
 - **测试在副本里跑**：`run_tests` 把项目复制到临时目录（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与 `target`），叠加暂存改动，运行 `ZIYUAN_TEST_COMMAND`。子进程只继承 `PATH`、`HOME` 等少数环境变量，API Key 不会传进去；时限 10 分钟，返回退出码与输出末尾（最多 8 KiB）。模型不能改这条命令。
-- **多框架测试失败摘录**：命令输出能认出 `cargo test`（兼容 Rust 1.89+ 线程 ID 格式）、`pytest`、`node --test`、`go test` 或 `jest`/`vitest` 的失败名单时，结果里另外列出失败测试名和对应断言（从日志末尾最多回看 1 MiB，每条摘录有上限）。认不出时仍只给输出末尾。测试是否通过仍只看退出码；都察院仍按这次 `run_tests` 成功还是失败来核验，不解析摘录文字。
+- **多框架测试失败摘录**：命令输出能认出 `cargo test`（兼容 Rust 1.89+ 线程 ID 格式）、`pytest`、`node --test`、`go test` 或 `jest`/`vitest` 的失败名单，或 `rustc`/`tsc`/`mypy` 结构化编译／类型诊断时，结果里另外列出失败测试名／诊断定位和对应摘录（从日志末尾最多回看 1 MiB，每条摘录有上限）。认不出时仍只给输出末尾。测试是否通过仍只看退出码；都察院仍按这次 `run_tests` 成功还是失败来核验，不解析摘录文字。
 - **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt。号舍里不能联网，只能写测试副本，读不到 `~/.ssh`、`~/.aws` 等凭据目录。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认）与 `require` 相同，没有号舍（如 Windows、未装 bubblewrap）则拒绝运行，报「号舍不可用」；`off` 不入号舍照常运行，结果中注明，须皇帝自担风险（Windows 政策见 [ADR-0001](adr/0001-windows-sandbox.md)）。号舍默认全断网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`；或用 `ZIYUAN_SANDBOX_ALLOW` 按域名放行，如 `ZIYUAN_SANDBOX_ALLOW="index.crates.io,static.crates.io"`。放行时号舍仍断网，只留一个本机代理（门吏），它只转递名单上域名的 HTTP(S)，其余回 403，被拦下的域名记在测试结果里。`example.com` 只放行其本身，`*.example.com` 只放行其子域。Linux 上按域名放行另须装 socat（`apt install socat`）。
 - **逐段准奏**：diff 按段编号（`@@ 第 n 段 · 原第 m 行 @@`，跨文件连续编号；相隔不超过 6 行的改动并为一段）。`--skip` 驳回所列各段，其余照原样写入，行尾与末行换行逐字节保留；新建文件整段驳回即不建。各段都驳回请直接 `discard`。驳回了哪些段记入事件簿（`ChangesApplied` 附段号）。Web 奏本每段有「准此段」勾选框，若都察院给出了逐段意见会显示在对应段头下，并附「取消勾选御史建议驳回的段」辅助按钮（只改勾选，仍由皇帝决定是否准奏）；TUI 在段头下附注御史意见、按 `W` 输入要驳回的段号；`ziyuan diff` 默认在段头下附注御史意见，`--plain` 保持纯 diff 不附注。
 - **落盘进版本库**：`ziyuan apply --commit`、Web 的「准奏并提交」、TUI 的 `m`。落盘后只提交本诏令写入的文件（项目在 jj 版本库中用 `jj commit <文件>`，否则 `git commit --only`），工作区里别的改动原样留着；文件若在准奏前就有你自己未提交的改动，会一并提交。提交说明首行为「紫垣诏令 #n：…」，附承办者与驳回的段号，末行 `Ziyuan-Edict: n`；`ziyuan github pr` 开的草稿 PR 用同样的标题与提交说明，两边对得上。提交失败（如未设提交者）时改动仍已落盘，可自行提交。重试时若最近 200 个提交里已有带本诏令尾注的，就认作已提交、不再提交一次；落盘中断后重试，已写成改后内容的文件跳过，其余照常核对原文再写。

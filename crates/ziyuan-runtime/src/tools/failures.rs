@@ -1,6 +1,7 @@
 //! 从常见测试框架的输出里抽出失败测试名和断言摘录。
 //!
-//! 目前识别 `cargo test`、`pytest`、`node --test`、`go test` 与 `jest`/`vitest`。
+//! 目前识别 `cargo test`、`pytest`、`node --test`、`go test` 与 `jest`/`vitest` 测试失败，
+//! 以及 `rustc`/`cargo`、`tsc`、`mypy`/`pyright` 的结构化编译／类型诊断。
 //! 认不出时返回 `None`，调用方继续只给出输出末尾，绝不凭空猜测失败原因。
 
 /// 单次附在测试结果里的失败条数上限。
@@ -17,6 +18,7 @@ pub(super) fn failure_note(log: &str) -> Option<String> {
         .or_else(|| node_test_failure_note(log))
         .or_else(|| go_test_failure_note(log))
         .or_else(|| jest_vitest_failure_note(log))
+        .or_else(|| compiler_diagnostic_note(log))
 }
 
 fn format_failures(items: &[(String, Option<String>)]) -> Option<String> {
@@ -453,6 +455,170 @@ fn jest_vitest_failure_note(log: &str) -> Option<String> {
     format_failures(&items)
 }
 
+// ---------- 编译与类型诊断（rustc / tsc / mypy） ----------
+
+fn format_diagnostics(items: &[(String, Option<String>)]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut out = String::from("〔编译诊断〕\n");
+    let shown = items.len().min(MAX_FAILURES);
+    for (header, detail) in items.iter().take(shown) {
+        out.push_str(&format!("- {header}\n"));
+        if let Some(detail) = detail {
+            for line in detail.lines() {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+    }
+    if items.len() > shown {
+        out.push_str(&format!("（其余 {} 条诊断未列出）\n", items.len() - shown));
+    }
+    Some(out)
+}
+
+fn compiler_diagnostic_note(log: &str) -> Option<String> {
+    rustc_diagnostic_note(log)
+        .or_else(|| tsc_diagnostic_note(log))
+        .or_else(|| mypy_diagnostic_note(log))
+}
+
+/// 解析 `rustc` / `cargo check` / `cargo clippy` 诊断块：
+/// 必须带 `--> <文件>:<行>:<列>` 定位，不把末尾的 `error: could not compile` 汇总当成诊断。
+fn rustc_diagnostic_note(log: &str) -> Option<String> {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut items: Vec<(String, Option<String>)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim_end();
+        let is_err = (line.starts_with("error[") || line.starts_with("error:"))
+            && !line.starts_with("error: could not compile")
+            && !line.starts_with("error: aborting due to")
+            && !line.starts_with("error: test failed");
+        if !is_err {
+            i += 1;
+            continue;
+        }
+        let mut loc: Option<&str> = None;
+        let mut excerpt = String::new();
+        let mut excerpt_lines = 0usize;
+        let mut j = i + 1;
+        while j < lines.len() {
+            let cur = lines[j].trim_end();
+            if cur.is_empty() {
+                // 跳过紧跟在诊断头后的单空行；已有定位后再遇空行则块结束。
+                if loc.is_some() {
+                    break;
+                }
+                j += 1;
+                continue;
+            }
+            if cur.starts_with("error[")
+                || cur.starts_with("error:")
+                || cur.starts_with("warning[")
+                || cur.starts_with("warning:")
+            {
+                break;
+            }
+            let trimmed = cur.trim_start();
+            if let Some(after) = trimmed.strip_prefix("--> ") {
+                if loc.is_none() {
+                    loc = Some(after.trim());
+                } else {
+                    push_excerpt_line(&mut excerpt, trimmed, &mut excerpt_lines);
+                }
+            } else if trimmed.starts_with("help:")
+                || trimmed.starts_with("note:")
+                || trimmed.contains("^^^")
+                || trimmed.contains("expected ")
+                || trimmed.contains("found ")
+            {
+                push_excerpt_line(&mut excerpt, trimmed, &mut excerpt_lines);
+            }
+            j += 1;
+        }
+        if let Some(loc) = loc {
+            let header = format!("{loc}: {line}");
+            let detail = (!excerpt.is_empty()).then_some(excerpt);
+            items.push((header, detail));
+        }
+        i = j.max(i + 1);
+    }
+    format_diagnostics(&items)
+}
+
+/// 解析 TypeScript `tsc` 诊断：
+/// 支持 `src/app.ts(12,5): error TS2322: ...` 与 `src/app.ts:12:5 - error TS2322: ...`。
+fn tsc_diagnostic_note(log: &str) -> Option<String> {
+    let mut items: Vec<(String, Option<String>)> = Vec::new();
+    for line in log.lines() {
+        let trimmed = line.trim();
+        let parsed = if let Some((left, right)) = trimmed.split_once("): error TS") {
+            let (path, coords) = left.rsplit_once('(').unwrap_or(("", ""));
+            if !path.is_empty()
+                && coords
+                    .split(',')
+                    .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                Some(format!("{path}({coords}): error TS{right}"))
+            } else {
+                None
+            }
+        } else if let Some((left, right)) = trimmed.split_once(" - error TS") {
+            let parts: Vec<&str> = left.rsplitn(3, ':').collect();
+            if parts.len() == 3
+                && !parts[2].is_empty()
+                && parts[0].bytes().all(|b| b.is_ascii_digit())
+                && parts[1].bytes().all(|b| b.is_ascii_digit())
+            {
+                Some(format!("{left}: error TS{right}"))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(header) = parsed {
+            items.push((header, None));
+        }
+    }
+    format_diagnostics(&items)
+}
+
+/// 解析 Python `mypy` / `pyright` 诊断：
+/// 支持 `path.py:12: error: ...`、`path.py:12:5: error: ...` 与 `path.py:12:5 - error: ...`。
+fn mypy_diagnostic_note(log: &str) -> Option<String> {
+    let mut items: Vec<(String, Option<String>)> = Vec::new();
+    for line in log.lines() {
+        let trimmed = line.trim();
+        let split = trimmed
+            .split_once(": error: ")
+            .or_else(|| trimmed.split_once(" - error: "));
+        let Some((left, msg)) = split else {
+            continue;
+        };
+        // left 形如 `src/app.py:12` 或 `src/app.py:12:5`。
+        let parts: Vec<&str> = left.split(':').collect();
+        let valid_loc = match parts.as_slice() {
+            [path, ln] => {
+                !path.is_empty() && !ln.is_empty() && ln.bytes().all(|b| b.is_ascii_digit())
+            }
+            [path, ln, col] => {
+                !path.is_empty()
+                    && !ln.is_empty()
+                    && !col.is_empty()
+                    && ln.bytes().all(|b| b.is_ascii_digit())
+                    && col.bytes().all(|b| b.is_ascii_digit())
+            }
+            _ => false,
+        };
+        if valid_loc && !msg.trim().is_empty() {
+            items.push((format!("{left}: error: {}", msg.trim()), None));
+        }
+    }
+    format_diagnostics(&items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +775,57 @@ Test Suites: 1 failed, 1 total
         assert!(note.contains("- tests::case7\n"), "{note}");
         assert!(!note.contains("tests::case8"), "{note}");
         assert!(note.contains("其余 2 个失败未列出"), "{note}");
+    }
+
+    #[test]
+    fn compiler_diagnostics_extract_rustc_tsc_and_mypy() {
+        let rustc_log = "\
+error[E0308]: mismatched types
+  --> crates/demo/src/lib.rs:42:12
+   |
+42 |     return \"oops\";
+   |            ^^^^^^ expected `usize`, found `&str`
+   |
+   = help: try parsing the string
+
+error: could not compile `demo` (lib) due to 1 previous error
+";
+        let note = failure_note(rustc_log).unwrap();
+        assert!(note.contains("〔编译诊断〕"), "{note}");
+        assert!(
+            note.contains("crates/demo/src/lib.rs:42:12: error[E0308]: mismatched types"),
+            "{note}"
+        );
+        assert!(note.contains("expected `usize`, found `&str`"), "{note}");
+        assert!(!note.contains("could not compile"), "{note}");
+
+        let tsc_log = "\
+src/view.ts(18,7): error TS2322: Type 'string' is not assignable to type 'number'.
+src/api.ts:9:3 - error TS2339: Property 'foo' does not exist on type 'Bar'.
+";
+        let tsc_note = failure_note(tsc_log).unwrap();
+        assert!(
+            tsc_note.contains("src/view.ts(18,7): error TS2322"),
+            "{tsc_note}"
+        );
+        assert!(
+            tsc_note.contains("src/api.ts:9:3: error TS2339"),
+            "{tsc_note}"
+        );
+
+        let mypy_log = "\
+pkg/calc.py:14: error: Incompatible return value type (got \"str\", expected \"int\")  [return-value]
+pkg/calc.py:21:8 - error: Cannot access member \"bar\" for type \"None\"
+Found 2 errors in 1 file
+";
+        let mypy_note = failure_note(mypy_log).unwrap();
+        assert!(
+            mypy_note.contains("pkg/calc.py:14: error: Incompatible return value type"),
+            "{mypy_note}"
+        );
+        assert!(
+            mypy_note.contains("pkg/calc.py:21:8: error: Cannot access member"),
+            "{mypy_note}"
+        );
     }
 }

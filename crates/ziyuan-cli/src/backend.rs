@@ -113,10 +113,16 @@ pub(crate) fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>>
         Err(_) => return Err("ZIYUAN_CONTEXT_TOKENS 须为有效 Unicode 正整数".into()),
     };
     eprintln!("上下文节略阈值：{context_tokens} tokens（不是模型窗口上限）");
+    let test_presets = match env::var("ZIYUAN_TEST_COMMANDS") {
+        Ok(raw) => ziyuan_runtime::tools::parse_test_presets(&raw).map_err(|e| e.to_string())?,
+        Err(env::VarError::NotPresent) => Default::default(),
+        Err(_) => return Err("ZIYUAN_TEST_COMMANDS 须为有效 Unicode 字符串".into()),
+    };
     Ok(Arc::new(
         AgentBackend::new(Box::new(model), env::current_dir()?, steps)
             .with_context_tokens(context_tokens)
             .with_catalog(catalog)
-            .with_test_command(env::var("ZIYUAN_TEST_COMMAND").ok()),
+            .with_test_command(env::var("ZIYUAN_TEST_COMMAND").ok())
+            .with_test_presets(test_presets),
     ))
 }

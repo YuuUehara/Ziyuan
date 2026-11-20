@@ -323,6 +323,7 @@ fn version_and_help_list_the_frozen_commands_and_environment() {
         "ZIYUAN_MAX_STEPS",
         "ZIYUAN_CONTEXT_TOKENS",
         "ZIYUAN_TEST_COMMAND",
+        "ZIYUAN_TEST_COMMANDS",
         "ZIYUAN_TZ",
         "ZIYUAN_GITHUB_REPO",
         "ZIYUAN_GITHUB_TOKEN",

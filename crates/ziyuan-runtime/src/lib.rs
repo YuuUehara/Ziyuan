@@ -107,8 +107,10 @@ pub struct AgentBackend {
     root: PathBuf,
     max_steps: usize,
     context_tokens: u64,
-    /// 皇帝设定的测试命令（`run_tests` 用）。
+    /// 皇帝设定的默认测试命令（`run_tests` 用）。
     test_command: Option<String>,
+    /// 皇帝通过 `ZIYUAN_TEST_COMMANDS` 设定的命名检查／测试预设白名单。
+    test_presets: std::collections::BTreeMap<String, String>,
 }
 
 /// 同一服务商的模型目录：按名称构造模型并给出单价。
@@ -127,6 +129,7 @@ impl AgentBackend {
             max_steps,
             context_tokens: agent_loop::CONTEXT_TOKENS,
             test_command: None,
+            test_presets: std::collections::BTreeMap::new(),
         }
     }
 
@@ -138,6 +141,14 @@ impl AgentBackend {
 
     pub fn with_test_command(mut self, command: Option<String>) -> Self {
         self.test_command = command;
+        self
+    }
+
+    pub fn with_test_presets(
+        mut self,
+        presets: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.test_presets = presets;
         self
     }
 
@@ -211,7 +222,12 @@ impl WorkerBackend for AgentBackend {
         let switched = self.switch_to(job.model.as_deref())?;
         let model = switched.as_deref().unwrap_or(self.model.as_ref());
         let tool_root = job.workspace_override.as_deref().unwrap_or(&self.root);
-        let mut sealed = tools::sealed_tools(tool_root, &edict.seal, self.test_command.as_deref())?;
+        let mut sealed = tools::sealed_tools_with_presets(
+            tool_root,
+            &edict.seal,
+            self.test_command.as_deref(),
+            self.test_presets.clone(),
+        )?;
         if !job.records.is_empty() {
             sealed.tools.push(tools::record_search(job.records.clone()));
         }

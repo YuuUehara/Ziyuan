@@ -749,7 +749,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 59] = [
+pub const RELEASES: [&str; 60] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -828,6 +828,8 @@ pub const RELEASES: [&str; 59] = [
     "1.24.0",
     // 1.25.0 新增只读版本库上下文工具（`vcs_status` / `vcs_diff` / `vcs_log`），零新增事件、玉玺编码不变。
     "1.25.0",
+    // 1.26.0 新增 `ZIYUAN_TEST_COMMANDS` 命名检查白名单与 rustc/tsc/mypy 编译诊断摘录，零新增事件。
+    "1.26.0",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。

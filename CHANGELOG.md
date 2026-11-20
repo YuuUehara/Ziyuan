@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.26.0 — 2026-11-20
+
+- **命名检查／测试预设白名单（`ZIYUAN_TEST_COMMANDS`）与编译诊断结构化摘录（零新增事件）**：
+  - `ziyuan-runtime` 新增 `tools::parse_test_presets` 与 `tools::sealed_tools_with_presets`、`AgentBackend::with_test_presets`；`run_tests` 新增可选参数 `preset`，模型可从皇帝预定义的白名单（如 `ZIYUAN_TEST_COMMANDS="check=cargo check --workspace;clippy=cargo clippy -- -D warnings;test=cargo test"`）按名称快速切换检查与全量测试，绝不开放任意 shell 或参数拼接；不传 `preset` 时完全保持 `ZIYUAN_TEST_COMMAND` 原行为。
+  - `tools::failures` 新增 `rustc`/`cargo`、`tsc`、`mypy`/`pyright` 结构化编译与类型诊断摘录（`〔编译诊断〕`，上限 8 条）；测试成败仍严格以退出码为准。
+  - 搜索与测试副本跳过 `__pycache__`、`.pytest_cache`、`.mypy_cache`、`.ruff_cache` 常见缓存目录。
+- 登记版本 `1.26.0`（序号 60，不提高旧事件簿读取门槛）；同步更新 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.26.0 验收记录](docs/acceptance/1.26.0.md)。
+
 ## 1.25.0 — 2026-11-20
 
 - **只读版本库上下文工具（`vcs_status`／`vcs_diff`／`vcs_log`，零新增事件与玉玺代码）**：

@@ -42,7 +42,14 @@ const MAX_SYMBOL_FILE_BYTES: u64 = 1024 * 1024;
 /// 永远不可查阅的目录：朝廷事件簿与版本库元数据。
 const DENIED_DIRS: &[&str] = &[".ziyuan", ".git", ".jj"];
 /// 搜索时跳过（但可直接读取）的目录：构建产物。测试副本也不复制它们。
-const SKIPPED_DIRS: &[&str] = &["target", "node_modules"];
+const SKIPPED_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+];
 /// 单次 `write_file` 最多写入的字节数。
 const MAX_WRITE_BYTES: usize = 256 * 1024;
 /// 单次 `replace_text` 批量补丁最多允许的条数。
@@ -96,12 +103,67 @@ impl Sealed {
 /// 按玉玺构造工具：只包含其授予的工具，且都限定在其查阅范围内。
 /// `test_command` 为皇帝设定的测试命令（`run_tests` 用；未设定时该工具报错）。
 /// 查阅范围不存在、越出 `root` 或落在禁区时返回错误。
+/// 解析皇帝设定的命名测试／检查白名单（`ZIYUAN_TEST_COMMANDS`）。
+///
+/// 格式为分号或换行分隔的 `名称=命令`（如 `check=cargo check;clippy=cargo clippy;test=cargo test`）；
+/// 名称限 1–32 位 ASCII 字母、数字、`_` 或 `-`，禁止重名或空命令。模型只能按名称选用，绝不能注入或改写命令。
+pub fn parse_test_presets(raw: &str) -> Result<BTreeMap<String, String>, BoxError> {
+    let mut presets = BTreeMap::new();
+    for entry in raw.split([';', '\n']) {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, command)) = trimmed.split_once('=') else {
+            return Err(
+                format!("ZIYUAN_TEST_COMMANDS 格式错误（须为 `名称=命令`）：{trimmed}").into(),
+            );
+        };
+        let name = name.trim();
+        let command = command.trim();
+        if name.is_empty()
+            || name.len() > 32
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            return Err(format!(
+                "ZIYUAN_TEST_COMMANDS 预设名 `{name}` 不合法（限 1–32 位 ASCII 字母、数字、_ 或 -）"
+            )
+            .into());
+        }
+        if command.is_empty() {
+            return Err(format!("ZIYUAN_TEST_COMMANDS 预设 `{name}` 缺少命令").into());
+        }
+        if presets
+            .insert(name.to_owned(), command.to_owned())
+            .is_some()
+        {
+            return Err(format!("ZIYUAN_TEST_COMMANDS 预设名重复：{name}").into());
+        }
+    }
+    Ok(presets)
+}
+
+/// 按玉玺构造工具：只包含其授予的工具，且都限定在其查阅范围内。
+/// `test_command` 为皇帝设定的默认测试命令（`run_tests` 用；未设定时该工具报错）。
+/// 查阅范围不存在、越出 `root` 或落在禁区时返回错误。
 pub fn sealed_tools(
     root: &Path,
     seal: &Seal,
     test_command: Option<&str>,
 ) -> Result<Sealed, BoxError> {
-    let sandbox = Arc::new(Sandbox::new(root, &seal.scope, test_command)?);
+    sealed_tools_with_presets(root, seal, test_command, BTreeMap::new())
+}
+
+/// 与 [`sealed_tools`] 相同，另附皇帝通过 `ZIYUAN_TEST_COMMANDS` 设定的命名检查／测试命令白名单。
+pub fn sealed_tools_with_presets(
+    root: &Path,
+    seal: &Seal,
+    test_command: Option<&str>,
+    test_presets: BTreeMap<String, String>,
+) -> Result<Sealed, BoxError> {
+    let sandbox = Arc::new(Sandbox::new(root, &seal.scope, test_command, test_presets)?);
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     for capability in &seal.capabilities {
         match capability {
@@ -460,12 +522,18 @@ struct Sandbox {
     root: PathBuf,
     scope: Vec<PathBuf>,
     test_command: Option<String>,
+    test_presets: BTreeMap<String, String>,
     /// 以相对路径为键。
     staged: Mutex<BTreeMap<String, FileChange>>,
 }
 
 impl Sandbox {
-    fn new(root: &Path, scope: &[String], test_command: Option<&str>) -> Result<Self, BoxError> {
+    fn new(
+        root: &Path,
+        scope: &[String],
+        test_command: Option<&str>,
+        test_presets: BTreeMap<String, String>,
+    ) -> Result<Self, BoxError> {
         let root = root.canonicalize()?;
         let mut entries = Vec::new();
         for path in scope {
@@ -494,6 +562,7 @@ impl Sandbox {
             root,
             scope,
             test_command: test_command.map(str::to_owned),
+            test_presets,
             staged: Mutex::default(),
         })
     }
@@ -1549,29 +1618,87 @@ struct RunTests(Arc<Sandbox>);
 
 impl Tool for RunTests {
     fn spec(&self) -> ToolSpec {
-        let command = self.0.test_command.as_deref().unwrap_or("（皇帝尚未设定）");
+        let default_cmd = self
+            .resolve_command(None)
+            .ok()
+            .unwrap_or("（皇帝尚未设定）");
+        let presets_note = if self.0.test_presets.is_empty() {
+            String::new()
+        } else {
+            let list = self
+                .0
+                .test_presets
+                .iter()
+                .map(|(k, v)| format!("{k}=`{v}`"))
+                .collect::<Vec<_>>()
+                .join("、");
+            format!("另可通过可选参数 `preset` 选用皇帝白名单中的预设命令：{list}。")
+        };
         ToolSpec {
             name: Capability::RunTests.code().into(),
             description: format!(
-                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的测试命令 `{command}`，返回退出码与输出末尾（未通过时作为工具错误返回）。命令不能改。若输出是 cargo test、pytest、node --test、go test 或 jest/vitest 且未通过，另附失败测试名和断言摘录；其他格式只给输出末尾。"
+                "在项目的临时副本（含已暂存的改动）中运行皇帝设定的检查／测试命令（默认 `{default_cmd}`），返回退出码与输出末尾（未通过时作为工具错误返回）。{presets_note}命令由皇帝预先定好，模型不能改写或拼接参数。若输出是 cargo test、pytest、node --test、go test、jest/vitest 或 rustc/tsc/mypy 编译诊断且未通过，另附结构化失败／诊断摘录；其他格式只给输出末尾。"
             ),
-            input_schema_json: r#"{"type":"object","properties":{},"additionalProperties":false}"#
+            input_schema_json: r#"{"type":"object","properties":{"preset":{"type":"string","description":"可选，从皇帝 ZIYUAN_TEST_COMMANDS 白名单中选用的预设名（如 check、clippy、test）；留空运行默认命令"}},"additionalProperties":false}"#
                 .into(),
         }
     }
 
-    fn execute(&self, _args_json: &str) -> Result<String, BoxError> {
-        self.run(crate::haoshe::Mode::from_env()?)
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(args_json, &["preset"])?;
+        let preset = optional_string(&args, "preset")?;
+        self.run_preset(preset.as_deref(), crate::haoshe::Mode::from_env()?)
     }
 }
 
 impl RunTests {
+    fn resolve_command(&self, preset: Option<&str>) -> Result<&str, BoxError> {
+        if let Some(name) = preset {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("preset 不能为空字符串（不指定预设请省略该字段）".into());
+            }
+            if let Some(cmd) = self.0.test_presets.get(name) {
+                return Ok(cmd.as_str());
+            }
+            if self.0.test_presets.is_empty() {
+                return Err(format!(
+                    "皇帝尚未通过 ZIYUAN_TEST_COMMANDS 设定命名预设，不能使用 preset `{name}`"
+                )
+                .into());
+            }
+            let allowed = self
+                .0
+                .test_presets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、");
+            return Err(format!("未知测试预设 `{name}`；皇帝允许的预设仅限：{allowed}").into());
+        }
+        if let Some(cmd) = self.0.test_command.as_deref() {
+            return Ok(cmd);
+        }
+        if let Some(cmd) = self.0.test_presets.get("default") {
+            return Ok(cmd.as_str());
+        }
+        if let Some((_, cmd)) = self.0.test_presets.iter().next() {
+            return Ok(cmd.as_str());
+        }
+        Err("皇帝尚未设定测试命令（ZIYUAN_TEST_COMMAND 或 ZIYUAN_TEST_COMMANDS）".into())
+    }
+
+    #[cfg(test)]
     fn run(&self, mode: crate::haoshe::Mode) -> Result<String, BoxError> {
-        let command = self
-            .0
-            .test_command
-            .as_deref()
-            .ok_or("皇帝尚未设定测试命令（ZIYUAN_TEST_COMMAND）")?;
+        self.run_preset(None, mode)
+    }
+
+    fn run_preset(
+        &self,
+        preset: Option<&str>,
+        mode: crate::haoshe::Mode,
+    ) -> Result<String, BoxError> {
+        let command = self.resolve_command(preset)?;
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
             "ziyuan-test-{}-{}",
@@ -3120,5 +3247,53 @@ export function bootUi() {}
         apply_changes(&root, &changes).unwrap();
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_presets_parse_and_enforce_strict_allowlist() {
+        let presets = parse_test_presets(
+            "check=cargo check --workspace; clippy = cargo clippy -- -D warnings\ntest=cargo test",
+        )
+        .unwrap();
+        assert_eq!(presets.len(), 3);
+        assert_eq!(presets["check"], "cargo check --workspace");
+        assert_eq!(presets["clippy"], "cargo clippy -- -D warnings");
+        assert_eq!(presets["test"], "cargo test");
+
+        // 非法名称、缺命令、重复名均拒绝。
+        assert!(parse_test_presets("bad name=cargo test").is_err());
+        assert!(parse_test_presets("check=").is_err());
+        assert!(parse_test_presets("no_equals").is_err());
+        assert!(parse_test_presets("a=1;a=2").is_err());
+
+        let dir =
+            std::env::temp_dir().join(format!("ziyuan-preset-allowlist-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "ok").unwrap();
+        let sandbox =
+            Arc::new(Sandbox::new(&dir, &[".".into()], Some("cargo test"), presets).unwrap());
+        let runner = RunTests(sandbox);
+        assert_eq!(runner.resolve_command(None).unwrap(), "cargo test");
+        assert_eq!(
+            runner.resolve_command(Some("check")).unwrap(),
+            "cargo check --workspace"
+        );
+        assert_eq!(
+            runner.resolve_command(Some("clippy")).unwrap(),
+            "cargo clippy -- -D warnings"
+        );
+        let err = runner
+            .resolve_command(Some("rm -rf /"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("未知测试预设") && err.contains("check"),
+            "{err}"
+        );
+        assert!(runner.resolve_command(Some("")).is_err());
+        assert!(runner.spec().description.contains("check="));
+
+        let _ = fs::remove_dir_all(dir);
     }
 }
