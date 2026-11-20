@@ -950,12 +950,110 @@ async fn tui_shows_hunk_censure_and_issues_write_edict_from_plan() {
     press(&mut app, "V");
     let modal = screen(&app);
     assert!(modal.contains("打回再改一轮"), "{modal}");
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|(m, err)| !err && m.contains("都察院批注第 1 段")),
+        "status: {:?}",
+        app.status
+    );
     press(&mut app, "请保留旧签名\n");
     let task3 = app.court().task(TaskId(3)).expect("应下发工部修订诏令 #3");
     assert_eq!(task3.edict.department, Department::Works);
     assert!(task3.edict.text.contains("打回修订诏令 #2"));
     assert!(task3.edict.text.contains("请保留旧签名"));
     assert!(task3.edict.text.contains("未保留旧签名"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tui_parallel_split_fails_closed_and_dag_add_and_deps_work() {
+    let (mut app, mut messages, root) = temp_app("tui-dag-parallel");
+
+    // 1. 下发工部写诏令 #1 并按 F 请求并行写分办：非 jj 仓库须 fail-closed 报错。
+    {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let seal = Seal {
+            capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+            scope: vec![".".into()],
+            mcp: Default::default(),
+        };
+        s.issue(Department::Works, "并改多模块".into(), seal)
+            .unwrap();
+    }
+    app.reload();
+    app.selected_task = Some(TaskId(1));
+    press(&mut app, "F");
+    let msg = tokio::time::timeout(Duration::from_secs(5), messages.recv())
+        .await
+        .expect("F 分办消息不应超时")
+        .expect("应收到 Split 消息");
+    app.handle(msg);
+    let (status_msg, is_err) = app.status.as_ref().expect("应有错误提示");
+    assert!(*is_err, "非 jj 仓库并行写分办应失败: {status_msg}");
+    assert!(
+        status_msg.contains("jj") || status_msg.contains("尚书") || status_msg.contains("并行"),
+        "unexpected error: {status_msg}"
+    );
+
+    // 2. 手工写入一次普通分办（产生子诏令 #2、#3），然后用 TUI 的 A 追加子诏令 #4（依赖 #2），
+    //    再用 E 修改 #4 的前置依赖为 #2,#3，以及清空依赖。
+    {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        // 招募一名工部侍郎以便追加子诏令。
+        let staff = s.recruit(None, Department::Works).unwrap();
+        s.appoint(staff, Office::ViceMinister(Department::Works))
+            .unwrap();
+        let events = s
+            .court()
+            .propose_split_serial_writes(
+                TaskId(1),
+                vec![(staff, "改甲".into()), (staff, "改乙".into())],
+                "御定分办".into(),
+                None,
+                TokenUsage::default(),
+            )
+            .unwrap();
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(expected, &events).unwrap();
+    }
+    app.reload();
+    app.selected_task = Some(TaskId(1));
+
+    // 按 A 打开追加子诏令弹窗，默认预填了工部下属 ID；输入内容、下移两格填依赖 2 后回车。
+    press(&mut app, "A");
+    let modal = screen(&app);
+    assert!(modal.contains("运行中追加子诏令"), "{modal}");
+    press(&mut app, "补收尾文档↓↓2\n");
+    let added = app.court().task(TaskId(4)).expect("应追加子诏令 #4");
+    assert_eq!(added.parent, Some(TaskId(1)));
+    assert_eq!(added.edict.text, "补收尾文档");
+    assert_eq!(added.dag.as_ref().unwrap().dependencies, vec![TaskId(2)]);
+    assert_eq!(app.selected_task, Some(TaskId(4)));
+
+    // 按 E 修改待办子诏令 #4 的前置依赖：原为 "2"，追加 ",3" 并回车。
+    press(&mut app, "E");
+    let modal = screen(&app);
+    assert!(modal.contains("修改前置依赖"), "{modal}");
+    press(&mut app, ",3\n");
+    let updated = app.court().task(TaskId(4)).unwrap();
+    assert_eq!(
+        updated.dag.as_ref().unwrap().dependencies,
+        vec![TaskId(2), TaskId(3)]
+    );
+
+    // 在原诏令 #1（非子诏令）上按 E 应拒绝并报错。
+    app.selected_task = Some(TaskId(1));
+    press(&mut app, "E");
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|(m, err)| *err && m.contains("只有已分办出的子诏令")),
+        "status: {:?}",
+        app.status
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

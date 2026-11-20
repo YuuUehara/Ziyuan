@@ -112,6 +112,10 @@ pub(crate) enum InputKind {
     Rename(AgentId),
     /// 人工译稿的当前段。原文不改，标记在文字变化后清除。
     HumanEdit,
+    /// 运行中向已分办原诏令追加子诏令。
+    DagAdd(TaskId),
+    /// 运行中修改待办子诏令的前置依赖。
+    DagDeps(TaskId),
 }
 
 #[derive(Clone, Copy)]

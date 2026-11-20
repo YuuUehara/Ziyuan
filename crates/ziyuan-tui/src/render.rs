@@ -992,6 +992,13 @@ impl App {
             ) => &[("Enter", "下发工部"), ("↑↓", "换项"), ("Esc", "取消")],
             (
                 Some(Modal::Input {
+                    kind: InputKind::DagAdd(_),
+                    ..
+                }),
+                _,
+            ) => &[("Enter", "追加子诏"), ("↑↓", "换项"), ("Esc", "取消")],
+            (
+                Some(Modal::Input {
                     kind: InputKind::Recruit,
                     ..
                 }),
@@ -1016,7 +1023,8 @@ impl App {
                 ("b", "批红"),
                 ("w/W/u", "准奏/逐段/驳回改动"),
                 ("z", "改动显示"),
-                ("f", "分办"),
+                ("f/F", "分办/并行写"),
+                ("A/E", "加子诏/改依赖"),
                 ("v", "廷议"),
                 ("i", "复核"),
                 ("x/X", "复勘/平反"),
@@ -1101,12 +1109,18 @@ impl App {
                     InputKind::Records => ("翰林院实录", "检索词（留空看最近）：", false),
                     InputKind::Rename(_) => ("易名", "姓名 字 号：", false),
                     InputKind::HumanEdit => ("人工译文", "这一段的译文：", false),
+                    InputKind::DagAdd(_) => ("运行中追加子诏令", "子诏令内容：", false),
+                    InputKind::DagDeps(_) => {
+                        ("修改前置依赖", "依赖子诏令 ID（如 2,3，留空清空）：", false)
+                    }
                 };
                 let title = match kind {
                     InputKind::Review(task, _)
                     | InputKind::Skip(task)
                     | InputKind::FromPlan(task)
-                    | InputKind::Revise(task) => {
+                    | InputKind::Revise(task)
+                    | InputKind::DagAdd(task)
+                    | InputKind::DagDeps(task) => {
                         format!("{title} · 诏令 #{}", task.0)
                     }
                     InputKind::Rename(agent) => format!("{title} · 官员 #{}", agent.0),
@@ -1116,12 +1130,14 @@ impl App {
                     kind,
                     InputKind::Edict | InputKind::FromPlan(_) | InputKind::Revise(_)
                 );
+                let dag_add = matches!(kind, InputKind::DagAdd(_));
+                let multi = edict || dag_add;
                 let popup = centered(
                     area,
                     72,
                     if matches!(kind, InputKind::Edict) {
                         11
-                    } else if matches!(kind, InputKind::FromPlan(_) | InputKind::Revise(_)) {
+                    } else if multi {
                         10
                     } else if with_department {
                         6
@@ -1149,13 +1165,16 @@ impl App {
                 if edict {
                     fields.push(("范围（空为整个项目）：", scope.as_str(), 1));
                     fields.push(("工具（空为只读，none 为不授）：", tools.as_str(), 2));
+                } else if dag_add {
+                    fields.push(("承办官 ID（如 2，留空自动）：", scope.as_str(), 1));
+                    fields.push(("前置依赖 ID（逗号分隔，可空）：", tools.as_str(), 2));
                 }
                 let mut cursor_line = 0;
                 let mut cursor_width = 0;
                 for (label, value, id) in fields {
                     lines.push(Line::default());
-                    let active = id == *field || !edict;
-                    let input = if edict {
+                    let active = id == *field || !multi;
+                    let input = if multi {
                         let marker = if active { "▶ " } else { "  " };
                         let label_style = if active {
                             Style::new().fg(GOLD).bold()
@@ -1179,11 +1198,14 @@ impl App {
                     }
                     lines.push(input);
                 }
-                if edict {
+                if multi {
                     lines.push(Line::default());
-                    lines.push(Line::from(
-                        Span::raw("↑↓ 换项 · Enter 下诏 · Esc 取消").dim(),
-                    ));
+                    let submit_hint = if dag_add {
+                        "↑↓ 换项 · Enter 追加子诏 · Esc 取消"
+                    } else {
+                        "↑↓ 换项 · Enter 下诏 · Esc 取消"
+                    };
+                    lines.push(Line::from(Span::raw(submit_hint).dim()));
                 }
                 let cursor_x = popup.x + 2 + cursor_width as u16;
                 let cursor_y =

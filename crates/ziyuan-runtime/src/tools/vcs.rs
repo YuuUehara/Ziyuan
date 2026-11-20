@@ -399,6 +399,10 @@ fn pathspecs_for(sandbox: &Sandbox, path_arg: Option<String>) -> Result<Vec<Stri
 pub(super) struct VcsStatus(pub(super) Arc<Sandbox>);
 
 impl Tool for VcsStatus {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "vcs_status".into(),
@@ -454,6 +458,10 @@ impl Tool for VcsStatus {
 pub(super) struct VcsDiff(pub(super) Arc<Sandbox>);
 
 impl Tool for VcsDiff {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "vcs_diff".into(),
@@ -535,6 +543,10 @@ impl Tool for VcsDiff {
 pub(super) struct VcsLog(pub(super) Arc<Sandbox>);
 
 impl Tool for VcsLog {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "vcs_log".into(),

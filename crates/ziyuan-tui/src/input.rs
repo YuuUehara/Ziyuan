@@ -4,10 +4,11 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    ABOLITION_NOTE, draft_plan_execution, draft_revision, duzhi_report, kaocheng_report,
-    skipped_note,
+    ABOLITION_NOTE, AddedSubtask, HunkVerdict, draft_plan_execution, draft_revision, duzhi_report,
+    kaocheng_report, parse_hunk_reviews, skipped_note, total_hunks,
 };
-use ziyuan_core::{Capability, Department, GovernanceMode, Seal, Verdict};
+use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
+use ziyuan_governance::TaskStatus;
 use ziyuan_runtime::Outcome;
 use ziyuan_runtime::tools::temp_cleanup::Problem;
 
@@ -270,6 +271,21 @@ impl App {
                         } else {
                             "read_file,search_code,write_file"
                         };
+                        let censor_flagged: Vec<u32> = entry
+                            .censure
+                            .as_ref()
+                            .zip(entry.changes.as_ref())
+                            .map(|(censure, changes)| {
+                                parse_hunk_reviews(&censure.note, total_hunks(&changes.files))
+                                    .into_iter()
+                                    .filter(|(_, r)| {
+                                        matches!(r.verdict, HunkVerdict::Reject | HunkVerdict::Warn)
+                                    })
+                                    .map(|(n, _)| n)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let mut parts = Vec::new();
                         if !draft.rejected_hunks.is_empty() {
                             let list = draft
                                 .rejected_hunks
@@ -277,7 +293,21 @@ impl App {
                                 .map(u32::to_string)
                                 .collect::<Vec<_>>()
                                 .join("、");
-                            self.info(format!("将附带上轮第 {list} 段意见与 diff（输入修订指示）"));
+                            parts.push(format!("被驳回第 {list} 段"));
+                        }
+                        if !censor_flagged.is_empty() {
+                            let list = censor_flagged
+                                .iter()
+                                .map(u32::to_string)
+                                .collect::<Vec<_>>()
+                                .join("、");
+                            parts.push(format!("都察院批注第 {list} 段"));
+                        }
+                        if !parts.is_empty() {
+                            self.info(format!(
+                                "将附带上轮{}意见与 diff（输入修订指示）",
+                                parts.join("及")
+                            ));
                         }
                         self.modal = Some(Modal::Input {
                             kind: InputKind::Revise(task),
@@ -336,6 +366,70 @@ impl App {
                 }
             }
             KeyCode::Char('f') => self.start_split(task),
+            KeyCode::Char('F') => self.start_split_with_options(task, true),
+            KeyCode::Char('A') => {
+                let parent = self
+                    .court()
+                    .task(task)
+                    .and_then(|t| t.parent)
+                    .unwrap_or(task);
+                let Some(parent_entry) = self.court().task(parent) else {
+                    return;
+                };
+                if parent_entry.split.is_none() {
+                    self.error("该诏令尚未分办，请先按 f 或 F 分办后再追加子诏令");
+                    return;
+                }
+                if matches!(
+                    parent_entry.status,
+                    TaskStatus::Completed { .. }
+                        | TaskStatus::Failed { .. }
+                        | TaskStatus::Cancelled
+                ) {
+                    self.error(format!("原诏令 #{} 已结束，不能再追加子诏令", parent.0));
+                    return;
+                }
+                let dept = parent_entry.edict.department;
+                let default_worker = default_subordinate(self.court(), dept)
+                    .map(|id| id.0.to_string())
+                    .unwrap_or_default();
+                self.modal = Some(Modal::Input {
+                    kind: InputKind::DagAdd(parent),
+                    text: String::new(),
+                    department: 0,
+                    scope: default_worker,
+                    tools: String::new(),
+                    field: 0,
+                });
+            }
+            KeyCode::Char('E') => {
+                let Some(entry) = self.court().task(task) else {
+                    return;
+                };
+                if entry.parent.is_none() {
+                    self.error("只有已分办出的子诏令可修改前置依赖");
+                    return;
+                }
+                if entry.status != TaskStatus::Pending {
+                    self.error(format!(
+                        "子诏令 #{} 非待办状态，仅未开办的子诏令可修改前置依赖",
+                        task.0
+                    ));
+                    return;
+                }
+                let current_deps = entry
+                    .dag
+                    .as_ref()
+                    .map(|d| {
+                        d.dependencies
+                            .iter()
+                            .map(|id| id.0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                self.modal = Some(text_input(InputKind::DagDeps(task), current_deps, 0));
+            }
             KeyCode::Char('v') => self.start_debate(task),
             KeyCode::Char('z') => self.cycle_diff_view(),
             KeyCode::Char('w') => {
@@ -507,7 +601,10 @@ impl App {
             } => {
                 let multi = matches!(
                     kind,
-                    InputKind::Edict | InputKind::FromPlan(_) | InputKind::Revise(_)
+                    InputKind::Edict
+                        | InputKind::FromPlan(_)
+                        | InputKind::Revise(_)
+                        | InputKind::DagAdd(_)
                 );
                 let switch_dept = matches!(kind, InputKind::Edict | InputKind::Recruit);
                 let target = match (multi, *field) {
@@ -793,6 +890,93 @@ impl App {
                 );
             }
             InputKind::HumanEdit => {}
+            InputKind::DagAdd(parent) => {
+                if text.is_empty() {
+                    self.error("子诏令内容不能为空");
+                    self.modal = Some(Modal::Input {
+                        kind,
+                        text,
+                        department: department_index,
+                        scope,
+                        tools,
+                        field: 0,
+                    });
+                    return;
+                }
+                let worker = match parse_worker_id(self.court(), parent, &scope) {
+                    Ok(id) => id,
+                    Err(reason) => {
+                        self.error(reason);
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field: 1,
+                        });
+                        return;
+                    }
+                };
+                let dependencies = match parse_task_ids(&tools) {
+                    Ok(deps) => deps,
+                    Err(reason) => {
+                        self.error(reason);
+                        self.modal = Some(Modal::Input {
+                            kind,
+                            text,
+                            department: department_index,
+                            scope,
+                            tools,
+                            field: 2,
+                        });
+                        return;
+                    }
+                };
+                let added = AddedSubtask {
+                    worker,
+                    text,
+                    dependencies,
+                    attempts: None,
+                    deadline: None,
+                    budget: None,
+                    artifact: None,
+                    approval_required: false,
+                    idempotency_key: None,
+                };
+                if let Some(id) = self.mutate(
+                    |s| s.dag_add_subtask(parent, added.clone()),
+                    |id| format!("已向原诏令 #{} 追加子诏令 #{}（按 r 执行）", parent.0, id.0),
+                ) {
+                    self.selected_task = Some(id);
+                    self.detail_scroll = 0;
+                }
+            }
+            InputKind::DagDeps(subtask) => {
+                let deps = match parse_task_ids(&text) {
+                    Ok(deps) => deps,
+                    Err(reason) => {
+                        self.error(reason);
+                        self.modal = Some(text_input(kind, text, department_index));
+                        return;
+                    }
+                };
+                self.mutate(
+                    |s| s.dag_update_deps(subtask, deps.clone()),
+                    |_| {
+                        if deps.is_empty() {
+                            format!("子诏令 #{} 的前置依赖已清空", subtask.0)
+                        } else {
+                            let list = deps
+                                .iter()
+                                .map(|d| format!("#{}", d.0))
+                                .collect::<Vec<_>>()
+                                .join("、");
+                            format!("子诏令 #{} 的前置依赖已改为 {list}", subtask.0)
+                        }
+                    },
+                );
+            }
         }
     }
 
@@ -1040,4 +1224,58 @@ fn parse_tools(value: &str) -> Result<BTreeSet<Capability>, String> {
             })
         })
         .collect()
+}
+
+fn parse_task_ids(raw: &str) -> Result<Vec<TaskId>, String> {
+    let mut ids = Vec::new();
+    for part in raw.split([',', '，', ' ', '、']) {
+        let trimmed = part.trim().trim_start_matches('#');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let n: u64 = trimmed
+            .parse()
+            .map_err(|_| format!("依赖子诏令 ID「{part}」须为正整数，以逗号分隔"))?;
+        if n == 0 {
+            return Err("依赖子诏令 ID 须为正整数".into());
+        }
+        ids.push(TaskId(n));
+    }
+    Ok(ids)
+}
+
+fn default_subordinate(court: &ziyuan_governance::Court, dept: Department) -> Option<AgentId> {
+    court
+        .agents()
+        .find(|a| {
+            matches!(
+                court.office_of(a.id),
+                Some(Office::ViceMinister(d) | Office::Clerk(d)) if d == dept
+            )
+        })
+        .map(|a| a.id)
+}
+
+fn parse_worker_id(
+    court: &ziyuan_governance::Court,
+    parent: TaskId,
+    raw: &str,
+) -> Result<AgentId, String> {
+    let trimmed = raw.trim().trim_start_matches('#');
+    if trimmed.is_empty() {
+        let dept = court
+            .task(parent)
+            .ok_or_else(|| format!("查无原诏令 #{}", parent.0))?
+            .edict
+            .department;
+        return default_subordinate(court, dept)
+            .ok_or_else(|| format!("{}尚无在任下属，请先招募任命或手填承办官 ID", dept.label()));
+    }
+    let id: u64 = trimmed
+        .parse()
+        .map_err(|_| format!("承办官 ID「{raw}」须为正整数"))?;
+    if id == 0 {
+        return Err("承办官 ID 须为正整数".into());
+    }
+    Ok(AgentId(id))
 }

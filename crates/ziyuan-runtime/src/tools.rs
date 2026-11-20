@@ -211,6 +211,10 @@ pub fn record_search(records: Arc<Vec<Record>>) -> Box<dyn Tool> {
 struct SearchRecords(Arc<Vec<Record>>);
 
 impl Tool for SearchRecords {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "search_records".into(),
@@ -885,6 +889,10 @@ fn is_denied(root: &Path, path: &Path) -> bool {
 struct ReadFile(Arc<Sandbox>);
 
 impl Tool for ReadFile {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: Capability::ReadFile.code().into(),
@@ -922,6 +930,10 @@ impl Tool for ReadFile {
 struct ListFiles(Arc<Sandbox>);
 
 impl Tool for ListFiles {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "list_files".into(),
@@ -995,6 +1007,10 @@ impl Tool for ListFiles {
 struct SearchCode(Arc<Sandbox>);
 
 impl Tool for SearchCode {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: Capability::SearchCode.code().into(),
@@ -1139,6 +1155,10 @@ impl Tool for SearchCode {
 struct FileOutline(Arc<Sandbox>);
 
 impl Tool for FileOutline {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "file_outline".into(),
@@ -1249,6 +1269,10 @@ impl Tool for FileOutline {
 struct FindSymbols(Arc<Sandbox>);
 
 impl Tool for FindSymbols {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "find_symbols".into(),
@@ -1428,6 +1452,10 @@ impl Tool for FindSymbols {
 struct FindReferences(Arc<Sandbox>);
 
 impl Tool for FindReferences {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "find_references".into(),

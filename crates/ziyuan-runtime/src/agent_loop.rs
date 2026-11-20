@@ -111,9 +111,18 @@ pub trait ModelProvider: Send + Sync {
         None
     }
 }
+/// 单轮内连续只读工具调用的最大并发线程数，避免大批量调用撑爆线程或文件句柄。
+const MAX_PARALLEL_READS: usize = 8;
+
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn execute(&self, args_json: &str) -> Result<String, BoxError>;
+
+    /// 只读无副作用工具可返回 `true`，同一模型回合内连续多条只读调用将并发执行，
+    /// 并按原始调用顺序回传结果与触发钩子；写操作、测试与外部 MCP 工具默认返回 `false`。
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 /// 粗估 token 数：ASCII 约 4 字节一个，其余（汉字等）每字一个；宁多勿少，供度支与节略预判。
@@ -494,26 +503,75 @@ pub fn run_with_context(
                         args_json: call.args_json.clone(),
                     });
                 }
-                if hooks.is_cancelled() {
-                    return Err(LoopError::Cancelled);
-                }
-                for (tool, call) in resolved {
-                    // 工具错误回传给模型，由模型决定如何继续。
+                let mut idx = 0;
+                while idx < resolved.len() {
+                    if hooks.is_cancelled() {
+                        return Err(LoopError::Cancelled);
+                    }
+                    if resolved[idx].0.is_read_only() {
+                        let mut end = idx + 1;
+                        while end < resolved.len() && resolved[end].0.is_read_only() {
+                            end += 1;
+                        }
+                        if end - idx >= 2 {
+                            let mut chunk_start = idx;
+                            while chunk_start < end {
+                                if hooks.is_cancelled() {
+                                    return Err(LoopError::Cancelled);
+                                }
+                                let chunk_end = (chunk_start + MAX_PARALLEL_READS).min(end);
+                                let chunk = &resolved[chunk_start..chunk_end];
+                                let results: Vec<Result<String, BoxError>> =
+                                    std::thread::scope(|scope| {
+                                        let handles: Vec<_> = chunk
+                                            .iter()
+                                            .map(|(tool, call)| {
+                                                let tool = *tool;
+                                                scope.spawn(move || {
+                                                    check_args(&tool.spec(), &call.args_json)
+                                                        .and_then(|()| {
+                                                            tool.execute(&call.args_json)
+                                                        })
+                                                })
+                                            })
+                                            .collect();
+                                        handles
+                                            .into_iter()
+                                            .map(|h| {
+                                                h.join().unwrap_or_else(|_| {
+                                                    Err("工具执行异常终止".into())
+                                                })
+                                            })
+                                            .collect()
+                                    });
+                                for ((_, call), result) in chunk.iter().zip(results) {
+                                    record_tool_result(
+                                        call,
+                                        result,
+                                        hooks,
+                                        nonce,
+                                        &mut messages,
+                                        &mut successful_reads,
+                                    );
+                                }
+                                chunk_start = chunk_end;
+                            }
+                            idx = end;
+                            continue;
+                        }
+                    }
+                    let (tool, call) = &resolved[idx];
                     let result = check_args(&tool.spec(), &call.args_json)
                         .and_then(|()| tool.execute(&call.args_json));
-                    hooks.tool_invoked(&call.name, &call.args_json, result.is_ok());
-                    if call.name == "read_file" && result.is_ok() {
-                        successful_reads.push((messages.len(), call.args_json.clone()));
-                    }
-                    let output = result.unwrap_or_else(|err| format!("tool error: {err}"));
-                    for finding in guard::scan(&output, &[Threat::Hijack]) {
-                        let source = format!("tool:{}", call.name);
-                        hooks.suspicion(&source, finding.threat, &finding.excerpt);
-                    }
-                    messages.push(Message::ToolOutput {
-                        call_id: call.id,
-                        output: guard::fence(&output, nonce),
-                    });
+                    record_tool_result(
+                        call,
+                        result,
+                        hooks,
+                        nonce,
+                        &mut messages,
+                        &mut successful_reads,
+                    );
+                    idx += 1;
                 }
             }
         }
@@ -532,6 +590,30 @@ pub fn run_with_context(
         Err(e @ (LoopError::Cancelled | LoopError::Budget { .. })) => Err(e),
         _ => Err(LoopError::StepLimit(max_steps)),
     }
+}
+
+/// 按原始调用顺序记录单次工具结果：触发钩子、记录成功读取、锦衣卫扫描并套上外来文书围栏。
+fn record_tool_result(
+    call: &ToolRequest,
+    result: Result<String, BoxError>,
+    hooks: &dyn ExecutionHooks,
+    nonce: &str,
+    messages: &mut Vec<Message>,
+    successful_reads: &mut Vec<(usize, String)>,
+) {
+    hooks.tool_invoked(&call.name, &call.args_json, result.is_ok());
+    if call.name == "read_file" && result.is_ok() {
+        successful_reads.push((messages.len(), call.args_json.clone()));
+    }
+    let output = result.unwrap_or_else(|err| format!("tool error: {err}"));
+    for finding in guard::scan(&output, &[Threat::Hijack]) {
+        let source = format!("tool:{}", call.name);
+        hooks.suspicion(&source, finding.threat, &finding.excerpt);
+    }
+    messages.push(Message::ToolOutput {
+        call_id: call.id.clone(),
+        output: guard::fence(&output, nonce),
+    });
 }
 
 /// 参数须是合法 JSON，并合乎工具声明的 schema。
@@ -1029,5 +1111,254 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parallel_readonly_tools_run_concurrently_and_preserve_order() {
+        use std::sync::{Arc, Barrier, Mutex};
+
+        struct BarrierRead(Arc<Barrier>);
+        impl Tool for BarrierRead {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "par_read".into(),
+                    description: "parallel read".into(),
+                    input_schema_json: r#"{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}"#.into(),
+                }
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+            fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+                let v: Value = serde_json::from_str(args_json)?;
+                let id = v["id"].as_str().unwrap_or_default().to_owned();
+                // 只有三个调用真正并发进入时屏障才会放行；若串行执行会直接死锁。
+                self.0.wait();
+                Ok(format!("val:{id}"))
+            }
+        }
+
+        struct ThreeCalls {
+            seen_outputs: Arc<Mutex<Vec<(String, String)>>>,
+        }
+        impl ModelProvider for ThreeCalls {
+            fn next_turn(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolSpec],
+                _hooks: &dyn ExecutionHooks,
+            ) -> Result<ModelTurn, BoxError> {
+                let outs: Vec<(String, String)> = messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        Message::ToolOutput { call_id, output } => {
+                            Some((call_id.clone(), guard::unfence(output, "n").to_owned()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !outs.is_empty() {
+                    *self.seen_outputs.lock().unwrap() = outs;
+                    return Ok(ModelTurn::Final("done".into()));
+                }
+                Ok(ModelTurn::Calls {
+                    calls: vec![
+                        ToolRequest {
+                            id: "c1".into(),
+                            name: "par_read".into(),
+                            args_json: r#"{"id":"first"}"#.into(),
+                        },
+                        ToolRequest {
+                            id: "c2".into(),
+                            name: "par_read".into(),
+                            args_json: r#"{"id":"second"}"#.into(),
+                        },
+                        ToolRequest {
+                            id: "c3".into(),
+                            name: "par_read".into(),
+                            args_json: r#"{"id":"third"}"#.into(),
+                        },
+                    ],
+                    text: String::new(),
+                    reasoning: String::new(),
+                })
+            }
+        }
+
+        struct OrderHooks(Mutex<Vec<String>>);
+        impl ExecutionHooks for OrderHooks {
+            fn tool_invoked(&self, tool: &str, args_json: &str, ok: bool) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{tool}:{args_json}:{ok}"));
+            }
+        }
+
+        let barrier = Arc::new(Barrier::new(3));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(BarrierRead(barrier))];
+        let hooks = OrderHooks(Mutex::new(Vec::new()));
+        let out = run(
+            &ThreeCalls {
+                seen_outputs: seen.clone(),
+            },
+            &tools,
+            vec![Message::User("go".into())],
+            3,
+            "n",
+            &hooks,
+        )
+        .unwrap();
+        assert_eq!(out, "done");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("c1".into(), "val:first".into()),
+                ("c2".into(), "val:second".into()),
+                ("c3".into(), "val:third".into()),
+            ]
+        );
+        assert_eq!(
+            *hooks.0.lock().unwrap(),
+            vec![
+                r#"par_read:{"id":"first"}:true"#.to_string(),
+                r#"par_read:{"id":"second"}:true"#.to_string(),
+                r#"par_read:{"id":"third"}:true"#.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_write_and_read_tools_keep_writes_sequential() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let tail_barrier = Arc::new(Barrier::new(2));
+
+        struct ReadTool {
+            log: Arc<Mutex<Vec<String>>>,
+            active: Arc<AtomicUsize>,
+            barrier: Arc<Barrier>,
+        }
+        impl Tool for ReadTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "ro".into(),
+                    description: "ro".into(),
+                    input_schema_json: r#"{"type":"object","properties":{"tag":{"type":"string"}},"required":["tag"]}"#.into(),
+                }
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+            fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+                let v: Value = serde_json::from_str(args_json)?;
+                let tag = v["tag"].as_str().unwrap_or_default().to_owned();
+                self.active.fetch_add(1, Ordering::SeqCst);
+                if tag.starts_with("after") {
+                    self.barrier.wait();
+                }
+                self.log.lock().unwrap().push(tag.clone());
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                Ok(tag)
+            }
+        }
+
+        struct WriteTool {
+            log: Arc<Mutex<Vec<String>>>,
+            active: Arc<AtomicUsize>,
+        }
+        impl Tool for WriteTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "wr".into(),
+                    description: "wr".into(),
+                    input_schema_json: r#"{"type":"object"}"#.into(),
+                }
+            }
+            fn execute(&self, _args_json: &str) -> Result<String, BoxError> {
+                // 写工具执行期间不得有任何其他工具并发在途。
+                assert_eq!(self.active.fetch_add(1, Ordering::SeqCst), 0);
+                self.log.lock().unwrap().push("write".into());
+                assert_eq!(self.active.fetch_sub(1, Ordering::SeqCst), 1);
+                Ok("written".into())
+            }
+        }
+
+        struct MixedModel;
+        impl ModelProvider for MixedModel {
+            fn next_turn(
+                &self,
+                messages: &[Message],
+                _tools: &[ToolSpec],
+                _hooks: &dyn ExecutionHooks,
+            ) -> Result<ModelTurn, BoxError> {
+                if messages
+                    .iter()
+                    .any(|m| matches!(m, Message::ToolOutput { .. }))
+                {
+                    return Ok(ModelTurn::Final("ok".into()));
+                }
+                Ok(ModelTurn::Calls {
+                    calls: vec![
+                        ToolRequest {
+                            id: "1".into(),
+                            name: "ro".into(),
+                            args_json: r#"{"tag":"before"}"#.into(),
+                        },
+                        ToolRequest {
+                            id: "2".into(),
+                            name: "wr".into(),
+                            args_json: "{}".into(),
+                        },
+                        ToolRequest {
+                            id: "3".into(),
+                            name: "ro".into(),
+                            args_json: r#"{"tag":"after1"}"#.into(),
+                        },
+                        ToolRequest {
+                            id: "4".into(),
+                            name: "ro".into(),
+                            args_json: r#"{"tag":"after2"}"#.into(),
+                        },
+                    ],
+                    text: String::new(),
+                    reasoning: String::new(),
+                })
+            }
+        }
+
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ReadTool {
+                log: log.clone(),
+                active: active.clone(),
+                barrier: tail_barrier,
+            }),
+            Box::new(WriteTool {
+                log: log.clone(),
+                active,
+            }),
+        ];
+        assert_eq!(
+            run(
+                &MixedModel,
+                &tools,
+                vec![Message::User("x".into())],
+                3,
+                "n",
+                &()
+            )
+            .unwrap(),
+            "ok"
+        );
+        let events = log.lock().unwrap().clone();
+        assert_eq!(events[0], "before");
+        assert_eq!(events[1], "write");
+        let mut tail = events[2..].to_vec();
+        tail.sort();
+        assert_eq!(tail, vec!["after1", "after2"]);
     }
 }

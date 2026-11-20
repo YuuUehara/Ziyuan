@@ -12,13 +12,25 @@ use crate::render::speech_line;
 impl App {
     /// 在阻塞线程中请尚书分办（会等待模型返回），结果经消息送回。
     pub(crate) fn start_split(&mut self, task: TaskId) {
-        self.info(format!("诏令 #{} 尚书分办中…", task.0));
+        self.start_split_with_options(task, false);
+    }
+
+    /// 按是否启用 jj 并行写工作区请尚书分办（`parallel_writes = true` 须在 jj 仓库中，否则 fail-closed）。
+    pub(crate) fn start_split_with_options(&mut self, task: TaskId, parallel_writes: bool) {
+        let mode = if parallel_writes {
+            "并行写分办"
+        } else {
+            "分办"
+        };
+        self.info(format!("诏令 #{} 尚书{mode}中…", task.0));
         let root = self.config.root.clone();
         let backend = self.config.backend.clone();
         let sender = self.sender.clone();
         tokio::task::spawn_blocking(move || {
             let result = Session::open(EventLog::new(&root))
-                .and_then(|mut s| s.plan_split(task, backend.as_ref()))
+                .and_then(|mut s| {
+                    s.plan_split_with_options(task, backend.as_ref(), parallel_writes, Some(&root))
+                })
                 .map(|subtasks| subtasks.len())
                 .map_err(|e| e.to_string());
             let _ = sender.send(Message::Split(task, result));

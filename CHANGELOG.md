@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.28.0 — 2026-11-20
+
+- **同轮只读工具并发执行（`ziyuan-runtime`）**：`agent_loop::Tool` 新增默认 `false` 的 `is_read_only()`，10 项纯只读工具（`read_file`、`list_files`、`search_code`、`file_outline`、`find_symbols`、`find_references`、`search_records`、`vcs_status`、`vcs_diff`、`vcs_log`）在同一模型回合内连续调用 ≥ 2 次时自动通过受限线程池（每批最多 8 线程）并发执行，并严格按原始顺序触发审计钩子、锦衣卫扫描与结果回传；写操作、测试与外部 MCP 工具维持串行。
+- **仓库约定受控注入（`AGENTS.md` / `CLAUDE.md`）**：玉玺授予 `ReadFile` 且范围覆盖仓库根目录时，`AgentBackend` 按 `AGENTS.md` 优先于 `CLAUDE.md` 读取首份非空常规 UTF-8 文件（不跟随符号链接、单读上限 64 KiB、注入摘要 4 KiB UTF-8 边界截断），经锦衣卫劫持扫描与本轮随机 `nonce` 外来文书围栏包裹后写入系统提示。
+- **TUI 交互能力对齐（`ziyuan-tui`）**：诏令页新增 `F`（jj 并行写分办，非 jj 仓库 fail-closed）、`A`（运行中向已分办原诏令追加子诏令）、`E`（运行中修改待办子诏令前置依赖）；`V`（打回再改一轮）同时汇总上轮被驳回段号与都察院逐段批注段号。
+- 登记版本 `1.28.0`（序号 62，不提高旧事件簿读取门槛）；同步更新 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.28.0 验收记录](docs/acceptance/1.28.0.md)。
+
 ## 1.27.0 — 2026-11-20
 
 - **代码搜索增强（`regex`／`glob`／上下文行）与跨文件引用查找 `find_references`（零新增事件与玉玺代码）**：
