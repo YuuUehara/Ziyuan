@@ -2876,10 +2876,12 @@ mod tests {
             assert!(write.execute(&args).is_err(), "{path}");
         }
 
-        // 本机没有号舍（如 Windows）时 run_tests 拒绝运行；副本的内容改以 off 照常运行来核对。
+        // 本机没有号舍（或 Windows 外部 CARGO_TARGET_DIR 被 W2 策略拒绝）时 run_tests 返回 SandboxUnavailable；
+        // 副本的内容改以 off 照常运行来核对。
         let run_tests = |sealed: &Sealed, tool: &dyn Tool| {
             let result = tool.execute("{}");
-            let unavailable = crate::haoshe::confine("true", &[], &Default::default()).is_err()
+            let unavailable = (!crate::haoshe::shell_sandbox_available()
+                || (cfg!(windows) && std::env::var_os("CARGO_TARGET_DIR").is_some()))
                 && crate::haoshe::Mode::from_env().unwrap() != crate::haoshe::Mode::Off;
             if !unavailable {
                 return result;

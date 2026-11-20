@@ -70,7 +70,7 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 | --- | --- | --- |
 | Linux | 支持 | bubblewrap（另装；按域名放行还要 socat） |
 | macOS | 支持 | 系统自带的 Seatbelt |
-| Windows | 支持 | 生产暂未接入，默认拒绝运行需要隔离的命令（实验 crate 已完成 W1a–W1d 与 W2 工程加固（`PrivateDesktop`、有界尾部采集、12/12 原生 Windows 11 含真实工具链实测），运行时已备齐 `haoshe::run_shell`（含取消透传），仅待独立 unsafe 审计与 crates.io 首发后切入）。设 `ZIYUAN_SANDBOX=off` 会取消隔离，风险见 [ADR-0001](docs/adr/0001-windows-sandbox.md) |
+| Windows | 支持 | `run_tests` 内置原生 AppContainer＋`PrivateDesktop`＋Job Object（默认全断网、仅可写测试副本与任务私有目录；`ZIYUAN_SANDBOX_ALLOW`、外部 `CARGO_TARGET_DIR` 与长连接 stdio 外藩仍默认拒绝，见 [ADR-0001](docs/adr/0001-windows-sandbox.md)）。设 `ZIYUAN_SANDBOX=off` 会取消隔离 |
 
 ## 快速开始
 
@@ -130,7 +130,7 @@ ziyuan history
 
 ## 开发与发布
 
-发布产品由十一个 crate 组成：`core` 定义任务与角色，`governance` 执行分配规则，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`memory` 提供本地译文记忆索引与检索，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互。工作区另有未发布的 `sandbox-windows` 原生实验 crate，已完成 W1a–W1d 文件／网络／生命周期隔离实测与 W2 就绪安全库接口，但尚未完成独立安全审计与生产接入；Windows 受保护执行仍失败关闭，见 [ADR-0001](docs/adr/0001-windows-sandbox.md)。其余分层说明见[体系结构](docs/architecture.md)。
+发布产品由十二个 crate 组成：`core` 定义任务与角色，`governance` 执行分配规则，`sandbox-windows` 封装 Windows 原生 AppContainer／Job 号舍边界，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`memory` 提供本地译文记忆索引与检索，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互（Windows 号舍边界见 [ADR-0001](docs/adr/0001-windows-sandbox.md)）。其余分层说明见[体系结构](docs/architecture.md)。
 
 在仓库根目录检查和构建：
 

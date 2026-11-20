@@ -83,12 +83,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 两者都跑全部测试，某个 crate 失败也跑完其余的。Windows 无号舍：run_tests 用例先断言拒绝，再以 off 经 cmd /C 核对副本；符号链接相关的用例只在 Unix 上跑。
+          # 两者都跑全部测试，某个 crate 失败也跑完其余的。Windows 经原生 AppContainer＋Job 运行 run_tests，长连接 stdio 外藩仍 fail closed；符号链接相关的用例只在 Unix 上跑。
           - os: macos-latest
             name: macOS · 功能与号舍（Seatbelt）
             command: cargo test --workspace --locked --no-fail-fast
           - os: windows-2025
-            name: Windows · 功能可用 · 号舍暂缺（fail closed）
+            name: Windows · 功能与原生号舍（AppContainer＋Job）
             command: cargo test --workspace --locked --no-fail-fast
     runs-on: ${{ matrix.os }}
     steps:
@@ -98,7 +98,7 @@ jobs:
       - run: ${{ matrix.command }}
       - name: R0 离线字面量检索基线（合成材料，非产品索引）
         run: cargo run -p ziyuan-runtime --example code_search_baseline --locked
-      - name: W1a–W1d Windows 原生隔离探针与安全 API（实验 crate，非生产号舍）
+      - name: W1–W2 Windows 原生号舍隔离探针与真实工具链验收
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh
         run: |

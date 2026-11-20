@@ -1,6 +1,6 @@
 # ADR-0001：Windows 号舍支持政策
 
-- 状态：已采纳（方案 A）
+- 状态：已切换（方案 B·W2 生产接入 `run_tests`；W3 长连接外藩与按域名放行仍失败关闭）
 - 日期：2026-10-29
 - 相关：[SECURITY.md](../../SECURITY.md)、[roadmap.md](../roadmap.md)「1.0 之后·号舍」
 
@@ -87,9 +87,9 @@ v1.0 对 Windows 的承诺：
 
 W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升级最高能力、不接入生产。探针若依赖管理员放宽策略、宿主广域 ACL、网络豁免或静默去掉 LPAC 才能跑，应停止并记录兼容性缺项，而非降低保护门槛。W1d 的取消机制与 4B 分别记录实现和实测，不能借平台 API 文档替代实际后代退出证据。
 
-### 当前原型进度（独立实验 crate，未接入生产）
+### 阶段实施记录（W0 – W2）
 
-`ziyuan-sandbox-windows` 目前仅作为未发布的工作区实验成员保留，无生产调用者，工作区根目录仍保持 `unsafe_code = "forbid"`，生产行为继续执行方案 A（`auto`／`require` 失败关闭）。
+工作区根目录始终保持 `unsafe_code = "forbid"`，所有 Win32 FFI 仅封装在 `ziyuan-sandbox-windows` 私有模块 `windows.rs` 内（与独立验证探针 `probe.rs` 解耦），生产 `ziyuan-runtime` 仅经安全 Rust 接口调用。
 
 - **W0（已完成）**：完成威胁模型、LPAC＋Job 方案选型及边界协议；选定以独立平台 crate 推进，不改生产 `runtime`／`MCP` 行为。
 - **W1a 启动与句柄探针（Server 2025 CI 基线已通过）**：独立探针以 LPAC 属性、`SystemRoot`＋任务私有 `LOCALAPPDATA`、挂起创建＋kill-on-close Job 及显式标准流句柄白名单运行；在 Windows Server 2025 Datacenter（`10.0.26100`）基线上通过普通 AppContainer、LPAC（`AAP_ACCESS=0`）与恢复前故障清理三组对照。
@@ -104,7 +104,19 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
   - `AppContainerChildCapable` 落地按任务独立隐藏桌面 `PrivateDesktop`（Alternate Desktop 模式，动态加载 `System32\user32.dll`，仅授本任务 SID `0x000200C3`、禁切桌面与钩子、Job 排空后销毁），使静态链接 `user32.dll` 的真实工具链在非默认／无头桌面上不再以 `0xC0000142` 崩溃，同时保持严格 LPAC 与 crate 零静态 `user32.dll` 导入。
   - 原生非管理员 Windows 11 12/12 实测证实：真实 Windows PowerShell 与带标准 `ALL APPLICATION PACKAGES:(RX)` 继承的 `Program Files` Git 可在零能力 AppContainer＋`PrivateDesktop` 内正常运行且宿主秘密文件与回环监听均遭阻断（`hits == 0`）；同时证实 `%USERPROFILE%` 下工具链（如默认 `cargo.exe`）与剥离 `ALL APPLICATION PACKAGES` ACE 的 MSI 安装目录（如部分 Node.js MSI）均被内核拒绝访问，W2 绝不放宽宿主用户目录或系统 ACL。
   - `ziyuan-runtime` 补齐 `haoshe::ShellRunSpec::cancel` 主动取消透传，并在 `mcp.rs` 明示 W2 首批仅覆盖一次性断网命令（`run_tests`），长连接 stdio 外藩留待 W3。
-- **仍未完成（W2 生产切换最后 2 项外部治理门槛）**：(1) 对 `ziyuan-sandbox-windows` 私有 `windows.rs` FFI 模块完成独立第三方 unsafe／安全审阅与长期平台维护确认；(2) 完成 `ziyuan-sandbox-windows` 在 crates.io 的首次手工发布与 Trusted Publishing 配置。达标后只需在 `haoshe::run_shell` 的 Windows 分支接入 `run_shell_sandboxed`；在此之前，生产 `ziyuan-runtime` 不依赖本 crate，Windows 受保护执行继续保持方案 A 失败关闭。
+## W2 生产切换决定（1.31.0，2026-11-21）
+
+1. **治理与发布门槛闭环**：
+   - 唯一维护者（`YuuUehara`）确认对精简后的 `crates/ziyuan-sandbox-windows/src/windows.rs` 私有 FFI 边界完成维护者审阅并承担 Windows 平台长期维护责任；
+   - `ziyuan-sandbox-windows` 已完成 crates.io 首次手工发布（`1.30.0`）与 GitHub OIDC Trusted Publishing（`release.yml`）配置，并排入 `release.yml` 十二个 crate 发布顺序（位于 `ziyuan-runtime` 之前）。
+2. **W2 生产正式接入范围（`run_tests`）**：
+   - `ziyuan-runtime` 在 `target.'cfg(windows)'` 下接入 `ziyuan-sandbox-windows`，保持自身 `unsafe_code = "forbid"`；
+   - `haoshe::run_shell` 在 Windows `Mode::Auto`／`Mode::Require` 且 `Network::Off`、无外部 `CARGO_TARGET_DIR` 时，经 `probe_capability()` 核验 `FileSystemAndNetworkIsolated` 后调用 `run_shell_sandboxed`（0 能力 `AppContainerChildCapable`＋`PrivateDesktop`＋`KILL_ON_JOB_CLOSE` Job Object），过滤 12 项宿主保留环境变量、按 `max_output` 与 `max_failure_scan` 有界采集输出、支持主动取消与整树排空清理，结果如实标注 `号舍（Windows AppContainer＋Job）`。
+3. **仍保持失败关闭的边界（留待 W3）**：
+   - `ZIYUAN_SANDBOX_ALLOW`（`Network::Only`）与 `Network::Open` 显式拒绝（`SandboxUnavailable`）；
+   - 外部 `CARGO_TARGET_DIR` 等额外可写目录显式拒绝（`SandboxUnavailable`）；
+   - 配置了 `haoshe` 的本地长连接 stdio 外藩（`mcp.rs`）继续显式拒绝（`SandboxUnavailable`）；
+   - 宿主 `%USERPROFILE%` 下工具链（如默认 `cargo.exe`）未经准入仍被内核拒绝，绝不放宽宿主用户目录或系统 ACL。
 
 ## 参考
 

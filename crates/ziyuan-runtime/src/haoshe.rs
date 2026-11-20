@@ -3,7 +3,7 @@
 //! 取贡院号舍之意：考生锁入单间，与外界隔绝。测试命令可能运行模型写入的代码，入号舍后
 //! 不能联网，只能写测试副本所在的临时目录，读不到家目录下常见的凭据（`.ssh`、`.aws` 等）
 //! 与项目的 `.ziyuan`。Linux 用 bubblewrap（`bwrap`），macOS 用系统自带的 Seatbelt
-//! （`sandbox-exec`）；Windows 暂无（见 `docs/adr/0001-windows-sandbox.md`）。
+//! （`sandbox-exec`）；Windows `run_tests` 用原生 AppContainer＋Job Object（`ziyuan-sandbox-windows`，默认全断网，见 `docs/adr/0001-windows-sandbox.md`）。
 //!
 //! 由 `ZIYUAN_SANDBOX` 决定：`auto`（默认）与 `require` 都是有则用、无则拒绝运行
 //! （[`SandboxUnavailable`]），绝不悄悄退化为未入号舍执行；`off` 为皇帝确认风险后不入号舍，
@@ -161,7 +161,7 @@ fn available() -> &'static Result<PathBuf, String> {
             };
         }
         if !cfg!(target_os = "linux") {
-            return Err("本系统暂无号舍（仅支持 Linux 与 macOS）".into());
+            return Err("本系统通用命令包装暂仅支持 Linux 与 macOS（Windows run_tests 经 run_shell 使用原生 AppContainer 号舍）".into());
         }
         let Some(bwrap) = find_in_path("bwrap") else {
             return Err("未找到 bubblewrap（bwrap），可用包管理器安装".into());
@@ -179,6 +179,32 @@ fn available() -> &'static Result<PathBuf, String> {
             Err(e) => Err(format!("bubblewrap 无法运行：{e}")),
         }
     })
+}
+
+/// Windows 原生号舍（AppContainer＋Job Object）可用性探测，只探测一次。
+#[cfg(windows)]
+fn windows_sandbox_available() -> &'static Result<(), String> {
+    static FOUND: OnceLock<Result<(), String>> = OnceLock::new();
+    FOUND.get_or_init(|| match ziyuan_sandbox_windows::probe_capability() {
+        ziyuan_sandbox_windows::SandboxCapability::FileSystemAndNetworkIsolated => Ok(()),
+        ziyuan_sandbox_windows::SandboxCapability::RestrictedProcess => {
+            Err("本机仅达 RestrictedProcess 级别，未达文件与网络隔离要求".into())
+        }
+        ziyuan_sandbox_windows::SandboxCapability::Unavailable { reason } => Err(reason),
+    })
+}
+
+/// 本机是否具备 `run_shell` 所需的原生号舍（Linux `bwrap`、macOS `sandbox-exec`、Windows AppContainer）。
+#[cfg(test)]
+pub(crate) fn shell_sandbox_available() -> bool {
+    #[cfg(windows)]
+    {
+        windows_sandbox_available().is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        available().is_ok()
+    }
 }
 
 /// 号舍的规矩：可写哪些目录、读不到哪些目录、能否联网。
@@ -268,31 +294,13 @@ pub struct ShellRunOutput {
 
 /// 由号舍拥有完整进程生命周期的受控 shell 执行入口（ADR-0001 §平台边界 #2）。
 ///
-/// 统一负责：平台前置策略核验、沙箱构造、门吏代理生命周期、受限环境注入、有界超时终止与
-/// 末尾输出采集；`ziyuan-sandbox-windows` 完成独立审计与 crates.io 首发后，只需在此处接入
-/// Windows 受保护分支，上层 `run_tests` 无需再直接操作裸 `Command`/`Child`。
+/// 统一负责：平台前置策略核验、沙箱构造（Linux `bwrap`／macOS `sandbox-exec`／Windows 原生
+/// `AppContainer＋Job`）、门吏代理生命周期、受限环境注入、有界超时／取消终止与末尾输出采集，
+/// 上层 `run_tests` 无需直接操作裸 `Command`/`Child` 或平台句柄。
 pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
     #[cfg(windows)]
     if spec.mode != Mode::Off {
-        if spec.network != Network::Off {
-            return Err(SandboxUnavailable::new(
-                "run_tests",
-                "Windows 原生号舍首批仅支持全断网（Network::Off），暂不支持 ZIYUAN_SANDBOX_ALLOW 按域名放行或开放联网",
-            )
-            .into());
-        }
-        if !spec.extra_writable.is_empty() {
-            return Err(SandboxUnavailable::new(
-                "run_tests",
-                "Windows 原生号舍首批不继承外部 CARGO_TARGET_DIR 等额外可写目录，请取消该变量后重试",
-            )
-            .into());
-        }
-        return Err(SandboxUnavailable::new(
-            "run_tests",
-            "Windows 原生号舍原型（ziyuan-sandbox-windows）已完成 W1/W2 接口与 AppContainer 隔离实测，待独立 unsafe 审计与 crates.io 首发后接入生产",
-        )
-        .into());
+        return run_shell_windows(spec);
     }
 
     let log_path = spec.sandbox_base.join("output.log");
@@ -378,6 +386,120 @@ pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
         haoshe_note,
         tail,
         tail_truncated: len > spec.max_output,
+        failure_scan,
+    })
+}
+
+#[cfg(windows)]
+fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
+    // 这些系统与用户目录变量由 ziyuan-sandbox-windows 统一注入为 SystemRoot 派生值与任务私有路径，
+    // 禁止沿用宿主值，以免覆盖容器私有环境或触发保留变量拒绝。
+    const WINDOWS_RESERVED_ENV: &[&str] = &[
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "SYSTEMDRIVE",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "HOME",
+        "APPDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+    ];
+    if spec.network != Network::Off {
+        return Err(SandboxUnavailable::new(
+            "run_tests",
+            "Windows 原生号舍 W2 首批仅支持全断网（Network::Off），暂不支持 ZIYUAN_SANDBOX_ALLOW 按域名放行或开放联网",
+        )
+        .into());
+    }
+    if !spec.extra_writable.is_empty() {
+        return Err(SandboxUnavailable::new(
+            "run_tests",
+            "Windows 原生号舍 W2 首批不继承外部 CARGO_TARGET_DIR 等额外可写目录，请取消该变量后重试",
+        )
+        .into());
+    }
+    if let Err(reason) = windows_sandbox_available() {
+        return Err(SandboxUnavailable::new("run_tests", reason.clone()).into());
+    }
+
+    let mut writable_dirs = vec![spec.sandbox_base.to_path_buf()];
+    if spec.work_dir != spec.sandbox_base && !spec.work_dir.starts_with(spec.sandbox_base) {
+        writable_dirs.push(spec.work_dir.to_path_buf());
+    }
+    let env: Vec<(String, String)> = spec
+        .env
+        .iter()
+        .filter(|(k, _)| {
+            let upper = k.to_ascii_uppercase();
+            !WINDOWS_RESERVED_ENV.contains(&upper.as_str())
+        })
+        .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned()))
+        .collect();
+    let capture_limit = spec.max_output.max(spec.max_failure_scan);
+    let result = ziyuan_sandbox_windows::run_shell_sandboxed(
+        &ziyuan_sandbox_windows::ShellSpec {
+            command: spec.command.to_owned(),
+            cwd: spec.work_dir.to_path_buf(),
+            writable_dirs,
+            readonly_dirs: Vec::new(),
+            env,
+            timeout: spec.timeout,
+            max_output_bytes: Some(capture_limit),
+        },
+        spec.cancel,
+    )
+    .map_err(|err| -> BoxError {
+        if err.kind() == io::ErrorKind::InvalidInput {
+            err.into()
+        } else {
+            SandboxUnavailable::new("run_tests", format!("Windows 原生号舍启动失败：{err}")).into()
+        }
+    })?;
+
+    let passed = matches!(
+        result.outcome,
+        ziyuan_sandbox_windows::ExitOutcome::Exited(0)
+    );
+    let verdict = match result.outcome {
+        ziyuan_sandbox_windows::ExitOutcome::Cancelled => "已取消（被主动终止）".to_owned(),
+        ziyuan_sandbox_windows::ExitOutcome::TimedOut => {
+            format!("超时（{} 秒）被终止", spec.timeout.as_secs())
+        }
+        ziyuan_sandbox_windows::ExitOutcome::Exited(0) => "通过（退出码 0）".to_owned(),
+        ziyuan_sandbox_windows::ExitOutcome::Exited(code) => format!("未通过（退出码 {code}）"),
+    };
+    let tail_start = result
+        .output
+        .len()
+        .saturating_sub(usize::try_from(spec.max_output).unwrap_or(usize::MAX));
+    let tail = String::from_utf8_lossy(&result.output[tail_start..]).into_owned();
+    let failure_scan = if passed {
+        None
+    } else {
+        let scan_start = result
+            .output
+            .len()
+            .saturating_sub(usize::try_from(spec.max_failure_scan).unwrap_or(usize::MAX));
+        Some(String::from_utf8_lossy(&result.output[scan_start..]).into_owned())
+    };
+    let mut haoshe_note =
+        "号舍（Windows AppContainer＋Job）：不可联网，只可写测试副本与任务私有目录".to_owned();
+    if !result.cleanup_warnings.is_empty() {
+        haoshe_note.push_str(&format!(
+            "；清理提示：{}",
+            result.cleanup_warnings.join("；")
+        ));
+    }
+    Ok(ShellRunOutput {
+        passed,
+        verdict,
+        haoshe_note,
+        tail,
+        tail_truncated: result.total_output_bytes > spec.max_output,
         failure_scan,
     })
 }
@@ -746,17 +868,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn run_shell_enforces_windows_w2_fail_closed_policy_checks() {
-        let base = std::env::temp_dir().join(format!("ziyuan-win-w2-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    fn run_shell_windows_appcontainer_isolates_copy_blocks_host_and_honors_policies() {
+        let root = std::env::temp_dir().join(format!("ziyuan-win-w2-{}", std::process::id()));
+        let base = root.join("sandbox");
+        let work = base.join("project");
+        let host = root.join("host-secret");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&host).unwrap();
+        let secret_file = host.join("secret.txt");
+        fs::write(&secret_file, "HOST_TOP_SECRET_131").unwrap();
 
         // 1. Network::Only rejected explicitly under ADR-0001 W2 policy.
         let net_err = run_shell(&ShellRunSpec {
             command: "echo x",
             mode: Mode::Auto,
             network: Network::only(vec!["example.com".into()]).unwrap(),
-            work_dir: &base,
+            work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
             hidden: &[],
@@ -777,12 +905,12 @@ mod tests {
         );
 
         // 2. External CARGO_TARGET_DIR / extra_writable rejected explicitly under ADR-0001 W2 policy.
-        let extra = vec![base.join("external-target")];
+        let extra = vec![root.join("external-target")];
         let dir_err = run_shell(&ShellRunSpec {
             command: "echo x",
             mode: Mode::Require,
             network: Network::Off,
-            work_dir: &base,
+            work_dir: &work,
             sandbox_base: &base,
             extra_writable: &extra,
             hidden: &[],
@@ -802,34 +930,99 @@ mod tests {
             dir_unavail.reason
         );
 
-        // 3. Default Network::Off still fails closed until unsafe audit + crates.io publish.
-        let default_err = run_shell(&ShellRunSpec {
-            command: "echo x",
+        // 3. Default Mode::Auto + Network::Off runs inside native Windows AppContainer + Job,
+        //    filters reserved host env vars, allows copy writes, and blocks host secrets.
+        let host_env: Vec<(String, OsString)> =
+            ["PATH", "SystemRoot", "USERPROFILE", "TEMP", "APPDATA"]
+                .iter()
+                .filter_map(|k| std::env::var_os(k).map(|v| ((*k).to_owned(), v)))
+                .collect();
+        let cmd = format!(
+            "echo INSIDE_OK>inside.txt && type \"{}\" 2>NUL & echo W2_DONE",
+            secret_file.display()
+        );
+        let out = run_shell(&ShellRunSpec {
+            command: &cmd,
             mode: Mode::Auto,
             network: Network::Off,
-            work_dir: &base,
+            work_dir: &work,
+            sandbox_base: &base,
+            extra_writable: &[],
+            hidden: std::slice::from_ref(&host),
+            env: &host_env,
+            timeout: Duration::from_secs(15),
+            max_output: 4096,
+            max_failure_scan: 4096,
+            cancel: None,
+        })
+        .unwrap();
+        assert!(out.passed, "{out:?}");
+        assert_eq!(out.verdict, "通过（退出码 0）");
+        assert!(
+            out.haoshe_note
+                .contains("号舍（Windows AppContainer＋Job）"),
+            "{out:?}"
+        );
+        assert!(out.tail.contains("W2_DONE"), "{out:?}");
+        assert!(
+            !out.tail.contains("HOST_TOP_SECRET_131"),
+            "host secret must stay blocked: {out:?}"
+        );
+        assert!(
+            fs::read_to_string(work.join("inside.txt"))
+                .unwrap()
+                .contains("INSIDE_OK")
+        );
+
+        // 4. Cancellation flag terminates the AppContainer Job promptly.
+        let cancel = AtomicBool::new(true);
+        let cancelled = run_shell(&ShellRunSpec {
+            command: "ping -n 6 127.0.0.1 > NUL",
+            mode: Mode::Require,
+            network: Network::Off,
+            work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
             hidden: &[],
-            env: &[],
-            timeout: Duration::from_secs(5),
+            env: &host_env,
+            timeout: Duration::from_secs(10),
             max_output: 1024,
             max_failure_scan: 1024,
+            cancel: Some(&cancel),
+        })
+        .unwrap();
+        assert!(!cancelled.passed, "{cancelled:?}");
+        assert!(cancelled.verdict.contains("已取消"), "{cancelled:?}");
+
+        // 5. Bounded tail vs larger failure_scan window on failing command.
+        let mut big = String::from("EARLY_PANIC_MARKER\n");
+        big.push_str(&"0123456789abcdef\n".repeat(40));
+        big.push_str("FINAL_LINE\n");
+        fs::write(work.join("big.txt"), big).unwrap();
+        let failed = run_shell(&ShellRunSpec {
+            command: "type big.txt & exit /b 2",
+            mode: Mode::Auto,
+            network: Network::Off,
+            work_dir: &work,
+            sandbox_base: &base,
+            extra_writable: &[],
+            hidden: &[],
+            env: &host_env,
+            timeout: Duration::from_secs(15),
+            max_output: 64,
+            max_failure_scan: 4096,
             cancel: None,
         })
-        .unwrap_err();
-        let def_unavail = default_err
-            .downcast_ref::<SandboxUnavailable>()
-            .expect("must return SandboxUnavailable");
-        assert_eq!(def_unavail.platform, "windows");
-        assert_eq!(def_unavail.operation, "run_tests");
-        assert!(
-            def_unavail.reason.contains("ziyuan-sandbox-windows"),
-            "{}",
-            def_unavail.reason
-        );
+        .unwrap();
+        assert!(!failed.passed, "{failed:?}");
+        assert_eq!(failed.verdict, "未通过（退出码 2）");
+        assert!(failed.tail_truncated, "{failed:?}");
+        assert!(failed.tail.contains("FINAL_LINE"), "{failed:?}");
+        assert!(!failed.tail.contains("EARLY_PANIC_MARKER"), "{failed:?}");
+        let scan = failed.failure_scan.as_deref().unwrap_or("");
+        assert!(scan.contains("EARLY_PANIC_MARKER"), "{scan}");
 
-        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

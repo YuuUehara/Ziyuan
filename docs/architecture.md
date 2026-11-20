@@ -48,7 +48,7 @@ ziyuan-cli ──┬──▶ ziyuan-web (axum, SSE) ──┐
 （所有 crate 依赖 ziyuan-core 领域类型；runtime 不依赖 governance）
 ```
 
-上图为生产依赖。工作区另有未发布、无生产调用者的 `ziyuan-sandbox-windows` 原生实验 crate（已完成 W1a–W1d 文件／网络／生命周期隔离验证与安全 Rust 库接口）；私有 FFI 边界及 W2 生产接入门槛见 [Windows ADR](adr/0001-windows-sandbox.md)，当前不表示 Windows 生产号舍已接入。
+上图为全平台核心依赖。在 Windows 目标（`cfg(windows)`）下，`ziyuan-runtime` 额外依赖 `ziyuan-sandbox-windows` 为 `run_tests` 提供原生 AppContainer＋`PrivateDesktop`＋Job Object 号舍（工作区与 `ziyuan-runtime` 均保持 `unsafe_code = "forbid"`，所有 Win32 FFI 封装在 `ziyuan-sandbox-windows` 私有 `windows.rs` 模块内）；W2 边界与 W3 外藩规划见 [Windows ADR](adr/0001-windows-sandbox.md)。
 
 - `ziyuan-core`：纯数据类型与 `ParseError`，无行为依赖。
 - `ziyuan-governance`：`Court` 字段私有，只能通过 `Court::apply(&CourtEvent)` 改变；`apply` 与 `propose_*` 共用同一套规则，返回 `GovernanceError`。官制（`Office::all` / `exists_in` / `rank`）定义在 core，署理规则在 `Court::route`。`names::NameGenerator` 由种子生成姓名；种子由 `ziyuan-app` 随机给出，生成的姓名随 `AgentRegistered` 落盘，回放不依赖随机数。官职代码与 v0.1 兼容，旧事件簿可直接回放。`WorkerBackend::model_name` / `ModelProvider::model_name` 供各前端显示承办模型，`price()` 返回单价（`ziyuan_core::Price`）供估算花费；单价表与 `ZIYUAN_LLM_PRICE` 解析在 `ziyuan-llm::price_for`。

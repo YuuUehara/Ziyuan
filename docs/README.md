@@ -2,7 +2,7 @@
 
 初次使用先看[使用指南](guide.md)；译书与本地文本工作台操作集中查阅[翰林院译书指南](novel-translation.md)，再按需配合[译文记忆与参考选用](memory.md)与[作品更新提醒](subscriptions.md)。
 
-发布进度与验证记录见[验收归档](#验收记录历史归档)及 [1.30.0 验收记录](acceptance/1.30.0.md)，已公开发布的二进制包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准，各版变化见 [CHANGELOG](../CHANGELOG.md)。
+发布进度与验证记录见[验收归档](#验收记录历史归档)及 [1.31.0 验收记录](acceptance/1.31.0.md)，已公开发布的二进制包以 [GitHub Releases](https://github.com/YuuUehara/Ziyuan/releases) 为准，各版变化见 [CHANGELOG](../CHANGELOG.md)。
 
 ## 使用指南
 
@@ -20,7 +20,7 @@
 | --- | --- |
 | [稳定性约定](stability.md) | 对外冻结接口、兼容边界与内部非冻结范围 |
 | [体系结构](architecture.md) | 分层架构、事件簿与权限边界 |
-| [ADR-0001：Windows 号舍](adr/0001-windows-sandbox.md) | Windows 受保护执行政策与原生沙箱实验进展 |
+| [ADR-0001：Windows 号舍](adr/0001-windows-sandbox.md) | Windows 原生号舍政策、W2 生产边界与 W3 规划 |
 | [路线图](roadmap.md) | 已完成能力概览与后续非承诺议题 |
 | [发布指南](releasing.md) | 标签发布、四平台打包验收与 crates.io 可信发布 |
 
@@ -28,6 +28,7 @@
 
 每份归档只记录当时实际执行过的检查范围与未测事项；历史版本结果不代替当前源码检查。
 
+- [1.31.0](acceptance/1.31.0.md)
 - [1.30.0](acceptance/1.30.0.md)
 - [1.29.0](acceptance/1.29.0.md)
 - [1.28.0](acceptance/1.28.0.md)

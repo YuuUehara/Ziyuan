@@ -1,12 +1,13 @@
-//! Experimental native Windows AppContainer / LPAC + Job Object sandbox boundary (ADR-0001).
+//! Native Windows AppContainer / LPAC + Job Object sandbox boundary (ADR-0001).
 //!
 //! Exposes a safe Rust API that owns all Win32 handles, AppContainer profile SIDs,
-//! attribute lists, and Job Object lifecycles internally. All production `unsafe` FFI
-//! stays confined inside the private `windows` module, separated from the standalone
-//! verification probe CLI in `probe`.
+//! attribute lists, alternate hidden desktops, and Job Object lifecycles internally.
+//! All production `unsafe` FFI stays confined inside the private `windows` module,
+//! separated from the standalone verification probe CLI in `probe`.
 //!
-//! Production `ziyuan-runtime` remains fail-closed on Windows until independent
-//! security review and crates.io trusted-publisher onboarding complete.
+//! Production `ziyuan-runtime` uses [`run_shell_sandboxed`] on Windows for offline
+//! one-shot `run_tests` execution (W2); persistent stdio MCP servers remain fail-closed
+//! until W3.
 
 use std::{io, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
 

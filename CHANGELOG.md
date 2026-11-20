@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.31.0 — 2026-11-21
+
+- **Windows 原生号舍 W2 正式接入生产（`run_tests` AppContainer＋Job Object）**：
+  - `ziyuan-sandbox-windows` 完成 crates.io 首发与 Trusted Publishing 配置及维护者签核，由 `ziyuan-runtime` 在 `cfg(windows)` 下正式接入；工作区与 `ziyuan-runtime` 保持 `unsafe_code = "forbid"`，所有 Win32 FFI 仍封装在 `ziyuan-sandbox-windows` 私有 `windows.rs` 模块内。
+  - `haoshe::run_shell` 在 Windows `Mode::Auto`／`Mode::Require`（`Network::Off` 且无外部 `CARGO_TARGET_DIR`）下自动核验 `FileSystemAndNetworkIsolated` 能力后，经 `run_shell_sandboxed` 在 0 能力 AppContainer＋独立隐藏桌面 `PrivateDesktop`＋`KILL_ON_JOB_CLOSE` Job Object 内运行测试副本；自动过滤 12 项宿主保留环境变量、按 `max_output`/`max_failure_scan` 有界采集输出、支持主动取消与整树排空清理，结果如实标注 `号舍（Windows AppContainer＋Job）`。
+  - 显式维持 W2 边界失败关闭：`ZIYUAN_SANDBOX_ALLOW`（`Network::Only`）／`Network::Open`、外部 `CARGO_TARGET_DIR` 以及配置了 `haoshe` 的长连接 stdio 外藩（`mcp.rs`）仍返回 `SandboxUnavailable`（留待 W3）；宿主 `%USERPROFILE%` 下未经准入的工具链继续被内核拒绝。
+  - `.github/workflows/release.yml` 升级为十二个 crate 自动发布顺序（`ziyuan-sandbox-windows` 排在 `ziyuan-runtime` 之前）；`.github/workflows/ci.yml` Windows 作业同步切为原生号舍实测。
+- 登记版本 `1.31.0`（序号 65，零新增事件与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [ADR-0001](docs/adr/0001-windows-sandbox.md)、[SECURITY.md](SECURITY.md)、[README.md](README.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md) 与 [发布指南](docs/releasing.md)；本地验证见 [1.31.0 验收记录](docs/acceptance/1.31.0.md)。
+
 ## 1.30.0 — 2026-11-21
 
 - **Windows 原生号舍 W2 工程加固、模块拆分与真实工具链实测（`ziyuan-sandbox-windows`，仍为未发布实验 crate）**：
