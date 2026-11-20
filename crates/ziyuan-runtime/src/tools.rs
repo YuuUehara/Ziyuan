@@ -2085,6 +2085,7 @@ impl RunTests {
             timeout: TEST_TIMEOUT,
             max_output: MAX_TEST_OUTPUT,
             max_failure_scan: MAX_FAILURE_SCAN,
+            cancel: None,
         })?;
         let note = if run.tail_truncated {
             format!("（仅最后 {MAX_TEST_OUTPUT} 字节）")

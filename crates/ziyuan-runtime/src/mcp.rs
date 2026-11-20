@@ -201,45 +201,53 @@ fn spawn(
     env: &BTreeMap<String, String>,
     haoshe: Option<&Haoshe>,
 ) -> Result<Transport, BoxError> {
-    let mut scratch = None;
-    let mut door = None;
-    let mut command = match haoshe {
+    let (mut command, scratch, door) = match haoshe {
         Some(cell) if crate::haoshe::Mode::from_env()? != crate::haoshe::Mode::Off => {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "ziyuan-mcp-{name}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(&dir)?;
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            let mut writable = vec![dir.clone()];
-            writable.extend(
-                cell.write
-                    .iter()
-                    .filter_map(|w| match w.strip_prefix("~/") {
-                        Some(rest) => home.as_ref().map(|h| h.join(rest)),
-                        None => Some(root.join(w)),
-                    }),
-            );
-            let rules = crate::haoshe::Rules {
-                readable: vec![root.to_path_buf()],
-                writable,
-                hidden: vec![root.join(".ziyuan")],
-                network: cell.network.clone(),
-            };
-            let confined = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
-                let _ = std::fs::remove_dir_all(&dir);
-                crate::haoshe::SandboxUnavailable::new(format!("外藩 {name}"), reason)
-            })?;
-            scratch = Some(dir);
-            door = confined.proxy;
-            confined.command
+            #[cfg(windows)]
+            {
+                let _ = cell;
+                return Err(crate::haoshe::SandboxUnavailable::new(
+                    format!("外藩 {name}"),
+                    "Windows 原生号舍 W2 首批仅覆盖一次性断网命令（run_tests），长连接 stdio 外藩（双向管道与按需联网）仍保持失败关闭，待 W3 另行实现",
+                )
+                .into());
+            }
+            #[cfg(not(windows))]
+            {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let dir = std::env::temp_dir().join(format!(
+                    "ziyuan-mcp-{name}-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                std::fs::create_dir_all(&dir)?;
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let mut writable = vec![dir.clone()];
+                writable.extend(
+                    cell.write
+                        .iter()
+                        .filter_map(|w| match w.strip_prefix("~/") {
+                            Some(rest) => home.as_ref().map(|h| h.join(rest)),
+                            None => Some(root.join(w)),
+                        }),
+                );
+                let rules = crate::haoshe::Rules {
+                    readable: vec![root.to_path_buf()],
+                    writable,
+                    hidden: vec![root.join(".ziyuan")],
+                    network: cell.network.clone(),
+                };
+                let confined = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    crate::haoshe::SandboxUnavailable::new(format!("外藩 {name}"), reason)
+                })?;
+                (confined.command, Some(dir), confined.proxy)
+            }
         }
         _ => {
             let mut command = Command::new(program);
             command.args(args);
-            command
+            (command, None, None)
         }
     };
     command

@@ -99,7 +99,12 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 - **W2 预备与执行所有权边界（1.29.0，原生 Windows 11 非管理员桌面已实测）**：
   - `ziyuan-sandbox-windows` 新增 `SandboxMode`（`StrictLpac` / `AppContainerChildCapable`）、`run_sandboxed_with_mode`、`ShellSpec` 与 `run_shell_sandboxed`（`%SystemRoot%\System32\cmd.exe /D /S /C`，禁 AutoRun、拒重解析点与控制字符）。原生非管理员 Windows 11 实测证实：0 能力 `AppContainerChildCapable`（`AAP_ACCESS=1`、`TokenCapabilities=0`）＋ `KILL_ON_JOB_CLOSE` Job 在允许 `cmd.exe` 派生子进程的同时，完整保留了 W1b 文件隔离（宿主源码、`.ziyuan`、模拟 `.ssh`、`.git` 与 peer 目录读写全部返回 Win32 `ERROR_ACCESS_DENIED (5)`）、W1c 零网络隔离（`NET_CAPS=0`，IPv4/IPv6 回环 TCP 与 IPv4 UDP 经 WFP 阻断，宿主三类监听均 `HOST_NET_ZERO_HITS=1`）以及超时／取消整树收尾（`active_processes_after == 0`、`cleanup_warnings == []`）。
   - `ziyuan-runtime::haoshe` 完成 §平台边界 #2 的执行所有权重构：新增拥有完整生命周期的 `haoshe::run_shell`（`ShellRunSpec` / `ShellRunOutput`），`tools.rs::RunTests` 已切至委托调用，并在 Windows `mode != Mode::Off` 分支显式校验并拒绝 `Network::Only`/`Open` 与外部 `CARGO_TARGET_DIR`。
-- **仍未完成（W2 生产切换最后 2 项门槛）**：(1) 对 `ziyuan-sandbox-windows` 私有 `windows.rs` FFI 模块完成独立第三方 unsafe／安全审阅与长期平台维护确认；(2) 完成 `ziyuan-sandbox-windows` 在 crates.io 的首次手工发布与 Trusted Publishing 配置。达标后只需在 `haoshe::run_shell` 的 Windows 分支接入 `run_shell_sandboxed`；在此之前，生产 `ziyuan-runtime` 不依赖本 crate，Windows 受保护执行继续保持方案 A 失败关闭。
+- **W2 工程加固、模块拆分与真实工具链实测（1.30.0，原生 Windows 11 非管理员桌面已实测）**：
+  - 将 W1a–W1d/W2 探针 CLI 拆入独立 `probe.rs`，生产核心 `windows.rs` 仅保留最小 Win32 FFI（零 WinSock、零探针代码）；`LaunchSpec`/`ShellSpec` 新增有界尾部读取 `max_output_bytes`（默认 16 MiB，`RunResult` 返回 `output_truncated`/`total_output_bytes`）；`build_environment` 补齐任务私有 `USERPROFILE`/`HOME`/`APPDATA`/`TEMP`/`TMP` 及 `WINDIR`/`ComSpec`/`SystemDrive`/`PATHEXT`（12 项保留变量禁覆盖）。
+  - `AppContainerChildCapable` 落地按任务独立隐藏桌面 `PrivateDesktop`（Alternate Desktop 模式，动态加载 `System32\user32.dll`，仅授本任务 SID `0x000200C3`、禁切桌面与钩子、Job 排空后销毁），使静态链接 `user32.dll` 的真实工具链在非默认／无头桌面上不再以 `0xC0000142` 崩溃，同时保持严格 LPAC 与 crate 零静态 `user32.dll` 导入。
+  - 原生非管理员 Windows 11 12/12 实测证实：真实 Windows PowerShell 与带标准 `ALL APPLICATION PACKAGES:(RX)` 继承的 `Program Files` Git 可在零能力 AppContainer＋`PrivateDesktop` 内正常运行且宿主秘密文件与回环监听均遭阻断（`hits == 0`）；同时证实 `%USERPROFILE%` 下工具链（如默认 `cargo.exe`）与剥离 `ALL APPLICATION PACKAGES` ACE 的 MSI 安装目录（如部分 Node.js MSI）均被内核拒绝访问，W2 绝不放宽宿主用户目录或系统 ACL。
+  - `ziyuan-runtime` 补齐 `haoshe::ShellRunSpec::cancel` 主动取消透传，并在 `mcp.rs` 明示 W2 首批仅覆盖一次性断网命令（`run_tests`），长连接 stdio 外藩留待 W3。
+- **仍未完成（W2 生产切换最后 2 项外部治理门槛）**：(1) 对 `ziyuan-sandbox-windows` 私有 `windows.rs` FFI 模块完成独立第三方 unsafe／安全审阅与长期平台维护确认；(2) 完成 `ziyuan-sandbox-windows` 在 crates.io 的首次手工发布与 Trusted Publishing 配置。达标后只需在 `haoshe::run_shell` 的 Windows 分支接入 `run_shell_sandboxed`；在此之前，生产 `ziyuan-runtime` 不依赖本 crate，Windows 受保护执行继续保持方案 A 失败关闭。
 
 ## 参考
 

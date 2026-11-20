@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.30.0 — 2026-11-21
+
+- **Windows 原生号舍 W2 工程加固、模块拆分与真实工具链实测（`ziyuan-sandbox-windows`，仍为未发布实验 crate）**：
+  - 将 W1a–W1d/W2 探针 CLI 迁入独立私有模块 `probe.rs`，生产核心 `windows.rs` 收窄至仅含 AppContainer/LPAC、ACL/SID、Job Object 与句柄生命周期 Win32 FFI（零 WinSock、零探针代码），显著缩小独立 unsafe 审阅面。
+  - `AppContainerChildCapable` 新增按任务独立隐藏桌面（`PrivateDesktop` / Alternate Desktop，动态加载 `%SystemRoot%\System32\user32.dll`，仅授本任务 SID `0x000200C3` 最小无界面初始化权限、禁切换桌面与钩子，Job 排空后即销毁），解决静态链接 `user32.dll` 的真实工具链在非默认／无头桌面下 `0xC0000142` 启动失败问题，同时保持严格 LPAC 与 crate 本身零静态 `user32.dll` 导入。
+  - `LaunchSpec`/`ShellSpec` 新增 `max_output_bytes`（默认 16 MiB），`RunResult` 新增 `output_truncated` 与 `total_output_bytes`，改为按文件尾偏移有界读取；`build_environment` 显式将 `USERPROFILE`/`HOME`/`APPDATA`/`TEMP`/`TMP` 指向本任务私有 profile 子目录并提供 `WINDIR`/`ComSpec`/`SystemDrive`/`PATHEXT`（12 项保留变量禁覆盖）。
+  - 原生非管理员 Windows 11 实测通过 12/12 用例：验证真实内置 Windows PowerShell 与 `Program Files` Git 在 0 能力 AppContainer＋`PrivateDesktop` 内正常运行且宿主秘密文件与回环网络均遭阻断（`hits == 0`），同时证实宿主 `%USERPROFILE%\.cargo\bin\cargo.exe` 未经准入被拒绝访问（不放宽宿主用户目录 ACL）。
+- **运行时取消透传与 Windows MCP 边界明示（`ziyuan-runtime`）**：`haoshe::ShellRunSpec` 新增 `cancel: Option<&AtomicBool>` 并在 `run_shell` 等待循环中即时终止响应（`已取消（被主动终止）`）；`mcp.rs` 在 Windows 下对配置 `haoshe` 的长连接 stdio 外藩显式返回 `SandboxUnavailable`，明示 W2 首批仅覆盖一次性断网命令（`run_tests`），stdio 外藩双向管道留待 W3。
+- 登记版本 `1.30.0`（序号 64，不提高旧事件簿读取门槛）；同步更新 [ADR-0001](docs/adr/0001-windows-sandbox.md)、[README.md](README.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.30.0 验收记录](docs/acceptance/1.30.0.md)。
+
 ## 1.29.0 — 2026-11-21
 
 - **Windows 原生号舍 W2 隔离实测与安全 Shell 接口（`ziyuan-sandbox-windows`，仍为未发布实验 crate）**：新增 `SandboxMode`（`StrictLpac` / `AppContainerChildCapable`）、`run_sandboxed_with_mode`、`ShellSpec` 与 `run_shell_sandboxed`（`%SystemRoot%\System32\cmd.exe /D /S /C`，禁 AutoRun、拒重解析点与换行控制字符）。原生非管理员 Windows 11 实测通过 10/10 用例：证实 0 能力 `AppContainerChildCapable`＋`KILL_ON_JOB_CLOSE` Job 在支持 `cmd.exe` 派生子进程的同时，完整保留文件隔离（宿主源码、`.ziyuan`、模拟 `.ssh`/`.git` 与 peer 目录全返回 `ERROR_ACCESS_DENIED`）、零网络隔离（`NET_CAPS=0`、WFP 阻断且宿主监听零抵达）及超时／取消整树收尾（`active_processes_after == 0`）。

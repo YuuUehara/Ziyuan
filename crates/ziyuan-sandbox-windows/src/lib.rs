@@ -1,8 +1,9 @@
 //! Experimental native Windows AppContainer / LPAC + Job Object sandbox boundary (ADR-0001).
 //!
 //! Exposes a safe Rust API that owns all Win32 handles, AppContainer profile SIDs,
-//! attribute lists, and Job Object lifecycles internally. All `unsafe` FFI stays
-//! confined inside the private `windows` module.
+//! attribute lists, and Job Object lifecycles internally. All production `unsafe` FFI
+//! stays confined inside the private `windows` module, separated from the standalone
+//! verification probe CLI in `probe`.
 //!
 //! Production `ziyuan-runtime` remains fail-closed on Windows until independent
 //! security review and crates.io trusted-publisher onboarding complete.
@@ -15,7 +16,13 @@ mod files;
 mod network;
 #[cfg(windows)]
 #[allow(unsafe_code)]
+mod probe;
+#[cfg(windows)]
+#[allow(unsafe_code)]
 mod windows;
+
+/// Default maximum tail bytes captured from a sandboxed process output file (16 MiB).
+pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Reported Windows sandbox capability level (ADR-0001).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +68,9 @@ pub struct LaunchSpec {
     pub env: Vec<(String, String)>,
     /// Maximum wall-clock runtime before the entire Job tree is terminated.
     pub timeout: Duration,
+    /// Maximum tail bytes read into memory from the captured output file.
+    /// `None` uses [`DEFAULT_MAX_OUTPUT_BYTES`].
+    pub max_output_bytes: Option<u64>,
 }
 
 /// Safe description of a `cmd.exe /D /S /C` command to run inside [`SandboxMode::AppContainerChildCapable`].
@@ -79,6 +89,9 @@ pub struct ShellSpec {
     pub env: Vec<(String, String)>,
     /// Maximum wall-clock runtime before the entire Job tree is terminated.
     pub timeout: Duration,
+    /// Maximum tail bytes read into memory from the captured output file.
+    /// `None` uses [`DEFAULT_MAX_OUTPUT_BYTES`].
+    pub max_output_bytes: Option<u64>,
 }
 
 /// How the sandboxed process tree ended.
@@ -96,8 +109,12 @@ pub enum ExitOutcome {
 #[derive(Clone, Debug)]
 pub struct RunResult {
     pub outcome: ExitOutcome,
-    /// Combined stdout/stderr captured via the task-private output file.
+    /// Combined stdout/stderr tail captured via the task-private output file (bounded by `max_output_bytes`).
     pub output: Vec<u8>,
+    /// Whether the captured output file exceeded `max_output_bytes` and was truncated to its tail.
+    pub output_truncated: bool,
+    /// Total bytes written to the task-private output file before tail truncation.
+    pub total_output_bytes: u64,
     /// Number of active processes remaining in the Job after tree termination (expected 0).
     pub active_processes_after: u32,
     /// Non-fatal cleanup diagnostics (e.g. if profile deletion failed).
@@ -148,7 +165,8 @@ pub fn run_sandboxed_with_mode(
 /// [`SandboxMode::AppContainerChildCapable`] container + `KILL_ON_JOB_CLOSE` Job Object.
 ///
 /// AutoRun registry hooks are disabled (`/D`), no network capabilities are granted, host
-/// directories are never admitted, and the entire descendant process tree is terminated and
+/// directories are never admitted, `HOME`/`USERPROFILE`/`APPDATA`/`TEMP` point exclusively
+/// to task-private profile storage, and the entire descendant process tree is terminated and
 /// drained before cleanup.
 pub fn run_shell_sandboxed(spec: &ShellSpec, cancel: Option<&AtomicBool>) -> io::Result<RunResult> {
     #[cfg(windows)]
@@ -165,12 +183,12 @@ pub fn run_shell_sandboxed(spec: &ShellSpec, cancel: Option<&AtomicBool>) -> io:
     }
 }
 
-/// Entrypoint for the standalone W1a/W1b/W1c/W1d verification probe binary.
+/// Entrypoint for the standalone W1a/W1b/W1c/W1d/W2 verification probe binary.
 #[doc(hidden)]
 pub fn run_probe_cli() -> io::Result<()> {
     #[cfg(windows)]
     {
-        windows::run()
+        probe::run()
     }
     #[cfg(not(windows))]
     {

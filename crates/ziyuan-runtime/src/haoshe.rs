@@ -20,6 +20,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// 家目录下读不得的凭据目录。
@@ -249,6 +250,8 @@ pub struct ShellRunSpec<'a> {
     pub timeout: Duration,
     pub max_output: u64,
     pub max_failure_scan: u64,
+    /// 可选主动取消信号；触发后立即终止子进程树并返回已取消状态。
+    pub cancel: Option<&'a AtomicBool>,
 }
 
 /// [`run_shell`] 的执行结果：不向上层泄漏子进程、Job 或门吏代理句柄。
@@ -322,16 +325,26 @@ pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
         fs::create_dir_all(&tmp)?;
         child.env("TMPDIR", tmp);
     }
+    enum WaitOutcome {
+        Exited(std::process::ExitStatus),
+        TimedOut,
+        Cancelled,
+    }
     let mut child = child.spawn()?;
     let started = Instant::now();
-    let status = loop {
+    let outcome = loop {
         if let Some(status) = child.try_wait()? {
-            break Some(status);
+            break WaitOutcome::Exited(status);
+        }
+        if spec.cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break WaitOutcome::Cancelled;
         }
         if started.elapsed() > spec.timeout {
             let _ = child.kill();
             let _ = child.wait();
-            break None;
+            break WaitOutcome::TimedOut;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -341,11 +354,12 @@ pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
     let mut log = fs::File::open(&log_path)?;
     let len = log.metadata()?.len();
     let tail = read_lossy_from(&mut log, len.saturating_sub(spec.max_output))?;
-    let passed = status.is_some_and(|s| s.success());
-    let verdict = match status {
-        None => format!("超时（{} 秒）被终止", spec.timeout.as_secs()),
-        Some(s) if s.success() => "通过（退出码 0）".to_owned(),
-        Some(s) => match s.code() {
+    let passed = matches!(outcome, WaitOutcome::Exited(s) if s.success());
+    let verdict = match outcome {
+        WaitOutcome::Cancelled => "已取消（被主动终止）".to_owned(),
+        WaitOutcome::TimedOut => format!("超时（{} 秒）被终止", spec.timeout.as_secs()),
+        WaitOutcome::Exited(s) if s.success() => "通过（退出码 0）".to_owned(),
+        WaitOutcome::Exited(s) => match s.code() {
             Some(code) => format!("未通过（退出码 {code}）"),
             None => "未通过（被信号终止）".to_owned(),
         },
@@ -720,6 +734,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             max_output: 4096,
             max_failure_scan: 4096,
+            cancel: None,
         })
         .unwrap();
         assert!(out.passed, "{out:?}");
@@ -749,6 +764,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             max_output: 1024,
             max_failure_scan: 1024,
+            cancel: None,
         })
         .unwrap_err();
         let net_unavail = net_err
@@ -774,6 +790,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             max_output: 1024,
             max_failure_scan: 1024,
+            cancel: None,
         })
         .unwrap_err();
         let dir_unavail = dir_err
@@ -798,6 +815,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             max_output: 1024,
             max_failure_scan: 1024,
+            cancel: None,
         })
         .unwrap_err();
         let def_unavail = default_err
@@ -811,6 +829,38 @@ mod tests {
             def_unavail.reason
         );
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn run_shell_off_honors_cancellation_flag() {
+        let base =
+            std::env::temp_dir().join(format!("ziyuan-run-shell-cancel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let cancel = AtomicBool::new(true);
+        let cmd = if cfg!(windows) {
+            "ping -n 6 127.0.0.1 > NUL"
+        } else {
+            "sleep 5"
+        };
+        let out = run_shell(&ShellRunSpec {
+            command: cmd,
+            mode: Mode::Off,
+            network: Network::Off,
+            work_dir: &base,
+            sandbox_base: &base,
+            extra_writable: &[],
+            hidden: &[],
+            env: &[],
+            timeout: Duration::from_secs(10),
+            max_output: 1024,
+            max_failure_scan: 1024,
+            cancel: Some(&cancel),
+        })
+        .unwrap();
+        assert!(!out.passed, "{out:?}");
+        assert!(out.verdict.contains("已取消"), "{out:?}");
         let _ = fs::remove_dir_all(&base);
     }
 }
