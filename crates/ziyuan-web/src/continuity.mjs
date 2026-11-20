@@ -33,7 +33,7 @@ export function mount({ api, getSelection, getChapters, refresh, navigate }) {
   el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
   el("restore").onclick = () => run(async () => { if (!checked) throw new Error("请先校验备份"); show(await send(`?destination=${encodeURIComponent(el("destination").value)}&fingerprint=${encodeURIComponent(checked.fingerprint)}`)); el("restore").disabled = true; });
   const updates=document.createElement("details");updates.className="continuity-tools";updates.dataset.workspaceTool="source-update";
-  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown（支持 UTF-8 与日文 JIS：Shift_JIS／ISO-2022-JP／EUC-JP）、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
   const reading=mountReading(issues,{api,getSelection,getChapters,navigate});
@@ -58,20 +58,55 @@ export function mount({ api, getSelection, getChapters, refresh, navigate }) {
   });
   u("apply").onclick=()=>change(async()=>{if(!proposed||proposed.project!==getSelection().project)throw new Error("项目已变，请重新预览");await api(`/text/${encodeURIComponent(proposed.project)}/source-update`,{...proposed.input,fingerprint:proposed.preview.fingerprint});proposed=null;u("apply").disabled=true;await refresh();});
 }
+function hasIso2022JpEscape(bytes) {
+  for (let i = 0; i + 2 < bytes.length; i++) {
+    if (bytes[i] !== 0x1b || bytes[i + 1] !== 0x24) continue;
+    if (bytes[i + 2] === 0x42 || bytes[i + 2] === 0x40) return true;
+    if (i + 3 < bytes.length && bytes[i + 2] === 0x28 && bytes[i + 3] === 0x44) return true;
+  }
+  return false;
+}
+function japanesePlausibility(text) {
+  let score = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if ((code >= 0x3040 && code <= 0x309f) || (code >= 0x30a0 && code <= 0x30ff)) score += 4;
+    else if ((code >= 0x3000 && code <= 0x303f) || (code >= 0xff01 && code <= 0xff60)) score += 3;
+    else if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) score += 2;
+    else if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code <= 0x7e)) score += 1;
+    else if (code >= 0xff61 && code <= 0xff9f) score -= 4;
+    else if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) score -= 8;
+  }
+  return score;
+}
+export function decodeTextBytes(buffer, label = "文件") {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或日文 JIS（Shift_JIS／ISO-2022-JP／EUC-JP）文本`);
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; }
+    catch { throw bad(); }
+  }
+  if (hasIso2022JpEscape(bytes)) {
+    try { return { text: new TextDecoder("iso-2022-jp", { fatal: true }).decode(bytes), encoding: "ISO-2022-JP" }; }
+    catch { throw bad(); }
+  }
+  try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; } catch {}
+  let sjis = null, euc = null;
+  try { sjis = new TextDecoder("shift_jis", { fatal: true }).decode(bytes); } catch {}
+  try { euc = new TextDecoder("euc-jp", { fatal: true }).decode(bytes); } catch {}
+  if (sjis !== null && euc === null) return { text: sjis, encoding: "Shift_JIS" };
+  if (euc !== null && sjis === null) return { text: euc, encoding: "EUC-JP" };
+  if (sjis !== null && euc !== null) {
+    return japanesePlausibility(euc) > japanesePlausibility(sjis)
+      ? { text: euc, encoding: "EUC-JP" }
+      : { text: sjis, encoding: "Shift_JIS" };
+  }
+  throw bad();
+}
 export function sourceUpdateRequest(name, bytes, chapter) {
   const binary = /\.(docx|epub)$/i.test(name);
   if (!binary) {
-    let text;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    } catch {
-      let hint = "";
-      try {
-        new TextDecoder("shift_jis", { fatal: true }).decode(bytes);
-        hint = "（检测到可能是 Shift_JIS / 日文旧编码，如青空文库默认下载格式）";
-      } catch {}
-      throw new Error(`「${name || "文件"}」不是有效的 UTF-8 文本${hint}，请先转为 UTF-8 再上传`);
-    }
+    const { text } = decodeTextBytes(bytes, name || "文件");
     return { chapter, name, text };
   }
   let binaryText = "";

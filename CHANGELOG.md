@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.22.0 — 2026-11-20
+
+- **文本导入新增日文 JIS 编码支持（`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`）**：
+  - `ziyuan-app` 新增 `text_project::decode_text_bytes`（基于 `encoding_rs`）：带 UTF-8 BOM 或有效 UTF-8 保持零拷贝原样归档；自动严格识别并解码 `ISO-2022-JP`（7 位转义序列）、`Shift_JIS`（CP932／青空文库默认格式）与 `EUC-JP`（双合法字节序列按日文假名／汉字特征择优消歧），遇到损坏或截断字节直接拒绝，绝不做有损替换。
+  - 覆盖 TXT／Markdown 预览与确认导入、传统 `text import`、原文追加与单章修订（`source-update`）、SRT 字幕、CSV／TBX 术语表及 TMX 记忆导入；CLI 与 Web 共用同一规则并统一按规范 UTF-8 归档（保持预览指纹一致、解码后同受 8 MiB 上限约束）。
+  - Web 前端（`index.html`、`continuity.mjs`、`continuity-memory.mjs`）取消原先遇 Shift_JIS 即拒绝的限制，改为浏览器端同步严格解码并提示识别出的 JIS 编码。
+- **文档与 README 修订**：同步修正 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md)、[DAG 排程速查](docs/dag.md) 与 [翰林院译书指南](docs/novel-translation.md) 中已过时的表述（包括 `1.17.0`–`1.21.0` 新增能力、`ziyuan-sandbox-windows` W1a–W1d 验证进展、DAG 运行中调整与并行写 `jj workspace` 隔离、`ZIYUAN_JJ_WORKSPACE` 环境变量以及 JIS 导入说明）；登记版本 `1.22.0`（不新增事件类型，不提高旧事件簿读取门槛），本地验证见 [1.22.0 验收记录](docs/acceptance/1.22.0.md)。
 
 ## 1.21.0 — 2026-11-20
 

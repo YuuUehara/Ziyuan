@@ -30,7 +30,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                    [--author <作者>] [--version <版本>] [--date <取得日期>] [--scope <使用范围>]
                                        建立项目（译入 zh-CN），打印项目 ID；来源与权利为用户自述，不作核验
   ziyuan text import <项目ID> <章节.txt>...
-                                       按给出的顺序一次性导入 UTF-8 TXT（每个项目只能导入一次）
+                                       按给出的顺序一次性导入 TXT（支持 UTF-8 及日文 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；每项目只导入一次）
   ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>]
                      [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs]
                      [--chapter-title <章名>]...

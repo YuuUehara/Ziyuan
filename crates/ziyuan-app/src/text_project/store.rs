@@ -119,7 +119,14 @@ impl TextProjects {
                 for (i, path) in sources.iter().enumerate() {
                     let chapter_id = format!("c{:04}", i + 1);
                     let source = Source::read(path)?;
-                    let paragraphs = split_paragraphs(&chapter_id, &source.bytes)?;
+                    let (decoded_str, _) = super::decode_text_bytes(&source.bytes)
+                        .map_err(|msg| invalid(format!("{chapter_id}: {msg}")))?;
+                    let decoded = match decoded_str {
+                        std::borrow::Cow::Borrowed(_) => None,
+                        std::borrow::Cow::Owned(s) => Some(s.into_bytes()),
+                    };
+                    let canonical = decoded.as_deref().unwrap_or(&source.bytes);
+                    let paragraphs = split_paragraphs(&chapter_id, canonical)?;
                     let blocks = chunk_paragraphs(&chapter_id, &paragraphs, limit)?;
                     project.chapters.push(Chapter {
                         original_path: format!("{bundle}/originals/{chapter_id}.txt"),
@@ -129,13 +136,13 @@ impl TextProjects {
                             .unwrap_or_default()
                             .to_string_lossy()
                             .into_owned(),
-                        sha256: sha256(&source.bytes),
-                        byte_len: source.bytes.len(),
+                        sha256: sha256(canonical),
+                        byte_len: canonical.len(),
                         paragraphs,
                         blocks,
                         parsing: None,
                     });
-                    snapshots.push(source);
+                    snapshots.push((source, decoded));
                 }
                 // Checked before staging so an oversized import leaves no hidden copy behind.
                 if estimated_manifest_bytes(&project)? > self.manifest_bytes {
@@ -148,8 +155,9 @@ impl TextProjects {
                 fs::create_dir(&stage)?;
                 fs::create_dir(stage.join("originals"))?;
                 fs::create_dir(stage.join("blocks"))?;
-                for (chapter, source) in project.chapters.iter().zip(&snapshots) {
-                    write_new(&dir.join(&chapter.original_path), &source.bytes)?;
+                for (chapter, (source, decoded)) in project.chapters.iter().zip(&snapshots) {
+                    let canonical = decoded.as_deref().unwrap_or(&source.bytes);
+                    write_new(&dir.join(&chapter.original_path), canonical)?;
                     for block in &chapter.blocks {
                         write_new(
                             &stage
@@ -160,7 +168,7 @@ impl TextProjects {
                     }
                 }
                 // Recheck every source, including earlier chapters, immediately before publication.
-                for snapshot in &mut snapshots {
+                for (snapshot, _) in &mut snapshots {
                     snapshot.verify()?;
                 }
                 project.block_bytes = limit;

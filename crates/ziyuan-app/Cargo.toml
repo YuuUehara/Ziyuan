@@ -26,6 +26,7 @@ tokio = { workspace = true, features = ["macros", "time"] }
 ureq.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
+encoding_rs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

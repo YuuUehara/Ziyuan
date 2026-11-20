@@ -5,6 +5,7 @@
 //! prevent a malicious process from swapping ancestor paths or changing/restoring a file
 //! between observations. This is consistency checking, not an adversarial filesystem sandbox.
 mod document;
+mod encoding;
 mod import;
 mod model;
 mod split;
@@ -13,6 +14,7 @@ pub(crate) mod update;
 mod validate;
 
 pub use document::*;
+pub use encoding::{TextEncoding, UNSUPPORTED_TEXT_ENCODING, decode_text_bytes};
 pub use import::{ImportOptions, ImportPreview, ImportSource};
 pub use model::*;
 pub use split::{chunk_paragraphs, split_paragraphs};

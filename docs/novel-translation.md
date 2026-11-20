@@ -45,7 +45,7 @@ ziyuan text show $id
 
 ![390px 窄屏导入预览：正文与读音清晰折行，无横向溢出](images/text-import-clean-narrow.png)
 
-1. **文件编码与上限**：只接受 UTF-8 `.txt`、`.md`、`.markdown`（网页检测到青空文库常用的 Shift_JIS 旧编码时会明确提示先转 UTF-8）。全部原文合计上限 **8 MiB**；网页 JSON 请求体上限 **24 MiB**（含结构包装与转义开销）。
+1. **文件编码与上限**：接受 **UTF-8** 及日文 **JIS 编码**（`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`，如青空文库默认下载格式）的 `.txt`、`.md`、`.markdown`。有效 UTF-8 原样保留；JIS 文本自动严格解码并转为 UTF-8 归档（含非法或截断字节时拒绝，绝不做有损替换）。原文及解码后合计上限 **8 MiB**；网页 JSON 请求体上限 **24 MiB**（含结构包装与转义开销）。
 2. **TXT 分段与长段拆分**：
    - 网页「TXT 分段」默认选用「**每个非空行一段（常见小说排版）**」；若原文件为了排版把同一自然段折成多行，请改选「**按空行分段（段内换行保留）**」。命令行对应 `--text-paragraphs lines|blank_lines`（不带任何选项的旧 `ziyuan text import` 仍按空行分段，保持向后兼容）。
    - 勾选「**TXT 过长段落拆为工作段**」（命令行 `--split-long-paragraphs`）后，只有放不进 48 KiB 译稿组上限的超长 TXT 自然段才会被拆开，优先沿句末切分，必要时按完整字形切分，注音与强调标记保持完整；成稿导出（TXT／Markdown／HTML）时同一自然段内的工作段会自动接回原段。
@@ -63,14 +63,14 @@ ziyuan text import "$id" novel.txt --text-paragraphs lines --split-long-paragrap
 
 ### DOCX、EPUB 与 SRT 文档导入
 
-在「项目管理 → 导入文档或字幕」中，可向空项目导入 `.docx`、`.epub`（上限 **16 MiB**，压缩包内最多 4096 个文件、单文件解压不超过 32 MiB）或 `.srt` 字幕（同样单次导入，原件与时间轴归档在 `.ziyuan/text-projects/<项目>/`，定稿后可回填导出）：
+在「项目管理 → 导入文档或字幕」中，可向空项目导入 `.docx`、`.epub`（上限 **16 MiB**，压缩包内最多 4096 个文件、单文件解压不超过 32 MiB）或 `.srt` 字幕（支持 UTF-8 及日文 JIS 编码；同样单次导入，原件与时间轴归档在 `.ziyuan/text-projects/<项目>/`，定稿后可回填导出）：
 
 - 命令行对应 `ziyuan text import-docx <项目ID> <文件.docx>`、`import-epub`、`import-srt`。
 - `ziyuan text show <项目ID> [--json]` 可查看分块与文件路径；不要手动修改 `.ziyuan/text-projects/` 中的内部文件。
 
 ### 原文追加与修订
 
-在「项目管理 → 追加与修订原文」选择 `.txt`、`.md`、`.docx` 或 `.epub`：默认追加新章；勾选「修订当前章」则修订当前块所属章节。务必先点「预览原文变化」看差异，无阻塞项再确认。
+在「项目管理 → 追加与修订原文」选择 `.txt`、`.md`（支持 UTF-8 及日文 JIS 编码）、`.docx` 或 `.epub`：默认追加新章；勾选「修订当前章」则修订当前块所属章节。务必先点「预览原文变化」看差异，无阻塞项再确认。
 
 ```text
 ziyuan text source-update <项目ID> next.txt --confirm <预览指纹>
@@ -153,7 +153,7 @@ ziyuan text human apply <项目ID> <块ID> [--json]   # 只读核对，准奏时
    - `translations/<项目>/context/style.md`：文体要求（语气、人称、用字）。
    - `translations/<项目>/context/summaries/<章ID>.md`：各章前情摘要（下诏时只导出当前块**之前**各章摘要，避免剧透后续章节）。
 3. **检查、交换与段旁提示**：
-   - 「资料」工具栏提供「**对比草稿与生产**」「**预览当前块**」「**确定性检查**」（`ziyuan text qa <项目ID>`，核对没有有效译稿、缺段、段号不一致或重复、多段、空译、疑似未翻译、数字不一致、重复译文和适用术语。未关联人物时不单列人物名，人物仍看段旁提示）、「**导出／导入术语表 CSV／TBX**」（只合入本地草稿，不会自动批准）以及「**导出备份文件／复制恢复 JSON**」。
+   - 「资料」工具栏提供「**对比草稿与生产**」「**预览当前块**」「**确定性检查**」（`ziyuan text qa <项目ID>`，核对没有有效译稿、缺段、段号不一致或重复、多段、空译、疑似未翻译、数字不一致、重复译文和适用术语。未关联人物时不单列人物名，人物仍看段旁提示）、「**导出／导入术语表 CSV／TBX**」（导入支持 UTF-8 及日文 JIS 编码，如日文 Excel 导出的 Shift_JIS CSV；只合入本地草稿，不会自动批准）以及「**导出备份文件／复制恢复 JSON**」。
    - 在「临时关联」填写本段人物、称呼对象与说话人并点「刷新段旁提示」，可在「译稿」页上方只读预览本段适用词条与规则（未过块首可见门槛的条目会标明「仅供本地回顾」，不表示已外发）。
 4. **快照版本**：每次 `ziyuan text context approve <项目ID>` 生成不可变快照 `v1`、`v2`…；改动草稿未批准前不会带入新任务。更新上下文后，先前用旧版翻译的块会提示「版本失效」。
 
@@ -242,7 +242,7 @@ ziyuan text verification record "$project" "$block" --file checks.json --json
 
 三者均为本地辅助工作记录，不联网、不调用模型，也不会改写译稿或批准状态：
 
-- **本地翻译记忆条目（`tm.json`）与 TMX 交换**：在「资料」工具栏点「翻译记忆」（命令行 `ziyuan text tm list|add|update|delete|adopt|build <项目ID>`）可维护项目内原译文对并记录采纳次数；底部「翻译记忆交换」与命令行 `ziyuan text tmx export/preview/import` 支持纯文本 TMX 预览后合并导入（遇复杂行内标记或 DTD 会拒绝）。注意：**这是局部条目管理**；使用局部/远程向量索引从定稿检索并向模型显式选用参考见[译文记忆与参考选用](memory.md)。
+- **本地翻译记忆条目（`tm.json`）与 TMX 交换**：在「资料」工具栏点「翻译记忆」（命令行 `ziyuan text tm list|add|update|delete|adopt|build <项目ID>`）可维护项目内原译文对并记录采纳次数；底部「翻译记忆交换」与命令行 `ziyuan text tmx export/preview/import` 支持纯文本 TMX（UTF-8 及日文 JIS 编码）预览后合并导入（遇复杂行内标记或 DTD 会拒绝）。注意：**这是局部条目管理**；使用局部/远程向量索引从定稿检索并向模型显式选用参考见[译文记忆与参考选用](memory.md)。
 - **审校评论（`comments.json`）**：在「资料」页签对当前块与段落添加、回复、指派、解决或重新打开评论（操作后自动刷新列表；命令行 `ziyuan text comment ...` 与 `tbx export|import` 均支持 `--json`）。
 - **跨章待查**：在「资料 → 跨章待查」（命令行 `ziyuan text issue list|add|review`）登记跨章节一致性存疑（最多关联 16 段），支持从问题跳回对应编辑段，状态为 `pending` / `confirmed` / `intentional` / `resolved`。原文、译稿或已批准资料变化后旧结果标为过期，须重新核对再处理。
 

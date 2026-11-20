@@ -1333,18 +1333,50 @@ function selectWorkspaceTab(panel) {
   translationWorkspace?.select(panel);
   if (panel === "materials") ensureMaterialsLoaded();
 }
-function decodeUtf8Text(buffer, label = "文件") {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    let hint = "";
-    try {
-      new TextDecoder("shift_jis", { fatal: true }).decode(bytes);
-      hint = "（检测到可能是 Shift_JIS / 日文旧编码，如青空文库默认下载格式）";
-    } catch {}
-    throw new Error(`「${label}」不是有效的 UTF-8 文本${hint}，请先转为 UTF-8 再上传`);
+function hasIso2022JpEscape(bytes) {
+  for (let i = 0; i + 2 < bytes.length; i++) {
+    if (bytes[i] !== 0x1b || bytes[i + 1] !== 0x24) continue;
+    if (bytes[i + 2] === 0x42 || bytes[i + 2] === 0x40) return true;
+    if (i + 3 < bytes.length && bytes[i + 2] === 0x28 && bytes[i + 3] === 0x44) return true;
   }
+  return false;
+}
+function japanesePlausibility(text) {
+  let score = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if ((code >= 0x3040 && code <= 0x309f) || (code >= 0x30a0 && code <= 0x30ff)) score += 4;
+    else if ((code >= 0x3000 && code <= 0x303f) || (code >= 0xff01 && code <= 0xff60)) score += 3;
+    else if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) score += 2;
+    else if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code <= 0x7e)) score += 1;
+    else if (code >= 0xff61 && code <= 0xff9f) score -= 4;
+    else if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) score -= 8;
+  }
+  return score;
+}
+function decodeImportedText(buffer, label = "文件") {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const bad = () => new Error(`「${label}」不是有效的 UTF-8 或日文 JIS（Shift_JIS／ISO-2022-JP／EUC-JP）文本`);
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; }
+    catch { throw bad(); }
+  }
+  if (hasIso2022JpEscape(bytes)) {
+    try { return { text: new TextDecoder("iso-2022-jp", { fatal: true }).decode(bytes), encoding: "ISO-2022-JP" }; }
+    catch { throw bad(); }
+  }
+  try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; } catch {}
+  let sjis = null, euc = null;
+  try { sjis = new TextDecoder("shift_jis", { fatal: true }).decode(bytes); } catch {}
+  try { euc = new TextDecoder("euc-jp", { fatal: true }).decode(bytes); } catch {}
+  if (sjis !== null && euc === null) return { text: sjis, encoding: "Shift_JIS" };
+  if (euc !== null && sjis === null) return { text: euc, encoding: "EUC-JP" };
+  if (sjis !== null && euc !== null) {
+    return japanesePlausibility(euc) > japanesePlausibility(sjis)
+      ? { text: euc, encoding: "EUC-JP" }
+      : { text: sjis, encoding: "Shift_JIS" };
+  }
+  throw bad();
 }
 let textModulesPromise = null;
 function ensureTextModules() {
@@ -2019,7 +2051,7 @@ $("materials-tbx-import")?.addEventListener("click", () => $("materials-tbx-file
 $("materials-tbx-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0]; if (!file || !textProjectId) return;
   try {
-    const xml = decodeUtf8Text(await file.arrayBuffer(), file.name);
+    const { text: xml } = decodeImportedText(await file.arrayBuffer(), file.name);
     const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx", { method: "POST", headers: { "Content-Type": "application/xml" }, body: xml });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || "请求失败");
@@ -2135,7 +2167,7 @@ $("materials-termbase-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file || !textProjectId) return;
   try {
-    const text = decodeUtf8Text(await file.arrayBuffer(), file.name);
+    const { text } = decodeImportedText(await file.arrayBuffer(), file.name);
     const response = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase", {
       method: "POST", headers: { "Content-Type": "text/csv" }, body: text,
     });
@@ -2749,7 +2781,7 @@ function renderImport() {
   const files = box.dataset.project === d.project ? $("import-files") : null;
   box.dataset.project = d.project; box.dataset.revision = String(d.revision);
   const disabled = d.busy ? "disabled" : "";
-  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；不追加、不替换。UTF-8；全部原文合计上限 8 MiB（JSON 请求上限 24 MiB）。用上移／下移调整章序，改动后须重新预览。</p>
+  box.innerHTML = `<h4>导入 TXT / Markdown</h4><p class="hint">仅空项目可一次导入；不追加、不替换。支持 UTF-8 及日文 JIS（Shift_JIS／ISO-2022-JP／EUC-JP，如青空文库默认格式）；全部原文合计上限 8 MiB（JSON 请求上限 24 MiB）。用上移／下移调整章序，改动后须重新预览。</p>
     <label>选择文件 <input type="file" id="import-files" multiple accept=".txt,.md,.markdown" ${disabled}></label>
     <ol>${d.files.map((f, i) => `<li><div class="row"><span>${esc(f.name)}</span><span class="shrink"><button type="button" class="small" data-import-move="${i}" data-step="-1" ${i === 0 ? "disabled" : disabled}>上移</button> <button type="button" class="small" data-import-move="${i}" data-step="1" ${i === d.files.length - 1 ? "disabled" : disabled}>下移</button> <button type="button" class="small" data-import-remove="${i}" ${disabled}>移除</button></span></div></li>`).join("")}</ol>
     <label>TXT 分段 <select id="import-paragraphs" ${disabled}><option value="lines" ${d.textParagraphs === "lines" ? "selected" : ""}>每个非空行一段（常见小说排版）</option><option value="blank_lines" ${d.textParagraphs === "blank_lines" ? "selected" : ""}>按空行分段（段内换行保留）</option></select></label>
@@ -2904,11 +2936,18 @@ $("text-import").addEventListener("change", async (e) => {
   if (e.target.id === "import-ruby") { d.ruby = e.target.checked; d.titles = []; d.preview = null; invalidateImport(); }
   if (e.target.id === "import-heading") { d.heading = e.target.value; d.titles = []; d.preview = null; invalidateImport(); }
   if (e.target.id === "import-files") {
-    const files = [...e.target.files]; d.busy = true; d.preview = null; d.titles = []; d.message = "正在解码 UTF-8…"; d.revision++; renderImport();
+    const files = [...e.target.files]; d.busy = true; d.preview = null; d.titles = []; d.message = "正在解码文件（UTF-8 / JIS）…"; d.revision++; renderImport();
     try {
       if (files.reduce((n, f) => n + f.size, 0) > 8 * 1024 * 1024) throw new Error("导入原文合计超过 8 MiB 上限，请拆成多个项目");
-      d.files = await Promise.all(files.map(async (f) => ({ name: f.name, text: decodeUtf8Text(await f.arrayBuffer(), f.name) })));
-      d.message = "请用上移／下移明确核对文件顺序，再预览。";
+      const decoded = await Promise.all(files.map(async (f) => ({ name: f.name, ...decodeImportedText(await f.arrayBuffer(), f.name) })));
+      if (decoded.reduce((n, f) => n + new TextEncoder().encode(f.text).length, 0) > 8 * 1024 * 1024) {
+        throw new Error("解码后原文合计超过 8 MiB 上限，请拆成多个项目");
+      }
+      d.files = decoded.map(({ name, text }) => ({ name, text }));
+      const jisEncodings = [...new Set(decoded.filter((f) => f.encoding !== "UTF-8").map((f) => f.encoding))];
+      d.message = jisEncodings.length
+        ? `已自动按 ${jisEncodings.join(" / ")} 解码（导入时按 UTF-8 保存）；请用上移／下移明确核对文件顺序，再预览。`
+        : "请用上移／下移明确核对文件顺序，再预览。";
     } catch (e) { d.files = []; d.message = `文件读取失败：${e.message}`; }
     finally { d.busy = false; d.dirty = true; d.revision++; if (importDraft === d) renderImport(); }
   }

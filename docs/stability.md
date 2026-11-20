@@ -13,7 +13,7 @@
 | CLI 子命令与参数 | 见 `ziyuan help`。「恢复默认」统一写 `default`，「一件不授」统一写 `none`；`all` 只用于票拟、批红、复核、复勘、回报等可逐件重做的批量操作，落盘、评定、撤销必须逐件进行。 |
 | `--json` 输出 | `court`、`officials`、`tasks`、`history`、`records`、`migrate`、`flags`、`mcp`。字段只增不删、不改义；键的顺序不作保证。`court` 与 Web 的 `/api/state` 同构。 |
 | 退出码 | 0 成功；1 运行中出错（如诏令不存在、事件簿读不了、模型调用失败）；2 用法错误（未知命令、参数不对）。管道提前关闭与 Ctrl-C 退朝视为成功。 |
-| 环境变量 | `ZIYUAN_LLM_MODEL`、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`、`ZIYUAN_LLM_PROVIDER`、`ZIYUAN_LLM_PRICE`、`ZIYUAN_LLM_RETRIES`、`ZIYUAN_MAX_STEPS`、`ZIYUAN_CONTEXT_TOKENS`、`ZIYUAN_TEST_COMMAND`、`ZIYUAN_SANDBOX`、`ZIYUAN_SANDBOX_ALLOW`、`ZIYUAN_DELTA`、`ZIYUAN_TZ`、`ZIYUAN_GITHUB_REPO`、`ZIYUAN_GITHUB_TOKEN`、`ZIYUAN_CONFIG_DIR`。 |
+| 环境变量 | `ZIYUAN_LLM_MODEL`、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`、`ZIYUAN_LLM_PROVIDER`、`ZIYUAN_LLM_PRICE`、`ZIYUAN_LLM_RETRIES`、`ZIYUAN_MAX_STEPS`、`ZIYUAN_CONTEXT_TOKENS`、`ZIYUAN_TEST_COMMAND`、`ZIYUAN_SANDBOX`、`ZIYUAN_SANDBOX_ALLOW`、`ZIYUAN_JJ_WORKSPACE`、`ZIYUAN_DELTA`、`ZIYUAN_TZ`、`ZIYUAN_GITHUB_REPO`、`ZIYUAN_GITHUB_TOKEN`、`ZIYUAN_CONFIG_DIR`。 |
 | Web 驿站 `POST /api/courier` | 凭令牌（`Authorization: Bearer`）投递 `{ text, department?, station?, urgent? }`，只入队。 |
 
 `ZIYUAN_CONTEXT_TOKENS` 为旧工具输出的节略触发阈值（正整数，默认 48000），不是模型硬窗口或度支预算；最近四份输出仍受保护。`ZIYUAN_DELTA` 指定可选 git-delta 可执行文件；未设置时查 PATH，不可用时回退内置预览，不改变逐段审批语义。
@@ -178,6 +178,16 @@
 ## 1.16.0：代码任务工具
 
 不新增朝廷事件，不提高旧事件簿的最低读取版本，也不改已有命令、参数和事件字段的含义。`read_file` 与 `search_code` 只增加可选参数；不带这些参数时，读取和搜索的结果与以前相同。行窗口返回的正文同样不超过 64 KiB。`replace_text` 随已有的 `write_file` 授予，不是新的玉玺代码；「恰好一次」按不重叠的字面次数计，路径先于空文本或新旧相同的判断。`run_tests` 仍只跑皇帝设定的命令，成败仍只看退出码；认得出 `cargo test` 失败时多附一段摘录，其他命令的输出末尾不变。终端下诏可以填写范围和工具，默认仍是只读玉玺，校验与命令行相同。
+
+## 1.17.0 – 1.21.0 及后续增量
+
+- **1.17.0 – 1.20.0（零新增事件）**：均不新增朝廷事件类型、不提高旧事件簿读取门槛、不改既有冻结命令含义。
+  - `1.17.0`：都察院逐段审 diff 与内置只读「条陈」模板（`edict --plan` / `edict --from-plan`），仍不自动驳回或落盘。
+  - `1.18.0`：`file_outline` 随 `read_file` 授予、`find_symbols` 随 `search_code` 授予，不新增玉玺代码；`run_tests` 失败摘录扩展至 `pytest`、`node --test`、`go test`、`jest`/`vitest`，测试成败仍只看退出码。
+  - `1.19.0`：`ziyuan-sandbox-windows` 完成 W1b–W1d 原生隔离探针与 W2 安全库接口，仍保持 `publish = false` 且不接入生产 `ziyuan-runtime`；Windows 受保护执行继续失败关闭。
+  - `1.20.0`：新增 `ziyuan split --parallel-writes`、Web `parallel_writes` 与环境变量 `ZIYUAN_JJ_WORKSPACE`（`auto|always|off`，默认 `auto`）；非 `jj` 仓库下请求写并行分办失败关闭；落盘继续逐段准奏与原文核验。
+- **1.21.0（运行中调整 DAG）**：事件簿仍为格式 v1，新增 `DagSubtaskAdded`（编码 `DAGADD`）与 `DagDependenciesUpdated`（编码 `DAGDEPS`），最低读取版本登记为序号 55（`1.21.0`）；未使用运行中调整的旧事件簿不抬高读取门槛。CLI 新增 `ziyuan dag add` 与 `ziyuan dag deps`；仅允许在父诏令未结束前追加子诏令（仍守单层 2–8 件上限）或修改 `Pending` 子诏令前置依赖，已开始／已结束节点不可改写。
+- **文本导入日文 JIS 编码支持（未发版增量）**：TXT／Markdown 预览与导入、原文更新、SRT 字幕、CSV／TBX 术语表及 TMX 导入在 UTF-8 之外新增日文 JIS（`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`）严格解码（绝不作有损替换）；带 UTF-8 BOM 或有效 UTF-8 输入保持原样字节零拷贝归档，非 UTF-8 JIS 输入在导入边界转换为规范 UTF-8 归档（解码后同样受 8 MiB 上限约束），不改变 `project.json` schema 2 与朝廷事件簿格式。
 
 ## 实验性
 

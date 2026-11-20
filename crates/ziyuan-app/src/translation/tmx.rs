@@ -191,7 +191,11 @@ fn parse(bytes: &[u8], source: &str, target: &str) -> Result<Parsed> {
     if bytes.len() > BYTES {
         return Err(invalid("TMX超过8 MiB"));
     }
-    let text = std::str::from_utf8(bytes).map_err(|_| invalid("TMX仅接受UTF-8"))?;
+    let (text, _) = crate::text_project::decode_text_bytes(bytes)
+        .map_err(|msg| invalid(format!("TMX {msg}")))?;
+    if text.len() > BYTES {
+        return Err(invalid("TMX超过8 MiB"));
+    }
     if source.eq_ignore_ascii_case(target) {
         return Err(invalid("TMX交换要求项目原译文语种不同"));
     }
@@ -210,7 +214,7 @@ fn parse(bytes: &[u8], source: &str, target: &str) -> Result<Parsed> {
         metadata: false,
         other_languages: false,
     };
-    let mut reader = Reader::from_str(text);
+    let mut reader = Reader::from_str(&text);
     loop {
         match reader
             .read_event()
@@ -273,8 +277,20 @@ fn parse(bytes: &[u8], source: &str, target: &str) -> Result<Parsed> {
                 }
                 if let Some(encoding) = e.encoding() {
                     let encoding = encoding.map_err(|e| invalid(e.to_string()))?;
-                    if !encoding.eq_ignore_ascii_case(b"UTF-8") {
-                        return Err(invalid("TMX仅接受UTF-8声明"));
+                    let supported = [
+                        b"UTF-8".as_slice(),
+                        b"SHIFT_JIS".as_slice(),
+                        b"SHIFT-JIS".as_slice(),
+                        b"SJIS".as_slice(),
+                        b"CP932".as_slice(),
+                        b"WINDOWS-31J".as_slice(),
+                        b"ISO-2022-JP".as_slice(),
+                        b"EUC-JP".as_slice(),
+                    ]
+                    .iter()
+                    .any(|allowed| encoding.eq_ignore_ascii_case(allowed));
+                    if !supported {
+                        return Err(invalid("TMX仅接受UTF-8或日文JIS编码声明"));
                     }
                 }
             }

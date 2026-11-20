@@ -8,13 +8,13 @@
 
 - **先试用，不必先配置模型**：未设置 `ZIYUAN_LLM_MODEL` 时只演示派工，不会真的分析或修改文件。
 - **接入模型后才执行真实工作**：支持 OpenAI 兼容接口（已有 DeepSeek 与本地 Ollama 实测）。默认只能读取授权范围内的文件；修改文件和运行测试须另行授权。
-- **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅 diff 后执行 `apply` 准奏才落盘。复杂改动可先用 `edict --plan` 只读出条陈方案，批复后再用 `edict --from-plan` 收窄范围授写权；工部支持按唯一旧文本局部替换，都察院复核可逐段附注 diff 意见，审阅和逐段准奏决定始终在你手中。
+- **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅 diff 后执行 `apply` 准奏才落盘。复杂改动可先用 `edict --plan` 只读出条陈方案，批复后再用 `edict --from-plan` 收窄范围授写权；工部具备按行读、轻量符号工具（`file_outline`／`find_symbols`）、按唯一旧文本局部替换（`replace_text`）及多框架测试失败摘录，都察院复核可逐段附注 diff 意见；在 `jj` 仓库中可通过 `--parallel-writes` 隔离并行写副本，分办后亦可用 `ziyuan dag add|deps` 在运行中追加子诏令或改写待办依赖——审阅和逐段准奏决定始终在你手中。
 - **逐块与整本译书**：支持从日文或英文原文建立项目，在本地预览分段并导入，逐块下诏初译、请只读审校、逐段朱批、修订与御览定稿；也可不调用模型，在网页、命令行或终端里手写**人工译稿**，用**御笔札记**记下认可译法。
 - **找回定稿译法**：译文记忆默认关闭、不联网。设置 `ZIYUAN_MEMORY_PROVIDER=local` 后只在本机计算；`deterministic` 为可重复的固定本机算法；远程嵌入须先按项目 `text memory authorize` 授权。记忆仅提供字面相近的参考译法，不自动改稿、不自动批准。
 
 ### 译书与本地文本工具概览
 
-- **原文预览、追加修订与成稿导出**：TXT／Markdown 导入前先预览章序、分段（默认按非空行，可改按空行并拆分超长段）与安全注音，核对指纹后再写入；支持 DOCX／EPUB／SRT 导入与定稿回填、原文追加或单章修订，以及双语通读、交稿预检和 TXT／Markdown／HTML（保留注音与着重号）成稿打包导出，见[预览与导入](docs/novel-translation.md#预览与确认导入)、[版本与回填](docs/novel-translation.md#译稿版本与格式回填)与[通读与导出](docs/novel-translation.md#原件与成稿导出)。
+- **原文预览、追加修订与成稿导出**：TXT／Markdown（支持 UTF-8 及日文 JIS 编码：Shift_JIS／ISO-2022-JP／EUC-JP，自动严格解码并按 UTF-8 归档）导入前先预览章序、分段（默认按非空行，可改按空行并拆分超长段）与安全注音，核对指纹后再写入；支持 DOCX／EPUB／SRT 导入与定稿回填、原文追加或单章修订，以及双语通读、交稿预检和 TXT／Markdown／HTML（保留注音与着重号）成稿打包导出，见[预览与导入](docs/novel-translation.md#预览与确认导入)、[版本与回填](docs/novel-translation.md#译稿版本与格式回填)与[通读与导出](docs/novel-translation.md#原件与成稿导出)。
 - **手工翻译优先与模型译校**：网页「翰林院 → 译稿」默认开启独立的「手工翻译」开关，提供双语逐段编辑与注音／着重／粗斜体标记工具；关闭开关可展开三栏对照、逐段朱批与模型初译／审校／修订流程。人工与模型译稿都保留三态版本快照，也可搭配局部词证与六事勘校记录使用，见[人工译稿](docs/novel-translation.md#人工译稿)与[词证与逐段勘校](docs/novel-translation.md#词证与逐段勘校)。
 - **资料、检索、译文记忆与备份**：在「资料」页签可集中维护人物、术语与称谓规则草稿（支持 CSV／TBX／TMX 交换）、确定性检查、御笔札记、审校评论与跨章待查；「全文检索与草稿替换」可快速定位原文、现行译文与人工草稿。「项目管理」支持完整工作区备份与迁机恢复；若启用局部／远程译文记忆并显式选用参考，外发前可预览全部提示文本，见[本地译文记忆](docs/memory.md#显式选用参考)与[兼容边界](docs/stability.md#140显式选用参考)。
 - **用量账本与更新提醒**：`ziyuan text usage <项目ID>` 按阶段汇总已报告用量与分币种估价，见[账本与精简边界](docs/novel-translation.md#逐阶段用量账本与请求材料精简)；「武英殿 · 作品关注」支持 syosetu 更新提醒与新章节自动入队（只记目录变化，不下载正文），见[作品更新提醒](docs/subscriptions.md)。
@@ -32,7 +32,7 @@
 
 1. 打开「翰林院」，点左侧「新建项目」。
 2. 填标题、原文语言、来源与权利声明（作者、版本、日期与使用范围可选）；来源与权利只是自述，软件不作核验。
-3. 建立后会自动进入「项目管理」，在「导入原文」选择 UTF-8 TXT／Markdown 文件（原文合计上限 `8 MiB`，JSON 请求上限 `24 MiB`），按需调整章序与选项：
+3. 建立后会自动进入「项目管理」，在「导入原文」选择 TXT／Markdown 文件（支持 UTF-8 与日文 JIS：Shift_JIS／ISO-2022-JP／EUC-JP，如青空文库默认格式；原文及解码后合计上限 `8 MiB`，JSON 请求上限 `24 MiB`），按需调整章序与选项：
    - TXT 分段默认按「每个非空行一段（常见小说排版）」，若原文为排版换行可改选「按空行分段」；超长自然段可勾选「TXT 过长段落拆为工作段」。
    - 先点「重新预览」核对章序、段落与警告（超过 200 段的章节默认先展示前 120 段并可点击展开全文，超过 50 条的警告默认折叠），确认无误后再点「确认预览并导入」。一个项目只导入一次原文。
 
@@ -70,7 +70,7 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 | --- | --- | --- |
 | Linux | 支持 | bubblewrap（另装；按域名放行还要 socat） |
 | macOS | 支持 | 系统自带的 Seatbelt |
-| Windows | 支持 | 暂缺，默认拒绝运行需要隔离的命令。设 `ZIYUAN_SANDBOX=off` 会取消隔离，风险见 [ADR-0001](docs/adr/0001-windows-sandbox.md) |
+| Windows | 支持 | 生产暂未接入，默认拒绝运行需要隔离的命令（实验 crate 已完成 W1a–W1d 原生隔离验证与安全接口，待独立审计与 W2 评审）。设 `ZIYUAN_SANDBOX=off` 会取消隔离，风险见 [ADR-0001](docs/adr/0001-windows-sandbox.md) |
 
 ## 快速开始
 
@@ -130,7 +130,7 @@ ziyuan history
 
 ## 开发与发布
 
-发布产品由十一个 crate 组成：`core` 定义任务与角色，`governance` 执行分配规则，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`memory` 提供本地译文记忆索引与检索，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互。工作区另有未发布的 `sandbox-windows` 独立启动探针，尚未完成文件／网络隔离验收，不接入生产；Windows 受保护执行仍失败关闭，见 [ADR-0001](docs/adr/0001-windows-sandbox.md)。其余分层说明见[体系结构](docs/architecture.md)。
+发布产品由十一个 crate 组成：`core` 定义任务与角色，`governance` 执行分配规则，`runtime` 执行模型与工具调用，`llm` 和 `github` 连接外部服务，`storage` 保存记录，`memory` 提供本地译文记忆索引与检索，`app` 提供各界面共用的功能，`cli`、`web`、`tui` 负责交互。工作区另有未发布的 `sandbox-windows` 原生实验 crate，已完成 W1a–W1d 文件／网络／生命周期隔离实测与 W2 就绪安全库接口，但尚未完成独立安全审计与生产接入；Windows 受保护执行仍失败关闭，见 [ADR-0001](docs/adr/0001-windows-sandbox.md)。其余分层说明见[体系结构](docs/architecture.md)。
 
 在仓库根目录检查和构建：
 
@@ -153,7 +153,7 @@ bash scripts/smoke.sh
   - 模型与执行：[接入真实模型](docs/guide.md#接入真实模型)、[任务队列与并发](docs/guide.md#任务队列与并发)、[常朝：常驻执行与自动复核](docs/guide.md#常朝常驻执行与自动复核)、[外藩朝贡：MCP 工具](docs/guide.md#外藩朝贡mcp-工具)
   - 权限与改动：[玉玺：限定官员的权限](docs/guide.md#玉玺限定官员的权限)、[工部动手：受控写权限](docs/guide.md#工部动手受控写权限)、[户部度支：预算与限额](docs/guide.md#户部度支预算与限额)、[刑部与锦衣卫：防提示注入](docs/guide.md#刑部与锦衣卫防提示注入)
   - 评定与监督：[吏部：评定、考绩与荐举](docs/guide.md#吏部评定考绩与荐举)、[都察院：复核回奏与证据核验](docs/guide.md#都察院复核回奏与证据核验)、[廷推与廷杖](docs/guide.md#廷推与廷杖)、[内阁、皇权与昏君模式](docs/guide.md#内阁皇权与昏君模式)
-  - 协作与文书：[多官协作：分办与汇总](docs/guide.md#多官协作分办与汇总)、[人格、字号与廷议](docs/guide.md#人格字号与廷议)、[翰林院：诏令模板](docs/guide.md#翰林院诏令模板)、[礼部：科举与文书](docs/guide.md#礼部科举与文书)、[礼部修 CHANGELOG](docs/guide.md#礼部修-changelog)
+  - 协作与文书：[多官协作：分办与汇总](docs/guide.md#多官协作分办与汇总)、[DAG 排程与运行中调整](docs/dag.md)、[人格、字号与廷议](docs/guide.md#人格字号与廷议)、[翰林院：诏令模板](docs/guide.md#翰林院诏令模板)、[礼部：科举与文书](docs/guide.md#礼部科举与文书)、[礼部修 CHANGELOG](docs/guide.md#礼部修-changelog)
   - 记录与对接：[起居注：按诏令、官员、类型、时间查](docs/guide.md#起居注按诏令官员类型时间查)、[翰林院修史：实录与前例](docs/guide.md#翰林院修史实录与前例)、[兵部：驿传与八百里加急](docs/guide.md#兵部驿传与八百里加急)、[兵部驿站 · GitHub](docs/guide.md#兵部驿站--github)、[版本控制：Jujutsu](docs/guide.md#版本控制jujutsu)
 - [翰林院译书指南](docs/novel-translation.md)：项目导入与追加修订、手工翻译优先与模型译校、资料词证勘校、检索版本、通读交稿导出、备份恢复与版权边界。
 - [本地译文记忆](docs/memory.md)：启用、建库、查询、远程嵌入授权及显式选用参考。

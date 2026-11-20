@@ -1177,3 +1177,138 @@ fn whole_book_multi_megabyte_txt_imports_chunks_reopens_and_updates_chapter() {
         .unwrap();
     assert_eq!(updated.chapters[1].paragraphs[0].text, "第二章改行一。");
 }
+
+#[test]
+fn jis_encodings_import_preview_and_reverify_cleanly() {
+    let f = Fixture::new();
+    let p_legacy = f.create("ja");
+    let sjis_sample = "吾輩は猫である。\r\n\r\n名前はまだ無い。\r\n";
+    let (sjis_bytes, _, had_err) = encoding_rs::SHIFT_JIS.encode(sjis_sample);
+    assert!(!had_err);
+    let legacy_file = f.file("legacy-sjis.txt", &sjis_bytes);
+    let imported_legacy = f
+        .service()
+        .import(&p_legacy.id, std::slice::from_ref(&legacy_file))
+        .unwrap();
+    assert_eq!(
+        imported_legacy.chapters[0].paragraphs[0].text,
+        "吾輩は猫である。"
+    );
+    assert_eq!(
+        imported_legacy.chapters[0].paragraphs[1].text,
+        "名前はまだ無い。"
+    );
+    assert_eq!(f.service().show(&p_legacy.id).unwrap(), imported_legacy);
+
+    // 预览与确认导入：同时导入 Shift_JIS（含青空注音）、ISO-2022-JP 与 EUC-JP。
+    let p_multi = f.create("ja");
+    let aozora = "｜東京《とうきょう》の空。\n二行目。\n";
+    let (aozora_sjis, _, e1) = encoding_rs::SHIFT_JIS.encode(aozora);
+    assert!(!e1);
+    let iso_text = "第二章の本文。\n";
+    let (iso_bytes, _, e2) = encoding_rs::ISO_2022_JP.encode(iso_text);
+    assert!(!e2);
+    let euc_text = "あいうえお、かきくけこ。\n";
+    let (euc_bytes, _, e3) = encoding_rs::EUC_JP.encode(euc_text);
+    assert!(!e3);
+
+    let f1 = f.file("01-sjis.txt", &aozora_sjis);
+    let f2 = f.file("02-iso.txt", &iso_bytes);
+    let f3 = f.file("03-euc.txt", &euc_bytes);
+    let file_sources = [
+        ImportSource::File(f1),
+        ImportSource::File(f2),
+        ImportSource::File(f3),
+    ];
+    let text_sources = [
+        ImportSource::Text {
+            name: "01-sjis.txt".into(),
+            text: aozora.into(),
+        },
+        ImportSource::Text {
+            name: "02-iso.txt".into(),
+            text: iso_text.into(),
+        },
+        ImportSource::Text {
+            name: "03-euc.txt".into(),
+            text: euc_text.into(),
+        },
+    ];
+    let opts = ImportOptions {
+        parsing: ParseOptions {
+            ruby: true,
+            text_paragraphs: TextParagraphs::Lines,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let preview_file = f
+        .service()
+        .preview_import(&p_multi.id, &file_sources, &opts)
+        .unwrap();
+    let preview_text = f
+        .service()
+        .preview_import(&p_multi.id, &text_sources, &opts)
+        .unwrap();
+    assert_eq!(preview_file.fingerprint, preview_text.fingerprint);
+    assert_eq!(preview_file.chapters[0].paragraphs[0].text, "東京の空。");
+    assert_eq!(
+        preview_file.chapters[1].paragraphs[0].text,
+        "第二章の本文。"
+    );
+    assert_eq!(
+        preview_file.chapters[2].paragraphs[0].text,
+        "あいうえお、かきくけこ。"
+    );
+
+    let imported = f
+        .service()
+        .import_prepared(&p_multi.id, &file_sources, &opts, &preview_file.fingerprint)
+        .unwrap();
+    assert_eq!(f.service().show(&p_multi.id).unwrap(), imported);
+
+    // 原文更新、术语表 CSV、TMX 与 SRT 均支持 Shift_JIS / JIS 导入。
+    let translations = ziyuan_app::translation::Translations::new(&f.0);
+    let (rev_sjis, _, e4) = encoding_rs::SHIFT_JIS.encode("第二章の改訂。\n");
+    assert!(!e4);
+    let update = ziyuan_app::translation::Translations::source_update_from_bytes(
+        Some("c0002".into()),
+        "02-rev.txt".into(),
+        &rev_sjis,
+    )
+    .unwrap();
+    assert_eq!(update.text, "第二章の改訂。\n");
+
+    let (csv_sjis, _, e5) = encoding_rs::SHIFT_JIS.encode(
+        "kind,id,source,name,allowed,aliases,status,note\nterm,t1,東京,,京都,,confirmed,地名\n",
+    );
+    assert!(!e5);
+    let receipt = translations
+        .import_termbase_csv(&p_multi.id, &csv_sjis)
+        .unwrap();
+    assert!(!receipt.revision.is_empty());
+    let tb_csv = translations.export_termbase_csv(&p_multi.id).unwrap();
+    assert!(
+        tb_csv.contains("東京") && tb_csv.contains("京都"),
+        "{tb_csv}"
+    );
+
+    let (tmx_sjis, _, e6) = encoding_rs::SHIFT_JIS.encode(
+        "<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><tmx version=\"1.4\"><header srclang=\"ja\"/><body><tu><tuv xml:lang=\"ja\"><seg>東京</seg></tuv><tuv xml:lang=\"zh-CN\"><seg>京都</seg></tuv></tu></body></tmx>",
+    );
+    assert!(!e6);
+    let tmx_preview = translations.preview_tmx(&p_multi.id, &tmx_sjis).unwrap();
+    assert_eq!(tmx_preview.entries, 1);
+
+    let p_srt = f.create("ja");
+    let (srt_sjis, _, e7) =
+        encoding_rs::SHIFT_JIS.encode("1\r\n00:00:01,000 --> 00:00:02,000\r\n東京の夜。\r\n");
+    assert!(!e7);
+    let srt_file = f.file("sub.srt", &srt_sjis);
+    let cues = translations.import_srt(&p_srt.id, &srt_file).unwrap();
+    assert_eq!(cues, 1);
+    assert_eq!(
+        f.service().show(&p_srt.id).unwrap().chapters[0].paragraphs[0].text,
+        "東京の夜。"
+    );
+}

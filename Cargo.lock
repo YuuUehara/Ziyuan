@@ -281,6 +281,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -443,6 +449,20 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
 
 [[package]]
 name = "equivalent"
@@ -947,6 +967,12 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "nix"
@@ -1645,6 +1671,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "similar"
@@ -2458,8 +2490,9 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-app"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
+ "encoding_rs",
  "pulldown-cmark",
  "quick-xml",
  "ring",
@@ -2482,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-cli"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -2500,14 +2533,14 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-core"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ziyuan-github"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "serde_json",
  "ureq",
@@ -2516,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-governance"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "ring",
  "serde",
@@ -2526,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-llm"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "ring",
  "serde_json",
@@ -2537,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-memory"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "ring",
  "serde",
@@ -2546,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-runtime"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "ring",
  "serde_json",
@@ -2557,14 +2590,14 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-sandbox-windows"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ziyuan-storage"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "ring",
  "serde",
@@ -2574,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-tui"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "ratatui",
  "ring",
@@ -2589,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "ziyuan-web"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "axum",
  "futures-util",

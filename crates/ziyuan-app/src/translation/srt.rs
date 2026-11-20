@@ -92,8 +92,9 @@ impl Translations {
         if bytes.len() > 8 * 1024 * 1024 {
             return Err(invalid("SRT 超过8 MiB"));
         }
-        let text = std::str::from_utf8(&bytes).map_err(|_| invalid("SRT 须为UTF-8"))?;
-        let cues = parse_srt(text)?;
+        let (text, _) = crate::text_project::decode_text_bytes(&bytes)
+            .map_err(|msg| invalid(format!("SRT {msg}")))?;
+        let cues = parse_srt(&text)?;
         let body = cues
             .iter()
             .map(|c| c.text.as_str())

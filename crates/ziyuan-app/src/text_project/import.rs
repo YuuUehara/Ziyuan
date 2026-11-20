@@ -35,7 +35,10 @@ pub struct ImportPreview {
 }
 
 enum Contents {
-    File(Box<Source>),
+    File {
+        source: Box<Source>,
+        decoded: Option<Vec<u8>>,
+    },
     Text(Vec<u8>),
 }
 struct Snapshot {
@@ -46,13 +49,13 @@ struct Snapshot {
 impl Snapshot {
     fn bytes(&self) -> &[u8] {
         match &self.contents {
-            Contents::File(s) => &s.bytes,
+            Contents::File { source, decoded } => decoded.as_deref().unwrap_or(&source.bytes),
             Contents::Text(bytes) => bytes,
         }
     }
     fn verify(&mut self) -> Result<()> {
         match &mut self.contents {
-            Contents::File(s) => s.verify(),
+            Contents::File { source, .. } => source.verify(),
             Contents::Text(_) => Ok(()),
         }
     }
@@ -183,13 +186,28 @@ fn snapshots(sources: &[ImportSource]) -> Result<Vec<Snapshot>> {
         let remaining = SOURCE_BYTES.saturating_sub(total);
         let contents = match input {
             ImportSource::File(path) => {
-                Contents::File(Box::new(Source::read_limited(path, remaining)?))
-            }
-            ImportSource::Text { text, .. } => {
-                if text.len() > remaining {
+                let source = Source::read_limited(path, remaining)?;
+                let (decoded_str, _) = super::decode_text_bytes(&source.bytes)
+                    .map_err(|msg| invalid(format!("{}: {msg}", fallback_title(&name))))?;
+                if decoded_str.len() > remaining {
                     return Err(invalid("导入原文合计超过 8 MiB，请拆成多个项目"));
                 }
-                Contents::Text(text.as_bytes().to_vec())
+                let decoded = match decoded_str {
+                    std::borrow::Cow::Borrowed(_) => None,
+                    std::borrow::Cow::Owned(s) => Some(s.into_bytes()),
+                };
+                Contents::File {
+                    source: Box::new(source),
+                    decoded,
+                }
+            }
+            ImportSource::Text { text, .. } => {
+                let (decoded_str, _) = super::decode_text_bytes(text.as_bytes())
+                    .map_err(|msg| invalid(format!("{}: {msg}", fallback_title(&name))))?;
+                if decoded_str.len() > remaining {
+                    return Err(invalid("导入原文合计超过 8 MiB，请拆成多个项目"));
+                }
+                Contents::Text(decoded_str.into_owned().into_bytes())
             }
         };
         let snapshot = Snapshot {
@@ -211,7 +229,9 @@ pub(super) fn format_for_name(name: &str) -> Result<SourceFormat> {
     {
         Some("txt") => Ok(SourceFormat::Text),
         Some("md" | "markdown") => Ok(SourceFormat::Markdown),
-        _ => Err(invalid("仅支持 UTF-8 .txt、.md 或 .markdown 原文")),
+        _ => Err(invalid(
+            "仅支持 UTF-8 或日文 JIS 编码的 .txt、.md 或 .markdown 原文",
+        )),
     }
 }
 

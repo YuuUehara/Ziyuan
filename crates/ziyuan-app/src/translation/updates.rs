@@ -26,12 +26,15 @@ impl Translations {
                 if bytes.len() > 8 * 1024 * 1024 {
                     return Err(invalid("原文正文超过 8 MiB"));
                 }
-                let text = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| invalid("仅接受 UTF-8 TXT 或 Markdown"))?;
+                let (decoded, _) = crate::text_project::decode_text_bytes(bytes)
+                    .map_err(|msg| invalid(format!("原文更新{msg}")))?;
+                if decoded.len() > 8 * 1024 * 1024 {
+                    return Err(invalid("原文正文超过 8 MiB"));
+                }
                 Ok(SourceUpdate {
                     chapter,
                     name,
-                    text,
+                    text: decoded.into_owned(),
                     package_base64: None,
                 })
             }

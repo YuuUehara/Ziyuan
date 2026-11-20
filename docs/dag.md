@@ -14,12 +14,12 @@
 
 | 区域 | 改动 |
 | --- | --- |
-| `ziyuan-core` | `DagNode` 与 `CourtEvent::EdictDag` |
-| `ziyuan-governance` | DAG 校验、自动串行提议、指派门控、批红与 `blocked_by` |
-| `ziyuan-storage` | `DAG` 编码/回放、兼容性样本；最低读取版本登记为序号 12（`1.0.0-rc.2`） |
-| `ziyuan-app` | `ScheduledSubtask` / `Session::split_scheduled`、原子校验、方案重试、自动串行、运行时排程检查 |
-| CLI / Web | `split --plan` /「御定排程」创建入口、受阻状态与排程查询 |
-| TUI | 依赖、受阻展示；自定义创建仍用 CLI / Web |
+| `ziyuan-core` | `DagNode`、`CourtEvent::EdictDag`、`DagSubtaskAdded`、`DagDependenciesUpdated` |
+| `ziyuan-governance` | DAG 校验、自动串行与显式并行写提议、运行中追加与改依赖、指派门控、批红与 `blocked_by` |
+| `ziyuan-storage` | `DAG`（序号 12，`1.0.0-rc.2`）与 `DAGADD` / `DAGDEPS`（序号 55，`1.21.0`）编码/回放与兼容样本 |
+| `ziyuan-app` | `ScheduledSubtask`、`AddedSubtask`、`Session::split_scheduled` / `dag_add_subtask` / `dag_update_deps`、并发写 `jj workspace` 隔离与运行时排程检查 |
+| CLI / Web | `split --plan` / `--parallel-writes`、`dag add|deps`、Web「御定排程」／「运行中追加子诏令」／「改依赖」与排程查询 |
+| TUI | 依赖、受阻展示；自定义创建与运行中调整仍用 CLI / Web |
 | 测试 | 校验拒绝情形、调度与失败阻塞、提示注入、API JSON、TUI 状态徽章 |
 
 ## 使用与边界
@@ -57,7 +57,7 @@ API：`POST /api/tasks/{id}/split` 的正文为 `{ "schedule": [...], "parallel_
 ## 已采用的决定
 
 1. **运行中调整边界（1.21.0）**：允许在原诏令未结束前显式追加子诏令（仍守单层 2–8 上限）与修改尚未开始（`Pending`）子诏令的前置依赖（严禁成环与改写已开始／已结束节点），由 `DAGADD`/`DAGDEPS` 独立事件审计回放。
-2. **失败处置**：上游失败或改动驳回不会自动重试，也不会让下游降级运行；下游继续受阻，需皇帝撤销或另行分办。
+2. **失败处置**：上游失败或改动驳回不会自动重试，也不会让下游降级运行；下游继续受阻，皇帝可通过 `ziyuan dag deps`／Web「改依赖」改线或清除断裂依赖，也可撤销或另行分办。
 3. **审批交接**：有改动时，以准奏后的磁盘为交接点，安全优先于无人值守的一次跑完。
 
 ## 验证

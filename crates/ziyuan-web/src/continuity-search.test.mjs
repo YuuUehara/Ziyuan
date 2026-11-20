@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mountSearch,replacementReady } from './continuity-search.mjs';
-import { backupSummary, sourceUpdateRequest } from './continuity.mjs';
+import { backupSummary, decodeTextBytes, sourceUpdateRequest } from './continuity.mjs';
 class Element {
  constructor(tag='div'){this.tagName=tag;this.children=[];this.elements=new Map();this.value='';this.textContent='';}
  querySelector(key){if(!this.elements.has(key))this.elements.set(key,new Element());return this.elements.get(key);}
@@ -29,8 +29,20 @@ test('old project search cannot confirm a draft replacement after project switch
   project='B';await confirm.onclick();assert.equal(writes,1);assert.match(section.querySelector('[data-status]').textContent,/重新预览/);
  }finally{globalThis.document=previous;}
 });
-test('source update rejects invalid UTF-8 and hints Shift_JIS',()=>{
- assert.throws(()=>sourceUpdateRequest('aozora.txt',Uint8Array.from([0x90,0xd4,0x8c,0xbb]),null),/UTF-8.*Shift_JIS/);
+test('source update and decodeTextBytes support Shift_JIS, ISO-2022-JP, EUC-JP and reject invalid bytes',()=>{
+ const sjis=sourceUpdateRequest('aozora.txt',Uint8Array.from([0x90,0xd4,0x8c,0xbb]),null);
+ assert.equal(sjis.text,'赤現');
+ assert.equal(decodeTextBytes(Uint8Array.from([0x90,0xd4,0x8c,0xbb]),'aozora.txt').encoding,'Shift_JIS');
+ const iso=decodeTextBytes(Uint8Array.from([0x1b,0x24,0x42,0x40,0x56,0x38,0x73,0x1b,0x28,0x42]),'jis.txt');
+ assert.equal(iso.encoding,'ISO-2022-JP');
+ assert.equal(iso.text,'赤佼');
+ // EUC-JP hiragana bytes that are also valid Shift_JIS half-width katakana must decode as EUC-JP.
+ const eucBytes=Uint8Array.from([0xa4,0xa2,0xa4,0xa4,0xa4,0xa6,0xa4,0xa8,0xa4,0xaa]);
+ const euc=decodeTextBytes(eucBytes,'euc.txt');
+ assert.equal(euc.encoding,'EUC-JP');
+ assert.equal(euc.text,'あいうえお');
+ assert.throws(()=>sourceUpdateRequest('broken.txt',Uint8Array.from([0xff,0xfe]),null),/UTF-8.*JIS/);
+ assert.throws(()=>decodeTextBytes(Uint8Array.from([0xef,0xbb,0xbf,0x82,0xa0]),'bom.txt'),/UTF-8.*JIS/);
 });
 test("pressing Enter (form submit) runs search without navigating", async () => {
   const previous = globalThis.document;
