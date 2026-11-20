@@ -70,7 +70,7 @@ cargo install --path crates/ziyuan-cli --locked                               # 
 | --- | --- | --- |
 | Linux | 支持 | bubblewrap（另装；按域名放行还要 socat） |
 | macOS | 支持 | 系统自带的 Seatbelt |
-| Windows | 支持 | 生产暂未接入，默认拒绝运行需要隔离的命令（实验 crate 已完成 W1a–W1d 原生隔离验证与安全接口，待独立审计与 W2 评审）。设 `ZIYUAN_SANDBOX=off` 会取消隔离，风险见 [ADR-0001](docs/adr/0001-windows-sandbox.md) |
+| Windows | 支持 | 生产暂未接入，默认拒绝运行需要隔离的命令（实验 crate 已完成 W1a–W1d 与 W2 `AppContainerChildCapable`／`run_shell_sandboxed` 原生 Windows 11 实测，运行时已备齐 `haoshe::run_shell` 边界，仅待独立 unsafe 审计与 crates.io 首发后切入）。设 `ZIYUAN_SANDBOX=off` 会取消隔离，风险见 [ADR-0001](docs/adr/0001-windows-sandbox.md) |
 
 ## 快速开始
 

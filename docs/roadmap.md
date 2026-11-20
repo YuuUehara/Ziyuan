@@ -8,6 +8,7 @@
 - **1.1 – 1.4（小说翻译闭环、参考与勘校）**：UTF-8 TXT／Markdown 预览（含显式 ruby 注音与安全显示）及确认导入；逐块初译、双路审校、逐段朱批、修订与御览定稿；受管写入与租约临时文件清理；本地译文记忆（`local`）与显式预览参考绑定；词证、六事逐段勘校、逐阶段用量账本与成稿 TAR 导出；syosetu 关注与新章节自动入队。
 - **1.5 – 1.13（人工工作台与多格式回填）**：独立人工草稿（含注音／着重／粗斜体标记编辑器与浏览器暂存）；结构化人物／术语／称谓规则资料与段旁只读提示；三态自动版本快照与对比清理；DOCX／EPUB 导入与定稿文字回填；字幕（SRT）、本地翻译记忆与审校评论；Web 新建空项目；确定性检查、CSV／TBX 术语交换与双语检索。
 - **1.14 – 1.15（连续翻译与全工作台整理）**：完整工作区备份与恢复、多格式原文追加与单章修订（TXT／Markdown／DOCX／EPUB）、跨章待查、连续双语通读与交稿预检、HTML 成稿保留完整标记、全文检索与草稿替换、纯文本 TMX 交换、终端人工译稿以及须按项目授权的远程嵌入。
+- **1.29.0（Windows 原生号舍 W2 预备与执行所有权边界）**：`ziyuan-sandbox-windows` 新增 `SandboxMode::AppContainerChildCapable` 与 `run_shell_sandboxed`（`cmd.exe /D /S /C`），在原生非管理员 Windows 11 实测通过子进程派生、全量文件隔离（Win32 5）、零网络能力（宿主监听零抵达）及超时／取消整树收尾；`ziyuan-runtime::haoshe` 新增拥有完整生命周期的 `run_shell` 并切换 `RunTests` 调用，Windows 生产继续按 ADR-0001 失败关闭直至完成独立 unsafe 审计与 crates.io 首发，零新增事件。
 - **1.28.0（运行速度与体验补齐）**：同一模型回合内连续多条只读工具调用自动并发执行（上限 8 线程、结果与钩子保序，写/测/MCP 保持串行）；在 `ReadFile` 与根目录范围授权下自动读取并围栏注入 `AGENTS.md`/`CLAUDE.md`（4 KiB 截断 + 锦衣卫扫描）；TUI 补齐 `F`（jj 并行写分办）、`A`/`E`（运行中追加 DAG 子诏令与修改待办前置依赖）及 `V` 修订弹窗都察院批注段号提示，零新增事件。
 - **1.27.0（搜索与导航深度）**：`list_files` 支持 `glob`；`search_code` 新增 `regex`、`glob`、`context_lines`（0–5）与暂存新建文件覆盖；随 `Capability::SearchCode` 新增跨文件整词引用查找工具 `find_references`（跳过注释与字符串、区分 `[定义]` 与 `[引用]`），零新增事件与玉玺代码。
 - **1.26.0（命名检查白名单与编译诊断摘录）**：新增 `ZIYUAN_TEST_COMMANDS` 命名白名单（`run_tests` 可选 `preset`，仍不开放任意 shell），扩展 `rustc`/`tsc`/`mypy` 结构化编译诊断摘录，测试副本跳过 Python 缓存目录，零新增事件。
@@ -29,7 +30,7 @@
 
 以下议题属于独立工程研究或长期评估方向，必须经过对应平台实测或人工盲评门槛后再决定是否并入生产流程：
 
-1. **Windows 原生号舍生产接入（W2，`ziyuan-sandbox-windows`）**：W1a–W1d 原生隔离探针与安全库接口已在 1.19.0 完成非管理员 Windows 11 实测；进入 W2 生产接入仍须完成独立 unsafe／安全审计、构建工具链派生子进程能力边界评审及 crates.io 首发登记，达标前 Windows 受保护执行保持失败关闭。
+1. **Windows 原生号舍生产切换（W2 终审，`ziyuan-sandbox-windows`）**：W1a–W1d 隔离探针、`AppContainerChildCapable`＋`run_shell_sandboxed` 原生 Windows 11 实测及 `haoshe::run_shell` 运行时所有权边界均已于 1.19.0／1.29.0 完成；仅余独立 unsafe／安全审阅与 `ziyuan-sandbox-windows` crates.io 首发登记 2 项门槛，达标后即可单点切入生产，此前继续失败关闭。
 2. **持久化代码索引与混合检索**：轻量免索引的 `file_outline`／`find_symbols` 已在 1.18.0 落地；面向超大型仓库的持久化符号／语义混合检索与评测基线仍待后续评估。
 3. **长篇翻译文学效果评估**：在同等模型、术语、预算与审批规则下开展双语盲评，详见[译文记忆评估步骤](memory.md#文学效果要怎样另行评估)。
 

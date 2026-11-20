@@ -36,7 +36,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::{ExitOutcome, LaunchSpec, RunResult, SandboxCapability};
+use crate::{ExitOutcome, LaunchSpec, RunResult, SandboxCapability, SandboxMode, ShellSpec};
 
 static PROFILE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -1025,17 +1025,57 @@ pub(crate) fn probe_capability() -> SandboxCapability {
     }
 }
 
-pub(crate) fn run_sandboxed(
+pub(crate) fn run_sandboxed_with_mode(
     spec: &LaunchSpec,
+    mode: SandboxMode,
     cancel: Option<&AtomicBool>,
 ) -> io::Result<RunResult> {
-    run_sandboxed_inner(spec, cancel, false)
+    let ordinary = matches!(mode, SandboxMode::AppContainerChildCapable);
+    run_sandboxed_inner(spec, cancel, ordinary, None)
+}
+
+pub(crate) fn run_shell_sandboxed(
+    spec: &ShellSpec,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<RunResult> {
+    if spec.command.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox shell command must not be empty",
+        ));
+    }
+    if spec.command.contains(['\0', '\r', '\n']) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox shell command must not contain NUL, CR, or LF",
+        ));
+    }
+    let system_root = std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| io::Error::other("SystemRoot unavailable; refusing to resolve cmd.exe"))?;
+    let cmd_exe = PathBuf::from(system_root).join("System32").join("cmd.exe");
+    reject_reparse_point(&cmd_exe)?;
+    let cmd_arg = quote_windows_arg(&cmd_exe.to_string_lossy())?;
+    // `/D` disables AutoRun registry hooks; `/S /C "..."` strips only the outer quotes so
+    // inner quotes and shell operators in `spec.command` are preserved verbatim.
+    let raw_cmdline = format!("{cmd_arg} /D /S /C \"{}\"", spec.command);
+    let launch = LaunchSpec {
+        program: cmd_exe,
+        args: Vec::new(),
+        cwd: Some(spec.cwd.clone()),
+        writable_dirs: spec.writable_dirs.clone(),
+        readonly_dirs: spec.readonly_dirs.clone(),
+        env: spec.env.clone(),
+        timeout: spec.timeout,
+    };
+    run_sandboxed_inner(&launch, cancel, true, Some(&raw_cmdline))
 }
 
 fn run_sandboxed_inner(
     spec: &LaunchSpec,
     cancel: Option<&AtomicBool>,
     ordinary_control: bool,
+    raw_cmdline: Option<&str>,
 ) -> io::Result<RunResult> {
     if spec.timeout.is_zero() {
         return Err(io::Error::new(
@@ -1121,12 +1161,17 @@ fn run_sandboxed_inner(
     let application = wide(&spec.program);
     let cwd = spec.cwd.as_deref().unwrap_or(&profile.path);
     let directory = wide(cwd);
-    let program_arg = quote_windows_arg(&spec.program.to_string_lossy())?;
-    let mut cmdline = program_arg;
-    for arg in &spec.args {
-        cmdline.push(' ');
-        cmdline.push_str(&quote_windows_arg(arg)?);
-    }
+    let cmdline = if let Some(raw) = raw_cmdline {
+        raw.to_owned()
+    } else {
+        let program_arg = quote_windows_arg(&spec.program.to_string_lossy())?;
+        let mut built = program_arg;
+        for arg in &spec.args {
+            built.push(' ');
+            built.push_str(&quote_windows_arg(arg)?);
+        }
+        built
+    };
     let mut command = wide(cmdline);
     let environment = build_environment(&profile.path, &temp_dir, &spec.env)?;
 
@@ -1252,7 +1297,7 @@ fn run_sandboxed_inner(
     })
 }
 
-fn winsock_child_probe(tcp4: &str, udp4: &str, tcp6: &str) -> io::Result<()> {
+fn winsock_child_probe(tcp4: &str, udp4: &str, tcp6: &str, ordinary: bool) -> io::Result<()> {
     // SAFETY: borrowed pseudo handle, never closed.
     let caps = token_capability_count(unsafe { GetCurrentProcess() })?;
     if caps != 0 {
@@ -1277,7 +1322,7 @@ fn winsock_child_probe(tcp4: &str, udp4: &str, tcp6: &str) -> io::Result<()> {
             "unexpected WSAStartup error inside LPAC: {wsa_ret}"
         )));
     }
-    let result = crate::network::child_probe(tcp4, udp4, tcp6, caps);
+    let result = crate::network::child_probe(tcp4, udp4, tcp6, caps, ordinary);
     // SAFETY: matches successful WSAStartup above.
     unsafe {
         WSACleanup();
@@ -1328,10 +1373,10 @@ fn run_lifecycle_probe(mode: &str) -> io::Result<()> {
                 thread::sleep(Duration::from_millis(700));
                 cancel_flag.store(true, Ordering::SeqCst);
             });
-            run_sandboxed_inner(&spec, Some(&cancel_flag), true)
+            run_sandboxed_inner(&spec, Some(&cancel_flag), true, None)
         })?
     } else {
-        run_sandboxed_inner(&spec, None, true)?
+        run_sandboxed_inner(&spec, None, true, None)?
     };
     let elapsed = started.elapsed();
     let _ = fs::remove_dir_all(&stage);
@@ -1384,6 +1429,27 @@ pub(super) fn run() -> io::Result<()> {
         thread::sleep(Duration::from_secs(60));
         return Ok(());
     }
+    if args.len() == 1 && args[0] == "--shell-child-check" {
+        // SAFETY: borrowed pseudo handle, never closed.
+        let process = unsafe { GetCurrentProcess() };
+        let app = token_flag(process, TokenIsAppContainer)?;
+        let aap = aap_access(process)?;
+        let job = in_job(process, null_mut())?;
+        let caps = token_capability_count(process)?;
+        let no_host_secret = std::env::var_os("ZIYUAN_W1A_HOST_ONLY").is_none();
+        let has_extra = std::env::var("ZIYUAN_W2_TEST").ok().as_deref() == Some("ok");
+        println!(
+            "SHELL_CHILD_OK=1 APP={app} AAP_ACCESS={} JOB={} CAPS={caps} CLEAN_ENV={} EXTRA_ENV={}",
+            u8::from(aap),
+            u8::from(job),
+            u8::from(no_host_secret),
+            u8::from(has_extra),
+        );
+        if app != 1 || !aap || !job || caps != 0 || !no_host_secret || !has_extra {
+            return Err(io::Error::other("shell child sandbox invariant failed"));
+        }
+        return Ok(());
+    }
     if args.len() == 2 && args[0] == "--child" {
         return child_probe(args[1].parse().map_err(io::Error::other)?);
     }
@@ -1433,19 +1499,26 @@ pub(super) fn run() -> io::Result<()> {
         // In "orphan" mode, primary exits immediately while grandchild stays alive holding stdout.
         return Ok(());
     }
-    if args.len() == 6 && args[..3] == ["--child", "false", "--network-probe"] {
-        child_probe(false)?;
-        winsock_child_probe(&args[3], &args[4], &args[5])?;
+    if args.len() == 6
+        && args[0] == "--child"
+        && matches!(args[1].as_str(), "false" | "true")
+        && args[2] == "--network-probe"
+    {
+        let ordinary: bool = args[1].parse().map_err(io::Error::other)?;
+        child_probe(ordinary)?;
+        winsock_child_probe(&args[3], &args[4], &args[5], ordinary)?;
         return Ok(());
     }
     if args.len() == 5
-        && args[..2] == ["--child", "false"]
+        && args[0] == "--child"
+        && matches!(args[1].as_str(), "false" | "true")
         && matches!(
             args[2].as_str(),
             "--file-probe" | "--readonly-dependency" | "--boundary-probe"
         )
     {
-        child_probe(false)?;
+        let ordinary: bool = args[1].parse().map_err(io::Error::other)?;
+        child_probe(ordinary)?;
         crate::files::child(args[3].as_ref(), args[4].as_ref())?;
         if args[2] == "--readonly-dependency" {
             dependency_child(args[3].as_ref())?;
@@ -1464,11 +1537,13 @@ pub(super) fn run() -> io::Result<()> {
         return run_lifecycle_probe(&args[0]);
     }
     let fault = args == ["--fail-before-resume"];
-    let ordinary = args == ["--ordinary-appcontainer-control"];
+    let ordinary_file = args == ["--ordinary-file-probe"];
+    let ordinary_net = args == ["--ordinary-network-probe"];
+    let ordinary = args == ["--ordinary-appcontainer-control"] || ordinary_file || ordinary_net;
     let readonly = args == ["--readonly-dependency"];
     let boundary = args == ["--boundary-probe"];
-    let network_probe = args == ["--network-probe"];
-    let file_probe = args == ["--file-probe"] || readonly || boundary;
+    let network_probe = args == ["--network-probe"] || ordinary_net;
+    let file_probe = args == ["--file-probe"] || ordinary_file || readonly || boundary;
     if !args.is_empty() && !fault && !ordinary && !file_probe && !network_probe {
         return Err(io::Error::other("unknown probe arguments"));
     }

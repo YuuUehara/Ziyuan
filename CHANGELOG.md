@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.29.0 — 2026-11-21
+
+- **Windows 原生号舍 W2 隔离实测与安全 Shell 接口（`ziyuan-sandbox-windows`，仍为未发布实验 crate）**：新增 `SandboxMode`（`StrictLpac` / `AppContainerChildCapable`）、`run_sandboxed_with_mode`、`ShellSpec` 与 `run_shell_sandboxed`（`%SystemRoot%\System32\cmd.exe /D /S /C`，禁 AutoRun、拒重解析点与换行控制字符）。原生非管理员 Windows 11 实测通过 10/10 用例：证实 0 能力 `AppContainerChildCapable`＋`KILL_ON_JOB_CLOSE` Job 在支持 `cmd.exe` 派生子进程的同时，完整保留文件隔离（宿主源码、`.ziyuan`、模拟 `.ssh`/`.git` 与 peer 目录全返回 `ERROR_ACCESS_DENIED`）、零网络隔离（`NET_CAPS=0`、WFP 阻断且宿主监听零抵达）及超时／取消整树收尾（`active_processes_after == 0`）。
+- **运行时号舍 W2 执行所有权边界重构（`ziyuan-runtime::haoshe` + `RunTests`）**：按 ADR-0001 §平台边界 #2 新增由号舍统一拥有进程／代理／超时／采集生命周期的 `haoshe::run_shell`（`ShellRunSpec` / `ShellRunOutput`），`RunTests::run_in_copy` 已完全切至该接口；Windows 受保护模式前置校验并明示拒绝 `Network::Only`/`Open` 与外部 `CARGO_TARGET_DIR`，待独立 unsafe 审计与 crates.io 首发后即可单点切换接入，此前继续保持方案 A 失败关闭且工作区维持 `unsafe_code = "forbid"`。
+- 登记版本 `1.29.0`（序号 63，不提高旧事件簿读取门槛）；同步更新 [ADR-0001](docs/adr/0001-windows-sandbox.md)、[README.md](README.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.29.0 验收记录](docs/acceptance/1.29.0.md)。
+
 ## 1.28.0 — 2026-11-20
 
 - **同轮只读工具并发执行（`ziyuan-runtime`）**：`agent_loop::Tool` 新增默认 `false` 的 `is_read_only()`，10 项纯只读工具（`read_file`、`list_files`、`search_code`、`file_outline`、`find_symbols`、`find_references`、`search_records`、`vcs_status`、`vcs_diff`、`vcs_log`）在同一模型回合内连续调用 ≥ 2 次时自动通过受限线程池（每批最多 8 线程）并发执行，并严格按原始顺序触发审计钩子、锦衣卫扫描与结果回传；写操作、测试与外部 MCP 工具维持串行。

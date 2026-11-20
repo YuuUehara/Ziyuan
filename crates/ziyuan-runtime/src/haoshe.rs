@@ -14,9 +14,13 @@ mod proxy;
 pub use proxy::Proxy;
 
 use crate::BoxError;
+use std::ffi::OsString;
+use std::fs;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// 家目录下读不得的凭据目录。
 const SECRET_DIRS: &[&str] = &[
@@ -225,6 +229,150 @@ pub fn shell(
     let args = ["-c".to_owned(), command.to_owned()];
     confine("/bin/sh", &args, &rules)
         .map_err(|reason| SandboxUnavailable::new("run_tests", reason).into())
+}
+
+/// 一次受控 shell 执行的完整规格（W2 所有权边界：由号舍统一拥有沙箱句柄、门吏代理、超时与输出采集）。
+pub struct ShellRunSpec<'a> {
+    pub command: &'a str,
+    pub mode: Mode,
+    pub network: Network,
+    /// 命令的工作目录（如测试副本根目录）。
+    pub work_dir: &'a Path,
+    /// 本次执行的任务私有可写根目录（`output.log` 与 Unix `TMPDIR` 亦落于此）。
+    pub sandbox_base: &'a Path,
+    /// 额外可写目录（如 `CARGO_TARGET_DIR`；Windows 原生号舍首批按 ADR-0001 显式拒绝）。
+    pub extra_writable: &'a [PathBuf],
+    /// 号舍内不可读的目录（如项目 `.ziyuan`）。
+    pub hidden: &'a [PathBuf],
+    /// 允许继承的环境变量白名单。
+    pub env: &'a [(String, OsString)],
+    pub timeout: Duration,
+    pub max_output: u64,
+    pub max_failure_scan: u64,
+}
+
+/// [`run_shell`] 的执行结果：不向上层泄漏子进程、Job 或门吏代理句柄。
+#[derive(Debug, Clone)]
+pub struct ShellRunOutput {
+    pub passed: bool,
+    pub verdict: String,
+    pub haoshe_note: String,
+    pub tail: String,
+    pub tail_truncated: bool,
+    /// 仅在 `!passed` 时采集的末尾扫描窗口，供失败／编译诊断摘录使用。
+    pub failure_scan: Option<String>,
+}
+
+/// 由号舍拥有完整进程生命周期的受控 shell 执行入口（ADR-0001 §平台边界 #2）。
+///
+/// 统一负责：平台前置策略核验、沙箱构造、门吏代理生命周期、受限环境注入、有界超时终止与
+/// 末尾输出采集；`ziyuan-sandbox-windows` 完成独立审计与 crates.io 首发后，只需在此处接入
+/// Windows 受保护分支，上层 `run_tests` 无需再直接操作裸 `Command`/`Child`。
+pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
+    #[cfg(windows)]
+    if spec.mode != Mode::Off {
+        if spec.network != Network::Off {
+            return Err(SandboxUnavailable::new(
+                "run_tests",
+                "Windows 原生号舍首批仅支持全断网（Network::Off），暂不支持 ZIYUAN_SANDBOX_ALLOW 按域名放行或开放联网",
+            )
+            .into());
+        }
+        if !spec.extra_writable.is_empty() {
+            return Err(SandboxUnavailable::new(
+                "run_tests",
+                "Windows 原生号舍首批不继承外部 CARGO_TARGET_DIR 等额外可写目录，请取消该变量后重试",
+            )
+            .into());
+        }
+        return Err(SandboxUnavailable::new(
+            "run_tests",
+            "Windows 原生号舍原型（ziyuan-sandbox-windows）已完成 W1/W2 接口与 AppContainer 隔离实测，待独立 unsafe 审计与 crates.io 首发后接入生产",
+        )
+        .into());
+    }
+
+    let log_path = spec.sandbox_base.join("output.log");
+    let log = fs::File::create(&log_path)?;
+    let Confined {
+        command: mut child,
+        note: mut haoshe_note,
+        proxy,
+    } = shell(
+        spec.command,
+        spec.mode,
+        spec.network.clone(),
+        spec.sandbox_base,
+        spec.extra_writable,
+        spec.hidden,
+    )?;
+    child
+        .current_dir(spec.work_dir)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    for (key, value) in spec.env {
+        child.env(key, value);
+    }
+    // 临时文件写在副本旁，号舍里也写得了，事后一并清除。
+    #[cfg(unix)]
+    {
+        let tmp = spec.sandbox_base.join("tmp");
+        fs::create_dir_all(&tmp)?;
+        child.env("TMPDIR", tmp);
+    }
+    let mut child = child.spawn()?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if started.elapsed() > spec.timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if let Some(denied) = proxy.map(|p| p.denied()).filter(|d| !d.is_empty()) {
+        haoshe_note.push_str(&format!("；拦下 {}", denied.join("、")));
+    }
+    let mut log = fs::File::open(&log_path)?;
+    let len = log.metadata()?.len();
+    let tail = read_lossy_from(&mut log, len.saturating_sub(spec.max_output))?;
+    let passed = status.is_some_and(|s| s.success());
+    let verdict = match status {
+        None => format!("超时（{} 秒）被终止", spec.timeout.as_secs()),
+        Some(s) if s.success() => "通过（退出码 0）".to_owned(),
+        Some(s) => match s.code() {
+            Some(code) => format!("未通过（退出码 {code}）"),
+            None => "未通过（被信号终止）".to_owned(),
+        },
+    };
+    let failure_scan = if passed {
+        None
+    } else {
+        Some(read_lossy_from(
+            &mut log,
+            len.saturating_sub(spec.max_failure_scan),
+        )?)
+    };
+    Ok(ShellRunOutput {
+        passed,
+        verdict,
+        haoshe_note,
+        tail,
+        tail_truncated: len > spec.max_output,
+        failure_scan,
+    })
+}
+
+fn read_lossy_from(file: &mut fs::File, start: u64) -> io::Result<String> {
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// 把 `program args…` 关进号舍；本机没有号舍时返回原因，由调用者决定照常运行还是拒绝。
@@ -549,5 +697,120 @@ mod tests {
         );
         assert_eq!(confined.proxy.unwrap().denied(), ["example.com"]);
         assert!(Network::only(vec!["https://x.com".into()]).is_err());
+    }
+
+    #[test]
+    fn run_shell_off_captures_output_and_reports_verdict() {
+        let base = std::env::temp_dir().join(format!("ziyuan-run-shell-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let env: Vec<(String, OsString)> = ["PATH", "SystemRoot", "COMSPEC"]
+            .iter()
+            .filter_map(|k| std::env::var_os(k).map(|v| ((*k).to_owned(), v)))
+            .collect();
+        let out = run_shell(&ShellRunSpec {
+            command: "echo run-shell-ok",
+            mode: Mode::Off,
+            network: Network::Off,
+            work_dir: &base,
+            sandbox_base: &base,
+            extra_writable: &[],
+            hidden: &[],
+            env: &env,
+            timeout: Duration::from_secs(10),
+            max_output: 4096,
+            max_failure_scan: 4096,
+        })
+        .unwrap();
+        assert!(out.passed, "{out:?}");
+        assert!(out.tail.contains("run-shell-ok"), "{out:?}");
+        assert!(out.haoshe_note.contains("未入号舍"), "{out:?}");
+        assert!(out.failure_scan.is_none());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_shell_enforces_windows_w2_fail_closed_policy_checks() {
+        let base = std::env::temp_dir().join(format!("ziyuan-win-w2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        // 1. Network::Only rejected explicitly under ADR-0001 W2 policy.
+        let net_err = run_shell(&ShellRunSpec {
+            command: "echo x",
+            mode: Mode::Auto,
+            network: Network::only(vec!["example.com".into()]).unwrap(),
+            work_dir: &base,
+            sandbox_base: &base,
+            extra_writable: &[],
+            hidden: &[],
+            env: &[],
+            timeout: Duration::from_secs(5),
+            max_output: 1024,
+            max_failure_scan: 1024,
+        })
+        .unwrap_err();
+        let net_unavail = net_err
+            .downcast_ref::<SandboxUnavailable>()
+            .expect("must return SandboxUnavailable");
+        assert!(
+            net_unavail.reason.contains("全断网"),
+            "{}",
+            net_unavail.reason
+        );
+
+        // 2. External CARGO_TARGET_DIR / extra_writable rejected explicitly under ADR-0001 W2 policy.
+        let extra = vec![base.join("external-target")];
+        let dir_err = run_shell(&ShellRunSpec {
+            command: "echo x",
+            mode: Mode::Require,
+            network: Network::Off,
+            work_dir: &base,
+            sandbox_base: &base,
+            extra_writable: &extra,
+            hidden: &[],
+            env: &[],
+            timeout: Duration::from_secs(5),
+            max_output: 1024,
+            max_failure_scan: 1024,
+        })
+        .unwrap_err();
+        let dir_unavail = dir_err
+            .downcast_ref::<SandboxUnavailable>()
+            .expect("must return SandboxUnavailable");
+        assert!(
+            dir_unavail.reason.contains("CARGO_TARGET_DIR"),
+            "{}",
+            dir_unavail.reason
+        );
+
+        // 3. Default Network::Off still fails closed until unsafe audit + crates.io publish.
+        let default_err = run_shell(&ShellRunSpec {
+            command: "echo x",
+            mode: Mode::Auto,
+            network: Network::Off,
+            work_dir: &base,
+            sandbox_base: &base,
+            extra_writable: &[],
+            hidden: &[],
+            env: &[],
+            timeout: Duration::from_secs(5),
+            max_output: 1024,
+            max_failure_scan: 1024,
+        })
+        .unwrap_err();
+        let def_unavail = default_err
+            .downcast_ref::<SandboxUnavailable>()
+            .expect("must return SandboxUnavailable");
+        assert_eq!(def_unavail.platform, "windows");
+        assert_eq!(def_unavail.operation, "run_tests");
+        assert!(
+            def_unavail.reason.contains("ziyuan-sandbox-windows"),
+            "{}",
+            def_unavail.reason
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

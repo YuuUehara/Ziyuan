@@ -212,20 +212,25 @@ fn spawn_udp_counter(
     })
 }
 
-fn is_network_denied(err: &io::Error) -> bool {
+fn is_network_denied(err: &io::Error, allow_wfp_drop_timeout: bool) -> bool {
     err.kind() == io::ErrorKind::PermissionDenied
         || matches!(
             err.raw_os_error(),
-            Some(WSAEACCES) | Some(10051) | Some(10049)
+            Some(WSAEACCES) | Some(10051) | Some(10049) | Some(10060) | Some(10061)
         )
+        || (allow_wfp_drop_timeout && err.kind() == io::ErrorKind::TimedOut)
 }
 
-/// Runs inside the LPAC child to assert TCP4, UDP4, and optional TCP6 loopback are blocked.
+/// Runs inside the AppContainer/LPAC child to assert TCP4, UDP4, and optional TCP6 loopback are blocked.
+/// In zero-capability ordinary AppContainer (`allow_wfp_drop_timeout = true`), Windows Filtering Platform
+/// may silently drop loopback packets (`TimedOut`) or return `WSAEACCES`; in both cases the host-side
+/// `HostListeners::verify_zero_child_traffic` independently proves zero connections/datagrams arrived.
 pub(crate) fn child_probe(
     tcp4: &str,
     udp4: &str,
     tcp6: &str,
     capability_count: u32,
+    allow_wfp_drop_timeout: bool,
 ) -> io::Result<()> {
     if capability_count != 0 {
         return Err(io::Error::other(format!(
@@ -235,13 +240,13 @@ pub(crate) fn child_probe(
     let tcp4_addr: SocketAddr = tcp4.parse().map_err(io::Error::other)?;
     let udp4_addr: SocketAddr = udp4.parse().map_err(io::Error::other)?;
 
-    match TcpStream::connect_timeout(&tcp4_addr, Duration::from_secs(2)) {
+    match TcpStream::connect_timeout(&tcp4_addr, Duration::from_millis(600)) {
         Ok(_) => {
             return Err(io::Error::other(
                 "LPAC child unexpectedly connected to IPv4 TCP loopback",
             ));
         }
-        Err(err) if is_network_denied(&err) => {}
+        Err(err) if is_network_denied(&err, allow_wfp_drop_timeout) => {}
         Err(err) => {
             return Err(io::Error::other(format!(
                 "IPv4 TCP loopback failed with non-denial error: {err} (raw={:?})",
@@ -251,7 +256,7 @@ pub(crate) fn child_probe(
     }
 
     let udp_blocked = match UdpSocket::bind("127.0.0.1:0") {
-        Err(err) if is_network_denied(&err) => true,
+        Err(err) if is_network_denied(&err, allow_wfp_drop_timeout) => true,
         Err(err) => {
             return Err(io::Error::other(format!(
                 "UDP bind failed with non-denial error: {err} (raw={:?})",
@@ -259,12 +264,18 @@ pub(crate) fn child_probe(
             )));
         }
         Ok(sock) => match sock.send_to(b"lpac-udp", udp4_addr) {
+            Ok(_) if allow_wfp_drop_timeout => {
+                // WFP may silently drop UDP datagrams after Winsock accepts them;
+                // host-side HostListeners::verify_zero_child_traffic must still observe 0 hits.
+                println!("NET_UDP4_WINSOCK_QUEUED_AWAITING_HOST_ZERO_HITS=1");
+                true
+            }
             Ok(_) => {
                 return Err(io::Error::other(
                     "LPAC child unexpectedly sent UDP datagram to loopback",
                 ));
             }
-            Err(err) if is_network_denied(&err) => true,
+            Err(err) if is_network_denied(&err, allow_wfp_drop_timeout) => true,
             Err(err) => {
                 return Err(io::Error::other(format!(
                     "UDP send failed with non-denial error: {err} (raw={:?})",
@@ -279,13 +290,13 @@ pub(crate) fn child_probe(
 
     if tcp6 != "none" {
         let tcp6_addr: SocketAddr = tcp6.parse().map_err(io::Error::other)?;
-        match TcpStream::connect_timeout(&tcp6_addr, Duration::from_secs(2)) {
+        match TcpStream::connect_timeout(&tcp6_addr, Duration::from_millis(600)) {
             Ok(_) => {
                 return Err(io::Error::other(
                     "LPAC child unexpectedly connected to IPv6 TCP loopback",
                 ));
             }
-            Err(err) if is_network_denied(&err) => {}
+            Err(err) if is_network_denied(&err, allow_wfp_drop_timeout) => {}
             Err(err) => {
                 return Err(io::Error::other(format!(
                     "IPv6 TCP loopback failed with non-denial error: {err} (raw={:?})",

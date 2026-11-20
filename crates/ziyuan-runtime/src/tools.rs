@@ -12,12 +12,11 @@ use crate::agent_loop::{Tool, ToolSpec};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
 
 mod failures;
@@ -2065,85 +2064,46 @@ impl RunTests {
             }
             fs::write(target, &change.after)?;
         }
-        let log_path = base.join("output.log");
-        let log = fs::File::create(&log_path)?;
         let target_dir: Vec<PathBuf> = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .into_iter()
             .collect();
-        let crate::haoshe::Confined {
-            command: mut child,
-            note: mut haoshe,
-            proxy,
-        } = crate::haoshe::shell(
+        let env: Vec<(String, std::ffi::OsString)> = TEST_ENV
+            .iter()
+            .filter_map(|key| std::env::var_os(key).map(|v| ((*key).to_owned(), v)))
+            .collect();
+        let hidden = [self.0.root.join(".ziyuan")];
+        let run = crate::haoshe::run_shell(&crate::haoshe::ShellRunSpec {
             command,
             mode,
-            crate::haoshe::Network::from_env()?,
-            base,
-            &target_dir,
-            &[self.0.root.join(".ziyuan")],
-        )?;
-        child
-            .current_dir(copy)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log);
-        for key in TEST_ENV {
-            if let Some(value) = std::env::var_os(key) {
-                child.env(key, value);
-            }
-        }
-        // 临时文件写在副本旁，号舍里也写得了，事后一并清除。
-        #[cfg(unix)]
-        {
-            let tmp = base.join("tmp");
-            fs::create_dir_all(&tmp)?;
-            child.env("TMPDIR", tmp);
-        }
-        let mut child = child.spawn()?;
-        let started = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break Some(status);
-            }
-            if started.elapsed() > TEST_TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        if let Some(denied) = proxy.map(|p| p.denied()).filter(|d| !d.is_empty()) {
-            haoshe.push_str(&format!("；拦下 {}", denied.join("、")));
-        }
-        let mut log = fs::File::open(&log_path)?;
-        let len = log.metadata()?.len();
-        let tail = read_lossy_from(&mut log, len.saturating_sub(MAX_TEST_OUTPUT))?;
-        let passed = status.is_some_and(|s| s.success());
-        let verdict = match status {
-            None => format!("超时（{} 秒）被终止", TEST_TIMEOUT.as_secs()),
-            Some(s) if s.success() => "通过（退出码 0）".to_owned(),
-            Some(s) => match s.code() {
-                Some(code) => format!("未通过（退出码 {code}）"),
-                None => "未通过（被信号终止）".to_owned(),
-            },
-        };
-        let note = if len > MAX_TEST_OUTPUT {
+            network: crate::haoshe::Network::from_env()?,
+            work_dir: copy,
+            sandbox_base: base,
+            extra_writable: &target_dir,
+            hidden: &hidden,
+            env: &env,
+            timeout: TEST_TIMEOUT,
+            max_output: MAX_TEST_OUTPUT,
+            max_failure_scan: MAX_FAILURE_SCAN,
+        })?;
+        let note = if run.tail_truncated {
             format!("（仅最后 {MAX_TEST_OUTPUT} 字节）")
         } else {
             String::new()
         };
-        let mut report = format!("测试 `{command}`：{verdict}（{haoshe}）\n输出{note}：\n{tail}");
-        if !passed {
-            let scan = read_lossy_from(&mut log, len.saturating_sub(MAX_FAILURE_SCAN))?;
-            if let Some(failures) = failures::failure_note(&scan) {
-                report.push('\n');
-                report.push_str(&failures);
-            }
+        let mut report = format!(
+            "测试 `{command}`：{}（{}）\n输出{note}：\n{}",
+            run.verdict, run.haoshe_note, run.tail
+        );
+        if !run.passed
+            && let Some(scan) = run.failure_scan.as_deref()
+            && let Some(failures) = failures::failure_note(scan)
+        {
+            report.push('\n');
+            report.push_str(&failures);
         }
         // 未通过记为工具失败：审计中 `run_tests` 的成败即测试的成败，供都察院核验。
-        if passed {
+        if run.passed {
             Ok(report)
         } else {
             Err(report.into())
@@ -2169,13 +2129,6 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn read_lossy_from(file: &mut fs::File, start: u64) -> io::Result<String> {
-    file.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn object_args(
