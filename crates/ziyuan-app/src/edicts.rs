@@ -38,9 +38,13 @@ pub fn render_diffs(files: &[FileChange]) -> Vec<String> {
     files
         .iter()
         .map(|change| {
-            let mut out = match &change.before {
-                Some(_) => format!("--- a/{0}\n+++ b/{0}\n", change.path),
-                None => format!("--- /dev/null\n+++ b/{}\n", change.path),
+            let mut out = if change.deleted {
+                format!("--- a/{}\n+++ /dev/null\n", change.path)
+            } else {
+                match &change.before {
+                    Some(_) => format!("--- a/{0}\n+++ b/{0}\n", change.path),
+                    None => format!("--- /dev/null\n+++ b/{}\n", change.path),
+                }
             };
             for hunk in change.hunks() {
                 number += 1;
@@ -110,6 +114,12 @@ pub fn selected_files(files: &[FileChange], skipped: &[u32]) -> Vec<FileChange> 
         let base = first;
         first += file.hunks().len();
         let after = file.select(|h| !skipped.contains(&((base + h + 1) as u32)));
+        if file.deleted {
+            if after.is_none() {
+                selected.push(file.clone());
+            }
+            continue;
+        }
         if after.as_ref() == file.before.as_ref() {
             continue;
         }
@@ -117,6 +127,7 @@ pub fn selected_files(files: &[FileChange], skipped: &[u32]) -> Vec<FileChange> 
             path: file.path.clone(),
             before: file.before.clone(),
             after: after.unwrap_or_default(),
+            deleted: false,
         });
     }
     selected
@@ -162,8 +173,12 @@ pub fn changes_version(files: &[FileChange]) -> String {
             }
             None => parts.push(vec![0]),
         }
-        parts.push(len(&f.after).to_vec());
-        parts.push(f.after.as_bytes().to_vec());
+        if f.deleted {
+            parts.push(vec![2]);
+        } else {
+            parts.push(len(&f.after).to_vec());
+            parts.push(f.after.as_bytes().to_vec());
+        }
     }
     sha256(&parts.iter().map(Vec::as_slice).collect::<Vec<_>>())
 }
@@ -685,7 +700,11 @@ impl<S: EventStore> Session<S> {
         for change in selected {
             let path = workspace.root().join(Path::new(&change.path));
             let before = digest_of(&path).map_err(failed)?;
-            let after = FileState::Present(sha256_hex(&[change.after.as_bytes()]));
+            let after = if change.deleted {
+                FileState::Absent
+            } else {
+                FileState::Present(sha256_hex(&[change.after.as_bytes()]))
+            };
             if before != after {
                 targets.push(TargetState {
                     path: change.path.clone(),

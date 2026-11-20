@@ -1647,13 +1647,13 @@ function taskHtml(t) {
     const stat = (f) => `<span class="plus">+${f.additions}</span> <span class="minus">−${f.deletions}</span>`;
     const staleMark = (f) => pending && f.stale ? ` <span class="badge failed">原文已变</span>` : "";
     const files = c.files.map((f, i) => `<details id="diff-${t.id}-${i}" ${pending ? "open" : ""}>
-      <summary>${esc(f.path)}${f.created ? "（新建）" : ""} ${stat(f)} ${hashNote(f)}${staleMark(f)}</summary>
+      <summary>${esc(f.path)}${f.deleted ? "（删除）" : f.created ? "（新建）" : ""} ${stat(f)} ${hashNote(f)}${staleMark(f)}</summary>
       <pre class="diff">${f.hunks.map((h) => hunkLine(h) + hunkBody(h)).join("")}</pre></details>`).join("");
     const hunks = c.files.reduce((n, f) => n + f.hunks.length, 0);
     const adds = c.files.reduce((n, f) => n + f.additions, 0), dels = c.files.reduce((n, f) => n + f.deletions, 0);
     const note = c.skipped.length ? `（驳回第 ${c.skipped.join("、")} 段）` : "";
     const bar = `<div class="diff-bar">视图 ${[["unified", "统一"], ["split", "左右"]].map(([k, l]) => `<button class="small${diffPrefs.layout === k ? " current" : ""}" data-diff-layout="${k}">${l}</button>`).join("")}<span class="gap"></span>渲染 <button class="small${diffPrefs.engine !== "delta" ? " current" : ""}" data-diff-engine="builtin">内置</button><button class="small${diffPrefs.engine === "delta" ? " current" : ""}" data-diff-engine="delta"${state.delta ? "" : " disabled title=\"未找到 git-delta：设 ZIYUAN_DELTA 为其可执行文件路径后重启\""}>delta</button></div>`;
-    const tree = c.files.length > 1 ? `<ul class="diff-tree">${c.files.map((f, i) => `<li><button class="jump" data-diff-jump="diff-${t.id}-${i}">${esc(f.path)}</button> ${f.created ? "新建" : "改写"} ${stat(f)}${staleMark(f)}</li>`).join("")}</ul>` : "";
+    const tree = c.files.length > 1 ? `<ul class="diff-tree">${c.files.map((f, i) => `<li><button class="jump" data-diff-jump="diff-${t.id}-${i}">${esc(f.path)}</button> ${f.deleted ? "删除" : f.created ? "新建" : "改写"} ${stat(f)}${staleMark(f)}</li>`).join("")}</ul>` : "";
     body += `<div class="changes"><b>工部奏本</b>　改动 ${c.files.length} 个文件 ${hunks} 段 <span class="plus">+${adds}</span> <span class="minus">−${dels}</span>，${stateLabel}${note}${pending && hunks > 1 ? `<span class="hint">　可逐段取舍：去掉勾选的段不落盘</span>` : ""}${bar}${tree}${files}</div>`;
     if (c.state === "proposed" && t.status === "completed") {
       // 原文已被别处改动的，准奏必被拒：不给准奏按钮，只能驳回。

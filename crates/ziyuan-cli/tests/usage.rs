@@ -131,6 +131,7 @@ impl Fixture {
                 path: format!("translations/{}/{BLOCK}/zh.json", self.project.id),
                 before: None,
                 after: String::from_utf8(draft.serialized().unwrap()).unwrap(),
+                deleted: false,
             }],
         );
         assert!(

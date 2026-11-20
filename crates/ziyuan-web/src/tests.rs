@@ -1270,6 +1270,7 @@ fn changes_json_counts_lines_and_marks_each_hunk() {
                 path: "src/a.rs".into(),
                 before: Some(before),
                 after,
+                deleted: false,
             }],
         },
         CourtEvent::TaskCompleted {
@@ -1557,6 +1558,7 @@ async fn censure_hunk_reviews_and_from_plan_endpoint_work_end_to_end() {
                         path: "src/a.rs".into(),
                         before: Some("fn old() {}\n".into()),
                         after: "fn new() {}\n".into(),
+                        deleted: false,
                     }],
                 },
                 CourtEvent::TaskCompleted {

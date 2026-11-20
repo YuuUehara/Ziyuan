@@ -90,6 +90,7 @@ impl Fx {
             path: output_rel(&self.project, block),
             before: fs::read_to_string(self.zh_path(block)).ok(),
             after,
+            deleted: false,
         }
     }
     fn status(&self, s: &Session<EventLog>, block: &str) -> BlockStatus {
@@ -213,6 +214,7 @@ fn human_binding_admission_resolves_approval_order_and_preserves_receipt_identit
                 path: format!("{}note-{n}.md", proposals_rel(&fx.project, B1)),
                 before: None,
                 after: format!("称谓建议{n}"),
+                deleted: false,
             }],
             "补建议",
         );
@@ -613,6 +615,7 @@ fn gate_accepts_a_valid_translation_and_proposals() {
         path: format!("{}terms.md", proposals_rel(&fx.project, B1)),
         before: None,
         after: "勇者 → 勇者\n".into(),
+        deleted: false,
     };
     complete(
         &mut s,
@@ -676,11 +679,13 @@ fn gate_rejects_bad_structure_paths_and_stale_versions() {
                         )
                         .ok(),
                         after: "{}".into(),
+                        deleted: false,
                     },
                     FileChange {
                         path: "src/evil.rs".into(),
                         before: None,
                         after: "x".into(),
+                        deleted: false,
                     },
                 ]
             }),
@@ -1013,6 +1018,7 @@ fn a_revise_that_leaves_zh_json_alone_keeps_the_translation() {
             path: format!("{}terms.json", proposals_rel(&fx.project, B1)),
             before: None,
             after: "{}\n".into(),
+            deleted: false,
         }],
         "译稿无需改",
     );

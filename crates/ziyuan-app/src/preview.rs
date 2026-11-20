@@ -8,10 +8,16 @@ use std::sync::OnceLock;
 use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 use ziyuan_core::FileChange;
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PreviewFile {
     pub path: String,
     pub created: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub deleted: bool,
     pub hunks: Vec<PreviewHunk>,
 }
 
@@ -101,6 +107,7 @@ pub fn preview_changes(files: &[FileChange]) -> Vec<PreviewFile> {
             PreviewFile {
                 path: change.path.clone(),
                 created: change.before.is_none(),
+                deleted: change.deleted,
                 hunks,
             }
         })

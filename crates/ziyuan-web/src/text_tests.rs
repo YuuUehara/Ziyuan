@@ -551,6 +551,7 @@ fn translate_events(
                 path: output_rel(&project.id, block),
                 before: None,
                 after: candidate.into(),
+                deleted: false,
             }],
         },
         &mut events,

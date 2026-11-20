@@ -432,9 +432,13 @@ impl GitHub {
         }
         let entries: Vec<Value> = files
             .iter()
-            .map(
-                |f| json!({ "path": f.path, "mode": "100644", "type": "blob", "content": f.after }),
-            )
+            .map(|f| {
+                if f.deleted {
+                    json!({ "path": f.path, "mode": "100644", "type": "blob", "sha": Value::Null })
+                } else {
+                    json!({ "path": f.path, "mode": "100644", "type": "blob", "content": f.after })
+                }
+            })
             .collect();
         let new_tree = self.call(
             "POST",
@@ -565,6 +569,7 @@ mod tests {
             path: "src/紫垣.rs".into(),
             before: before.map(str::to_owned),
             after: "new\n".into(),
+            deleted: false,
         };
         // 分支上没有 PR、分支尚不存在：取默认分支的最新提交与目录树。
         let lead = || {
@@ -653,6 +658,7 @@ mod tests {
             path: "a.rs".into(),
             before: None,
             after: "x".into(),
+            deleted: false,
         }];
         let open = |hub: &GitHub, op| hub.draft_pull_request("b", "t", "正文", "m", &files, op);
         // 上次已开出 PR 而未及记账：认出标记，直接返回，不再开。
@@ -758,6 +764,7 @@ mod tests {
             path: "NEW.md".into(),
             before: None,
             after: "hi".into(),
+            deleted: false,
         };
         assert!(
             hub.draft_pull_request("b", "t", "", "m", &[new], "op")

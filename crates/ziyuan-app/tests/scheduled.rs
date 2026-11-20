@@ -281,6 +281,7 @@ impl WorkerBackend for StageIncrement {
             path: "value.txt".into(),
             before: Some(before),
             after,
+            deleted: false,
         }]);
         Ok("staged".into())
     }

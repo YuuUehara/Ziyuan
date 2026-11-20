@@ -173,13 +173,18 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         ),
         TaskFailed { task, reason } => format!("v1\tFAILED\t{}\t{}", task.0, to_hex(reason)),
         TaskCancelled { task } => format!("v1\tCANCELLED\t{}", task.0),
-        // 每处改动为 `路径:原文:新文`（均 hex，新建文件的原文为 `-`），以逗号分隔。
+        // 每处改动为 `路径:原文:新文`（均 hex；新建文件原文为 `-`，删除文件新文为 `-`），以逗号分隔。
         ChangesProposed { task, changes } => {
             let entries: Vec<_> = changes
                 .iter()
                 .map(|c| {
                     let before = c.before.as_deref().map_or("-".into(), to_hex);
-                    format!("{}:{before}:{}", to_hex(&c.path), to_hex(&c.after))
+                    let after = if c.deleted {
+                        "-".into()
+                    } else {
+                        to_hex(&c.after)
+                    };
+                    format!("{}:{before}:{after}", to_hex(&c.path))
                 })
                 .collect();
             format!("v1\tCHANGES\t{}\t{}", task.0, entries.join(","))
@@ -876,10 +881,20 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
                     let [path, before, after] = entry.split(':').collect::<Vec<_>>()[..] else {
                         return Err("改动字段不合法".into());
                     };
+                    let before = (before != "-").then(|| from_hex(before)).transpose()?;
+                    let (after, deleted) = if after == "-" {
+                        if before.is_none() {
+                            return Err("删除改动缺少原文".into());
+                        }
+                        (String::new(), true)
+                    } else {
+                        (from_hex(after)?, false)
+                    };
                     Ok(FileChange {
                         path: from_hex(path)?,
-                        before: (before != "-").then(|| from_hex(before)).transpose()?,
-                        after: from_hex(after)?,
+                        before,
+                        after,
+                        deleted,
                     })
                 })
                 .collect::<Result<_, _>>()?,
@@ -1341,6 +1356,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         | OfficialPurged { .. }
         | TaskReviewed { .. }
         | ModelUsage { .. } => 2,
+        ChangesProposed { changes, .. } if changes.iter().any(|c| c.deleted) => 57,
         TaskAssigned { .. }
         | OfficeModelSet { .. }
         | OfficeCeilingSet { .. }
@@ -1815,11 +1831,19 @@ mod tests {
                         path: "src/新:a.rs".into(),
                         before: None,
                         after: "fn a() {}\n".into(),
+                        deleted: false,
                     },
                     FileChange {
                         path: "README.md".into(),
                         before: Some(String::new()),
                         after: "\t,一\n".into(),
+                        deleted: false,
+                    },
+                    FileChange {
+                        path: "src/旧.rs".into(),
+                        before: Some("fn old() {}\n".into()),
+                        after: String::new(),
+                        deleted: true,
                     },
                 ],
             },

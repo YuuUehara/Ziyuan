@@ -287,6 +287,58 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                         .as_ref()
                         .map(|ce| parse_hunk_reviews(&ce.note, total_hunks(&c.files)))
                         .unwrap_or_default();
+                    let files_json: Vec<Value> = c
+                        .files
+                        .iter()
+                        .zip(render_diffs(&c.files))
+                        .zip(ziyuan_app::preview_changes(&c.files))
+                        .map(|((f, diff), preview)| {
+                            let count = |kind: char| {
+                                preview
+                                    .hunks
+                                    .iter()
+                                    .flat_map(|h| &h.lines)
+                                    .filter(|l| l.kind == kind)
+                                    .count()
+                            };
+                            let hunks_json: Vec<Value> = preview
+                                .hunks
+                                .iter()
+                                .map(|h| {
+                                    let rejected = c.state == ChangeState::Discarded
+                                        || c.skipped.contains(&h.number);
+                                    let status = match c.state {
+                                        ChangeState::Proposed => "pending",
+                                        _ if rejected => "rejected",
+                                        _ => "approved",
+                                    };
+                                    let censure = hunk_reviews.get(&h.number).map(|r| {
+                                        json!({
+                                            "verdict": r.verdict.code(),
+                                            "label": r.verdict.label(),
+                                            "note": r.note,
+                                        })
+                                    });
+                                    json!({
+                                        "number": h.number,
+                                        "status": status,
+                                        "censure": censure,
+                                        "lines": h.lines,
+                                    })
+                                })
+                                .collect();
+                            json!({
+                                "path": f.path,
+                                "created": f.before.is_none(),
+                                "deleted": f.deleted,
+                                "base_hash": base_hash(f),
+                                "additions": count('+'),
+                                "deletions": count('-'),
+                                "diff": diff,
+                                "hunks": hunks_json,
+                            })
+                        })
+                        .collect();
                     json!({
                         "state": match c.state {
                             ChangeState::Proposed => "proposed",
@@ -296,32 +348,7 @@ pub fn court_json(court: &Court, backend: &dyn WorkerBackend, recent: Option<usi
                         "skipped": c.skipped,
                         // 准奏时回传，服务端据以确认审阅的正是记下的这份改动。
                         "version": changes_version(&c.files),
-                        "files": c.files.iter().zip(render_diffs(&c.files)).zip(ziyuan_app::preview_changes(&c.files)).map(|((f, diff), preview)| {
-                            let count = |kind: char| preview.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == kind).count();
-                            json!({
-                                "path": f.path,
-                                "created": f.before.is_none(),
-                                "base_hash": base_hash(f),
-                                "additions": count('+'),
-                                "deletions": count('-'),
-                                "diff": diff,
-                                // 着色、带行号与词级标记的预览，段号与 diff 相同；status 为该段的处置。
-                                "hunks": preview.hunks.iter().map(|h| {
-                                    let rejected = c.state == ChangeState::Discarded || c.skipped.contains(&h.number);
-                                    let status = match c.state {
-                                        ChangeState::Proposed => "pending",
-                                        _ if rejected => "rejected",
-                                        _ => "approved",
-                                    };
-                                    let censure = hunk_reviews.get(&h.number).map(|r| json!({
-                                        "verdict": r.verdict.code(),
-                                        "label": r.verdict.label(),
-                                        "note": r.note,
-                                    }));
-                                    json!({ "number": h.number, "status": status, "censure": censure, "lines": h.lines })
-                                }).collect::<Vec<_>>(),
-                            })
-                        }).collect::<Vec<_>>(),
+                        "files": files_json,
                     })
                 }),
                 "worker": worker.and_then(name),

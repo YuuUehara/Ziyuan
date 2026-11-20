@@ -94,6 +94,22 @@ pub(super) fn replace_target(target: &Path, bytes: &[u8]) -> io::Result<()> {
 /// 放弃租约但不上抛它的错误：此刻真正要报告的是原始失败或“替换已完成”。
 ///
 /// 错误不丢弃，只是改道：记到诊断通道，由同线程的调用方取走并报到 stderr。
+/// 删除已有目标文件：先核验非只读（与 `replace_target` 一致），再删除并尝试同步父目录。
+/// 目标已不存在时视作已完成（供中断重试幂等收尾）。
+pub(super) fn remove_target(target: &Path) -> io::Result<()> {
+    if existing_permissions(target)?.is_none() {
+        return Ok(());
+    }
+    match fs::remove_file(target) {
+        Ok(()) => {
+            sync_parent(target);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn release_recording_failure(lease: super::temp_cleanup::Lease) {
     let path = lease.path().to_path_buf();
     if let Err(e) = lease.release() {

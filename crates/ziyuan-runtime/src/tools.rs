@@ -44,6 +44,8 @@ const DENIED_DIRS: &[&str] = &[".ziyuan", ".git", ".jj"];
 const SKIPPED_DIRS: &[&str] = &["target", "node_modules"];
 /// 单次 `write_file` 最多写入的字节数。
 const MAX_WRITE_BYTES: usize = 256 * 1024;
+/// 单次 `replace_text` 批量补丁最多允许的条数。
+const MAX_REPLACE_EDITS: usize = 50;
 /// `run_tests` 的时限、返回的输出末尾字节数，以及从末尾回扫 cargo 失败摘录的上限。
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_TEST_OUTPUT: u64 = 8 * 1024;
@@ -113,10 +115,12 @@ pub fn sealed_tools(
                 tools.push(Box::new(SearchCode(sandbox.clone())));
                 tools.push(Box::new(FindSymbols(sandbox.clone())));
             }
-            // `replace_text` 随 `write_file` 授予，不另设权限，玉玺编码不变。
+            // `replace_text`、`delete_file`、`rename_file` 随 `write_file` 授予，不另设权限，玉玺编码不变。
             Capability::WriteFile => {
                 tools.push(Box::new(WriteFile(sandbox.clone())));
                 tools.push(Box::new(ReplaceText(sandbox.clone())));
+                tools.push(Box::new(DeleteFile(sandbox.clone())));
+                tools.push(Box::new(RenameFile(sandbox.clone())));
             }
             Capability::RunTests => tools.push(Box::new(RunTests(sandbox.clone()))),
         }
@@ -189,14 +193,25 @@ pub fn audit_args(tool: &str, args_json: &str) -> String {
     let Ok(mut args) = serde_json::from_str::<Value>(args_json) else {
         return args_json.to_owned();
     };
+    let redact_str = |content: &str| {
+        format!(
+            "〔{} 行，{} 字节，全文见奏本〕",
+            content.lines().count(),
+            content.len()
+        )
+    };
     for key in ["content", "old", "new"] {
         if let Some(content) = args.get(key).and_then(|c| c.as_str()) {
-            let summary = format!(
-                "〔{} 行，{} 字节，全文见奏本〕",
-                content.lines().count(),
-                content.len()
-            );
-            args[key] = summary.into();
+            args[key] = redact_str(content).into();
+        }
+    }
+    if let Some(edits) = args.get_mut("edits").and_then(Value::as_array_mut) {
+        for edit in edits {
+            for key in ["old", "new"] {
+                if let Some(content) = edit.get(key).and_then(Value::as_str) {
+                    edit[key] = redact_str(content).into();
+                }
+            }
         }
     }
     args.to_string()
@@ -225,7 +240,15 @@ fn base_state_in(root: &Path, change: &FileChange) -> Result<(BaseState, PathBuf
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    let state = if current.as_deref() == Some(change.after.as_bytes()) {
+    let state = if change.deleted {
+        if current.is_none() {
+            BaseState::Written
+        } else if current.as_deref() == change.before.as_deref().map(str::as_bytes) {
+            BaseState::Original
+        } else {
+            BaseState::Changed
+        }
+    } else if current.as_deref() == Some(change.after.as_bytes()) {
         BaseState::Written
     } else if current.as_deref() == change.before.as_deref().map(str::as_bytes) {
         BaseState::Original
@@ -339,7 +362,8 @@ fn write_all(
                 // 目录标签取**词法**路径，与 canonical 的 `target` 分开存：受保护集合里的
                 // 条目来自恢复记录的 `targets[].path`，也是词法形式。
                 let relative_parent = relative_parent_of(&change.path);
-                targets.push((target, &change.after, relative_parent));
+                let payload = (!change.deleted).then_some(change.after.as_str());
+                targets.push((target, payload, relative_parent));
             }
             BaseState::Changed => {
                 return Err(format!("{} 自呈报以来已被改动，拒绝落盘", change.path).into());
@@ -352,10 +376,13 @@ fn write_all(
     let mut swept: BTreeSet<PathBuf> = BTreeSet::new();
     for (target, after, relative_parent) in targets {
         if let Some(parent) = target.parent() {
-            // 先建目录再扫：首次写入新目录时目录尚不存在，`sweep_dir` 会把“读不到”
-            // 记成一条 I/O 失败并算作没扫全，正常的第一次写入就被报成清理失败。
-            fs::create_dir_all(parent)?;
+            if after.is_some() {
+                // 先建目录再扫：首次写入新目录时目录尚不存在，`sweep_dir` 会把“读不到”
+                // 记成一条 I/O 失败并算作没扫全，正常的第一次写入就被报成清理失败。
+                fs::create_dir_all(parent)?;
+            }
             if let Some(protected) = protected
+                && parent.is_dir()
                 && swept.insert(parent.to_path_buf())
             {
                 // 只清本次写入目标所在目录；不取工作目录锁，调用方本就持锁。
@@ -366,7 +393,10 @@ fn write_all(
                 problems.extend(report.problems);
             }
         }
-        replace::replace_target(&target, after.as_bytes())?;
+        match after {
+            Some(content) => replace::replace_target(&target, content.as_bytes())?,
+            None => replace::remove_target(&target)?,
+        }
     }
     Ok(())
 }
@@ -417,6 +447,11 @@ fn contained(root: &Path, relative: &str) -> Result<PathBuf, BoxError> {
 }
 
 /// 项目根目录与玉玺查阅范围（均为 canonical 路径；互相包含的范围已合并），及暂存的改动。
+enum StagedEntry {
+    Content(String),
+    Deleted,
+}
+
 struct Sandbox {
     root: PathBuf,
     scope: Vec<PathBuf>,
@@ -469,10 +504,16 @@ impl Sandbox {
         Ok((path, key))
     }
 
-    fn staged(&self, relative: &str) -> Option<String> {
+    fn staged_entry(&self, relative: &str) -> Option<StagedEntry> {
         let (_, key) = self.resolve_write(relative).ok()?;
         let staged = self.staged.lock().expect("暂存区锁未中毒");
-        staged.get(&key).map(|c| c.after.clone())
+        staged.get(&key).map(|c| {
+            if c.deleted {
+                StagedEntry::Deleted
+            } else {
+                StagedEntry::Content(c.after.clone())
+            }
+        })
     }
 
     fn resolve(&self, relative: &str) -> Result<PathBuf, BoxError> {
@@ -594,10 +635,18 @@ impl Sandbox {
         if is_denied(&self.root, path) {
             return false;
         }
-        let Ok(text) = fs::read_to_string(path) else {
-            return false;
-        };
         let relative = self.display(path);
+        let text = {
+            let staged = self.staged.lock().expect("暂存区锁未中毒");
+            match staged.get(&relative) {
+                Some(c) if c.deleted => return false,
+                Some(c) => c.after.clone(),
+                None => match fs::read_to_string(path) {
+                    Ok(text) => text,
+                    Err(_) => return false,
+                },
+            }
+        };
         for (number, line) in text.lines().enumerate() {
             if line_has(line, query, ignore_case)
                 && page.consider(format!("{relative}:{}: {}", number + 1, line.trim()))
@@ -688,8 +737,9 @@ impl Tool for ReadFile {
         let relative = required_string(&args, "path")?;
         let offset = optional_i64(&args, "offset")?;
         let lines = optional_i64(&args, "lines")?;
-        let bytes = match self.0.staged(&relative) {
-            Some(text) => text.into_bytes(),
+        let bytes = match self.0.staged_entry(&relative) {
+            Some(StagedEntry::Deleted) => return Err(format!("{relative} 已被暂存删除").into()),
+            Some(StagedEntry::Content(text)) => text.into_bytes(),
             None => fs::read(self.0.resolve(&relative)?)?,
         };
         if offset.is_none() && lines.is_none() {
@@ -737,7 +787,14 @@ impl Tool for ListFiles {
             let under = prefixes
                 .iter()
                 .any(|p| p == "." || path == p || path.starts_with(&format!("{p}/")));
-            if under && !files.contains_key(path) {
+            if !under {
+                continue;
+            }
+            if change.deleted {
+                files.remove(path);
+            } else if let Some(size) = files.get_mut(path) {
+                *size = change.after.len() as u64;
+            } else {
                 lines.push(format!("{path}（暂存新建，{} 字节）", change.after.len()));
             }
         }
@@ -864,22 +921,28 @@ impl Tool for FileOutline {
             Some(n) if (1..=MAX_OUTLINE_SYMBOLS as i64).contains(&n) => n,
             Some(_) => return Err(format!("limit 须在 1 到 {MAX_OUTLINE_SYMBOLS} 之间").into()),
         };
-        let (display_path, text) = if let Some(staged) = self.0.staged(&relative) {
-            let (_, key) = self.0.resolve_write(&relative)?;
-            (key, staged)
-        } else {
-            let resolved = self.0.resolve(&relative)?;
-            if resolved.is_dir() {
-                return Err(format!("{relative} 是目录，请指定单个文件或使用 find_symbols").into());
+        let (display_path, text) = match self.0.staged_entry(&relative) {
+            Some(StagedEntry::Deleted) => return Err(format!("{relative} 已被暂存删除").into()),
+            Some(StagedEntry::Content(staged)) => {
+                let (_, key) = self.0.resolve_write(&relative)?;
+                (key, staged)
             }
-            let len = fs::metadata(&resolved)?.len();
-            if len > MAX_OUTLINE_BYTES as u64 {
-                return Err(format!("文件过大（{len} 字节），请改用 read_file 按行读取").into());
+            None => {
+                let resolved = self.0.resolve(&relative)?;
+                if resolved.is_dir() {
+                    return Err(
+                        format!("{relative} 是目录，请指定单个文件或使用 find_symbols").into(),
+                    );
+                }
+                let len = fs::metadata(&resolved)?.len();
+                if len > MAX_OUTLINE_BYTES as u64 {
+                    return Err(format!("文件过大（{len} 字节），请改用 read_file 按行读取").into());
+                }
+                let bytes = fs::read(&resolved)?;
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| "不是 UTF-8 文本文件，无法提取符号大纲")?;
+                (self.0.display(&resolved), text)
             }
-            let bytes = fs::read(&resolved)?;
-            let text =
-                String::from_utf8(bytes).map_err(|_| "不是 UTF-8 文本文件，无法提取符号大纲")?;
-            (self.0.display(&resolved), text)
         };
         let Some((lang, all)) = symbols::extract_for_path(Path::new(&display_path), &text) else {
             return Ok(format!(
@@ -1005,19 +1068,24 @@ impl Tool for FindSymbols {
             self.0.collect_symbol_files(root, &mut files)?;
         }
         let prefixes: Vec<String> = roots.iter().map(|d| self.0.display(d)).collect();
-        let staged_snapshot: BTreeMap<String, String> = {
+        let staged_snapshot: BTreeMap<String, Option<String>> = {
             let staged = self.0.staged.lock().expect("暂存区锁未中毒");
             staged
                 .iter()
-                .map(|(k, v)| (k.clone(), v.after.clone()))
+                .map(|(k, v)| (k.clone(), (!v.deleted).then(|| v.after.clone())))
                 .collect()
         };
-        for rel in staged_snapshot.keys() {
+        for (rel, content) in &staged_snapshot {
             let under = prefixes
                 .iter()
                 .any(|p| p == "." || rel == p || rel.starts_with(&format!("{p}/")));
-            if under {
+            if !under {
+                continue;
+            }
+            if content.is_some() {
                 files.entry(rel.clone()).or_insert(None);
+            } else {
+                files.remove(rel);
             }
         }
 
@@ -1035,7 +1103,10 @@ impl Tool for FindSymbols {
             if symbols::Language::from_path(Path::new(&rel)).is_none() {
                 continue;
             }
-            let text = if let Some(staged) = staged_snapshot.get(&rel) {
+            let text = if let Some(entry) = staged_snapshot.get(&rel) {
+                let Some(staged) = entry else {
+                    continue;
+                };
                 staged.clone()
             } else if let Some(disk) = disk_path {
                 let Ok(meta) = fs::metadata(&disk) else {
@@ -1146,6 +1217,7 @@ impl Tool for WriteFile {
                 path: key.clone(),
                 before,
                 after: content,
+                deleted: false,
             },
         );
         Ok(format!(
@@ -1161,31 +1233,82 @@ impl Tool for ReplaceText {
         ToolSpec {
             name: "replace_text".into(),
             description: format!(
-                "把授权范围（{}）内某个文本文件里唯一的一段 old 换成 new。找不到或出现不止一处就拒绝，不做模糊匹配，也不删除、改名或新建文件。改动只暂存，与 write_file 一样等准奏后才落盘。结果最多 {MAX_WRITE_BYTES} 字节。",
+                "把授权范围（{}）内某个文本文件里唯一的一段 old 换成 new，或通过 edits 数组在单次调用内按顺序原子应用多处补丁（最多 {MAX_REPLACE_EDITS} 处；任一处找不到或出现不止一处即整批拒绝，不留半截改动）。不做模糊匹配，也不新建或删除文件。改动只暂存，与 write_file 一样等准奏后才落盘。结果最多 {MAX_WRITE_BYTES} 字节。",
                 self.0.scope_label()
             ),
-            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"old":{"type":"string","description":"要替换的原文，必须在文件中恰好出现一次"},"new":{"type":"string","description":"替换后的文本，可以是空字符串"}},"required":["path","old","new"],"additionalProperties":false}"#.into(),
+            input_schema_json: format!(
+                r#"{{"type":"object","properties":{{"path":{{"type":"string","description":"相对项目根目录的文件路径"}},"old":{{"type":"string","description":"单处替换时的原文，必须在文件中恰好出现一次（与 edits 二选一）"}},"new":{{"type":"string","description":"单处替换后的文本，可以是空字符串（与 edits 二选一）"}},"edits":{{"type":"array","description":"批量补丁数组（最多 {MAX_REPLACE_EDITS} 项，与 old/new 二选一），按顺序原子应用","items":{{"type":"object","properties":{{"old":{{"type":"string","description":"该处要替换的原文，须唯一匹配"}},"new":{{"type":"string","description":"替换后的文本，可以是空字符串"}}}},"required":["old","new"],"additionalProperties":false}}}}}},"required":["path"],"additionalProperties":false}}"#
+            ),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let args = object_args(args_json, &["path", "old", "new"])?;
+        let args = object_args(args_json, &["path", "old", "new", "edits"])?;
         let relative = required_string(&args, "path")?;
-        let old = required_string(&args, "old")?;
-        let new = required_string(&args, "new")?;
+        let has_edits = args.contains_key("edits");
+        let has_single = args.contains_key("old") || args.contains_key("new");
+        let (batch_mode, edits): (bool, Vec<(String, String)>) = if has_edits {
+            if has_single {
+                return Err("edits 与 old/new 不能同时传入".into());
+            }
+            let arr = args
+                .get("edits")
+                .and_then(Value::as_array)
+                .ok_or("edits 须为对象数组")?;
+            if arr.is_empty() {
+                return Err("edits 不能为空".into());
+            }
+            if arr.len() > MAX_REPLACE_EDITS {
+                return Err(format!("edits 最多支持 {MAX_REPLACE_EDITS} 处补丁").into());
+            }
+            let mut parsed = Vec::with_capacity(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                let obj = item
+                    .as_object()
+                    .ok_or_else(|| format!("第 {} 处补丁须为 JSON 对象", i + 1))?;
+                for key in obj.keys() {
+                    if key != "old" && key != "new" {
+                        return Err(format!("第 {} 处补丁含未知字段：{key}", i + 1).into());
+                    }
+                }
+                let old = obj
+                    .get("old")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("第 {} 处补丁缺少字符串参数 old", i + 1))?;
+                let new = obj
+                    .get("new")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("第 {} 处补丁缺少字符串参数 new", i + 1))?;
+                parsed.push((old.to_owned(), new.to_owned()));
+            }
+            (true, parsed)
+        } else {
+            let old = required_string(&args, "old")?;
+            let new = required_string(&args, "new")?;
+            (false, vec![(old, new)])
+        };
         // 路径先过玉玺和禁区。空 old、新旧相同都不能让越界路径报成功。
         let (path, key) = self.0.resolve_write(&relative)?;
         if path.is_dir() {
             return Err(format!("{key} 是目录").into());
         }
-        if old.is_empty() {
-            return Err("old 不能为空".into());
+        for (i, (old, _)) in edits.iter().enumerate() {
+            if old.is_empty() {
+                return Err(if batch_mode {
+                    format!("第 {} 处补丁的 old 不能为空", i + 1).into()
+                } else {
+                    "old 不能为空".into()
+                });
+            }
         }
-        if old == new {
+        if !batch_mode && edits[0].0 == edits[0].1 {
             return Ok("新旧文本相同，未写入暂存".into());
         }
         let mut staged = self.0.staged.lock().expect("暂存区锁未中毒");
         let (before, current) = if let Some(change) = staged.get(&key) {
+            if change.deleted {
+                return Err(format!("{key} 已被暂存删除，不能替换").into());
+            }
             (change.before.clone(), change.after.clone())
         } else if path.exists() {
             let text =
@@ -1194,29 +1317,208 @@ impl Tool for ReplaceText {
         } else {
             return Err(format!("{key} 不存在，不能替换").into());
         };
-        let count = current.match_indices(&old).count();
-        if count == 0 {
-            return Err("找不到要替换的文本".into());
+        let mut working = current.clone();
+        let mut old_bytes = 0usize;
+        let mut new_bytes = 0usize;
+        for (i, (old, new)) in edits.iter().enumerate() {
+            let count = working.match_indices(old).count();
+            if count == 0 {
+                return Err(if batch_mode {
+                    format!("第 {} 处补丁：找不到要替换的文本", i + 1).into()
+                } else {
+                    "找不到要替换的文本".into()
+                });
+            }
+            if count > 1 {
+                return Err(if batch_mode {
+                    format!("第 {} 处补丁：匹配到 {count} 处，须唯一才能替换", i + 1).into()
+                } else {
+                    format!("匹配到 {count} 处，须唯一才能替换").into()
+                });
+            }
+            working = working.replacen(old, new, 1);
+            old_bytes += old.len();
+            new_bytes += new.len();
         }
-        if count > 1 {
-            return Err(format!("匹配到 {count} 处，须唯一才能替换").into());
-        }
-        let after = current.replacen(&old, &new, 1);
-        if after.len() > MAX_WRITE_BYTES {
+        if working.len() > MAX_WRITE_BYTES {
             return Err(format!("替换后超过 {MAX_WRITE_BYTES} 字节").into());
+        }
+        if working == current {
+            return Ok("新旧文本相同，未写入暂存".into());
         }
         staged.insert(
             key.clone(),
             FileChange {
                 path: key.clone(),
                 before,
-                after,
+                after: working,
+                deleted: false,
             },
         );
         Ok(format!(
-            "已暂存 {key}：替换 1 处（{} 字节 → {} 字节）；诏令完成后呈报皇帝，准奏后才写入项目",
-            old.len(),
-            new.len()
+            "已暂存 {key}：替换 {} 处（{old_bytes} 字节 → {new_bytes} 字节）；诏令完成后呈报皇帝，准奏后才写入项目",
+            edits.len(),
+        ))
+    }
+}
+
+struct DeleteFile(Arc<Sandbox>);
+
+impl Tool for DeleteFile {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "delete_file".into(),
+            description: format!(
+                "暂存删除授权范围（{}）内的单个文本文件（不能删目录、二进制文件或超过 {MAX_WRITE_BYTES} 字节的文件）。改动只暂存，诏令完成后呈报皇帝，准奏后才从项目删除。",
+                self.0.scope_label()
+            ),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"}},"required":["path"],"additionalProperties":false}"#.into(),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(args_json, &["path"])?;
+        let relative = required_string(&args, "path")?;
+        let (path, key) = self.0.resolve_write(&relative)?;
+        if path.is_dir() {
+            return Err(format!("{key} 是目录，不能删除").into());
+        }
+        let mut staged = self.0.staged.lock().expect("暂存区锁未中毒");
+        if let Some(existing) = staged.get(&key) {
+            if existing.deleted {
+                return Ok(format!("{key} 已在暂存中标记删除"));
+            }
+            if existing.before.is_none() {
+                staged.remove(&key);
+                return Ok(format!("已取消暂存新建的 {key}"));
+            }
+            let before = existing.before.clone();
+            staged.insert(
+                key.clone(),
+                FileChange {
+                    path: key.clone(),
+                    before,
+                    after: String::new(),
+                    deleted: true,
+                },
+            );
+            return Ok(format!(
+                "已暂存删除 {key}；诏令完成后呈报皇帝，准奏后才从项目删除"
+            ));
+        }
+        if !path.exists() {
+            return Err(format!("{key} 不存在，不能删除").into());
+        }
+        let bytes = fs::read(&path)?;
+        if bytes.len() > MAX_WRITE_BYTES {
+            return Err(format!("{key} 超过 {MAX_WRITE_BYTES} 字节，暂不支持暂存删除").into());
+        }
+        let text = String::from_utf8(bytes).map_err(|_| format!("{key} 不是文本文件，不能删除"))?;
+        staged.insert(
+            key.clone(),
+            FileChange {
+                path: key.clone(),
+                before: Some(text),
+                after: String::new(),
+                deleted: true,
+            },
+        );
+        Ok(format!(
+            "已暂存删除 {key}；诏令完成后呈报皇帝，准奏后才从项目删除"
+        ))
+    }
+}
+
+struct RenameFile(Arc<Sandbox>);
+
+impl Tool for RenameFile {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "rename_file".into(),
+            description: format!(
+                "暂存把授权范围（{}）内的单个文本文件从 from 改名或移动到 to（等价于原子暂存删除旧路径并新建目标路径；不允许覆盖已有文件，不支持目录与二进制文件，上限 {MAX_WRITE_BYTES} 字节）。改动只暂存，准奏后才落盘。",
+                self.0.scope_label()
+            ),
+            input_schema_json: r#"{"type":"object","properties":{"from":{"type":"string","description":"原相对文件路径"},"to":{"type":"string","description":"目标相对文件路径"}},"required":["from","to"],"additionalProperties":false}"#.into(),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(args_json, &["from", "to"])?;
+        let from_rel = required_string(&args, "from")?;
+        let to_rel = required_string(&args, "to")?;
+        let (from_path, from_key) = self.0.resolve_write(&from_rel)?;
+        let (to_path, to_key) = self.0.resolve_write(&to_rel)?;
+        if from_key == to_key {
+            return Ok("源路径与目标路径相同，未写入暂存".into());
+        }
+        if from_path.is_dir() {
+            return Err(format!("{from_key} 是目录，不能改名").into());
+        }
+        if to_path.is_dir() {
+            return Err(format!("{to_key} 是目录，不能作为目标路径").into());
+        }
+        let mut staged = self.0.staged.lock().expect("暂存区锁未中毒");
+        let (from_before, content) = if let Some(change) = staged.get(&from_key) {
+            if change.deleted {
+                return Err(format!("{from_key} 已被暂存删除，不能改名").into());
+            }
+            (change.before.clone(), change.after.clone())
+        } else if from_path.exists() {
+            let bytes = fs::read(&from_path)?;
+            if bytes.len() > MAX_WRITE_BYTES {
+                return Err(
+                    format!("{from_key} 超过 {MAX_WRITE_BYTES} 字节，暂不支持暂存改名").into(),
+                );
+            }
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("{from_key} 不是文本文件，不能改名"))?;
+            (Some(text.clone()), text)
+        } else {
+            return Err(format!("{from_key} 不存在，不能改名").into());
+        };
+        if content.len() > MAX_WRITE_BYTES {
+            return Err(format!("改名内容超过 {MAX_WRITE_BYTES} 字节").into());
+        }
+        let to_exists = match staged.get(&to_key) {
+            Some(c) => !c.deleted,
+            None => to_path.exists(),
+        };
+        if to_exists {
+            return Err(format!("{to_key} 已存在，拒绝覆盖改名").into());
+        }
+        let to_before = staged.get(&to_key).and_then(|c| c.before.clone());
+        match from_before {
+            Some(orig) => {
+                staged.insert(
+                    from_key.clone(),
+                    FileChange {
+                        path: from_key.clone(),
+                        before: Some(orig),
+                        after: String::new(),
+                        deleted: true,
+                    },
+                );
+            }
+            None => {
+                staged.remove(&from_key);
+            }
+        }
+        if to_before.as_deref() == Some(content.as_str()) {
+            staged.remove(&to_key);
+        } else {
+            staged.insert(
+                to_key.clone(),
+                FileChange {
+                    path: to_key.clone(),
+                    before: to_before,
+                    after: content,
+                    deleted: false,
+                },
+            );
+        }
+        Ok(format!(
+            "已暂存改名 {from_key} → {to_key}；诏令完成后呈报皇帝，准奏后才落盘"
         ))
     }
 }
@@ -1270,6 +1572,14 @@ impl RunTests {
         copy_tree(&self.0.root, &self.0.root, copy)?;
         for change in self.0.staged.lock().expect("暂存区锁未中毒").values() {
             let target = copy.join(&change.path);
+            if change.deleted {
+                match fs::remove_file(&target) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                continue;
+            }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -2192,6 +2502,7 @@ mod tests {
             path: "src/main.rs".into(),
             before: Some("a\nb\n".into()),
             after: "a\nB\n".into(),
+            deleted: false,
         };
         fs::write(root.join("src/main.rs"), "a\r\nb\r\n").unwrap();
         assert_eq!(base_state(&root, &crlf).unwrap(), BaseState::Changed);
@@ -2208,6 +2519,7 @@ mod tests {
             path: "../evil".into(),
             before: None,
             after: String::new(),
+            deleted: false,
         }];
         assert!(apply_changes(&root, &evil).is_err());
         fs::remove_dir_all(dir).unwrap();
@@ -2224,11 +2536,13 @@ mod tests {
                 path: "src/main.rs".into(),
                 before: Some(original.clone()),
                 after: "first".into(),
+                deleted: false,
             },
             FileChange {
                 path: "src/new/b.rs".into(),
                 before: None,
                 after: "second file content".into(),
+                deleted: false,
             },
         ];
         {
@@ -2289,6 +2603,7 @@ mod tests {
             path: path.into(),
             before: None,
             after: after.into(),
+            deleted: false,
         }
     }
 
@@ -2607,6 +2922,170 @@ export function bootUi() {}
             narrow_hits.contains("src/lib.rs") && !narrow_hits.contains("web/app.mjs"),
             "{narrow_hits}"
         );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_text_batch_edits_are_atomic_and_audit_redacts_edits() {
+        let dir = workspace("batch-replace");
+        let root = dir.join("project");
+        fs::write(
+            root.join("src/main.rs"),
+            "fn alpha() -> i32 { 1 }\nfn beta() -> i32 { 2 }\nfn gamma() -> i32 { 3 }\n",
+        )
+        .unwrap();
+        let seal = Seal {
+            capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+            scope: vec!["src".into()],
+            mcp: Default::default(),
+        };
+        let sealed = sealed_tools(&root, &seal, None).unwrap();
+        let find = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+        let replace = find("replace_text");
+
+        let bad = serde_json::json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"old": "fn alpha() -> i32 { 1 }", "new": "fn alpha() -> i32 { 10 }"},
+                {"old": "fn missing() {}", "new": "fn nope() {}"}
+            ]
+        })
+        .to_string();
+        let err = replace.execute(&bad).unwrap_err().to_string();
+        assert!(err.contains("第 2 处补丁"), "{err}");
+        assert!(sealed.changes().is_empty(), "失败批次不得留下半截改动");
+
+        let mixed = serde_json::json!({
+            "path": "src/main.rs",
+            "old": "alpha",
+            "new": "a",
+            "edits": [{"old": "beta", "new": "b"}]
+        })
+        .to_string();
+        assert!(replace.execute(&mixed).is_err());
+
+        let ok = serde_json::json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"old": "fn alpha() -> i32 { 1 }", "new": "fn alpha() -> i32 { 10 }"},
+                {"old": "fn gamma() -> i32 { 3 }", "new": "fn gamma() -> i32 { 30 }"}
+            ]
+        })
+        .to_string();
+        let out = replace.execute(&ok).unwrap();
+        assert!(out.contains("替换 2 处"), "{out}");
+        let changes = sealed.changes();
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].deleted);
+        assert!(changes[0].after.contains("10") && changes[0].after.contains("30"));
+
+        let audited = audit_args("replace_text", &ok);
+        assert!(!audited.contains("fn alpha()"), "{audited}");
+        assert!(audited.contains("全文见奏本"), "{audited}");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn delete_file_and_rename_file_stage_overlay_and_apply_cleanly() {
+        let dir = workspace("delete-rename");
+        let root = dir.join("project");
+        fs::write(root.join("src/obsolete.rs"), "pub fn old() {}\n").unwrap();
+        fs::write(root.join("src/moved.rs"), "pub fn stay() -> i32 { 7 }\n").unwrap();
+        let seal = Seal {
+            capabilities: [
+                Capability::ReadFile,
+                Capability::SearchCode,
+                Capability::WriteFile,
+            ]
+            .into(),
+            scope: vec!["src".into()],
+            mcp: Default::default(),
+        };
+        let sealed = sealed_tools(&root, &seal, None).unwrap();
+        let get = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+
+        assert!(get("delete_file").execute(r#"{"path":".env"}"#).is_err());
+        assert!(
+            get("rename_file")
+                .execute(r#"{"from":"src/moved.rs","to":".env"}"#)
+                .is_err()
+        );
+
+        get("delete_file")
+            .execute(r#"{"path":"src/obsolete.rs"}"#)
+            .unwrap();
+        assert!(root.join("src/obsolete.rs").exists());
+        assert!(
+            get("read_file")
+                .execute(r#"{"path":"src/obsolete.rs"}"#)
+                .is_err()
+        );
+        assert!(
+            get("file_outline")
+                .execute(r#"{"path":"src/obsolete.rs"}"#)
+                .is_err()
+        );
+        let listed = get("list_files").execute(r#"{}"#).unwrap();
+        assert!(!listed.contains("obsolete.rs"), "{listed}");
+        let searched = get("search_code").execute(r#"{"query":"fn old"}"#).unwrap();
+        assert!(!searched.contains("obsolete.rs"), "{searched}");
+        let syms = get("find_symbols").execute(r#"{"query":"old"}"#).unwrap();
+        assert!(!syms.contains("obsolete.rs"), "{syms}");
+
+        assert!(
+            get("rename_file")
+                .execute(r#"{"from":"src/moved.rs","to":"src/main.rs"}"#)
+                .is_err()
+        );
+        get("rename_file")
+            .execute(r#"{"from":"src/moved.rs","to":"src/renamed.rs"}"#)
+            .unwrap();
+        assert!(
+            get("read_file")
+                .execute(r#"{"path":"src/moved.rs"}"#)
+                .is_err()
+        );
+        let renamed_text = get("read_file")
+            .execute(r#"{"path":"src/renamed.rs"}"#)
+            .unwrap();
+        assert!(renamed_text.contains("fn stay()"), "{renamed_text}");
+
+        get("write_file")
+            .execute(r#"{"path":"src/temp.rs","content":"// temp\n"}"#)
+            .unwrap();
+        get("delete_file")
+            .execute(r#"{"path":"src/temp.rs"}"#)
+            .unwrap();
+
+        let changes = sealed.changes();
+        assert_eq!(changes.len(), 3, "{changes:?}");
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.path == "src/obsolete.rs" && c.deleted)
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.path == "src/moved.rs" && c.deleted)
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.path == "src/renamed.rs" && !c.deleted && c.before.is_none())
+        );
+
+        apply_changes(&root, &changes).unwrap();
+        assert!(!root.join("src/obsolete.rs").exists());
+        assert!(!root.join("src/moved.rs").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("src/renamed.rs")).unwrap(),
+            "pub fn stay() -> i32 { 7 }\n"
+        );
+        assert_eq!(base_state(&root, &changes[0]).unwrap(), BaseState::Written);
+        apply_changes(&root, &changes).unwrap();
 
         fs::remove_dir_all(dir).unwrap();
     }

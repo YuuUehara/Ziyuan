@@ -130,6 +130,7 @@ impl Fixture {
                     path: format!("translations/{}/{block}/zh.json", self.project.id),
                     before: None,
                     after: String::from_utf8(candidate.serialized().unwrap()).unwrap(),
+                    deleted: false,
                 }],
             },
             CourtEvent::TaskCompleted {
@@ -324,9 +325,11 @@ fn assert_writer_tools(request: &Value) {
     assert_eq!(
         names,
         [
+            "delete_file",
             "file_outline",
             "list_files",
             "read_file",
+            "rename_file",
             "replace_text",
             "search_records",
             "write_file"

@@ -74,6 +74,7 @@ fn hunks_select_keeps_line_endings_and_new_files_can_be_dropped() {
         path: "a".into(),
         before: Some(before.clone()),
         after: before.replace("l1\r\n", "L1\r\n").replace("end", "END"),
+        deleted: false,
     };
     let hunks = change.hunks();
     assert_eq!(hunks.len(), 2, "{hunks:?}");
@@ -100,6 +101,7 @@ fn hunks_select_keeps_line_endings_and_new_files_can_be_dropped() {
         path: "b".into(),
         before: None,
         after: "x\ny".into(),
+        deleted: false,
     };
     assert_eq!(created.hunks().len(), 1);
     assert_eq!(created.select(|_| false), None);

@@ -2,14 +2,21 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 承办官员暂存的一处文件改动（只支持新建与改写）。`before` 为改动时项目中的原文，
-/// 新建文件为 `None`；落盘前据此确认文件在此期间未被他人改动。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// 承办官员暂存的一处文件改动（支持新建、改写与删除；改名拆为删旧建新两处改动）。
+/// `before` 为改动时项目中的原文，新建文件为 `None`；落盘前据此确认文件在此期间未被他人改动。
+/// `deleted` 为 `true` 时表示删除该文件，此时 `before` 必为 `Some`、`after` 为空串。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     /// 相对项目根目录的路径（`/` 分隔）。
     pub path: String,
     pub before: Option<String>,
     pub after: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
 }
 
 /// 统一 diff 中一段改动：`start` 为原文起始行号（从 1 起），`lines` 为（标记, 行）——
@@ -30,6 +37,13 @@ impl FileChange {
             .before
             .as_deref()
             .map_or(Vec::new(), |b| b.split_inclusive('\n').collect());
+        if self.deleted {
+            return old
+                .into_iter()
+                .enumerate()
+                .map(|(i, l)| ('-', i, l))
+                .collect();
+        }
         let new: Vec<&str> = self.after.split_inclusive('\n').collect();
         let (n, m) = (old.len(), new.len());
         let mut ops = Vec::with_capacity(n.max(m));
@@ -85,9 +99,16 @@ impl FileChange {
         owner
     }
 
-    /// 按段切分的差异，供逐段准奏。新建文件只有一段。
+    /// 按段切分的差异，供逐段准奏。新建与删除均只占一段（含删除空文件）。
     pub fn hunks(&self) -> Vec<Hunk> {
         let ops = self.ops();
+        if self.deleted && ops.is_empty() {
+            // 删除空文件也占一段，使皇帝可逐段准奏或驳回。
+            return vec![Hunk {
+                start: 1,
+                lines: Vec::new(),
+            }];
+        }
         let owner = Self::hunk_of(&ops);
         let mut hunks: Vec<(usize, usize, usize)> = Vec::new(); // (段号, 首改动行, 末改动行)
         for (k, h) in owner.iter().enumerate() {
@@ -117,8 +138,11 @@ impl FileChange {
     }
 
     /// 只采纳 `keep(段号)` 为真的段（段号从 0 起）后的文件内容；`None` 表示文件不存在
-    /// （新建文件被整段驳回）。全部采纳即 `after`，全部驳回即 `before`。
+    /// （新建文件被整段驳回，或删除文件被准奏）。全部采纳即落盘结果，全部驳回即 `before`。
     pub fn select(&self, keep: impl Fn(usize) -> bool) -> Option<String> {
+        if self.deleted {
+            return if keep(0) { None } else { self.before.clone() };
+        }
         let ops = self.ops();
         let owner = Self::hunk_of(&ops);
         let mut out = String::new();
@@ -137,5 +161,36 @@ impl FileChange {
         }
         let created = any_new || !ops.iter().any(|op| op.0 == '+');
         (self.before.is_some() || created).then_some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deleted_file_is_single_hunk_and_supports_skip_and_empty_files() {
+        let non_empty = FileChange {
+            path: "src/old.rs".into(),
+            before: Some("fn a() {}\nfn b() {}\n".into()),
+            after: String::new(),
+            deleted: true,
+        };
+        let hunks = non_empty.hunks();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].lines.len(), 2);
+        assert!(hunks[0].lines.iter().all(|(m, _)| *m == '-'));
+        assert_eq!(non_empty.select(|_| true), None);
+        assert_eq!(non_empty.select(|_| false), non_empty.before);
+
+        let empty = FileChange {
+            path: "empty.txt".into(),
+            before: Some(String::new()),
+            after: String::new(),
+            deleted: true,
+        };
+        assert_eq!(empty.hunks().len(), 1);
+        assert_eq!(empty.select(|_| true), None);
+        assert_eq!(empty.select(|_| false), Some(String::new()));
     }
 }

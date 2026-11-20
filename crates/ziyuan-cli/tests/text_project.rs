@@ -1373,6 +1373,7 @@ fn selected_reference_preview_and_persisted_submission_are_offline() {
                 path: format!("translations/{project}/{reference_block}/zh.json"),
                 before: None,
                 after: serde_json::to_string_pretty(&candidate).unwrap(),
+                deleted: false,
             }],
         },
         CourtEvent::TaskCompleted {

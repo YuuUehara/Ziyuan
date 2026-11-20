@@ -221,7 +221,8 @@ impl WorkerBackend for AgentBackend {
             .extend(mcp::sealed_tools(tool_root, &edict.seal.mcp)?);
         let nonce = guard::nonce();
         let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
-            "你可以用 write_file 整篇改写文件，或用 replace_text 替换其中唯一一段旧文本（找不到、或出现不止一处，就不要改）。\
+            "你可以用 write_file 整篇改写或新建文件，用 replace_text 替换唯一一段或一批原子化补丁（找不到或出现不止一处就整批拒绝），\
+             或用 delete_file / rename_file 暂存删除与改名。\
              改动只暂存，回奏后由皇帝审阅 diff 决定是否落盘；不能执行测试命令以外的任何命令。回奏时列出改了哪些文件、为什么改。"
         } else {
             "你只能使用所提供的工具查阅授权范围内的内容，不能修改文件或执行命令。"

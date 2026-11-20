@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.23.0 — 2026-11-20
+
+- **工部单次批量补丁替换与文件删除／改名暂存（仍守「人看过才落盘」）**：
+  - `replace_text` 新增原子化 `edits: [{ old, new }]` 批量补丁模式（单次最多 50 处，与旧版 `old`/`new` 单处模式完全兼容）：按序逐处精确唯一匹配，任一处缺失或存在多处匹配即整批拒绝、不留半截改动；审计日志 `audit_args` 同步脱敏 `edits` 数组正文。
+  - 新增 `delete_file` 与 `rename_file` 工具（随 `Capability::WriteFile` 授予，玉玺编码不变）：`delete_file` 暂存删除授权范围内的单个文本文件（取消新建则直接移出暂存）；`rename_file` 原子拆分为「删旧＋建新」两处暂存改动（拒绝覆盖已有文件）；暂存后 `read_file`、`list_files`、`search_code`、`file_outline`、`find_symbols` 与 `run_tests` 副本立即可见最新状态。
+  - `FileChange` 新增 `deleted` 字段（默认 `false`、JSON 缺省兼容）；`ziyuan-storage` 在 `CHANGES` 中以 `after = "-"` 编码删除并登记版本 `1.23.0`（序号 57，不含删除的 `CHANGES` 仍保持 `0.3` 读取门槛），受管写入恢复记录 `TargetState` 开放 `Present -> Absent` 删除目标；`ziyuan-github` PR 建树对删除文件发送 `sha: null`；译书准奏门禁明确拒绝删除译稿与建议文件；都察院测试验功在 `delete_file`／`rename_file` 后自动失效。
+  - CLI `render_diffs`（`+++ /dev/null`）、Web 奉天门与 TUI 紫禁城改动预览均标注「（删除）」并支持 `--skip` 逐段驳回删除。
+- 同步更新 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.23.0 验收记录](docs/acceptance/1.23.0.md)。
+
 ## 1.22.0 — 2026-11-20
 
 - **文本导入新增日文 JIS 编码支持（`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`）**：

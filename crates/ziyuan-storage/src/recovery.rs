@@ -610,12 +610,9 @@ fn validate_targets(targets: &[TargetState]) -> Result<(), RecoveryError> {
                 return Err(corrupt("目标哈希不合法"));
             }
         }
-        // 本版只支持新建与改写：删除（存在变为不存在）留待后续版本。
+        // 支持新建（Absent -> Present）、改写（Present -> Present）与删除（Present -> Absent）。
         if target.before == target.after {
             return Err(corrupt("目标前后状态须不同"));
-        }
-        if target.after == FileState::Absent {
-            return Err(corrupt("目标须由存在变为存在"));
         }
     }
     Ok(())
@@ -1382,12 +1379,13 @@ mod tests {
         record.targets = vec![target];
         assert_rejected(&record, "目标前后状态须不同");
 
-        // 本版不做删除：存在变为不存在不被接受（留待 v1.3）。
+        // 1.23.0 起允许删除（Present -> Absent）的恢复目标。
         let mut target = record.targets[0].clone();
         target.before = FileState::Present(CREATED_SHA.into());
         target.after = FileState::Absent;
         record.targets = vec![target];
-        assert_rejected(&record, "目标须由存在变为存在");
+        let bytes = encode_record(&record).expect("删除目标可编码");
+        assert_eq!(decode_record(&bytes).expect("删除目标可解码"), record);
 
         let mut target = record.targets[0].clone();
         target.after = FileState::Present("bad".into());

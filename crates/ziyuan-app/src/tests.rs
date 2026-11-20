@@ -95,6 +95,7 @@ fn previews_number_lines_mark_changed_words_and_colour_code() {
         path: "src/a.rs".into(),
         before: Some(before),
         after,
+        deleted: false,
     }];
     let [file] = preview_changes(&files).try_into().unwrap();
     assert_eq!(
@@ -131,6 +132,7 @@ fn previews_number_lines_mark_changed_words_and_colour_code() {
         path: "notes.unknownext".into(),
         before: Some("甲乙丙丁\n".into()),
         after: "完全不同的一句话\n".into(),
+        deleted: false,
     }];
     let [file] = preview_changes(&files).try_into().unwrap();
     assert!(
@@ -1859,11 +1861,13 @@ impl WorkerBackend for TwoFiles {
                 path: "a.txt".into(),
                 before: Some(self.0.clone()),
                 after,
+                deleted: false,
             },
             FileChange {
                 path: "b.txt".into(),
                 before: None,
                 after: "b\n".into(),
+                deleted: false,
             },
         ]);
         Ok("改毕".into())
@@ -2350,11 +2354,13 @@ async fn test_evidence_keeps_history_but_refuses_stale_success() {
                     path: "a.txt".into(),
                     before: Some("old\n".into()),
                     after: "new\n".into(),
+                    deleted: false,
                 },
                 FileChange {
                     path: "b.txt".into(),
                     before: Some("old\n".into()),
                     after: "new\n".into(),
+                    deleted: false,
                 },
             ]);
             Ok("改毕".into())
@@ -3212,11 +3218,13 @@ fn delta_input_carries_standard_hunk_headers_and_hunk_numbers() {
             path: "src/a.rs".into(),
             before: Some(before),
             after,
+            deleted: false,
         },
         FileChange {
             path: "docs/新.md".into(),
             before: None,
             after: "甲\n乙\n".into(),
+            deleted: false,
         },
     ];
     let hunks = unified_hunks(&files);
@@ -3296,6 +3304,7 @@ fn real_git_delta_renders_hunks_when_configured() {
         path: "src/x.rs".into(),
         before: Some("fn main() {\n    old();\n}\n".into()),
         after: "fn main() {\n    new();\n}\n".into(),
+        deleted: false,
     }];
     let diff = &unified_hunks(&files)[0][0];
     for side_by_side in [false, true] {
@@ -3453,6 +3462,7 @@ fn censor_fences_diff_and_prompts_hunk_reviews() {
                         path: "src/a.rs".into(),
                         before: Some(before.clone()),
                         after: after.clone(),
+                        deleted: false,
                     }],
                 },
                 CourtEvent::TaskCompleted {
@@ -3594,4 +3604,121 @@ fn plan_workflow_extracts_paths_rolls_up_new_files_and_issues_works_edict() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn deleted_file_changes_persist_support_skip_and_invalidate_test_evidence() {
+    use std::fs;
+    let dir = std::env::temp_dir().join(format!("ziyuan-delete-e2e-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/keep.rs"), "pub fn keep() {}\n").unwrap();
+    fs::write(dir.join("src/drop.rs"), "pub fn drop_me() {}\n").unwrap();
+
+    let mut s = Session::found(EventLog::new(&dir)).unwrap();
+    let task = s
+        .issue(
+            Department::Works,
+            "清理无用文件".into(),
+            Seal {
+                capabilities: [Capability::ReadFile, Capability::WriteFile].into(),
+                scope: vec!["src".into()],
+                mcp: Default::default(),
+            },
+        )
+        .unwrap()
+        .id;
+    let worker = s
+        .court()
+        .route(&s.court().task(task).unwrap().edict)
+        .unwrap()
+        .worker;
+    s.commit(|_| {
+        Ok(vec![
+            CourtEvent::TaskAssigned {
+                task,
+                worker,
+                model: None,
+            },
+            CourtEvent::ToolInvoked {
+                task,
+                tool: "run_tests".into(),
+                args_json: "{}".into(),
+                ok: true,
+            },
+            CourtEvent::ToolInvoked {
+                task,
+                tool: "delete_file".into(),
+                args_json: r#"{"path":"src/drop.rs"}"#.into(),
+                ok: true,
+            },
+            CourtEvent::ChangesProposed {
+                task,
+                changes: vec![
+                    FileChange {
+                        path: "src/drop.rs".into(),
+                        before: Some("pub fn drop_me() {}\n".into()),
+                        after: String::new(),
+                        deleted: true,
+                    },
+                    FileChange {
+                        path: "src/keep.rs".into(),
+                        before: Some("pub fn keep() {}\n".into()),
+                        after: String::new(),
+                        deleted: true,
+                    },
+                ],
+            },
+            CourtEvent::TaskCompleted {
+                task,
+                worker,
+                summary: "已暂存删除".into(),
+            },
+        ])
+    })
+    .unwrap();
+
+    // delete_file 之后先前的测试验功失效。
+    let history = s.history().unwrap();
+    let ev = test_evidence(s.court().task(task).unwrap(), history);
+    assert!(!ev.applicable, "delete_file 之后应使测试验功失效：{ev}");
+
+    // 预览与 diff 标注删除。
+    let files = &s
+        .court()
+        .task(task)
+        .unwrap()
+        .changes
+        .as_ref()
+        .unwrap()
+        .files;
+    let diffs = render_diffs(files);
+    assert!(diffs[0].contains("+++ /dev/null"), "{}", diffs[0]);
+    let preview = crate::preview_changes(files);
+    assert!(preview[0].deleted && preview[1].deleted);
+
+    // 驳回第 2 段（src/keep.rs），准奏第 1 段（src/drop.rs）。
+    s.apply_changes(task, &dir, vec![2]).unwrap();
+    assert!(!dir.join("src/drop.rs").exists(), "准奏的删除应已落盘");
+    assert!(dir.join("src/keep.rs").exists(), "被驳回的删除应保留原文件");
+
+    // 重开事件簿完整回放，且最低读取版本升至 1.23.0。
+    let log = EventLog::new(&dir);
+    let inspected = log.inspect().unwrap();
+    assert_eq!(
+        ziyuan_storage::release_name(inspected.readable_since),
+        "1.23.0"
+    );
+    let reopened = Session::open(log).unwrap();
+    let replayed = reopened
+        .court()
+        .task(task)
+        .unwrap()
+        .changes
+        .as_ref()
+        .unwrap();
+    assert_eq!(replayed.files.len(), 2);
+    assert!(replayed.files[0].deleted && replayed.files[1].deleted);
+
+    let _ = fs::remove_dir_all(&dir);
 }

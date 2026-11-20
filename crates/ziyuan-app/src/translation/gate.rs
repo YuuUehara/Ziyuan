@@ -32,6 +32,9 @@ pub(crate) fn gate_problems(
         problems.push(format!("关联的译稿路径 {} 不是 {output}", link.output_path));
     }
     for file in selected {
+        if file.deleted {
+            problems.push(format!("译稿与建议文件不可删除：{}", file.path));
+        }
         if file.path != output && !under_proposals(&file.path, &proposals) {
             problems.push(format!(
                 "只可写 {output} 与 {proposals} 下的文件：{}",

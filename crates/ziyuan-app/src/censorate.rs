@@ -17,9 +17,12 @@ use crate::{AppError, Session, truncate};
 /// 平反时的史官记。
 pub const ACQUITTAL_NOTE: &str = "史官记：成化二年，复于少保官，遣官赐祭——冤者得白，虽迟犹胜于无。";
 
-/// 工具是否会修改暂存文件（`write_file` 与随其授予的 `replace_text`）。
+/// 工具是否会修改暂存文件（`write_file` 与随其授予的 `replace_text`、`delete_file`、`rename_file`）。
 fn is_write_tool(tool: &str) -> bool {
-    tool == Capability::WriteFile.code() || tool == "replace_text"
+    matches!(
+        tool,
+        "write_file" | "replace_text" | "delete_file" | "rename_file"
+    )
 }
 
 /// 都察院对某一段 diff 改动的意见等级。
@@ -557,8 +560,8 @@ impl<S: EventStore> Session<S> {
                 .capabilities
                 .contains(&Capability::WriteFile)
             {
-                "write_file 与 replace_text 只把改动暂存在内存中（run_tests 在叠加暂存改动的副本上跑），须皇帝准奏才写入项目；\
-                 记录中 write_file 或 replace_text 成功，即是暂存成功，回奏称「改动未落盘」「仅暂存」属实，不是矛盾，不得据此弹劾。\n"
+                "write_file、replace_text、delete_file 与 rename_file 只把改动暂存在内存中（run_tests 在叠加暂存改动的副本上跑），须皇帝准奏才写入项目；\
+                 记录中上述写入类工具成功，即是暂存成功，回奏称「改动未落盘」「仅暂存」属实，不是矛盾，不得据此弹劾。\n"
             } else {
                 ""
             },

@@ -601,6 +601,7 @@ async fn translation_line_shows_kind_project_block_and_state() {
             path: output,
             before: None,
             after: "{\"schema_version\":1,\"paragraphs\":[]}".into(),
+            deleted: false,
         }],
     });
     events.push(CourtEvent::TaskCompleted {
@@ -916,6 +917,7 @@ async fn tui_shows_hunk_censure_and_issues_write_edict_from_plan() {
                         path: "src/a.rs".into(),
                         before: Some("fn old() {}\n".into()),
                         after: "fn new() {}\n".into(),
+                        deleted: false,
                     }],
                 },
                 ziyuan_core::CourtEvent::TaskCompleted {

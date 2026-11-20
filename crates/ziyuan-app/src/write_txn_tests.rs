@@ -114,6 +114,7 @@ impl WorkerBackend for Rewrite {
             path: "a.txt".into(),
             before: self.before.map(str::to_owned),
             after: self.after.into(),
+            deleted: false,
         }]);
         Ok("改毕".into())
     }
@@ -615,6 +616,7 @@ async fn concurrent_approvals_on_two_tasks_never_interleave() {
             path: "a.txt".into(),
             before: Some(ORIGINAL.into()),
             after: CHANGED.into(),
+            deleted: false,
         },
         "a",
     );
@@ -624,6 +626,7 @@ async fn concurrent_approvals_on_two_tasks_never_interleave() {
             path: "b.txt".into(),
             before: None,
             after: "b\n".into(),
+            deleted: false,
         },
         "b",
     );
@@ -674,6 +677,7 @@ fn approval_retries_until_the_other_process_finishes() {
             path: "a.txt".into(),
             before: Some(ORIGINAL.into()),
             after: CHANGED.into(),
+            deleted: false,
         },
     );
     finisher.join().unwrap();

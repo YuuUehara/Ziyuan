@@ -78,6 +78,7 @@ impl Fixture {
                     path: output_rel(&self.project, BLOCK),
                     before: None,
                     after: String::from_utf8(prompt.serialized().unwrap()).unwrap(),
+                    deleted: false,
                 }],
             },
             CourtEvent::TaskCompleted {

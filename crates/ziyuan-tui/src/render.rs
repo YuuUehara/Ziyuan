@@ -595,8 +595,14 @@ impl App {
                 .unwrap_or_default();
             // 与 Web 同一份预览：行号、按语言着色，成对删增行中改动的字词加底色。
             for (file, stale) in preview_changes(&changes.files).into_iter().zip(stale) {
-                let created = if file.created { "（新建）" } else { "" };
-                let mut head = vec![Span::raw(format!("▸ {}{created}", file.path)).bold()];
+                let badge = if file.deleted {
+                    "（删除）"
+                } else if file.created {
+                    "（新建）"
+                } else {
+                    ""
+                };
+                let mut head = vec![Span::raw(format!("▸ {}{badge}", file.path)).bold()];
                 if stale {
                     head.push(Span::styled(
                         "　原文已变，准奏会被拒（u 驳回）",
