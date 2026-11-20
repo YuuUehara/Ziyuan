@@ -749,7 +749,7 @@ impl EventLog {
 }
 
 /// 各发布版本，按序号（[`LogReport::readable_since`] 所用，从 1 起）排列。
-pub const RELEASES: [&str; 60] = [
+pub const RELEASES: [&str; 61] = [
     "0.1.0",
     "0.2.0",
     "0.3.0",
@@ -830,6 +830,8 @@ pub const RELEASES: [&str; 60] = [
     "1.25.0",
     // 1.26.0 新增 `ZIYUAN_TEST_COMMANDS` 命名检查白名单与 rustc/tsc/mypy 编译诊断摘录，零新增事件。
     "1.26.0",
+    // 1.27.0 增强搜索（regex/glob/上下文行）、list_files glob 与跨文件引用查找 find_references，零新增事件与玉玺代码。
+    "1.27.0",
 ];
 
 /// 序号对应的发布版本号；超出所知的报本版。

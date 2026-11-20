@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.27.0 — 2026-11-20
+
+- **代码搜索增强（`regex`／`glob`／上下文行）与跨文件引用查找 `find_references`（零新增事件与玉玺代码）**：
+  - `ziyuan-runtime` 新增 `tools::glob` 线性时间路径通配器（支持 `*`、`?`、`**`、`[a-z]`／`[!a-z]` 与 `{rs,toml}`）；`list_files` 新增可选 `glob` 参数，同时过滤磁盘与暂存新建文件。
+  - `search_code` 新增可选 `regex`（线性时间、受 1 MiB 编译容量保护）、`glob` 与 `context_lines`（0–5，块间以 `---` 分隔），并补全暂存新建文件覆盖；不传新参数时完全保持既有字面量格式。
+  - 随 `Capability::SearchCode` 新增 `find_references` 工具：按整词边界跨文件查找符号引用并自动跳过注释、字符串与更长标识符子串，区分 `[定义]` 与 `[引用]`，支持 `path`、`glob`、`include_definitions`、`offset`、`limit`，严守玉玺范围与禁区。
+- 登记版本 `1.27.0`（序号 61，不提高旧事件簿读取门槛）；同步更新 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.27.0 验收记录](docs/acceptance/1.27.0.md)。
+
 ## 1.26.0 — 2026-11-20
 
 - **命名检查／测试预设白名单（`ZIYUAN_TEST_COMMANDS`）与编译诊断结构化摘录（零新增事件）**：

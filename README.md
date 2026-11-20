@@ -8,7 +8,7 @@
 
 - **先试用，不必先配置模型**：未设置 `ZIYUAN_LLM_MODEL` 时只演示派工，不会真的分析或修改文件。
 - **接入模型后才执行真实工作**：支持 OpenAI 兼容接口（已有 DeepSeek 与本地 Ollama 实测）。默认只能读取授权范围内的文件；修改文件和运行测试须另行授权。
-- **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅 diff 后执行 `apply` 准奏才落盘。复杂改动可先用 `edict --plan` 只读出条陈方案，批复后再用 `edict --from-plan` 收窄范围授写权，审阅驳回或逐段跳过后可用 `edict --revise`（及 Web／TUI 对应入口）一键携带 diff 与御史意见打回再改一轮；工部具备按行读、轻量符号工具（`file_outline`／`find_symbols`）、只读版本库工具（`vcs_status`／`vcs_diff`／`vcs_log`）、单处或原子批量局部替换（`replace_text`）、暂存删除／改名（`delete_file`／`rename_file`）、命名检查预设白名单（`ZIYUAN_TEST_COMMANDS`）及多框架测试失败／编译诊断摘录，都察院复核可逐段附注 diff 意见；在 `jj` 仓库中可通过 `--parallel-writes` 隔离并行写副本，分办后亦可用 `ziyuan dag add|deps` 在运行中追加子诏令或改写待办依赖——审阅和逐段准奏决定始终在你手中。
+- **模型提出改动，你决定是否写入**：任务完成不等于文件已修改，要审阅 diff 后执行 `apply` 准奏才落盘。复杂改动可先用 `edict --plan` 只读出条陈方案，批复后再用 `edict --from-plan` 收窄范围授写权，审阅驳回或逐段跳过后可用 `edict --revise`（及 Web／TUI 对应入口）一键携带 diff 与御史意见打回再改一轮；工部具备按行读、轻量符号与引用工具（`file_outline`／`find_symbols`／`find_references`）、支持正则／glob／上下文行的 `search_code`、只读版本库工具（`vcs_status`／`vcs_diff`／`vcs_log`）、单处或原子批量局部替换（`replace_text`）、暂存删除／改名（`delete_file`／`rename_file`）、命名检查预设白名单（`ZIYUAN_TEST_COMMANDS`）及多框架测试失败／编译诊断摘录，都察院复核可逐段附注 diff 意见；在 `jj` 仓库中可通过 `--parallel-writes` 隔离并行写副本，分办后亦可用 `ziyuan dag add|deps` 在运行中追加子诏令或改写待办依赖——审阅和逐段准奏决定始终在你手中。
 - **逐块与整本译书**：支持从日文或英文原文建立项目，在本地预览分段并导入，逐块下诏初译、请只读审校、逐段朱批、修订与御览定稿；也可不调用模型，在网页、命令行或终端里手写**人工译稿**，用**御笔札记**记下认可译法。
 - **找回定稿译法**：译文记忆默认关闭、不联网。设置 `ZIYUAN_MEMORY_PROVIDER=local` 后只在本机计算；`deterministic` 为可重复的固定本机算法；远程嵌入须先按项目 `text memory authorize` 授权。记忆仅提供字面相近的参考译法，不自动改稿、不自动批准。
 

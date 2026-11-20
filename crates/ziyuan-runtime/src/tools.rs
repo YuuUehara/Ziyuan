@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
 
 mod failures;
+mod glob;
 mod replace;
 mod symbols;
 pub mod temp_cleanup;
@@ -28,8 +29,11 @@ mod vcs;
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
-/// 单次 `search_code` 一页最多返回的匹配行数。
+/// 单次 `search_code` 一页最多返回的匹配行数，以及上下文行上限。
 const MAX_MATCHES: usize = 50;
+const MAX_CONTEXT_LINES: usize = 5;
+/// 单次 `find_references` 一页最多返回的引用数。
+const MAX_REF_MATCHES: usize = 50;
 /// 单次 `list_files` 最多列出的文件数。
 const MAX_LISTED: usize = 300;
 /// 单次 `file_outline` 默认与最多返回的符号数、可扫描的文件字节上限。
@@ -176,10 +180,11 @@ pub fn sealed_tools_with_presets(
                 tools.push(Box::new(vcs::VcsDiff(sandbox.clone())));
                 tools.push(Box::new(vcs::VcsLog(sandbox.clone())));
             }
-            // `find_symbols` 随 `search_code` 授予，不另设权限，玉玺编码不变。
+            // `find_symbols`、`find_references` 随 `search_code` 授予，不另设权限，玉玺编码不变。
             Capability::SearchCode => {
                 tools.push(Box::new(SearchCode(sandbox.clone())));
                 tools.push(Box::new(FindSymbols(sandbox.clone())));
+                tools.push(Box::new(FindReferences(sandbox.clone())));
             }
             // `replace_text`、`delete_file`、`rename_file` 随 `write_file` 授予，不另设权限，玉玺编码不变。
             Capability::WriteFile => {
@@ -513,6 +518,12 @@ fn contained(root: &Path, relative: &str) -> Result<PathBuf, BoxError> {
 }
 
 /// 项目根目录与玉玺查阅范围（均为 canonical 路径；互相包含的范围已合并），及暂存的改动。
+struct CollectedTextFiles {
+    files: BTreeMap<String, Option<PathBuf>>,
+    staged: BTreeMap<String, Option<String>>,
+    explicit_file: bool,
+}
+
 enum StagedEntry {
     Content(String),
     Deleted,
@@ -633,36 +644,72 @@ impl Sandbox {
         labels.join("、")
     }
 
-    /// 深度优先搜索；返回是否应停止（默认搜索凑满一页后不再往后数）。不进入符号链接。
-    fn search(
-        &self,
-        path: &Path,
-        query: &str,
-        ignore_case: bool,
-        page: &mut MatchPage,
-    ) -> io::Result<bool> {
-        if !path.is_dir() {
-            return Ok(self.search_file(path, query, ignore_case, page));
-        }
-        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let file_type = entry.file_type()?;
-            let name = entry.file_name();
-            let skipped = SKIPPED_DIRS.iter().any(|d| name == *d);
-            let stop = if file_type.is_dir() && !skipped {
-                !is_denied(&self.root, &entry.path())
-                    && self.search(&entry.path(), query, ignore_case, page)?
-            } else if file_type.is_file() {
-                self.search_file(&entry.path(), query, ignore_case, page)
+    /// 收集 `path_arg`（或整个玉玺范围）内全部可读文本文件候选（磁盘 + 暂存新建，剔除暂存删除与构建产物）。
+    fn collect_text_files(&self, path_arg: Option<&str>) -> Result<CollectedTextFiles, BoxError> {
+        let staged_snapshot: BTreeMap<String, Option<String>> = {
+            let staged = self.staged.lock().expect("暂存区锁未中毒");
+            staged
+                .iter()
+                .map(|(k, v)| (k.clone(), (!v.deleted).then(|| v.after.clone())))
+                .collect()
+        };
+        let (roots, explicit_file) = if let Some(relative) = path_arg {
+            let trimmed = relative.trim();
+            if trimmed.is_empty() || trimmed == "." {
+                (self.scope.clone(), false)
+            } else if let Ok((_, key)) = self.resolve_write(relative)
+                && let Some(entry) = staged_snapshot.get(&key)
+            {
+                if under_skipped_rel(&key) {
+                    return Err(format!("不搜索构建产物: {relative}").into());
+                }
+                let mut files = BTreeMap::new();
+                if entry.is_some() {
+                    files.insert(key, None);
+                }
+                return Ok(CollectedTextFiles {
+                    files,
+                    staged: staged_snapshot,
+                    explicit_file: true,
+                });
             } else {
-                false
-            };
-            if stop {
-                return Ok(true);
+                let start = self.resolve(relative)?;
+                if under_skipped(&self.root, &start) {
+                    return Err(format!("不搜索构建产物: {relative}").into());
+                }
+                let is_file = !start.is_dir();
+                (vec![start], is_file)
+            }
+        } else {
+            (self.scope.clone(), false)
+        };
+
+        let mut files: BTreeMap<String, Option<PathBuf>> = BTreeMap::new();
+        for root in &roots {
+            self.collect_symbol_files(root, &mut files)?;
+        }
+        let prefixes: Vec<String> = roots.iter().map(|d| self.display(d)).collect();
+        for (rel, content) in &staged_snapshot {
+            if under_skipped_rel(rel) {
+                continue;
+            }
+            let under = prefixes
+                .iter()
+                .any(|p| p == "." || rel == p || rel.starts_with(&format!("{p}/")));
+            if !under {
+                continue;
+            }
+            if content.is_some() {
+                files.entry(rel.clone()).or_insert(None);
+            } else {
+                files.remove(rel);
             }
         }
-        Ok(false)
+        Ok(CollectedTextFiles {
+            files,
+            staged: staged_snapshot,
+            explicit_file,
+        })
     }
 
     /// 列出 `path` 下的文件（相对路径），跳过构建产物与禁区，不进入符号链接。
@@ -714,39 +761,6 @@ impl Sandbox {
         }
         Ok(())
     }
-
-    fn search_file(
-        &self,
-        path: &Path,
-        query: &str,
-        ignore_case: bool,
-        page: &mut MatchPage,
-    ) -> bool {
-        // 禁区文件与非 UTF-8（二进制）文件直接跳过。
-        if is_denied(&self.root, path) {
-            return false;
-        }
-        let relative = self.display(path);
-        let text = {
-            let staged = self.staged.lock().expect("暂存区锁未中毒");
-            match staged.get(&relative) {
-                Some(c) if c.deleted => return false,
-                Some(c) => c.after.clone(),
-                None => match fs::read_to_string(path) {
-                    Ok(text) => text,
-                    Err(_) => return false,
-                },
-            }
-        };
-        for (number, line) in text.lines().enumerate() {
-            if line_has(line, query, ignore_case)
-                && page.consider(format!("{relative}:{}: {}", number + 1, line.trim()))
-            {
-                return true;
-            }
-        }
-        false
-    }
 }
 
 /// 一页搜索结果。默认搜索在凑满一页后再遇到一条就停，以免改掉原来的截断语义。
@@ -778,12 +792,71 @@ impl MatchPage {
     }
 }
 
-fn line_has(line: &str, query: &str, ignore_case: bool) -> bool {
-    if ignore_case {
-        line.to_lowercase().contains(&query.to_lowercase())
-    } else {
-        line.contains(query)
+enum SearchMatcher {
+    Literal { query: String, ignore_case: bool },
+    Regex(regex::Regex),
+}
+
+impl SearchMatcher {
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Self::Literal { query, ignore_case } => {
+                if *ignore_case {
+                    line.to_lowercase().contains(query)
+                } else {
+                    line.contains(query.as_str())
+                }
+            }
+            Self::Regex(re) => re.is_match(line),
+        }
     }
+}
+
+fn under_skipped_rel(rel: &str) -> bool {
+    rel.split('/').any(|seg| SKIPPED_DIRS.contains(&seg))
+}
+
+fn is_reference_candidate(rel: &str, explicit_target: bool) -> bool {
+    if explicit_target {
+        return true;
+    }
+    if let Some(lang) = symbols::Language::from_path(Path::new(rel)) {
+        return lang != symbols::Language::Markdown;
+    }
+    let Some(ext) = Path::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    else {
+        return false;
+    };
+    matches!(
+        ext.as_str(),
+        "java"
+            | "kt"
+            | "kts"
+            | "cs"
+            | "swift"
+            | "rb"
+            | "php"
+            | "scala"
+            | "zig"
+            | "lua"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "ps1"
+            | "sql"
+            | "vue"
+            | "svelte"
+            | "css"
+            | "scss"
+            | "html"
+            | "xml"
+            | "toml"
+            | "yaml"
+            | "yml"
+    )
 }
 
 /// 路径落在 `target` 或 `node_modules` 下。搜索不进入这些目录。
@@ -853,16 +926,22 @@ impl Tool for ListFiles {
         ToolSpec {
             name: "list_files".into(),
             description: format!(
-                "列出授权范围（{}）内某目录下的全部文件（递归，含本次 write_file 暂存的新文件），返回 `路径（字节数）`，最多 {MAX_LISTED} 个；不给 path 则列整个授权范围。跳过 target、node_modules。",
+                "列出授权范围（{}）内某目录下的全部文件（递归，含本次 write_file 暂存的新文件），返回 `路径（字节数）`，最多 {MAX_LISTED} 个；不给 path 则列整个授权范围。可用 glob 过滤路径（如 `*.rs`、`crates/**/tests/*.rs`、`*.{{rs,toml}}`）。跳过 target、node_modules 与 Python 缓存目录。",
                 self.0.scope_label()
             ),
-            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的目录路径；省略则列整个授权范围"}},"additionalProperties":false}"#.into(),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的目录路径；省略则列整个授权范围"},"glob":{"type":"string","description":"可选：路径通配过滤，如 *.rs、crates/**/*.rs、*.{rs,toml}"}},"additionalProperties":false}"#.into(),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let args: Value = serde_json::from_str(args_json)?;
-        let dirs = match args.get("path").and_then(Value::as_str) {
+        let args = object_args(args_json, &["path", "glob"])?;
+        let path_arg = optional_string(&args, "path")?;
+        let glob_matcher = match optional_string(&args, "glob")? {
+            Some(pat) if !pat.trim().is_empty() => Some(glob::GlobMatcher::compile(&pat)?),
+            Some(_) => return Err("glob 不能为空".into()),
+            None => None,
+        };
+        let dirs = match path_arg.as_deref() {
             Some(p) if !p.trim().is_empty() && p.trim() != "." => vec![self.0.resolve(p)?],
             _ => self.0.scope.clone(),
         };
@@ -870,7 +949,6 @@ impl Tool for ListFiles {
         for dir in &dirs {
             self.0.list(dir, &mut files)?;
         }
-        // 暂存而尚未落盘的新文件也列出，免得官员以为自己写的文件不存在。
         let prefixes: Vec<String> = dirs.iter().map(|d| self.0.display(d)).collect();
         let staged = self.0.staged.lock().expect("暂存区锁未中毒");
         let mut lines: Vec<String> = Vec::new();
@@ -885,11 +963,14 @@ impl Tool for ListFiles {
                 files.remove(path);
             } else if let Some(size) = files.get_mut(path) {
                 *size = change.after.len() as u64;
-            } else {
+            } else if glob_matcher.as_ref().is_none_or(|g| g.is_match(path)) {
                 lines.push(format!("{path}（暂存新建，{} 字节）", change.after.len()));
             }
         }
         drop(staged);
+        if let Some(matcher) = &glob_matcher {
+            files.retain(|path, _| matcher.is_match(path));
+        }
         let total = files.len() + lines.len();
         lines.extend(
             files
@@ -904,7 +985,7 @@ impl Tool for ListFiles {
         let mut out = lines.join("\n");
         if total > MAX_LISTED {
             out.push_str(&format!(
-                "\n[已截断：共 {total} 个，仅显示前 {MAX_LISTED} 个；可指定子目录]"
+                "\n[已截断：共 {total} 个，仅显示前 {MAX_LISTED} 个；可指定子目录或 glob]"
             ));
         }
         Ok(out)
@@ -918,11 +999,11 @@ impl Tool for SearchCode {
         ToolSpec {
             name: Capability::SearchCode.code().into(),
             description: format!(
-                "在授权范围（{}）内的文本文件中按字面量搜索，返回 `路径:行号: 内容`。默认区分大小写，一页最多 {MAX_MATCHES} 条。可用 path 限定目录或文件，ignore_case 忽略大小写，offset 与 limit 翻页。先按授权范围和禁区过滤，不查 .git、.jj、.ziyuan、.env*、target、node_modules。",
+                "在授权范围（{}）内的文本文件中搜索（含暂存新建／改动，跳过暂存删除），返回 `路径:行号: 内容`。默认区分大小写按字面量查，一页最多 {MAX_MATCHES} 条。可用 path 限定目录或文件、glob 过滤路径（如 `*.rs`、`crates/**/*.rs`）、regex 启用正则搜索、ignore_case 忽略大小写、context_lines（0–{MAX_CONTEXT_LINES}）附带上下邻行、offset 与 limit 翻页。先按授权范围和禁区过滤，不查 .git、.jj、.ziyuan、.env*、target、node_modules 与 Python 缓存。",
                 self.0.scope_label()
             ),
             input_schema_json: format!(
-                r#"{{"type":"object","properties":{{"query":{{"type":"string","description":"要查找的字面量文本"}},"path":{{"type":"string","description":"只查这个相对目录或文件；省略则查整个授权范围"}},"ignore_case":{{"type":"boolean","description":"为 true 时忽略大小写"}},"offset":{{"type":"integer","description":"跳过前若干条匹配，从 0 起"}},"limit":{{"type":"integer","description":"本页条数，1 到 {MAX_MATCHES}"}}}},"required":["query"],"additionalProperties":false}}"#
+                r#"{{"type":"object","properties":{{"query":{{"type":"string","description":"要查找的字面量文本，或 regex=true 时的正则表达式"}},"path":{{"type":"string","description":"只查这个相对目录或文件；省略则查整个授权范围"}},"glob":{{"type":"string","description":"可选：路径通配过滤，如 *.rs、crates/**/*.rs、*.{{rs,toml}}"}},"regex":{{"type":"boolean","description":"为 true 时按 Rust 正则表达式匹配"}},"ignore_case":{{"type":"boolean","description":"为 true 时忽略大小写"}},"context_lines":{{"type":"integer","description":"可选：每条匹配前后附带的上下文行数，0 到 {MAX_CONTEXT_LINES}"}},"offset":{{"type":"integer","description":"跳过前若干条匹配，从 0 起"}},"limit":{{"type":"integer","description":"本页条数，1 到 {MAX_MATCHES}"}}}},"required":["query"],"additionalProperties":false}}"#
             ),
         }
     }
@@ -930,13 +1011,30 @@ impl Tool for SearchCode {
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
         let args = object_args(
             args_json,
-            &["query", "path", "ignore_case", "offset", "limit"],
+            &[
+                "query",
+                "path",
+                "glob",
+                "regex",
+                "ignore_case",
+                "context_lines",
+                "offset",
+                "limit",
+            ],
         )?;
         let query = required_string(&args, "query")?;
         if query.is_empty() {
             return Err("query 不能为空".into());
         }
+        let use_regex = optional_bool(&args, "regex")?.unwrap_or(false);
         let ignore_case = optional_bool(&args, "ignore_case")?.unwrap_or(false);
+        let context_lines = match optional_i64(&args, "context_lines")? {
+            None => 0usize,
+            Some(n) if (0..=MAX_CONTEXT_LINES as i64).contains(&n) => n as usize,
+            Some(_) => {
+                return Err(format!("context_lines 须在 0 到 {MAX_CONTEXT_LINES} 之间").into());
+            }
+        };
         let offset = optional_i64(&args, "offset")?.unwrap_or(0);
         if offset < 0 {
             return Err("offset 不能为负".into());
@@ -947,8 +1045,33 @@ impl Tool for SearchCode {
             Some(_) => return Err(format!("limit 须在 1 到 {MAX_MATCHES} 之间").into()),
         };
         let path = optional_string(&args, "path")?;
+        let glob_matcher = match optional_string(&args, "glob")? {
+            Some(pat) if !pat.trim().is_empty() => Some(glob::GlobMatcher::compile(&pat)?),
+            Some(_) => return Err("glob 不能为空".into()),
+            None => None,
+        };
+        let matcher = if use_regex {
+            let compiled = regex::RegexBuilder::new(&query)
+                .case_insensitive(ignore_case)
+                .size_limit(1 << 20)
+                .build()
+                .map_err(|e| format!("正则表达式无效：{e}"))?;
+            SearchMatcher::Regex(compiled)
+        } else {
+            SearchMatcher::Literal {
+                query: if ignore_case {
+                    query.to_lowercase()
+                } else {
+                    query
+                },
+                ignore_case,
+            }
+        };
         let enhanced = path.is_some()
+            || glob_matcher.is_some()
+            || use_regex
             || ignore_case
+            || context_lines > 0
             || args.contains_key("offset")
             || args.contains_key("limit");
         let mut page = MatchPage {
@@ -959,25 +1082,57 @@ impl Tool for SearchCode {
             more: false,
             hits: Vec::new(),
         };
-        let roots = if let Some(relative) = path.as_deref() {
-            if relative.trim().is_empty() || relative.trim() == "." {
-                self.0.scope.clone()
-            } else {
-                let start = self.0.resolve(relative)?;
-                if under_skipped(&self.0.root, &start) {
-                    return Err(format!("不搜索构建产物: {relative}").into());
-                }
-                vec![start]
+        let CollectedTextFiles {
+            files,
+            staged: staged_snapshot,
+            ..
+        } = self.0.collect_text_files(path.as_deref())?;
+        'outer: for (relative, disk_path) in files {
+            if let Some(g) = &glob_matcher
+                && !g.is_match(&relative)
+            {
+                continue;
             }
-        } else {
-            self.0.scope.clone()
-        };
-        for root in &roots {
-            if self.0.search(root, &query, ignore_case, &mut page)? {
-                break;
+            let text = if let Some(entry) = staged_snapshot.get(&relative) {
+                let Some(staged) = entry else {
+                    continue;
+                };
+                staged.clone()
+            } else if let Some(disk) = disk_path {
+                match fs::read_to_string(&disk) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                }
+            } else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for (number, line) in lines.iter().enumerate() {
+                if !matcher.is_match(line) {
+                    continue;
+                }
+                let hit = if context_lines == 0 {
+                    format!("{relative}:{}: {}", number + 1, line.trim())
+                } else {
+                    let from = number.saturating_sub(context_lines);
+                    let to = (number + context_lines).min(lines.len().saturating_sub(1));
+                    let mut block = Vec::with_capacity(to - from + 1);
+                    for (idx, ctx_line) in lines.iter().enumerate().take(to + 1).skip(from) {
+                        let sep = if idx == number { ':' } else { '-' };
+                        block.push(format!(
+                            "{relative}:{}{sep} {}",
+                            idx + 1,
+                            ctx_line.trim_end()
+                        ));
+                    }
+                    block.join("\n")
+                };
+                if page.consider(hit) {
+                    break 'outer;
+                }
             }
         }
-        Ok(format_matches(&page, enhanced))
+        Ok(format_matches(&page, enhanced, context_lines > 0))
     }
 }
 
@@ -1266,6 +1421,154 @@ impl Tool for FindSymbols {
                 page.total
             ));
         }
+        Ok(out)
+    }
+}
+
+struct FindReferences(Arc<Sandbox>);
+
+impl Tool for FindReferences {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "find_references".into(),
+            description: format!(
+                "在授权范围（{}）内的源码文件中按整词查找符号的调用点与引用（跳过注释、字符串与更长标识符的子串；暂存改动优先于磁盘），区分 `[定义]` 与 `[引用]`。可用 path 限目录或文件、glob 过滤路径（如 `*.rs`）、include_definitions 控制是否包含定义行（默认 true）、offset 与 limit 翻页（一页最多 {MAX_REF_MATCHES} 条）。",
+                self.0.scope_label()
+            ),
+            input_schema_json: format!(
+                r#"{{"type":"object","properties":{{"symbol":{{"type":"string","description":"要查找的完整符号标识符（如 parse_test_presets、Seal）"}},"path":{{"type":"string","description":"可选：只查这个相对目录或文件；省略则查整个授权范围"}},"glob":{{"type":"string","description":"可选：路径通配过滤，如 *.rs、crates/**/*.rs"}},"include_definitions":{{"type":"boolean","description":"是否包含符号定义行；默认 true，设为 false 时只列调用／引用点"}},"offset":{{"type":"integer","description":"跳过前若干条结果，从 0 起"}},"limit":{{"type":"integer","description":"本页条数，1 到 {MAX_REF_MATCHES}"}}}},"required":["symbol"],"additionalProperties":false}}"#
+            ),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(
+            args_json,
+            &[
+                "symbol",
+                "path",
+                "glob",
+                "include_definitions",
+                "offset",
+                "limit",
+            ],
+        )?;
+        let symbol = required_string(&args, "symbol")?.trim().to_owned();
+        if !symbols::is_valid_symbol_name(&symbol) {
+            return Err("symbol 须为 1–120 字节的单个标识符（不含空格或标点）".into());
+        }
+        let include_definitions = optional_bool(&args, "include_definitions")?.unwrap_or(true);
+        let offset = optional_i64(&args, "offset")?.unwrap_or(0);
+        if offset < 0 {
+            return Err("offset 不能为负".into());
+        }
+        let limit = match optional_i64(&args, "limit")? {
+            None => MAX_REF_MATCHES as i64,
+            Some(n) if (1..=MAX_REF_MATCHES as i64).contains(&n) => n,
+            Some(_) => return Err(format!("limit 须在 1 到 {MAX_REF_MATCHES} 之间").into()),
+        };
+        let path = optional_string(&args, "path")?;
+        let glob_matcher = match optional_string(&args, "glob")? {
+            Some(pat) if !pat.trim().is_empty() => Some(glob::GlobMatcher::compile(&pat)?),
+            Some(_) => return Err("glob 不能为空".into()),
+            None => None,
+        };
+        let CollectedTextFiles {
+            files,
+            staged: staged_snapshot,
+            explicit_file,
+        } = self.0.collect_text_files(path.as_deref())?;
+        let explicit_target = explicit_file || glob_matcher.is_some();
+
+        let mut page = MatchPage {
+            offset: usize::try_from(offset).unwrap_or(usize::MAX),
+            limit: usize::try_from(limit).unwrap_or(MAX_REF_MATCHES),
+            stop_when_full: false,
+            total: 0,
+            more: false,
+            hits: Vec::new(),
+        };
+        let mut def_count = 0usize;
+
+        for (rel, disk_path) in files {
+            if let Some(g) = &glob_matcher
+                && !g.is_match(&rel)
+            {
+                continue;
+            }
+            if !is_reference_candidate(&rel, explicit_target) {
+                continue;
+            }
+            let text = if let Some(entry) = staged_snapshot.get(&rel) {
+                let Some(staged) = entry else {
+                    continue;
+                };
+                staged.clone()
+            } else if let Some(disk) = disk_path {
+                let Ok(meta) = fs::metadata(&disk) else {
+                    continue;
+                };
+                if meta.len() > MAX_SYMBOL_FILE_BYTES {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&disk) else {
+                    continue;
+                };
+                text
+            } else {
+                continue;
+            };
+            if !text.contains(&symbol) {
+                continue;
+            }
+            let rel_path = Path::new(&rel);
+            let def_lines: BTreeSet<usize> = symbols::extract_for_path(rel_path, &text)
+                .map(|(_, syms)| {
+                    syms.into_iter()
+                        .filter(|s| s.name == symbol)
+                        .map(|s| s.line)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let stripped = symbols::strip_code_lines(rel_path, &text);
+            for (idx, (raw_line, code_line)) in text.lines().zip(stripped.iter()).enumerate() {
+                if !symbols::has_whole_ident(code_line, &symbol) {
+                    continue;
+                }
+                let line_no = idx + 1;
+                let is_def = def_lines.contains(&line_no);
+                if is_def && !include_definitions {
+                    continue;
+                }
+                if is_def {
+                    def_count += 1;
+                }
+                let tag = if is_def { "定义" } else { "引用" };
+                page.consider(format!("{rel}:{line_no} [{tag}]: {}", raw_line.trim()));
+            }
+        }
+
+        if page.total == 0 {
+            return Ok(format!("未找到符号 `{symbol}` 的引用"));
+        }
+        if page.hits.is_empty() {
+            return Ok(format!(
+                "共 {} 处匹配，offset={} 已超出范围",
+                page.total, page.offset
+            ));
+        }
+        let from = page.offset + 1;
+        let to = page.offset + page.hits.len();
+        let mut out = page.hits.join("\n");
+        let summary = if def_count > 0 {
+            format!(
+                "共 {} 处匹配（含 {def_count} 处定义），当前第 {from}–{to} 处",
+                page.total
+            )
+        } else {
+            format!("共 {} 处引用，当前第 {from}–{to} 处", page.total)
+        };
+        out.push_str(&format!("\n[{summary}]"));
         Ok(out)
     }
 }
@@ -1985,7 +2288,7 @@ fn read_window(text: &str, offset: Option<i64>, lines: Option<i64>) -> Result<St
     ))
 }
 
-fn format_matches(page: &MatchPage, enhanced: bool) -> String {
+fn format_matches(page: &MatchPage, enhanced: bool, with_context: bool) -> String {
     if page.hits.is_empty() {
         return if enhanced && page.offset > 0 && page.total > 0 {
             format!("无匹配（共 {} 条，偏移已越过末尾）", page.total)
@@ -2007,7 +2310,8 @@ fn format_matches(page: &MatchPage, enhanced: bool) -> String {
             page.total
         ));
     }
-    out.push_str(&page.hits.join("\n"));
+    let sep = if with_context { "\n---\n" } else { "\n" };
+    out.push_str(&page.hits.join(sep));
     if !enhanced && page.more {
         out.push_str(&format!("\n[已截断：仅显示前 {MAX_MATCHES} 条]"));
     }
@@ -3295,5 +3599,172 @@ export function bootUi() {}
         assert!(runner.spec().description.contains("check="));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_files_and_search_code_support_glob_regex_context_and_staged_new_files() {
+        let dir = workspace("search-nav");
+        let root = dir.join("project");
+        fs::write(
+            root.join("src/engine.rs"),
+            "pub fn boot_alpha() {\n    let x = 1;\n    let y = 2;\n}\npub fn boot_beta() {}\n",
+        )
+        .unwrap();
+        let sealed = sealed_tools(
+            &root,
+            &seal(
+                &[
+                    Capability::ReadFile,
+                    Capability::SearchCode,
+                    Capability::WriteFile,
+                ],
+                &["."],
+            ),
+            None,
+        )
+        .unwrap();
+        let get = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+
+        get("write_file")
+            .execute(r#"{"path":"src/staged_mod.rs","content":"pub fn boot_gamma() {}\n"}"#)
+            .unwrap();
+
+        let rs_only = get("list_files").execute(r#"{"glob":"*.rs"}"#).unwrap();
+        assert!(
+            rs_only.contains("src/main.rs")
+                && rs_only.contains("src/engine.rs")
+                && rs_only.contains("src/staged_mod.rs")
+                && !rs_only.contains("docs/a.md"),
+            "{rs_only}"
+        );
+        let md_only = get("list_files")
+            .execute(r#"{"glob":"docs/*.md"}"#)
+            .unwrap();
+        assert!(
+            md_only.contains("docs/a.md") && !md_only.contains("src/main.rs"),
+            "{md_only}"
+        );
+        assert!(get("list_files").execute(r#"{"glob":"*.[rs"}"#).is_err());
+
+        let re_out = get("search_code")
+            .execute(r#"{"query":"boot_(alpha|gamma)","regex":true,"glob":"src/*.rs"}"#)
+            .unwrap();
+        assert!(
+            re_out.contains("src/engine.rs:1:")
+                && re_out.contains("src/staged_mod.rs:1:")
+                && !re_out.contains("boot_beta"),
+            "{re_out}"
+        );
+
+        let ctx_out = get("search_code")
+            .execute(r#"{"query":"let x = 1","path":"src/engine.rs","context_lines":1}"#)
+            .unwrap();
+        assert!(
+            ctx_out.contains("src/engine.rs:1- pub fn boot_alpha() {")
+                && ctx_out.contains("src/engine.rs:2:     let x = 1;")
+                && ctx_out.contains("src/engine.rs:3-     let y = 2;"),
+            "{ctx_out}"
+        );
+
+        assert!(
+            get("search_code")
+                .execute(r#"{"query":"[unclosed","regex":true}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("正则表达式无效")
+        );
+        assert!(
+            get("search_code")
+                .execute(r#"{"query":"boot","context_lines":6}"#)
+                .is_err()
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn find_references_skips_comments_strings_and_substrings_and_respects_scope_and_staged() {
+        let dir = workspace("refs");
+        let root = dir.join("project");
+        fs::write(
+            root.join("src/lib.rs"),
+            "// compute() in comment\npub fn compute(v: i32) -> i32 {\n    let msg = \"compute() in string\";\n    let recompute = v + 1;\n    recompute\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/caller.rs"),
+            "use crate::compute;\npub fn run_all() -> i32 {\n    compute(42)\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("docs/a.md"),
+            "Mention compute in markdown prose.\n",
+        )
+        .unwrap();
+        fs::write(root.join(".env"), "compute=secret\n").unwrap();
+
+        let sealed = sealed_tools(
+            &root,
+            &seal(
+                &[
+                    Capability::ReadFile,
+                    Capability::SearchCode,
+                    Capability::WriteFile,
+                ],
+                &["."],
+            ),
+            None,
+        )
+        .unwrap();
+        let get = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+
+        let all = get("find_references")
+            .execute(r#"{"symbol":"compute"}"#)
+            .unwrap();
+        assert!(all.contains("src/lib.rs:2 [定义]:"), "{all}");
+        assert!(all.contains("src/caller.rs:1 [引用]:"), "{all}");
+        assert!(all.contains("src/caller.rs:3 [引用]:"), "{all}");
+        assert!(
+            !all.contains("in comment")
+                && !all.contains("in string")
+                && !all.contains("recompute")
+                && !all.contains("docs/a.md")
+                && !all.contains(".env"),
+            "{all}"
+        );
+
+        let refs_only = get("find_references")
+            .execute(r#"{"symbol":"compute","include_definitions":false}"#)
+            .unwrap();
+        assert!(!refs_only.contains("[定义]"), "{refs_only}");
+        assert!(refs_only.contains("src/caller.rs:3 [引用]:"), "{refs_only}");
+
+        get("write_file")
+            .execute(r#"{"path":"src/new_caller.rs","content":"pub fn extra() { compute(7); }\n"}"#)
+            .unwrap();
+        get("delete_file")
+            .execute(r#"{"path":"src/caller.rs"}"#)
+            .unwrap();
+        let after_stage = get("find_references")
+            .execute(r#"{"symbol":"compute","include_definitions":false}"#)
+            .unwrap();
+        assert!(
+            after_stage.contains("src/new_caller.rs:1 [引用]:")
+                && !after_stage.contains("src/caller.rs"),
+            "{after_stage}"
+        );
+
+        assert!(
+            get("find_references")
+                .execute(r#"{"symbol":"bad name"}"#)
+                .is_err()
+        );
+        assert!(
+            get("find_references")
+                .execute(r#"{"symbol":"compute","path":".env"}"#)
+                .is_err()
+        );
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }

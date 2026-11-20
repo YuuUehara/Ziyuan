@@ -8,6 +8,7 @@ description = "任务运行与工具执行：紫垣（ZiYuan）的内部组件�
 repository.workspace = true
 
 [dependencies]
+regex.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 ureq.workspace = true

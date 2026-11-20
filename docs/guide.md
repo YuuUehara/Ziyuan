@@ -205,7 +205,7 @@ ziyuan edict --tools none "只凭诏令文本回答"
 - 授了 `read_file` 即同时有 `list_files`（递归列出范围内的文件与大小，含本次暂存的新文件，跳过 `target`、`node_modules`）、`file_outline`（列出单个 Rust / JS / TS / Python / Go / C / C++ / Markdown 文件的符号大纲与行号，支持 `kind` 过滤与 `offset`/`limit` 翻页，暂存改动优先于磁盘）以及只读版本库工具 `vcs_status` / `vcs_diff` / `vcs_log`（支持 `jj` 与 `git`，按玉玺范围与禁区二次过滤、严防参数注入、输出上限 32 KiB），均不另设权限，玉玺写法不变。
 - 授了 `write_file` 即同时有 `replace_text`、`delete_file` 与 `rename_file`，均不另设权限。`replace_text` 支持单处 `{old, new}` 或原子批量 `edits: [{old, new}]`（最多 50 处），每处只替换恰好出现一次的旧文本，任一处不符即整批拒绝、不做模糊匹配；`delete_file` 暂存删除单个文件，`rename_file` 暂存改名／移动（等价于原路径删去、新路径新建，两路径皆须在玉玺范围内且避开禁区）。全部改动只暂存，走同一份奏本、原文核验和逐段准奏。
 - `read_file` 不带行号时，仍从文件开头读，超过 64 KiB 截断。带 `offset`（从第 1 行起）或 `lines` 时按行窗口读，并写明总行数、后面还有没有。
-- `search_code` 不带额外参数时，仍是区分大小写的字面搜索，最多 50 条。可以加 `path` 只查一个目录或文件，`ignore_case` 忽略大小写，`offset` 与 `limit` 翻页（一页 1–50 条）。授了 `search_code` 同时有 `find_symbols`（按符号名跨文件查函数、结构体、枚举、trait、impl、类、接口、常量与 Markdown 标题定义，跳过注释、字符串与非定义引用，支持 `path`、`kind`、`exact`、`ignore_case`、`offset`、`limit`，暂存改动优先于磁盘）。两者均先按玉玺范围和禁区过滤，不搜 `target`、`node_modules`。
+- `search_code` 不带额外参数时，仍是区分大小写的字面搜索，最多 50 条。可以加 `path` 只查目录或文件、`glob` 过滤路径（如 `*.rs`、`crates/**/*.rs`）、`regex` 启用线性时间正则、`ignore_case` 忽略大小写、`context_lines`（0–5）附带上下邻行、`offset` 与 `limit` 翻页（一页 1–50 条），并同时覆盖暂存新建／改动文件（`list_files` 同样支持 `glob`）。授了 `search_code` 同时有 `find_symbols`（跨文件查符号定义）与 `find_references`（按整词边界跨文件查调用点与引用，跳过注释与字符串，区分 `[定义]` 与 `[引用]`，支持 `path`、`glob`、`include_definitions`、`offset`、`limit`）。三者均先按玉玺范围和禁区过滤，不搜 `target`、`node_modules` 与 Python 缓存目录。
 
 ## 工部动手：受控写权限
 

@@ -117,6 +117,90 @@ pub(super) fn extract(lang: Language, text: &str) -> Vec<Symbol> {
     }
 }
 
+fn is_ref_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// 校验 `find_references` 的符号名：1–120 字节的单个标识符。
+pub(super) fn is_valid_symbol_name(symbol: &str) -> bool {
+    !symbol.is_empty() && symbol.len() <= 120 && symbol.chars().all(is_ref_ident_char)
+}
+
+/// 在已剔除注释与字符串的代码行中做整词标识符匹配（不匹配更长标识符的子串）。
+pub(super) fn has_whole_ident(line: &str, symbol: &str) -> bool {
+    if symbol.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(rel) = line[start..].find(symbol) {
+        let abs = start + rel;
+        let end = abs + symbol.len();
+        let before_ok = line[..abs]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_ref_ident_char(c));
+        let after_ok = line[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ref_ident_char(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + line[abs..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// 按路径后缀剔除注释与字符串字面量，返回与原文件逐行对齐的代码骨架，供 `find_references` 使用。
+/// 被剔除的注释／字符串以空格占位，防止两侧标识符黏连成伪匹配。
+pub(super) fn strip_code_lines(path: &Path, text: &str) -> Vec<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    match Language::from_path(path) {
+        Some(Language::Rust) => {
+            let mut lex = BraceLexState::default();
+            text.lines()
+                .map(|line| lex.strip_line_with_pad(line, true, false, true))
+                .collect()
+        }
+        Some(Language::JsTs | Language::Go) => {
+            let mut lex = BraceLexState::default();
+            text.lines()
+                .map(|line| lex.strip_line_with_pad(line, false, true, true))
+                .collect()
+        }
+        Some(Language::CCpp) => {
+            let mut lex = BraceLexState::default();
+            text.lines()
+                .map(|line| lex.strip_line_with_pad(line, false, false, true))
+                .collect()
+        }
+        Some(Language::Python) => {
+            let mut triple = None;
+            text.lines()
+                .map(|line| strip_python_line_with_pad(line, &mut triple, true))
+                .collect()
+        }
+        Some(Language::Markdown) => text.lines().map(str::to_owned).collect(),
+        None => match ext.as_deref() {
+            Some("sh" | "bash" | "zsh" | "rb" | "toml" | "yaml" | "yml" | "ps1") => {
+                let mut triple = None;
+                text.lines()
+                    .map(|line| strip_python_line_with_pad(line, &mut triple, true))
+                    .collect()
+            }
+            _ => {
+                let mut lex = BraceLexState::default();
+                text.lines()
+                    .map(|line| lex.strip_line_with_pad(line, false, false, true))
+                    .collect()
+            }
+        },
+    }
+}
+
 // ---------- 通用辅助 ----------
 
 fn clip_sig(line: &str) -> String {
@@ -161,6 +245,16 @@ struct BraceLexState {
 
 impl BraceLexState {
     fn strip_line(&mut self, line: &str, nested_comments: bool, backticks: bool) -> String {
+        self.strip_line_with_pad(line, nested_comments, backticks, false)
+    }
+
+    fn strip_line_with_pad(
+        &mut self,
+        line: &str,
+        nested_comments: bool,
+        backticks: bool,
+        pad: bool,
+    ) -> String {
         let bytes = line.as_bytes();
         let mut out = String::with_capacity(line.len());
         let mut i = 0;
@@ -232,6 +326,9 @@ impl BraceLexState {
             }
             // 块注释开始
             if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                if pad {
+                    out.push(' ');
+                }
                 self.block_comment = 1;
                 i += 2;
                 continue;
@@ -247,6 +344,9 @@ impl BraceLexState {
                     hashes += 1;
                 }
                 if bytes.get(start + hashes) == Some(&b'"') {
+                    if pad {
+                        out.push(' ');
+                    }
                     self.rust_raw_hashes = Some(hashes);
                     i = start + hashes + 1;
                     continue;
@@ -254,6 +354,9 @@ impl BraceLexState {
             }
             // 字符串字面量
             if bytes[i] == b'"' {
+                if pad {
+                    out.push(' ');
+                }
                 in_quote = Some(b'"');
                 i += 1;
                 continue;
@@ -262,16 +365,25 @@ impl BraceLexState {
                 // Rust 生命周期 `'a` 与字符字面量 `'x'` 区分：仅当闭合单引号在 2..=6 字节内且不是生命周期时才当作字符字面量。
                 if nested_comments {
                     if let Some(end) = rust_char_literal_end(bytes, i) {
+                        if pad {
+                            out.push(' ');
+                        }
                         i = end;
                         continue;
                     }
                 } else {
+                    if pad {
+                        out.push(' ');
+                    }
                     in_quote = Some(b'\'');
                     i += 1;
                     continue;
                 }
             }
             if backticks && bytes[i] == b'`' {
+                if pad {
+                    out.push(' ');
+                }
                 self.in_backtick = true;
                 i += 1;
                 continue;
@@ -768,6 +880,10 @@ fn extract_python(text: &str) -> Vec<Symbol> {
 }
 
 fn strip_python_line(line: &str, triple: &mut Option<&'static str>) -> String {
+    strip_python_line_with_pad(line, triple, false)
+}
+
+fn strip_python_line_with_pad(line: &str, triple: &mut Option<&'static str>, pad: bool) -> String {
     let bytes = line.as_bytes();
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
@@ -798,16 +914,25 @@ fn strip_python_line(line: &str, triple: &mut Option<&'static str>) -> String {
             break;
         }
         if line[i..].starts_with("\"\"\"") {
+            if pad {
+                out.push(' ');
+            }
             *triple = Some("\"\"\"");
             i += 3;
             continue;
         }
         if line[i..].starts_with("'''") {
+            if pad {
+                out.push(' ');
+            }
             *triple = Some("'''");
             i += 3;
             continue;
         }
         if bytes[i] == b'"' || bytes[i] == b'\'' {
+            if pad {
+                out.push(' ');
+            }
             single_quote = Some(bytes[i]);
             i += 1;
             continue;
