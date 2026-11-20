@@ -24,6 +24,7 @@ mod failures;
 mod replace;
 mod symbols;
 pub mod temp_cleanup;
+mod vcs;
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
@@ -109,6 +110,9 @@ pub fn sealed_tools(
                 tools.push(Box::new(ReadFile(sandbox.clone())));
                 tools.push(Box::new(ListFiles(sandbox.clone())));
                 tools.push(Box::new(FileOutline(sandbox.clone())));
+                tools.push(Box::new(vcs::VcsStatus(sandbox.clone())));
+                tools.push(Box::new(vcs::VcsDiff(sandbox.clone())));
+                tools.push(Box::new(vcs::VcsLog(sandbox.clone())));
             }
             // `find_symbols` 随 `search_code` 授予，不另设权限，玉玺编码不变。
             Capability::SearchCode => {
@@ -522,6 +526,24 @@ impl Sandbox {
             return Err(format!("拒绝访问玉玺查阅范围之外的路径: {relative}").into());
         }
         Ok(path)
+    }
+
+    pub(super) fn scope_rel_paths(&self) -> Vec<String> {
+        self.scope
+            .iter()
+            .map(|p| {
+                let rel = self.display(p);
+                if rel.is_empty() { ".".to_owned() } else { rel }
+            })
+            .collect()
+    }
+
+    pub(super) fn resolve_vcs_path(&self, relative: &str) -> Result<String, BoxError> {
+        let path = contained(&self.root, relative)?;
+        if !self.scope.iter().any(|s| path.starts_with(s)) {
+            return Err(format!("拒绝访问玉玺查阅范围之外的路径: {relative}").into());
+        }
+        Ok(self.display(&path))
     }
 
     fn display(&self, path: &Path) -> String {
@@ -2351,7 +2373,17 @@ mod tests {
             .unwrap()
             .tools;
         let names: Vec<_> = only_read.iter().map(|t| t.spec().name).collect();
-        assert_eq!(names, ["read_file", "list_files", "file_outline"]);
+        assert_eq!(
+            names,
+            [
+                "read_file",
+                "list_files",
+                "file_outline",
+                "vcs_status",
+                "vcs_diff",
+                "vcs_log"
+            ]
+        );
         assert!(only_read[0].execute(r#"{"path":"src/main.rs"}"#).is_ok());
         let err = only_read[0]
             .execute(r#"{"path":"docs/a.md"}"#)

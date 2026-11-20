@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.25.0 — 2026-11-20
+
+- **只读版本库上下文工具（`vcs_status`／`vcs_diff`／`vcs_log`，零新增事件与玉玺代码）**：
+  - `ziyuan-runtime` 新增 `tools::vcs` 模块，随 `Capability::ReadFile` 授予 `vcs_status`、`vcs_diff`（支持 `path`、`rev`、`staged`、`stat_only`）与 `vcs_log`（支持 `path`、`rev`、`limit` 1–30）。
+  - 自动检测并优先使用 Jujutsu（`jj`），否则回退 Git（`git`）；禁止任意参数与 shell 拼接，`validate_rev` 严格拦截 `-` 选项注入与 `:` 路径偷渡（如 `HEAD:.env`）；子进程仅继承无害环境变量且设 15 秒超时；输出按玉玺范围与禁区（`.ziyuan`、`.git`、`.jj`、`.env*`）二次过滤，上限 32 KiB，并经外来文书边界包裹防提示注入。
+- 登记版本 `1.25.0`（序号 59，不提高旧事件簿读取门槛）；同步更新 [README.md](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；本地验证见 [1.25.0 验收记录](docs/acceptance/1.25.0.md)。
+
 ## 1.24.0 — 2026-11-20
 
 - **「打回再改一轮」一键修订闭环（零新增朝廷事件）**：

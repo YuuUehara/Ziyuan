@@ -188,6 +188,7 @@
   - `1.20.0`：新增 `ziyuan split --parallel-writes`、Web `parallel_writes` 与环境变量 `ZIYUAN_JJ_WORKSPACE`（`auto|always|off`，默认 `auto`）；非 `jj` 仓库下请求写并行分办失败关闭；落盘继续逐段准奏与原文核验。
 - **1.21.0（运行中调整 DAG）**：事件簿仍为格式 v1，新增 `DagSubtaskAdded`（编码 `DAGADD`）与 `DagDependenciesUpdated`（编码 `DAGDEPS`），最低读取版本登记为序号 55（`1.21.0`）；未使用运行中调整的旧事件簿不抬高读取门槛。CLI 新增 `ziyuan dag add` 与 `ziyuan dag deps`；仅允许在父诏令未结束前追加子诏令（仍守单层 2–8 件上限）或修改 `Pending` 子诏令前置依赖，已开始／已结束节点不可改写。
 - **1.22.0（导入文件日文 JIS 编码支持）**：TXT／Markdown 预览与导入、原文更新、SRT 字幕、CSV／TBX 术语表及 TMX 导入在 UTF-8 之外新增日文 JIS（`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`）严格解码（绝不作有损替换）；带 UTF-8 BOM 或有效 UTF-8 输入保持原样字节零拷贝归档，非 UTF-8 JIS 输入在导入边界转换为规范 UTF-8 归档（解码后同样受 8 MiB 上限约束），不改变 `project.json` schema 2 与朝廷事件簿格式。
+- **1.25.0（只读版本库上下文工具）**：`vcs_status`、`vcs_diff`、`vcs_log` 随 `Capability::ReadFile` 授予，不新增玉玺代码、不新增朝廷事件、不提高旧事件簿读取门槛；仅以固定只读子命令调用 `jj`／`git`（无任意 shell），严格拒绝以 `-` 开头或含 `:` 的 `rev`，并按玉玺范围与 `.ziyuan`/`.git`/`.jj`/`.env*` 禁区二次过滤输出。
 - **1.24.0（「打回再改一轮」一键修订闭环）**：不新增朝廷事件类型、不提高旧事件簿读取门槛。`ziyuan edict --revise <诏令ID>`、Web `POST /api/tasks/{id}/revise`（观政令牌 403）与 TUI `V` 仅允许对已完成的工部代码诏令下发常规 `EdictIssued`，不自动驳回旧暂存改动、不自动落盘。
 - **1.23.0（工部批量补丁替换、删除与改名暂存）**：`replace_text` 新增可选数组参数 `edits: [{old, new}]`（单次最多 50 处、原子成败、审计隐去正文字段），不带 `edits` 时单处 `{old, new}` 行为不变；`delete_file` 与 `rename_file` 随既有的 `write_file` 授予，不新增玉玺代码。删除操作在 `CHANGES` 行中编码为 `{路径十六进制}:{原文十六进制}:-`（最低读取版本登记为序号 57 = `1.23.0`）；不含删除项的 `CHANGES` 仍保持最低读取版本 `0.3`，不抬高旧事件簿读取门槛。删除同样走暂存、逐段准奏（可 `--skip` 保留原文件）、原文逐字节核验与恢复校验；译书任务严禁产出或准奏删除改动。
 

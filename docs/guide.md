@@ -202,7 +202,7 @@ ziyuan edict --tools none "只凭诏令文本回答"
 - 绝对路径、`..` 与不存在的路径在下诏时拒绝；运行时按 canonical 路径检查，符号链接也无法越界。
 - 无论玉玺如何，`.ziyuan`（事件簿）、`.git`、`.jj` 与 `.env*` 均不可读写。
 - 运行时按玉玺构造工具：模型看不到未授予的工具，越界的读取记为失败的 `ToolInvoked`。
-- 授了 `read_file` 即同时有 `list_files`（递归列出范围内的文件与大小，含本次暂存的新文件，跳过 `target`、`node_modules`）与 `file_outline`（列出单个 Rust / JS / TS / Python / Go / C / C++ / Markdown 文件的符号大纲与行号，支持 `kind` 过滤与 `offset`/`limit` 翻页，暂存改动优先于磁盘），不另设权限，玉玺写法不变。
+- 授了 `read_file` 即同时有 `list_files`（递归列出范围内的文件与大小，含本次暂存的新文件，跳过 `target`、`node_modules`）、`file_outline`（列出单个 Rust / JS / TS / Python / Go / C / C++ / Markdown 文件的符号大纲与行号，支持 `kind` 过滤与 `offset`/`limit` 翻页，暂存改动优先于磁盘）以及只读版本库工具 `vcs_status` / `vcs_diff` / `vcs_log`（支持 `jj` 与 `git`，按玉玺范围与禁区二次过滤、严防参数注入、输出上限 32 KiB），均不另设权限，玉玺写法不变。
 - 授了 `write_file` 即同时有 `replace_text`、`delete_file` 与 `rename_file`，均不另设权限。`replace_text` 支持单处 `{old, new}` 或原子批量 `edits: [{old, new}]`（最多 50 处），每处只替换恰好出现一次的旧文本，任一处不符即整批拒绝、不做模糊匹配；`delete_file` 暂存删除单个文件，`rename_file` 暂存改名／移动（等价于原路径删去、新路径新建，两路径皆须在玉玺范围内且避开禁区）。全部改动只暂存，走同一份奏本、原文核验和逐段准奏。
 - `read_file` 不带行号时，仍从文件开头读，超过 64 KiB 截断。带 `offset`（从第 1 行起）或 `lines` 时按行窗口读，并写明总行数、后面还有没有。
 - `search_code` 不带额外参数时，仍是区分大小写的字面搜索，最多 50 条。可以加 `path` 只查一个目录或文件，`ignore_case` 忽略大小写，`offset` 与 `limit` 翻页（一页 1–50 条）。授了 `search_code` 同时有 `find_symbols`（按符号名跨文件查函数、结构体、枚举、trait、impl、类、接口、常量与 Markdown 标题定义，跳过注释、字符串与非定义引用，支持 `path`、`kind`、`exact`、`ignore_case`、`offset`、`limit`，暂存改动优先于磁盘）。两者均先按玉玺范围和禁区过滤，不搜 `target`、`node_modules`。
