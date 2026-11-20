@@ -139,7 +139,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          for crate in ziyuan-core ziyuan-governance ziyuan-storage ziyuan-runtime ziyuan-github \
+          for crate in ziyuan-core ziyuan-governance ziyuan-storage ziyuan-sandbox-windows ziyuan-runtime ziyuan-github \
                        ziyuan-llm ziyuan-memory ziyuan-app ziyuan-web ziyuan-tui ziyuan-cli; do
             status="$(curl -s -o /dev/null -w '%{http_code}' -A 'ziyuan-release (https://github.com/YuuUehara/Ziyuan)' \
               "https://crates.io/api/v1/crates/$crate/$version")"

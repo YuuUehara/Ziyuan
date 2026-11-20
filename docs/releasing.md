@@ -27,16 +27,16 @@ jj git push --remote origin --tag v1.15.1
    - `x86_64-pc-windows-msvc`
    每个平台上传压缩包后都会**重新下载已上传资产**、解压并执行 `scripts/check-package.sh` 验收，确认实际分发包可用。
 3. **publish**：全部平台验收通过后公开 Release。
-4. **crates**：Release 公开后运行，借助 `rust-lang/crates-io-auth-action@v1` 通过 GitHub OIDC 换取短期令牌，按依赖顺序向 crates.io 发布十一个生产 crate（已存在版本跳过）。
+4. **crates**：Release 公开后运行，借助 `rust-lang/crates-io-auth-action@v1` 通过 GitHub OIDC 换取短期令牌，按依赖顺序向 crates.io 发布十二个生产 crate（已存在版本跳过）。
 
 任一构建或下载包验收失败时，Release 保持草稿且不会触发 crate 发布；`crates` 作业失败则不影响已公开的二进制下载包，可在修正配置后重跑失败作业。
 
 ## crates.io 可信发布
 
-工作区发布的十一个生产 crate 顺序如下（`ziyuan-sandbox-windows` 为未发布实验成员，不在发布循环中）：
+工作区发布的十二个 crate 顺序如下（`ziyuan-sandbox-windows` 排在 `ziyuan-runtime` 之前；首次发布前须完成手工首发与 Trusted Publishing 登记）：
 
 ```text
-ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-runtime
+ziyuan-core → ziyuan-governance → ziyuan-storage → ziyuan-sandbox-windows → ziyuan-runtime
 → ziyuan-github → ziyuan-llm → ziyuan-memory → ziyuan-app → ziyuan-web → ziyuan-tui → ziyuan-cli
 ```
 

@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish = false
-description = "Experimental native Windows LPAC + Job Object sandbox boundary"
+description = "Windows 原生号舍（AppContainer/LPAC 与 Job Object）：紫垣（ZiYuan）的内部组件，供 ziyuan-runtime 使用；Rust API 不保证稳定。"
+repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
 
 # Only the private Win32 ownership boundary may opt in. Other workspace crates
-# continue inheriting unsafe_code = "forbid"; this crate is not published/linked.
+# continue inheriting unsafe_code = "forbid".
 [lints.rust]
 unsafe_code = "deny"
