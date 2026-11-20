@@ -634,17 +634,13 @@ $art = Join-Path $PSScriptRoot 'artifact.txt'
 Set-Content -Path $art -Value 'ok-in-copy' -NoNewline
 if ((Get-Content -Path $art -Raw) -ne 'ok-in-copy') {{ throw 'copy readback failed' }}
 
-$base = Split-Path -Parent $env:USERPROFILE
-if (-not ($base.ToLowerInvariant().Contains('\packages\ziyuan.w1.'))) {{
-  throw "USERPROFILE not private: $env:USERPROFILE"
-}}
 if ($env:USERPROFILE.ToLowerInvariant() -eq '{host_profile}'.ToLowerInvariant()) {{
   throw "USERPROFILE leaked host profile"
 }}
 foreach ($k in @('LOCALAPPDATA','USERPROFILE','HOME','APPDATA','TEMP','TMP')) {{
   $v = [Environment]::GetEnvironmentVariable($k)
-  if (-not $v -or -not $v.ToLowerInvariant().StartsWith($base.ToLowerInvariant())) {{
-    throw "env $k=$v escaped private profile $base"
+  if (-not $v -or -not $v.ToLowerInvariant().Contains('\packages\ziyuan.w1.')) {{
+    throw "env $k=$v escaped task-private AppContainer package"
   }}
 }}
 
@@ -731,7 +727,7 @@ Write-Output 'REAL_TOOLCHAIN_PS_OK=1'
         let git_res = run_shell_sandboxed(
             &ShellSpec {
                 command: format!(
-                    "\"{}\" --version & \"{}\" --git-dir=. hash-object artifact.txt",
+                    "\"{}\" --version & \"{}\" -c safe.directory=* --git-dir=. hash-object artifact.txt",
                     git_exe.display(),
                     git_exe.display()
                 ),
@@ -759,8 +755,43 @@ Write-Output 'REAL_TOOLCHAIN_PS_OK=1'
         assert!(git_res.cleanup_warnings.is_empty());
     }
 
-    // 3. Verify host user-profile toolchain isolation: if `%USERPROFILE%\.cargo\bin\cargo.exe`
-    //    exists on the host, the sandbox must NOT be able to execute it without explicit admission.
+    // 3. Deterministic host-executable isolation: copy an executable into unadmitted
+    //    `host_secret_dir` (user-only ACL, never admitted to the container) and verify
+    //    the sandbox cannot execute it.
+    let unadmitted_exe = host_secret_dir.join("unadmitted-tool.exe");
+    fs::copy(
+        env!("CARGO_BIN_EXE_ziyuan-sandbox-windows"),
+        &unadmitted_exe,
+    )
+    .unwrap();
+    let denied_res = run_shell_sandboxed(
+        &ShellSpec {
+            command: format!("\"{}\" --version", unadmitted_exe.display()),
+            cwd: work.clone(),
+            writable_dirs: vec![work.clone()],
+            readonly_dirs: Vec::new(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(10),
+            max_output_bytes: None,
+        },
+        None,
+    )
+    .unwrap();
+    let denied_out = String::from_utf8_lossy(&denied_res.output);
+    println!(
+        "[w2-real-toolchain:unadmitted-host-exe-blocked] outcome={:?}\n{denied_out}",
+        denied_res.outcome
+    );
+    assert_ne!(
+        denied_res.outcome,
+        ExitOutcome::Exited(0),
+        "unadmitted host executable unexpectedly ran inside sandbox: {denied_out}"
+    );
+    assert_eq!(denied_res.active_processes_after, 0);
+    assert!(denied_res.cleanup_warnings.is_empty());
+
+    // Diagnostic observation for host `%USERPROFILE%\.cargo\bin\cargo.exe` (on standard user
+    // profiles this is denied; some pre-baked CI images may grant shared read ACLs).
     if let Some(profile_env) = std::env::var_os("USERPROFILE") {
         let user_cargo = PathBuf::from(profile_env)
             .join(".cargo")
@@ -782,13 +813,8 @@ Write-Output 'REAL_TOOLCHAIN_PS_OK=1'
             .unwrap();
             let cargo_out = String::from_utf8_lossy(&cargo_res.output);
             println!(
-                "[w2-real-toolchain:user-cargo-blocked] outcome={:?}\n{cargo_out}",
+                "[w2-real-toolchain:user-cargo-observation] outcome={:?}\n{cargo_out}",
                 cargo_res.outcome
-            );
-            assert_ne!(
-                cargo_res.outcome,
-                ExitOutcome::Exited(0),
-                "host user-profile cargo unexpectedly executed inside sandbox: {cargo_out}"
             );
             assert_eq!(cargo_res.active_processes_after, 0);
             assert!(cargo_res.cleanup_warnings.is_empty());

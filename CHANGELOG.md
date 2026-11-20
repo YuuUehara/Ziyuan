@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.31.1 — 2026-11-21
+
+- **文档全量同步至 1.31.0 现行行为**：
+  - 更新 [使用指南](docs/guide.md)（补齐 Windows 原生 AppContainer 号舍生产说明、Windows 长连接 stdio 外藩 W3 边界、`run_tests` 跳过 Python 缓存与 `ZIYUAN_TEST_COMMANDS` 预设、同轮只读工具并发与 `AGENTS.md`/`CLAUDE.md` 受控围栏注入）。
+  - 修正 [体系结构](docs/architecture.md) 中 3 处过时表述（`haoshe::run_shell` 已接入 Windows 原生号舍、同轮只读工具已并发执行）。
+  - 在 [稳定性约定](docs/stability.md) 冻结环境变量表补齐 `ZIYUAN_TEST_COMMANDS`，并在 `ziyuan --help` 明示 `ZIYUAN_SANDBOX_ALLOW` 限 Linux／macOS。
+- **Windows Server 2025 CI 号舍兼容性修复（`ziyuan-sandbox-windows`）**：
+  - `PrivateDesktop` SDDL 补齐显式低完整性标签 `S:(ML;;NW;;;LW)`，确保在提权宿主（High IL，如 GitHub Actions `windows-2025`）下 Low-IL AppContainer 仍可稳定初始化 `user32.dll`。
+  - 修复 `w2_real_toolchain_runs_tests_in_sandbox_while_blocking_host_and_user_profile` 在提权 CI runner 上的三项环境差异：PowerShell 私有环境校验兼容 8.3 短路径（`RUNNER~1` vs `runneradmin`）、`git hash-object` 增加 `-c safe.directory=*` 避免 `BUILTIN\Administrators` 属主触发退出码 128、改用未准入 `host_secret_dir\unadmitted-tool.exe` 做确定性宿主可执行文件阻断断言。
+- **`docs/` 冗余历史截图清理**：移除 6 张仅由早期 1.4／1.13 历史验收记录引用且已被现行指南截图取代的 PNG（共约 1.09 MiB，原图保留于 git 历史），27 张现行文档截图与测试夹具完整保留。
+- 登记补丁版本 `1.31.1`（序号 66，零行为与事件变更）；验证见 [1.31.1 验收记录](docs/acceptance/1.31.1.md)。
+
 ## 1.31.0 — 2026-11-21
 
 - **Windows 原生号舍 W2 正式接入生产（`run_tests` AppContainer＋Job Object）**：

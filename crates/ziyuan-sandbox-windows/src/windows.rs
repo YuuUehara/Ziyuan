@@ -339,8 +339,10 @@ impl PrivateDesktop {
             // Grant SYSTEM + host user full control; grant this AppContainer SID only
             // READ_CONTROL | DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW | DESKTOP_ENUMERATE |
             // DESKTOP_WRITEOBJECTS (0x000200C3) -- excluding DESKTOP_SWITCHDESKTOP and hooks.
+            // Explicit Low Mandatory Integrity Label (S:(ML;;NW;;;LW)) ensures Low-IL AppContainer
+            // tokens can initialize user32.dll even when the host process runs elevated (High IL).
             let sddl = wide(format!(
-                "D:P(A;;GA;;;SY)(A;;GA;;;{user})(A;;0x000200C3;;;{app})"
+                "D:P(A;;GA;;;SY)(A;;GA;;;{user})(A;;0x000200C3;;;{app})S:(ML;;NW;;;LW)"
             ));
             let mut descriptor = null_mut();
             // SAFETY: SDDL buffer and descriptor live through CreateDesktopW;

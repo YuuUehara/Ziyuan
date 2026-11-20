@@ -164,7 +164,7 @@ pub(crate) const HELP: &str = concat!(
   ZIYUAN_TEST_COMMAND  run_tests 运行的默认测试命令（如 cargo test；由皇帝设定，模型不能更改）
   ZIYUAN_TEST_COMMANDS run_tests 命名检查／测试预设白名单（分号或换行分隔，如 check=cargo check;test=cargo test）
   ZIYUAN_SANDBOX       号舍（run_tests 的沙箱）：auto（默认）与 require 有则用、没有则不跑；off 不入号舍
-  ZIYUAN_SANDBOX_ALLOW 号舍内可访问的域名，逗号分隔（如 crates.io,*.github.com）；未设则全断网
+  ZIYUAN_SANDBOX_ALLOW 号舍内可访问的域名，逗号分隔（如 crates.io,*.github.com）；未设则全断网（Linux／macOS，Windows 暂不支持）
   ZIYUAN_LLM_PRICE     估算花费用的单价「输入,输出[,币种]」（每百万 token）；
                        deepseek-flash / deepseek-v4-pro 内置官方高峰价（估算上限）
   ZIYUAN_LLM_RETRIES   网络错误、429、5xx 时的重试次数（默认 3，指数退避，遵守 Retry-After）
