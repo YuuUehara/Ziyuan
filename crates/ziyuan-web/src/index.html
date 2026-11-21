@@ -4,20 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>奉天门 · 紫垣</title>
-<div class="cmd-palette-backdrop" id="cmd-palette" role="dialog" aria-modal="true" aria-label="快捷命令面板" hidden>
-  <div class="cmd-palette-box">
-    <div class="cmd-palette-head">
-      <input type="text" id="cmd-palette-input" placeholder="输入殿阁、诏令编号（如 #3）或操作…" autocomplete="off">
-      <button type="button" class="small" id="cmd-palette-close" data-view>Esc</button>
-    </div>
-    <ul class="cmd-palette-list" id="cmd-palette-list" role="listbox"></ul>
-    <div class="cmd-palette-foot">
-      <span>↑↓ 选择 · Enter 执行 · Esc 关闭</span>
-      <span>Ctrl+K / Cmd+K</span>
-    </div>
-  </div>
-</div>
-
 <script>
   // 字形随系统语言（如 ja 用日文字形），不按原文语种预设。
   if (navigator.language) document.documentElement.lang = navigator.language;
@@ -1321,6 +1307,20 @@
   </form>
 </div></div>
 
+<div class="cmd-palette-backdrop" id="cmd-palette" role="dialog" aria-modal="true" aria-label="快捷命令面板" hidden>
+  <div class="cmd-palette-box">
+    <div class="cmd-palette-head">
+      <input type="text" id="cmd-palette-input" placeholder="输入殿阁、诏令编号（如 #3）或操作…" autocomplete="off">
+      <button type="button" class="small" id="cmd-palette-close" data-view>Esc</button>
+    </div>
+    <ul class="cmd-palette-list" id="cmd-palette-list" role="listbox"></ul>
+    <div class="cmd-palette-foot">
+      <span>↑↓ 选择 · Enter 执行 · Esc 关闭</span>
+      <span>Ctrl+K / Cmd+K</span>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 // 令牌由服务器种在 HttpOnly Cookie 中，页面脚本不经手。
@@ -1372,173 +1372,11 @@ function selectWorkspaceTab(panel) {
   translationWorkspace?.select(panel);
   if (panel === "materials") ensureMaterialsLoaded();
 }
-function hasIso2022JpEscape(bytes) {
-  for (let i = 0; i + 2 < bytes.length; i++) {
-    if (bytes[i] !== 0x1b || bytes[i + 1] !== 0x24) continue;
-    if (bytes[i + 2] === 0x42 || bytes[i + 2] === 0x40) return true;
-    if (i + 3 < bytes.length && bytes[i + 2] === 0x28 && bytes[i + 3] === 0x44) return true;
-  }
-  return false;
-}
-function hasDisallowedControlByte(bytes) {
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if ((b <= 0x08) || b === 0x0b || b === 0x0c || (b >= 0x0e && b <= 0x1f) || b === 0x7f) return true;
-  }
-  return false;
-}
-function isUndefinedWindows1252(b) {
-  return b === 0x81 || b === 0x8d || b === 0x8f || b === 0x90 || b === 0x9d;
-}
-function isCommonWestern1252Letter(b) {
-  return b === 0x8c || b === 0x9c || b === 0x9f
-    || (b >= 0xc0 && b <= 0xcf) || (b >= 0xd1 && b <= 0xd6) || (b >= 0xd9 && b <= 0xdc)
-    || (b >= 0xdf && b <= 0xef) || (b >= 0xf1 && b <= 0xf6) || (b >= 0xf9 && b <= 0xfc) || b === 0xff;
-}
-function isCommonWestern1252Punct(b) {
-  return b === 0x80 || b === 0x82 || b === 0x84 || b === 0x85 || b === 0x8b
-    || (b >= 0x91 && b <= 0x97) || b === 0x9b || b === 0xa0 || b === 0xa3 || b === 0xa7
-    || b === 0xa9 || b === 0xab || b === 0xad || b === 0xae || b === 0xb0 || b === 0xb2
-    || b === 0xb3 || b === 0xb4 || b === 0xb7 || b === 0xba || b === 0xbb;
-}
-function isPlausibleWindows1252(bytes) {
-  if (!bytes.length || hasDisallowedControlByte(bytes)) return false;
-  let nonAscii = 0, commonWestern = 0, hasAsciiAlnum = false;
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if (isUndefinedWindows1252(b)) return false;
-    if ((b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a)) hasAsciiAlnum = true;
-    else if (b >= 0x80) {
-      nonAscii++;
-      if (isCommonWestern1252Letter(b) || isCommonWestern1252Punct(b)) commonWestern++;
-    }
-  }
-  return nonAscii > 0 && hasAsciiAlnum && nonAscii * 3 <= bytes.length * 2 && commonWestern * 4 >= nonAscii * 3;
-}
-const WIN1252_HIGH = [
-  0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
-  0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0,
-  0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
-  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178,
-];
-function decodeWindows1252Strict(bytes) {
-  if (!isPlausibleWindows1252(bytes)) return null;
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if (b >= 0x80 && b <= 0x9f) {
-      const cp = WIN1252_HIGH[b - 0x80];
-      if (!cp) return null;
-      out += String.fromCharCode(cp);
-    } else {
-      out += String.fromCharCode(b);
-    }
-  }
-  return out;
-}
-function westernPlausibility(bytes) {
-  let score = 0, prevHighNonPunct = false;
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    if (b < 0x80) {
-      score += (b === 0x09 || b === 0x0a || b === 0x0d || (b >= 0x20 && b <= 0x7e)) ? 1 : -8;
-      prevHighNonPunct = false;
-    } else if (isCommonWestern1252Letter(b)) {
-      score += prevHighNonPunct ? 1 : 2;
-      prevHighNonPunct = true;
-    } else if (isCommonWestern1252Punct(b)) {
-      score += 1;
-      prevHighNonPunct = false;
-    } else {
-      score += prevHighNonPunct ? -5 : -4;
-      prevHighNonPunct = true;
-    }
-  }
-  return score;
-}
-function koreanPlausibility(bytes) {
-  let score = 0;
-  for (let i = 0; i < bytes.length;) {
-    const b = bytes[i];
-    if (b < 0x80) {
-      score += (b === 0x09 || b === 0x0a || b === 0x0d || (b >= 0x20 && b <= 0x7e)) ? 1 : -8;
-      i++;
-      continue;
-    }
-    if (i + 1 >= bytes.length) return -1e9;
-    const t = bytes[i + 1];
-    if (b >= 0xb0 && b <= 0xc8 && t >= 0xa1 && t <= 0xfe) score += 3;
-    else if (b >= 0xa1 && b <= 0xa3 && t >= 0xa1 && t <= 0xfe) score += 2;
-    else if (b >= 0xca && b <= 0xfd && t >= 0xa1 && t <= 0xfe) score += 1;
-    else if (b >= 0xa4 && b <= 0xac && t >= 0xa1 && t <= 0xfe) score += 0;
-    else score -= 1;
-    i += 2;
-  }
-  return score;
-}
-function japanesePlausibility(text) {
-  let score = 0;
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if ((code >= 0x3040 && code <= 0x309f) || (code >= 0x30a0 && code <= 0x30ff)) score += 4;
-    else if ((code >= 0x3000 && code <= 0x303f) || (code >= 0xff01 && code <= 0xff60)) score += 3;
-    else if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) score += 2;
-    else if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code <= 0x7e)) score += 1;
-    else if (code >= 0xff61 && code <= 0xff9f) score -= 4;
-    else if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) score -= 8;
-  }
-  return score;
-}
-function decodeImportedText(buffer, label = "文件", sourceLanguage = null) {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或受支持旧编码（JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩文 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本`);
-  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-    try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; }
-    catch { throw bad(); }
-  }
-  if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
-    throw bad();
-  }
-  if ((!sourceLanguage || sourceLanguage === "ja") && hasIso2022JpEscape(bytes)) {
-    try { return { text: new TextDecoder("iso-2022-jp", { fatal: true }).decode(bytes), encoding: "ISO-2022-JP" }; }
-    catch { throw bad(); }
-  }
-  try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; } catch {}
-  if (hasDisallowedControlByte(bytes)) throw bad();
-  const tryDecode = (name) => { try { const out = new TextDecoder(name, { fatal: true }).decode(bytes); return /[\u007f-\u009f]/.test(out) ? null : out; } catch { return null; } };
-  if (sourceLanguage === "ja") {
-    const sjis = tryDecode("shift_jis"), euc = tryDecode("euc-jp");
-    if (sjis !== null && euc === null) return { text: sjis, encoding: "Shift_JIS" };
-    if (euc !== null && sjis === null) return { text: euc, encoding: "EUC-JP" };
-    if (sjis !== null && euc !== null) {
-      return japanesePlausibility(euc) > japanesePlausibility(sjis)
-        ? { text: euc, encoding: "EUC-JP" }
-        : { text: sjis, encoding: "Shift_JIS" };
-    }
-    throw bad();
-  }
-  if (sourceLanguage === "ko") {
-    const ko = tryDecode("euc-kr");
-    if (ko !== null) return { text: ko, encoding: "EUC-KR" };
-    throw bad();
-  }
-  if (sourceLanguage === "en" || sourceLanguage === "fr" || sourceLanguage === "de") {
-    const w = decodeWindows1252Strict(bytes);
-    if (w !== null) return { text: w, encoding: "Windows-1252" };
-    throw bad();
-  }
-  let best = null;
-  const consider = (score, text, encoding) => { if (!best || score > best.score) best = { score, text, encoding }; };
-  const sjis = tryDecode("shift_jis");
-  if (sjis !== null) consider(japanesePlausibility(sjis), sjis, "Shift_JIS");
-  const euc = tryDecode("euc-jp");
-  if (euc !== null) consider(japanesePlausibility(euc), euc, "EUC-JP");
-  const ko = tryDecode("euc-kr");
-  if (ko !== null) consider(koreanPlausibility(bytes), ko, "EUC-KR");
-  const w = decodeWindows1252Strict(bytes);
-  if (w !== null) consider(westernPlausibility(bytes), w, "Windows-1252");
-  if (best) return { text: best.text, encoding: best.encoding };
-  throw bad();
+let importDecoderPromise = null;
+async function decodeImportedText(buffer, label = "文件", sourceLanguage = null) {
+  if (!importDecoderPromise) importDecoderPromise = import(`/assets/import-decoder.mjs`);
+  const mod = await importDecoderPromise;
+  return mod.decodeImportedText(buffer, label, sourceLanguage);
 }
 let textModulesPromise = null;
 function ensureTextModules() {
@@ -2278,7 +2116,7 @@ $("materials-tbx-import")?.addEventListener("click", () => $("materials-tbx-file
 $("materials-tbx-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0]; if (!file || !textProjectId) return;
   try {
-    const { text: xml } = decodeImportedText(await file.arrayBuffer(), file.name, textProject?.project?.source_language || null);
+    const { text: xml } = await decodeImportedText(await file.arrayBuffer(), file.name, textProject?.project?.source_language || null);
     const r = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase-tbx", { method: "POST", headers: { "Content-Type": "application/xml" }, body: xml });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || "请求失败");
@@ -2424,7 +2262,7 @@ $("materials-termbase-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file || !textProjectId) return;
   try {
-    const { text } = decodeImportedText(await file.arrayBuffer(), file.name, textProject?.project?.source_language || null);
+    const { text } = await decodeImportedText(await file.arrayBuffer(), file.name, textProject?.project?.source_language || null);
     const response = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase", {
       method: "POST", headers: { "Content-Type": "text/csv" }, body: text,
     });
@@ -3203,7 +3041,7 @@ $("text-import").addEventListener("change", async (e) => {
     try {
       if (files.reduce((n, f) => n + f.size, 0) > 8 * 1024 * 1024) throw new Error("导入原文合计超过 8 MiB 上限，请拆成多个项目");
       const sourceLanguage = textProject?.project?.source_language || null;
-      const decoded = await Promise.all(files.map(async (f) => ({ name: f.name, ...decodeImportedText(await f.arrayBuffer(), f.name, sourceLanguage) })));
+      const decoded = await Promise.all(files.map(async (f) => ({ name: f.name, ...(await decodeImportedText(await f.arrayBuffer(), f.name, sourceLanguage)) })));
       if (decoded.reduce((n, f) => n + new TextEncoder().encode(f.text).length, 0) > 8 * 1024 * 1024) {
         throw new Error("解码后原文合计超过 8 MiB 上限，请拆成多个项目");
       }
@@ -5322,65 +5160,50 @@ $("login-form").addEventListener("submit", async (event) => {
 // ---- 快捷命令面板（Ctrl+K / Cmd+K） ----
 let cmdPaletteItems = [];
 let cmdPaletteIndex = 0;
+let cmdPaletteMod = null;
+let cmdPaletteModPromise = null;
 
-function buildCommandPaletteItems() {
-  const viewer = !!(state && state.viewer);
-  const items = [
-    { label: "前往 · 翰林院（翻译与译稿）", meta: "殿阁", keys: "hanlin translation 翰林院 翻译", run: () => { location.hash = "#translation"; showHall(); } },
-    { label: "前往 · 奉天殿（诏令）", meta: "殿阁", keys: "fengtian edict task 奉天殿 诏令", run: () => { location.hash = "#fengtian"; showHall(); } },
-    { label: "前往 · 华盖殿（朝堂制度）", meta: "殿阁", keys: "huagai court mode 华盖殿 朝堂", run: () => { location.hash = "#huagai"; showHall(); } },
-    { label: "前往 · 文华殿（百官与度支）", meta: "殿阁", keys: "wenhua officials duzhi 文华殿 百官 度支", run: () => { location.hash = "#wenhua"; showHall(); } },
-    { label: "前往 · 武英殿（实录·驿站·关注）", meta: "殿阁", keys: "wuying records follow 武英殿 实录 关注", run: () => { location.hash = "#wuying"; showHall(); } },
-    { label: "前往 · 起居注（事件簿）", meta: "殿阁", keys: "qiju history 起居注 事件簿", run: () => { location.hash = "#qiju"; showHall(); } },
-    { label: "查看 · 户部度支奏销", meta: "只读", keys: "duzhi budget 度支 奏销 花费", run: () => { location.hash = "#wenhua"; showHall(); $("duzhi-btn")?.click(); } },
-    { label: "导出 · 户部度支报表（CSV / Excel BOM）", meta: "导出", keys: "duzhi export csv excel 度支 导出", run: () => downloadDuzhiExport("csv", true) },
-    { label: "导出 · 户部度支报表（JSON）", meta: "导出", keys: "duzhi export json 度支 导出", run: () => downloadDuzhiExport("json", false) },
-    { label: "查看 · 考成簿", meta: "只读", keys: "kaocheng 考成 政绩", run: () => { location.hash = "#wenhua"; showHall(); $("kaocheng-btn")?.click(); } },
-    { label: "切换主题 · 汝窑天青 / 墨分五色 / 青绿山水", meta: "界面", keys: "theme tianqing mo qinglv 主题 配色", run: () => {
-      const order = ["tianqing", "mo", "qinglv"];
-      const cur = document.documentElement.dataset.theme || "tianqing";
-      setTheme(order[(order.indexOf(cur) + 1) % order.length]);
-      if (state) preserve(render);
-    } },
-  ];
-  if (!viewer) {
-    items.push(
-      { label: "下诏 · 打开新诏令表单", meta: "操作", keys: "edict new 下诏 新建", run: () => { location.hash = "#fengtian"; showHall(); $("edict-new")?.click(); } },
-      { label: "执行 · 执行待办诏令", meta: "操作", keys: "run execute 执行 待办", run: () => $("run-btn")?.click() },
-    );
+function runCommandPaletteAction(action) {
+  if (!action) return;
+  if (action.type === "hall") { location.hash = action.hall; showHall(); }
+  else if (action.type === "duzhi") { location.hash = "#wenhua"; showHall(); $("duzhi-btn")?.click(); }
+  else if (action.type === "export") { downloadDuzhiExport(action.format, action.bom); }
+  else if (action.type === "kaocheng") { location.hash = "#wenhua"; showHall(); $("kaocheng-btn")?.click(); }
+  else if (action.type === "theme") {
+    const order = ["tianqing", "mo", "qinglv"];
+    const cur = document.documentElement.dataset.theme || "tianqing";
+    setTheme(order[(order.indexOf(cur) + 1) % order.length]);
+    if (state) preserve(render);
+  } else if (action.type === "new-edict") { location.hash = "#fengtian"; showHall(); $("edict-new")?.click(); }
+  else if (action.type === "run") { $("run-btn")?.click(); }
+  else if (action.type === "task") {
+    selected = action.taskId;
+    location.hash = "#fengtian";
+    showHall();
+    preserve(render);
   }
-  if (state && Array.isArray(state.tasks)) {
-    for (const t of state.tasks.slice(0, 20)) {
-      const snippet = String(t.text || "").replace(/\s+/g, " ").slice(0, 42);
-      items.push({
-        label: `诏令 #${t.id} · ${snippet}`,
-        meta: statusLabel[t.status] || t.status,
-        keys: `#${t.id} ${t.id} ${t.department || ""} ${snippet}`,
-        run: () => {
-          selected = t.id;
-          location.hash = "#fengtian";
-          showHall();
-          preserve(render);
-        },
-      });
-    }
-  }
-  return items;
 }
 
-function renderCommandPaletteList() {
+async function ensureCommandPaletteModule() {
+  if (cmdPaletteMod) return cmdPaletteMod;
+  if (!cmdPaletteModPromise) cmdPaletteModPromise = import(`/assets/command-palette.mjs`).then((m) => (cmdPaletteMod = m));
+  return cmdPaletteModPromise;
+}
+
+async function renderCommandPaletteList() {
   const input = $("cmd-palette-input");
   const list = $("cmd-palette-list");
   if (!input || !list) return;
-  const q = input.value.trim().toLowerCase();
-  const terms = q ? q.split(/\s+/) : [];
-  const all = buildCommandPaletteItems();
-  cmdPaletteItems = terms.length
-    ? all.filter((item) => {
-        const hay = `${item.label} ${item.meta} ${item.keys}`.toLowerCase();
-        return terms.every((term) => hay.includes(term));
-      })
-    : all;
+  const mod = await ensureCommandPaletteModule();
+  const all = mod.buildPaletteSpecs({
+    viewer: !!(state && state.viewer),
+    tasks: state && Array.isArray(state.tasks) ? state.tasks : [],
+    statusLabel,
+  });
+  cmdPaletteItems = mod.filterPaletteItems(all, input.value).map((spec) => ({
+    ...spec,
+    run: () => runCommandPaletteAction(spec.action),
+  }));
   if (cmdPaletteIndex >= cmdPaletteItems.length) cmdPaletteIndex = 0;
   list.textContent = "";
   if (!cmdPaletteItems.length) {

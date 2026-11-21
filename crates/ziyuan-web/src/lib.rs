@@ -122,6 +122,8 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "continuity-search.mjs" => include_str!("continuity-search.mjs"),
         "continuity-memory.mjs" => include_str!("continuity-memory.mjs"),
         "continuity-document.mjs" => include_str!("continuity-document.mjs"),
+        "import-decoder.mjs" => include_str!("import-decoder.mjs"),
+        "command-palette.mjs" => include_str!("command-palette.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (
