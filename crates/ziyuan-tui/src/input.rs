@@ -4,8 +4,8 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    ABOLITION_NOTE, AddedSubtask, HunkVerdict, RevertStatus, draft_plan_execution, draft_revision,
-    duzhi_report, kaocheng_report, parse_hunk_reviews, skipped_note, total_hunks,
+    ABOLITION_NOTE, AddedSubtask, HunkVerdict, RevertStatus, draft_follow_up, draft_plan_execution,
+    draft_revision, duzhi_report, kaocheng_report, parse_hunk_reviews, skipped_note, total_hunks,
 };
 use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
 use ziyuan_governance::TaskStatus;
@@ -236,6 +236,9 @@ impl App {
                     duzhi_report(self.court(), self.model.as_deref(), |m| backend.price(m));
                 self.modal = Some(Modal::Notice(report));
             }
+            KeyCode::Char('B') => {
+                self.modal = Some(Modal::Notice(self.translation_overview_report()));
+            }
             KeyCode::Char('g') => {
                 let selected = GovernanceMode::ALL
                     .iter()
@@ -369,6 +372,28 @@ impl App {
                             department: works,
                             scope: draft.scope.join(","),
                             tools: tools.into(),
+                            field: 0,
+                        });
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
+            KeyCode::Char('Q') => {
+                let Some(entry) = self.court().task(task) else {
+                    return;
+                };
+                match draft_follow_up(entry, &self.config.root) {
+                    Ok(draft) => {
+                        let dept_idx = Department::ALL
+                            .iter()
+                            .position(|&d| d == draft.department)
+                            .unwrap_or(0);
+                        self.modal = Some(Modal::Input {
+                            kind: InputKind::FollowUp(task),
+                            text: String::new(),
+                            department: dept_idx,
+                            scope: draft.scope.join(","),
+                            tools: "read_file,search_code（只读固定）".into(),
                             field: 0,
                         });
                     }
@@ -687,17 +712,23 @@ impl App {
                 tools,
                 field,
             } => {
+                let follow_up = matches!(kind, InputKind::FollowUp(_));
                 let multi = matches!(
                     kind,
                     InputKind::Edict
                         | InputKind::FromPlan(_)
                         | InputKind::Revise(_)
                         | InputKind::DagAdd(_)
+                        | InputKind::FollowUp(_)
                 );
-                let switch_dept = matches!(kind, InputKind::Edict | InputKind::Recruit);
+                let switch_dept = matches!(
+                    kind,
+                    InputKind::Edict | InputKind::Recruit | InputKind::FollowUp(_)
+                );
+                let field_count: u8 = if follow_up { 2 } else { 3 };
                 let target = match (multi, *field) {
                     (true, 1) => scope,
-                    (true, 2) => tools,
+                    (true, 2) if !follow_up => tools,
                     _ => text,
                 };
                 match key.code {
@@ -712,8 +743,8 @@ impl App {
                         *department =
                             (*department + Department::ALL.len() - 1) % Department::ALL.len()
                     }
-                    KeyCode::Up if multi => *field = (*field + 2) % 3,
-                    KeyCode::Down if multi => *field = (*field + 1) % 3,
+                    KeyCode::Up if multi => *field = (*field + field_count - 1) % field_count,
+                    KeyCode::Down if multi => *field = (*field + 1) % field_count,
                     _ => {}
                 }
             }
@@ -874,6 +905,53 @@ impl App {
                         format!(
                             "已打回诏令 #{} 下发工部修订诏令 #{}（按 r 执行）",
                             source_task.0, id.0
+                        )
+                    },
+                ) {
+                    self.selected_task = Some(id);
+                    self.detail_scroll = 0;
+                }
+            }
+            InputKind::FollowUp(source_task) => {
+                if text.is_empty() {
+                    self.error("续问内容不能为空");
+                    self.modal = Some(Modal::Input {
+                        kind,
+                        text,
+                        department: department_index,
+                        scope,
+                        tools,
+                        field: 0,
+                    });
+                    return;
+                }
+                let scope_override: Option<Vec<String>> = {
+                    let parts: Vec<String> = scope
+                        .split([',', '，'])
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    (!parts.is_empty()).then_some(parts)
+                };
+                let root = self.config.root.clone();
+                if let Some(id) = self.mutate(
+                    |s| {
+                        Ok(s.issue_follow_up(
+                            source_task,
+                            &root,
+                            Some(department),
+                            scope_override.clone(),
+                            text.clone(),
+                        )?
+                        .0
+                        .id)
+                    },
+                    |id| {
+                        format!(
+                            "已依前件 #{} 下发{}只读续问诏令 #{}（按 r 执行）",
+                            source_task.0,
+                            department.label(),
+                            id.0
                         )
                     },
                 ) {

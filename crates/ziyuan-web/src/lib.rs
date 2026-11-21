@@ -36,9 +36,9 @@ use ziyuan_runtime::{Limits, WorkerBackend};
 use crate::auth::{index, login, require_token};
 use crate::edicts::{
     acquit, apply_changes, approve, cancel, censor, changelog, courier, dag_add, dag_deps, debate,
-    discard_changes, draft, from_plan, github_pr, github_pull, github_reply, issue, preview_revert,
-    recheck, redraft, remove_template, revert_changes, review, revise_edict, save_template, split,
-    urgent,
+    discard_changes, draft, follow_up_edict, from_plan, github_pr, github_pull, github_reply,
+    issue, preview_revert, recheck, redraft, remove_template, revert_changes, review, revise_edict,
+    save_template, split, urgent,
 };
 use crate::personnel::{
     abolish, appoint, budget, cane, crown, dismiss, exam, nominate, office_ceiling, office_model,
@@ -47,7 +47,8 @@ use crate::personnel::{
 use crate::run::{run, stop_run};
 use crate::state::{AppState, Inner};
 use crate::views::{
-    changes_delta, duzhi, events_stream, history, kaocheng, recommend, records, state,
+    changes_delta, duzhi, duzhi_export_download, events_stream, history, kaocheng, recommend,
+    records, state,
 };
 const INDEX_HTML: &str = include_str!("index.html");
 
@@ -204,6 +205,7 @@ fn router_for(app: AppState) -> Router {
         .route("/recommend", get(recommend))
         .route("/kaocheng", get(kaocheng))
         .route("/duzhi", get(duzhi))
+        .route("/duzhi/export", get(duzhi_export_download))
         .route("/budget", post(budget))
         .route("/events", get(events_stream))
         .route("/edicts", post(issue))
@@ -221,6 +223,7 @@ fn router_for(app: AppState) -> Router {
         .route("/tasks/{id}/censor", post(censor))
         .route("/tasks/{id}/from-plan", post(from_plan))
         .route("/tasks/{id}/revise", post(revise_edict))
+        .route("/tasks/{id}/follow-up", post(follow_up_edict))
         .route("/tasks/{id}/recheck", post(recheck))
         .route("/tasks/{id}/acquit", post(acquit))
         .route("/records", get(records))

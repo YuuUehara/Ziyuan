@@ -1,6 +1,7 @@
 //! 人工译稿终端入口。业务判断全部调用应用层，与命令行同一组方法。
 use ziyuan_app::translation::{
-    DraftParagraph, DraftSave, TargetMark, Translations, VersionState, human_submit_request_id,
+    BlockState, DraftParagraph, DraftSave, TargetMark, Translations, VersionState,
+    human_submit_request_id,
 };
 use ziyuan_storage::{LockScope, Workspace};
 
@@ -312,6 +313,70 @@ impl App {
             )),
             Err(error) => self.error(error.to_string()),
         }
+    }
+
+    /// 翰林院译书项目概览（供全局 `B` 键弹窗查看，不写盘、不入事件簿）。
+    pub(crate) fn translation_overview_report(&self) -> String {
+        let translations = Translations::new(&self.config.root);
+        let projects = match translations.texts().list() {
+            Ok(list) => list,
+            Err(error) => return format!("翰林院译书概览读取失败：{error}"),
+        };
+        if projects.is_empty() {
+            return "翰林院译书概览\n\n当前项目下尚未建立译书项目。\n可用 `ziyuan text init --title <书名> --language <ja|en|ko|fr|de> --source <来源> --rights <声明>` 建立，或按 4 切至译稿页查看。".into();
+        }
+        let mut out = format!("翰林院译书概览　共 {} 个译书项目\n", projects.len());
+        for project in projects {
+            let chapters = project.chapters.len();
+            let blocks = project
+                .chapters
+                .iter()
+                .map(|c| c.blocks.len())
+                .sum::<usize>();
+            let mut finalized = 0usize;
+            let mut approved = 0usize;
+            let mut pending = 0usize;
+            let mut stale = 0usize;
+            let mut not_started = 0usize;
+            let mut other = 0usize;
+            if let Ok(statuses) = self
+                .session
+                .translation_status(&self.config.root, &project.id)
+            {
+                for item in statuses {
+                    match item.state {
+                        BlockState::Finalized { .. } | BlockState::HumanFinalized { .. } => {
+                            finalized += 1
+                        }
+                        BlockState::Applied { .. }
+                        | BlockState::AwaitingYulan { .. }
+                        | BlockState::HumanApproved { .. } => approved += 1,
+                        BlockState::Running { .. } | BlockState::AwaitingApproval { .. } => {
+                            pending += 1
+                        }
+                        BlockState::Stale { .. } | BlockState::HumanStale { .. } => stale += 1,
+                        BlockState::NotStarted => not_started += 1,
+                        BlockState::Failed { .. }
+                        | BlockState::Cancelled { .. }
+                        | BlockState::Uncertain { .. } => other += 1,
+                    }
+                }
+            }
+            out.push_str(&format!(
+                "\n• 《{}》（{} · {}）  {} 章 / {} 块\n  已定稿 {finalized} · 已准奏/待御览 {approved} · 进行中/待准奏 {pending} · 失效 {stale} · 未开始 {not_started}",
+                project.metadata.title,
+                project.id,
+                project.metadata.source_language,
+                chapters,
+                blocks
+            ));
+            if other > 0 {
+                out.push_str(&format!(" · 失败/撤销 {other}"));
+            }
+            out.push('\n');
+        }
+        out.push_str("\n按 4 切至「译稿」页可逐段编辑、送审、准奏与定稿。");
+        out
     }
 
     pub(crate) fn current_human_project(&self) -> Option<String> {

@@ -129,6 +129,37 @@ pub(crate) async fn revise_edict(
     .await
 }
 
+/// 基于已完成前件实录发起只读续问／追查：`{ question, department?, scope? }`。
+pub(crate) async fn follow_up_edict(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let question = str_field(&body, "question")?.to_owned();
+    let department = match body
+        .get("department")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => Some(parse::<Department>(raw)?),
+        None => None,
+    };
+    let scope = string_list(&body["scope"]);
+    let scope_override = (!scope.is_empty()).then_some(scope);
+    app.mutate(move |s| {
+        let (edict, draft) =
+            s.issue_follow_up(TaskId(id), &root, department, scope_override, question)?;
+        Ok(json!({
+            "id": edict.id.0,
+            "department": draft.department.code(),
+            "department_label": draft.department.label(),
+            "scope": draft.scope,
+        }))
+    })
+    .await
+}
+
 /// 翰林院存模板：`{ name, department, text, tools?, scope?, criteria: [..] }`（同名覆盖）。
 pub(crate) async fn save_template(
     State(app): State<AppState>,

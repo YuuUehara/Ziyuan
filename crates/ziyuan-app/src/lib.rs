@@ -12,6 +12,7 @@ mod delta;
 mod edicts;
 mod exam;
 mod follow;
+mod follow_up;
 mod history;
 mod huidian;
 pub mod memory;
@@ -50,12 +51,16 @@ pub use follow::{
     FollowCourier, FollowCourierStatus, FollowQueueError, FollowQueued, follow_courier,
     follow_station,
 };
+pub use follow_up::{FollowUpDraft, can_follow_up_task, draft_follow_up, follow_up_edict_text};
 pub use history::{HistoryEntry, HistoryFilter, describe_event, history_entries};
 pub use huidian::{HUIDIAN_EVERY, huidian_tag};
 pub use personnel::{ABOLITION_NOTE, appointment_note, demotion_note, reform_note, vacancies};
 pub use plan::{PlanDraft, can_execute_from_plan, draft_plan_execution, plan_edict_text};
 pub use preview::{PreviewFile, PreviewHunk, PreviewLine, PreviewSpan, preview_changes};
-pub use reports::{describe_record, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report};
+pub use reports::{
+    DuzhiBudget, DuzhiExport, DuzhiRow, describe_record, duzhi_export, duzhi_export_csv,
+    duzhi_export_json, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report,
+};
 pub use revise::{ReviseDraft, can_revise_task, draft_revision, revision_edict_text};
 pub use run::{EXECUTOR_BUSY, NEGLECT_THRESHOLD, RunUpdate, TaskReport, WatchOptions, WatchUpdate};
 pub use time::{format_time, parse_time, tz_offset};

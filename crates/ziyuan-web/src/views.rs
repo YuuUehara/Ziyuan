@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use tokio::sync::broadcast;
 use ziyuan_app::{
-    DeltaStyle, HistoryFilter, ansi_html, changes_version, duzhi_report, format_time,
-    history_entries, kaocheng_report, parse_time, tz_offset, unified_hunks,
+    DeltaStyle, HistoryFilter, ansi_html, changes_version, duzhi_export, duzhi_export_csv,
+    duzhi_export_json, duzhi_report, format_time, history_entries, kaocheng_report, parse_time,
+    tz_offset, unified_hunks,
 };
 use ziyuan_core::{AgentId, Office, TaskId};
 
@@ -237,6 +238,64 @@ pub(crate) async fn duzhi(State(app): State<AppState>) -> Result<Json<Value>, Ap
         })
         .await?;
     Ok(Json(json!({ "report": report })))
+}
+
+/// 度支报表导出：`?format=csv|json`（默认 `csv`），`?bom=1` 为 CSV 加 UTF-8 BOM。
+pub(crate) async fn duzhi_export_download(
+    State(app): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let format = query
+        .get("format")
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "csv".into());
+    if format != "csv" && format != "json" {
+        return Err(ApiError::bad(format!(
+            "不支持的度支导出格式「{format}」（可用 csv 或 json）"
+        )));
+    }
+    let bom = query
+        .get("bom")
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let backend = app.0.config.backend.clone();
+    let exported = app
+        .with_session(move |s| {
+            let default = backend.model_name();
+            Ok(duzhi_export(s.court(), default, |m| backend.price(m)))
+        })
+        .await?;
+    if format == "json" {
+        let body = serde_json::to_string_pretty(&duzhi_export_json(&exported))
+            .map_err(|e| ApiError::bad(e.to_string()))?
+            + "\n";
+        Ok((
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"duzhi-report.json\"",
+                ),
+            ],
+            body,
+        )
+            .into_response())
+    } else {
+        let body = duzhi_export_csv(&exported, bom);
+        Ok((
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"duzhi-report.csv\"",
+                ),
+            ],
+            body,
+        )
+            .into_response())
+    }
 }
 
 pub(crate) async fn events_stream(

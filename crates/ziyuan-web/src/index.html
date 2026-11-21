@@ -4,6 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>奉天门 · 紫垣</title>
+<div class="cmd-palette-backdrop" id="cmd-palette" role="dialog" aria-modal="true" aria-label="快捷命令面板" hidden>
+  <div class="cmd-palette-box">
+    <div class="cmd-palette-head">
+      <input type="text" id="cmd-palette-input" placeholder="输入殿阁、诏令编号（如 #3）或操作…" autocomplete="off">
+      <button type="button" class="small" id="cmd-palette-close" data-view>Esc</button>
+    </div>
+    <ul class="cmd-palette-list" id="cmd-palette-list" role="listbox"></ul>
+    <div class="cmd-palette-foot">
+      <span>↑↓ 选择 · Enter 执行 · Esc 关闭</span>
+      <span>Ctrl+K / Cmd+K</span>
+    </div>
+  </div>
+</div>
+
 <script>
   // 字形随系统语言（如 ja 用日文字形），不按原文语种预设。
   if (navigator.language) document.documentElement.lang = navigator.language;
@@ -757,6 +771,23 @@
   @media (max-width:560px) { .workspace-tabs { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
   [data-workspace-panel] { min-width:0; }
   [data-workspace-panel] > .hint:first-child { margin:0 0 16px; }
+  .tool-trace-history { margin:8px 0 10px; border:1px solid var(--line); border-radius:4px; background:var(--paper); padding:6px 10px; font-size:12.5px; }
+  .tool-trace-history summary { cursor:pointer; color:var(--muted); font-weight:600; user-select:none; }
+  .tool-trace-history ul { list-style:none; margin:6px 0 2px; padding:0; max-height:220px; overflow:auto; font-family:var(--mono); font-size:12px; }
+  .tool-trace-history li { padding:2px 0; border-bottom:1px dashed var(--line); display:flex; gap:8px; justify-content:space-between; }
+  .tool-trace-history li:last-child { border-bottom:0; }
+  .tool-trace-history .ok { color:#2f6f44; }
+  .tool-trace-history .err { color:var(--zhu); }
+  .cmd-palette-backdrop { position:fixed; inset:0; background:rgba(20, 24, 28, 0.45); display:flex; align-items:flex-start; justify-content:center; padding-top:11vh; z-index:999; }
+  .cmd-palette-backdrop[hidden] { display:none; }
+  .cmd-palette-box { width:min(560px, 92vw); background:var(--sheet); color:var(--ink); border:1px solid var(--line); border-radius:8px; box-shadow:0 16px 40px rgba(0, 0, 0, 0.28); overflow:hidden; }
+  .cmd-palette-head { padding:10px 12px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; }
+  .cmd-palette-head input { flex:1; border:0; background:transparent; color:var(--ink); font-size:14px; outline:none; padding:4px 2px; }
+  .cmd-palette-list { list-style:none; margin:0; padding:6px; max-height:54vh; overflow:auto; }
+  .cmd-palette-item { padding:8px 10px; border-radius:4px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:13px; }
+  .cmd-palette-item:hover, .cmd-palette-item.active { background:var(--paper); color:var(--zhu); }
+  .cmd-palette-item .cmd-meta { font-size:11.5px; color:var(--muted); flex-shrink:0; }
+  .cmd-palette-foot { padding:6px 12px; border-top:1px solid var(--line); font-size:11.5px; color:var(--muted); display:flex; justify-content:space-between; }
 </style>
 </head>
 <body>
@@ -774,6 +805,7 @@
     <button class="gold" id="run-btn">执行待办诏令</button>
     <button id="watch-btn" title="常朝：常驻执行，随到随办，办完自动请都察院复核">开常朝</button>
     <button id="stop-btn" hidden>中止执行</button>
+    <button class="small" id="cmd-palette-btn" data-view title="打开快捷命令面板（Ctrl+K / Cmd+K）">指令 Ctrl+K</button>
     <span class="themes" role="group" aria-label="配色">
       <button class="small" data-theme="tianqing" data-view title="汝窑天青">天青</button><button class="small" data-theme="mo" data-view title="墨分五色">墨分</button><button class="small" data-theme="qinglv" data-view title="青绿山水">青绿</button>
     </span>
@@ -887,7 +919,7 @@
             </form>
           </div>
           <div class="side">
-            <h3>吏部荐举 <button class="small" id="kaocheng-btn" data-view title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" data-view title="户部：按用途、模型、官员汇总花费">度支奏销</button></h3>
+            <h3>吏部荐举 <button class="small" id="kaocheng-btn" data-view title="仿张居正考成法：立限考事，以事责人">考成簿</button> <button class="small" id="duzhi-btn" data-view title="户部：按用途、模型、官员汇总花费">度支奏销</button> <button class="small" id="duzhi-export-csv" data-view title="导出户部度支 CSV（含 UTF-8 BOM，Excel 可直接打开）">导出 CSV</button> <button class="small" id="duzhi-export-json" data-view title="导出户部度支 JSON 报表">导出 JSON</button></h3>
             <div class="row">
               <select id="recommend-office" data-keep></select>
               <button class="shrink" id="recommend-btn" data-view>荐举</button>
@@ -1300,6 +1332,7 @@ const fmt = (n) => Number(n).toLocaleString("zh-CN");
 let state = null;
 const streams = {};   // 诏令 ID → 执行中流式文本
 const activeTools = {}; // 诏令 ID → 当前正在执行的工具描述
+const toolHistory = {}; // 诏令 ID → [{ step, phase, tool, summary, ok, duration_ms }]
 let palaceLive = null;  // 殿试进行中已推送的答卷
 const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
 // 改动的视图（统一/左右）与渲染（内置/git-delta），记在本机。
@@ -1645,6 +1678,18 @@ function taskHtml(t) {
   } else if (t.status === "failed") {
     body = `<div class="reply error">${esc(t.detail)}</div>`;
   }
+  const traces = toolHistory[t.id] || [];
+  if (traces.length) {
+    const items = traces.map((tr) => {
+      const mark = tr.phase === "started" ? "▸" : (tr.ok ? "✓" : "✗");
+      const cls = tr.phase === "started" ? "" : (tr.ok ? "ok" : "err");
+      const right = tr.phase === "started"
+        ? "运行中…"
+        : (tr.duration_ms != null ? `${tr.duration_ms < 1000 ? `${tr.duration_ms}ms` : `${(tr.duration_ms / 1000).toFixed(1)}s`}` : "");
+      return `<li><span class="${cls}">[第 ${esc(tr.step)} 步] ${mark} ${esc(tr.tool)}${tr.summary ? " " + esc(tr.summary) : ""}</span><span>${esc(right)}</span></li>`;
+    }).join("");
+    body += `<details class="tool-trace-history" id="tool-history-${t.id}" ${open ? "open" : ""}><summary>工具执行轨迹（${traces.length} 条记录）</summary><ul>${items}</ul></details>`;
+  }
   if (t.dag) {
     const d = t.dag;
     const fields = [
@@ -1848,6 +1893,29 @@ function taskHtml(t) {
         <div class="plan-row">
           <input type="text" id="plan-extra-${t.id}" data-keep placeholder="补充指示（可选）">
           <button type="button" class="small gold shrink" data-from-plan="${t.id}">批复并下发工部</button>
+        </div>
+      </div>
+    </details>`;
+  }
+  if (t.follow_up_draft) {
+    const f = t.follow_up_draft;
+    const deptOpts = (state.departments || []).map((d) =>
+      `<option value="${esc(d.code)}" ${d.code === f.department ? "selected" : ""}>${esc(d.label)}</option>`
+    ).join("");
+    const hint = f.has_changes || f.has_censure
+      ? "基于本件实录（自动附带前件摘要、改动清单与复核意见）发起只读续问；固定剥离写文件、跑测试与外藩权限。"
+      : "基于本件实录（自动附带前件摘要）发起只读续问；固定剥离写文件、跑测试与外藩权限。";
+    body += `<details class="plan-exec write" id="followup-exec-${t.id}">
+      <summary>续问／追查（只读新诏令）</summary>
+      <div class="plan-form">
+        <div class="hint">${hint}</div>
+        <div class="plan-row">
+          <select id="followup-dept-${t.id}" data-keep class="shrink">${deptOpts}</select>
+          <input type="text" id="followup-scope-${t.id}" data-keep value="${esc(f.scope.join(", "))}" placeholder="查阅范围（留空沿用前件，逗号分隔）">
+        </div>
+        <div class="plan-row">
+          <input type="text" id="followup-question-${t.id}" data-keep placeholder="输入追问或复核问题（必填）">
+          <button type="button" class="small gold shrink" data-followup="${t.id}">发起只读续问</button>
         </div>
       </div>
     </details>`;
@@ -4756,6 +4824,30 @@ $("duzhi-btn").addEventListener("click", async () => {
     $("recommend-result").innerHTML = `<pre class="kaocheng">${esc(report)}</pre>`;
   } catch (e) { toast(e.message, true); }
 });
+async function downloadDuzhiExport(format, bom) {
+  const qs = format === "csv" ? `format=csv${bom ? "&bom=1" : ""}` : "format=json";
+  try {
+    const res = await fetch(`api/duzhi/export?${qs}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `导出失败（HTTP ${res.status}）`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = format === "json" ? "duzhi-report.json" : "duzhi-report.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(`已导出度支报表（${format.toUpperCase()}）`);
+  } catch (e) {
+    toast(e.message || "导出度支报表失败", true);
+  }
+}
+$("duzhi-export-csv").addEventListener("click", () => downloadDuzhiExport("csv", true));
+$("duzhi-export-json").addEventListener("click", () => downloadDuzhiExport("json", false));
 const setBudget = (body, done) => act(api("/budget", body), done);
 const amount = (id) => Number($(id).value) || 0;
 $("office-budget-set").addEventListener("click", () =>
@@ -5004,6 +5096,28 @@ document.addEventListener("click", (event) => {
       toast(`已依条陈 #${id} 下发工部诏令 #${r.id}（范围：${r.scope.join("、")}）`);
       refresh();
     });
+  } else if (d.followup) {
+    const id = d.followup;
+    const question = (($("followup-question-" + id) || {}).value || "").trim();
+    if (!question) {
+      toast("请先填写续问或追查内容", true);
+      return;
+    }
+    const department = ($("followup-dept-" + id) || {}).value || "";
+    const scope = (($("followup-scope-" + id) || {}).value || "")
+      .split(/[\n,，、]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    el.disabled = true;
+    const payload = { question, scope };
+    if (department) payload.department = department;
+    act(api(`/tasks/${id}/follow-up`, payload)).then((r) => {
+      el.disabled = false;
+      if (!r) return;
+      selected = r.id;
+      toast(`已基于诏令 #${id} 发起只读续问 #${r.id}`);
+      refresh();
+    });
   } else if (d.apply) {
     const skip = [...document.querySelectorAll(`.hunk-${d.apply}`)].filter((b) => !b.checked).map((b) => Number(b.dataset.n));
     const what = skip.length ? `（驳回第 ${skip.join("、")} 段，其余落盘）` : "";
@@ -5124,13 +5238,45 @@ function connect() {
   source.addEventListener("tool", (event) => {
     const d = JSON.parse(event.data);
     const task = d.task;
+    const list = toolHistory[task] || (toolHistory[task] = []);
     if (d.phase === "started") {
       const label = d.summary ? `[第 ${d.step} 步] ${d.tool} ${d.summary}` : `[第 ${d.step} 步] ${d.tool}`;
       activeTools[task] = label;
       appendLiveLine(task, `[第 ${d.step} 步] ▸ ${d.tool}${d.summary ? " " + d.summary : ""}…`);
+      list.push({ step: d.step, phase: "started", tool: d.tool, summary: d.summary || "", ok: null, duration_ms: null });
     } else if (d.phase === "finished") {
       delete activeTools[task];
       appendLiveLine(task, `[第 ${d.step} 步] ${d.ok ? "✓" : "✗"} ${d.tool} (${fmtDuration(d.duration_ms || 0)})`);
+      const existing = [...list].reverse().find((item) => item.step === d.step && item.tool === d.tool && item.phase === "started");
+      if (existing) {
+        existing.phase = "finished";
+        existing.ok = !!d.ok;
+        existing.duration_ms = d.duration_ms || 0;
+      } else {
+        list.push({ step: d.step, phase: "finished", tool: d.tool, summary: "", ok: !!d.ok, duration_ms: d.duration_ms || 0 });
+      }
+    }
+    if (list.length > 200) list.splice(0, list.length - 200);
+    const histEl = $("tool-history-" + task);
+    if (histEl) {
+      const sum = histEl.querySelector("summary");
+      const ul = histEl.querySelector("ul");
+      if (sum) sum.textContent = `工具执行轨迹（${list.length} 条记录）`;
+      if (ul) {
+        ul.textContent = "";
+        for (const tr of list) {
+          const li = document.createElement("li");
+          const left = document.createElement("span");
+          left.className = tr.phase === "started" ? "" : (tr.ok ? "ok" : "err");
+          const mark = tr.phase === "started" ? "▸" : (tr.ok ? "✓" : "✗");
+          left.textContent = `[第 ${tr.step} 步] ${mark} ${tr.tool}${tr.summary ? " " + tr.summary : ""}`;
+          const right = document.createElement("span");
+          right.textContent = tr.phase === "started" ? "运行中…" : fmtDuration(tr.duration_ms || 0);
+          li.appendChild(left);
+          li.appendChild(right);
+          ul.appendChild(li);
+        }
+      }
     }
     const el = $("stream-" + task);
     const badge = $("tool-live-" + task);
@@ -5171,6 +5317,166 @@ $("login-form").addEventListener("submit", async (event) => {
   });
   if (response.ok) location.reload();
   else toast("令牌不正确", true);
+});
+
+// ---- 快捷命令面板（Ctrl+K / Cmd+K） ----
+let cmdPaletteItems = [];
+let cmdPaletteIndex = 0;
+
+function buildCommandPaletteItems() {
+  const viewer = !!(state && state.viewer);
+  const items = [
+    { label: "前往 · 翰林院（翻译与译稿）", meta: "殿阁", keys: "hanlin translation 翰林院 翻译", run: () => { location.hash = "#translation"; showHall(); } },
+    { label: "前往 · 奉天殿（诏令）", meta: "殿阁", keys: "fengtian edict task 奉天殿 诏令", run: () => { location.hash = "#fengtian"; showHall(); } },
+    { label: "前往 · 华盖殿（朝堂制度）", meta: "殿阁", keys: "huagai court mode 华盖殿 朝堂", run: () => { location.hash = "#huagai"; showHall(); } },
+    { label: "前往 · 文华殿（百官与度支）", meta: "殿阁", keys: "wenhua officials duzhi 文华殿 百官 度支", run: () => { location.hash = "#wenhua"; showHall(); } },
+    { label: "前往 · 武英殿（实录·驿站·关注）", meta: "殿阁", keys: "wuying records follow 武英殿 实录 关注", run: () => { location.hash = "#wuying"; showHall(); } },
+    { label: "前往 · 起居注（事件簿）", meta: "殿阁", keys: "qiju history 起居注 事件簿", run: () => { location.hash = "#qiju"; showHall(); } },
+    { label: "查看 · 户部度支奏销", meta: "只读", keys: "duzhi budget 度支 奏销 花费", run: () => { location.hash = "#wenhua"; showHall(); $("duzhi-btn")?.click(); } },
+    { label: "导出 · 户部度支报表（CSV / Excel BOM）", meta: "导出", keys: "duzhi export csv excel 度支 导出", run: () => downloadDuzhiExport("csv", true) },
+    { label: "导出 · 户部度支报表（JSON）", meta: "导出", keys: "duzhi export json 度支 导出", run: () => downloadDuzhiExport("json", false) },
+    { label: "查看 · 考成簿", meta: "只读", keys: "kaocheng 考成 政绩", run: () => { location.hash = "#wenhua"; showHall(); $("kaocheng-btn")?.click(); } },
+    { label: "切换主题 · 汝窑天青 / 墨分五色 / 青绿山水", meta: "界面", keys: "theme tianqing mo qinglv 主题 配色", run: () => {
+      const order = ["tianqing", "mo", "qinglv"];
+      const cur = document.documentElement.dataset.theme || "tianqing";
+      setTheme(order[(order.indexOf(cur) + 1) % order.length]);
+      if (state) preserve(render);
+    } },
+  ];
+  if (!viewer) {
+    items.push(
+      { label: "下诏 · 打开新诏令表单", meta: "操作", keys: "edict new 下诏 新建", run: () => { location.hash = "#fengtian"; showHall(); $("edict-new")?.click(); } },
+      { label: "执行 · 执行待办诏令", meta: "操作", keys: "run execute 执行 待办", run: () => $("run-btn")?.click() },
+    );
+  }
+  if (state && Array.isArray(state.tasks)) {
+    for (const t of state.tasks.slice(0, 20)) {
+      const snippet = String(t.text || "").replace(/\s+/g, " ").slice(0, 42);
+      items.push({
+        label: `诏令 #${t.id} · ${snippet}`,
+        meta: statusLabel[t.status] || t.status,
+        keys: `#${t.id} ${t.id} ${t.department || ""} ${snippet}`,
+        run: () => {
+          selected = t.id;
+          location.hash = "#fengtian";
+          showHall();
+          preserve(render);
+        },
+      });
+    }
+  }
+  return items;
+}
+
+function renderCommandPaletteList() {
+  const input = $("cmd-palette-input");
+  const list = $("cmd-palette-list");
+  if (!input || !list) return;
+  const q = input.value.trim().toLowerCase();
+  const terms = q ? q.split(/\s+/) : [];
+  const all = buildCommandPaletteItems();
+  cmdPaletteItems = terms.length
+    ? all.filter((item) => {
+        const hay = `${item.label} ${item.meta} ${item.keys}`.toLowerCase();
+        return terms.every((term) => hay.includes(term));
+      })
+    : all;
+  if (cmdPaletteIndex >= cmdPaletteItems.length) cmdPaletteIndex = 0;
+  list.textContent = "";
+  if (!cmdPaletteItems.length) {
+    const empty = document.createElement("li");
+    empty.className = "cmd-palette-item";
+    empty.textContent = "无匹配指令";
+    list.appendChild(empty);
+    return;
+  }
+  cmdPaletteItems.forEach((item, idx) => {
+    const li = document.createElement("li");
+    li.className = "cmd-palette-item" + (idx === cmdPaletteIndex ? " active" : "");
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", idx === cmdPaletteIndex ? "true" : "false");
+    const title = document.createElement("span");
+    title.textContent = item.label;
+    const meta = document.createElement("span");
+    meta.className = "cmd-meta";
+    meta.textContent = item.meta;
+    li.appendChild(title);
+    li.appendChild(meta);
+    li.addEventListener("mouseenter", () => {
+      cmdPaletteIndex = idx;
+      list.querySelectorAll(".cmd-palette-item").forEach((n, i) => {
+        n.classList.toggle("active", i === idx);
+        n.setAttribute("aria-selected", i === idx ? "true" : "false");
+      });
+    });
+    li.addEventListener("click", () => {
+      closeCommandPalette();
+      item.run();
+    });
+    list.appendChild(li);
+  });
+}
+
+function openCommandPalette() {
+  const modal = $("cmd-palette");
+  const input = $("cmd-palette-input");
+  if (!modal || !input) return;
+  modal.hidden = false;
+  input.value = "";
+  cmdPaletteIndex = 0;
+  renderCommandPaletteList();
+  input.focus();
+}
+
+function closeCommandPalette() {
+  const modal = $("cmd-palette");
+  if (modal) modal.hidden = true;
+}
+
+$("cmd-palette-btn")?.addEventListener("click", openCommandPalette);
+$("cmd-palette-close")?.addEventListener("click", closeCommandPalette);
+$("cmd-palette")?.addEventListener("click", (e) => {
+  if (e.target === $("cmd-palette")) closeCommandPalette();
+});
+$("cmd-palette-input")?.addEventListener("input", () => {
+  cmdPaletteIndex = 0;
+  renderCommandPaletteList();
+});
+$("cmd-palette-input")?.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (cmdPaletteItems.length) {
+      cmdPaletteIndex = (cmdPaletteIndex + 1) % cmdPaletteItems.length;
+      renderCommandPaletteList();
+    }
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (cmdPaletteItems.length) {
+      cmdPaletteIndex = (cmdPaletteIndex - 1 + cmdPaletteItems.length) % cmdPaletteItems.length;
+      renderCommandPaletteList();
+    }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const chosen = cmdPaletteItems[cmdPaletteIndex];
+    if (chosen) {
+      closeCommandPalette();
+      chosen.run();
+    }
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeCommandPalette();
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    const modal = $("cmd-palette");
+    if (modal && !modal.hidden) closeCommandPalette();
+    else openCommandPalette();
+  } else if (e.key === "Escape") {
+    const modal = $("cmd-palette");
+    if (modal && !modal.hidden) closeCommandPalette();
+  }
 });
 
 refresh().then(() => { if (state) connect(); });

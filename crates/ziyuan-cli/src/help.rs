@@ -22,6 +22,8 @@ pub(crate) const HELP: &str = concat!(
                                        批复只读条陈并下发工部写诏令：自动按条陈收窄范围（可 --scope 改定），默认授 write_file 与 run_tests
   ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]
                                        打回已完成的工部诏令再改一轮：携带上轮 diff、都察院逐段意见与批语下发修订诏令
+  ziyuan edict --follow-up <诏令ID> [--dept <部门>] [--scope <路径>]... [--queue] <追问内容>
+                                       基于已完成前件实录发起只读续问／追查：自动带上前件回奏摘要并剥离写／测／外藩权限
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan run --watch [--poll 5] [--no-censor]
@@ -76,8 +78,9 @@ pub(crate) const HELP: &str = concat!(
                                        评定已完成的诏令（吏部考绩只采信评定）
   ziyuan censor <诏令ID|all>           都察院复核回奏：核验引用与测试，御史背书或弹劾，有改动时逐段点评 diff
   ziyuan budget [court|<官职>|<诏令ID> <tokens|default>]
+  ziyuan budget --export <文件> [--format csv|json] [--bom]
                                        户部度支：设朝廷总额、官职每件或某件诏令的 token 上限，用尽即停支（default 取消）；
-                                       不带参数则出具度支奏销（按用途、模型、官员汇总花费）
+                                       不带参数则出具度支奏销；--export 导出 CSV/JSON 报表（--bom 供 Excel 识别中文）
   ziyuan post [--dept works] [--station 驿站] [--urgent] <内容|->
                                        兵部驿传：外部事件（CI 失败、新 issue）入队为诏令，`-` 读标准输入；
                                        默认玉玺（只读），仍须批红、受度支约束；只入队，不执行
@@ -347,13 +350,14 @@ pub(crate) fn completions(shell: Shell) -> String {
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
-         edict) words="--plan --from-plan --revise --note --no-tests --template --dept --scope --tools --mcp --queue" ;;
+         edict) words="--plan --from-plan --revise --follow-up --note --no-tests --template --dept --scope --tools --mcp --queue" ;;
          split) words="--plan --parallel-writes" ;;
          dag) words="add deps --deps --clear --artifact --attempts --budget --deadline --approval --key" ;;
          text) words="{text_words} {text_flags}" ;;
          note) words="add list show edit remove promote help --source --zh --kind --remark --project --block --para --search --json" ;;
          follow) words="add list remove check updates read queue on off help --all --json" ;;
          apply) words="--skip --commit" ;;
+         budget) words="court --export --format --bom" ;;
          {json_cases}) words="--json" ;;
        esac ;;
   esac
@@ -403,6 +407,9 @@ complete -F _ziyuan ziyuan
                 format!("{} -l key -r", seen("dag")),
                 format!("{} -l skip -x", seen("apply")),
                 format!("{} -l commit", seen("apply")),
+                format!("{} -l export -r", seen("budget")),
+                format!("{} -l format -x -a 'csv json'", seen("budget")),
+                format!("{} -l bom", seen("budget")),
                 format!("{} -a '{}'", seen("text"), TEXT_COMPLETION_WORDS),
                 format!("{} -l project -r", seen("text")),
                 format!("{} -l query -r", seen("text")),

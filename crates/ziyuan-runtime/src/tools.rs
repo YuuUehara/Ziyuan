@@ -21,6 +21,7 @@ use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_record
 
 mod failures;
 mod glob;
+mod index;
 mod replace;
 mod symbols;
 pub mod temp_cleanup;
@@ -539,6 +540,8 @@ struct Sandbox {
     test_presets: BTreeMap<String, String>,
     /// 以相对路径为键。
     staged: Mutex<BTreeMap<String, FileChange>>,
+    /// 增量符号与标识符索引缓存（进程内 + `.ziyuan/index/symbols-v1.json`）。
+    symbol_index: Mutex<index::SymbolIndex>,
 }
 
 impl Sandbox {
@@ -572,12 +575,14 @@ impl Sandbox {
                 scope.push(entry);
             }
         }
+        let index_root = root.clone();
         Ok(Self {
             root,
             scope,
             test_command: test_command.map(str::to_owned),
             test_presets,
             staged: Mutex::default(),
+            symbol_index: Mutex::new(index::SymbolIndex::new(index_root)),
         })
     }
 
@@ -1208,11 +1213,16 @@ impl Tool for FileOutline {
             Some(n) if (1..=MAX_OUTLINE_SYMBOLS as i64).contains(&n) => n,
             Some(_) => return Err(format!("limit 须在 1 到 {MAX_OUTLINE_SYMBOLS} 之间").into()),
         };
-        let (display_path, text) = match self.0.staged_entry(&relative) {
+        let (display_path, lang, all) = match self.0.staged_entry(&relative) {
             Some(StagedEntry::Deleted) => return Err(format!("{relative} 已被暂存删除").into()),
             Some(StagedEntry::Content(staged)) => {
                 let (_, key) = self.0.resolve_write(&relative)?;
-                (key, staged)
+                let Some((lang, all)) = symbols::extract_for_path(Path::new(&key), &staged) else {
+                    return Ok(format!(
+                        "{key}：暂不支持该文件类型的符号大纲（支持 Rust、JS/TS、Python、Go、C/C++、Markdown），可用 read_file 查看"
+                    ));
+                };
+                (key, lang, all)
             }
             None => {
                 let resolved = self.0.resolve(&relative)?;
@@ -1221,20 +1231,41 @@ impl Tool for FileOutline {
                         format!("{relative} 是目录，请指定单个文件或使用 find_symbols").into(),
                     );
                 }
-                let len = fs::metadata(&resolved)?.len();
+                let meta = fs::metadata(&resolved)?;
+                let len = meta.len();
                 if len > MAX_OUTLINE_BYTES as u64 {
                     return Err(format!("文件过大（{len} 字节），请改用 read_file 按行读取").into());
                 }
-                let bytes = fs::read(&resolved)?;
-                let text = String::from_utf8(bytes)
-                    .map_err(|_| "不是 UTF-8 文本文件，无法提取符号大纲")?;
-                (self.0.display(&resolved), text)
+                let display_path = self.0.display(&resolved);
+                let stamp = index::FileStamp::from_metadata(&meta);
+                let lang = symbols::Language::from_path(Path::new(&display_path));
+                if let (Some(lang), Some(stamp)) = (lang, stamp) {
+                    let cached = {
+                        let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                        idx.get_symbols(&display_path, stamp)
+                    };
+                    if let Some(syms) = cached {
+                        (display_path, lang, syms)
+                    } else {
+                        let bytes = fs::read(&resolved)?;
+                        let text = String::from_utf8(bytes)
+                            .map_err(|_| "不是 UTF-8 文本文件，无法提取符号大纲")?;
+                        let (_, all) = symbols::extract_for_path(Path::new(&display_path), &text)
+                            .expect("已确认受支持语种");
+                        let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                        idx.put_symbols(display_path.clone(), stamp, &all);
+                        idx.flush_if_dirty();
+                        (display_path, lang, all)
+                    }
+                } else {
+                    let bytes = fs::read(&resolved)?;
+                    let _ = String::from_utf8(bytes)
+                        .map_err(|_| "不是 UTF-8 文本文件，无法提取符号大纲")?;
+                    return Ok(format!(
+                        "{display_path}：暂不支持该文件类型的符号大纲（支持 Rust、JS/TS、Python、Go、C/C++、Markdown），可用 read_file 查看"
+                    ));
+                }
             }
-        };
-        let Some((lang, all)) = symbols::extract_for_path(Path::new(&display_path), &text) else {
-            return Ok(format!(
-                "{display_path}：暂不支持该文件类型的符号大纲（支持 Rust、JS/TS、Python、Go、C/C++、Markdown），可用 read_file 查看"
-            ));
         };
         let filtered: Vec<_> = match kind.as_deref() {
             Some(filter) => all
@@ -1397,11 +1428,14 @@ impl Tool for FindSymbols {
             if symbols::Language::from_path(Path::new(&rel)).is_none() {
                 continue;
             }
-            let text = if let Some(entry) = staged_snapshot.get(&rel) {
+            let syms = if let Some(entry) = staged_snapshot.get(&rel) {
                 let Some(staged) = entry else {
                     continue;
                 };
-                staged.clone()
+                let Some((_, syms)) = symbols::extract_for_path(Path::new(&rel), staged) else {
+                    continue;
+                };
+                syms
             } else if let Some(disk) = disk_path {
                 let Ok(meta) = fs::metadata(&disk) else {
                     continue;
@@ -1409,14 +1443,27 @@ impl Tool for FindSymbols {
                 if meta.len() > MAX_SYMBOL_FILE_BYTES {
                     continue;
                 }
-                let Ok(text) = fs::read_to_string(&disk) else {
-                    continue;
-                };
-                text
+                let stamp = index::FileStamp::from_metadata(&meta);
+                let cached = stamp.and_then(|s| {
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.get_symbols(&rel, s)
+                });
+                if let Some(syms) = cached {
+                    syms
+                } else {
+                    let Ok(text) = fs::read_to_string(&disk) else {
+                        continue;
+                    };
+                    let Some((_, syms)) = symbols::extract_for_path(Path::new(&rel), &text) else {
+                        continue;
+                    };
+                    if let Some(s) = stamp {
+                        let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                        idx.put_symbols(rel.clone(), s, &syms);
+                    }
+                    syms
+                }
             } else {
-                continue;
-            };
-            let Some((_, syms)) = symbols::extract_for_path(Path::new(&rel), &text) else {
                 continue;
             };
             for sym in syms {
@@ -1450,6 +1497,10 @@ impl Tool for FindSymbols {
             }
         }
 
+        {
+            let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+            idx.flush_if_dirty();
+        }
         if page.total == 0 {
             return Ok("未找到匹配的符号".into());
         }
@@ -1461,14 +1512,10 @@ impl Tool for FindSymbols {
         }
         let from = page.offset + 1;
         let to = page.offset + page.hits.len();
-        let mut out = page.hits.join(
-            "
-",
-        );
+        let mut out = page.hits.join("\n");
         if page.total > page.hits.len() || page.offset > 0 {
             out.push_str(&format!(
-                "
-[共 {} 个符号，当前第 {from}–{to} 个]",
+                "\n[共 {} 个符号，当前第 {from}–{to} 个]",
                 page.total
             ));
         }
@@ -1554,11 +1601,24 @@ impl Tool for FindReferences {
             if !is_reference_candidate(&rel, explicit_target) {
                 continue;
             }
-            let text = if let Some(entry) = staged_snapshot.get(&rel) {
+            let rel_path = Path::new(&rel);
+            let (text, stripped, def_lines) = if let Some(entry) = staged_snapshot.get(&rel) {
                 let Some(staged) = entry else {
                     continue;
                 };
-                staged.clone()
+                if !staged.contains(&symbol) {
+                    continue;
+                }
+                let def_lines: BTreeSet<usize> = symbols::extract_for_path(rel_path, staged)
+                    .map(|(_, syms)| {
+                        syms.into_iter()
+                            .filter(|s| s.name == symbol)
+                            .map(|s| s.line)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let stripped = symbols::strip_code_lines(rel_path, staged);
+                (staged.clone(), stripped, def_lines)
             } else if let Some(disk) = disk_path {
                 let Ok(meta) = fs::metadata(&disk) else {
                     continue;
@@ -1566,26 +1626,47 @@ impl Tool for FindReferences {
                 if meta.len() > MAX_SYMBOL_FILE_BYTES {
                     continue;
                 }
+                let stamp = index::FileStamp::from_metadata(&meta);
+                let bloom_check = stamp.and_then(|s| {
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.might_contain_ident(&rel, s, &symbol)
+                });
+                if bloom_check == Some(false) {
+                    continue;
+                }
                 let Ok(text) = fs::read_to_string(&disk) else {
                     continue;
                 };
-                text
+                let stripped = symbols::strip_code_lines(rel_path, &text);
+                let cached_syms = stamp.and_then(|s| {
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.get_symbols(&rel, s)
+                });
+                let syms = match cached_syms {
+                    Some(s) => s,
+                    None => symbols::extract_for_path(rel_path, &text)
+                        .map(|(_, s)| s)
+                        .unwrap_or_default(),
+                };
+                if bloom_check.is_none()
+                    && let Some(s) = stamp
+                {
+                    let bloom = index::build_ident_bloom(&stripped);
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.put_symbols_and_bloom(rel.clone(), s, &syms, bloom);
+                }
+                if !text.contains(&symbol) {
+                    continue;
+                }
+                let def_lines: BTreeSet<usize> = syms
+                    .into_iter()
+                    .filter(|s| s.name == symbol)
+                    .map(|s| s.line)
+                    .collect();
+                (text, stripped, def_lines)
             } else {
                 continue;
             };
-            if !text.contains(&symbol) {
-                continue;
-            }
-            let rel_path = Path::new(&rel);
-            let def_lines: BTreeSet<usize> = symbols::extract_for_path(rel_path, &text)
-                .map(|(_, syms)| {
-                    syms.into_iter()
-                        .filter(|s| s.name == symbol)
-                        .map(|s| s.line)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let stripped = symbols::strip_code_lines(rel_path, &text);
             for (idx, (raw_line, code_line)) in text.lines().zip(stripped.iter()).enumerate() {
                 if !symbols::has_whole_ident(code_line, &symbol) {
                     continue;
@@ -1603,6 +1684,10 @@ impl Tool for FindReferences {
             }
         }
 
+        {
+            let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+            idx.flush_if_dirty();
+        }
         if page.total == 0 {
             return Ok(format!("未找到符号 `{symbol}` 的引用"));
         }
@@ -4274,6 +4359,110 @@ export function bootUi() {}
             elapsed < Duration::from_secs(5),
             "取消传播过慢: {elapsed:?}"
         );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn symbol_index_persists_invalidates_and_respects_staged_edits() {
+        let dir = workspace("symbol-index-e2e");
+        let root = dir.join("project");
+        fs::create_dir_all(root.join(".ziyuan")).unwrap();
+        fs::write(
+            root.join("src/alpha.rs"),
+            "pub fn alpha_calc(x: i32) -> i32 { x + 1 }\npub fn caller() -> i32 { alpha_calc(41) }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/beta.rs"),
+            "pub fn beta_only() -> i32 { 7 }\n",
+        )
+        .unwrap();
+
+        let run_seal = seal(
+            &[
+                Capability::ReadFile,
+                Capability::SearchCode,
+                Capability::WriteFile,
+            ],
+            &["src"],
+        );
+        let sealed1 = sealed_tools(&root, &run_seal, None).unwrap();
+        fn find_tool<'a>(sealed: &'a Sealed, name: &str) -> &'a dyn Tool {
+            sealed
+                .tools
+                .iter()
+                .find(|t| t.spec().name == name)
+                .unwrap()
+                .as_ref()
+        }
+
+        let outline1 = find_tool(&sealed1, "file_outline")
+            .execute(r#"{"path":"src/alpha.rs"}"#)
+            .unwrap();
+        assert!(outline1.contains("alpha_calc"), "{outline1}");
+
+        let syms1 = find_tool(&sealed1, "find_symbols")
+            .execute(r#"{"query":"alpha_calc"}"#)
+            .unwrap();
+        assert!(syms1.contains("src/alpha.rs"), "{syms1}");
+
+        let refs1 = find_tool(&sealed1, "find_references")
+            .execute(r#"{"symbol":"alpha_calc"}"#)
+            .unwrap();
+        assert!(refs1.contains("[定义]"), "{refs1}");
+        assert!(refs1.contains("[引用]"), "{refs1}");
+
+        let cache_file = root.join(".ziyuan/index/symbols-v1.json");
+        assert!(cache_file.exists(), "应持久化符号索引缓存");
+
+        // 新建 Sandbox 命中磁盘缓存，结果应完全一致。
+        let sealed2 = sealed_tools(&root, &run_seal, None).unwrap();
+        let syms2 = find_tool(&sealed2, "find_symbols")
+            .execute(r#"{"query":"alpha_calc"}"#)
+            .unwrap();
+        assert_eq!(syms1, syms2);
+        let refs2 = find_tool(&sealed2, "find_references")
+            .execute(r#"{"symbol":"alpha_calc"}"#)
+            .unwrap();
+        assert_eq!(refs1, refs2);
+
+        // 磁盘文件修改（尺寸变化即刻失效），应反映新符号。
+        fs::write(
+            root.join("src/beta.rs"),
+            "pub fn beta_only() -> i32 { 7 }\npub fn beta_fresh_symbol() -> i32 { alpha_calc(2) }\n",
+        )
+        .unwrap();
+        let syms3 = find_tool(&sealed2, "find_symbols")
+            .execute(r#"{"query":"beta_fresh_symbol"}"#)
+            .unwrap();
+        assert!(syms3.contains("beta_fresh_symbol"), "{syms3}");
+        let refs3 = find_tool(&sealed2, "find_references")
+            .execute(r#"{"symbol":"alpha_calc"}"#)
+            .unwrap();
+        assert!(refs3.contains("src/beta.rs"), "{refs3}");
+
+        // 暂存改动优先于磁盘与缓存，且不污染磁盘缓存。
+        find_tool(&sealed2, "write_file")
+            .execute(
+                r#"{"path":"src/alpha.rs","content":"pub fn staged_only_fn() -> i32 { 99 }\n"}"#,
+            )
+            .unwrap();
+        let staged_outline = find_tool(&sealed2, "file_outline")
+            .execute(r#"{"path":"src/alpha.rs"}"#)
+            .unwrap();
+        assert!(
+            staged_outline.contains("staged_only_fn"),
+            "{staged_outline}"
+        );
+        assert!(!staged_outline.contains("alpha_calc"), "{staged_outline}");
+
+        let sealed3 = sealed_tools(&root, &run_seal, None).unwrap();
+        let disk_outline = find_tool(&sealed3, "file_outline")
+            .execute(r#"{"path":"src/alpha.rs"}"#)
+            .unwrap();
+        assert!(disk_outline.contains("alpha_calc"), "{disk_outline}");
+        assert!(!disk_outline.contains("staged_only_fn"), "{disk_outline}");
 
         fs::remove_dir_all(dir).unwrap();
     }

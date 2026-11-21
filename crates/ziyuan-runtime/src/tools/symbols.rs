@@ -128,7 +128,7 @@ pub(super) fn extract(lang: Language, text: &str) -> Vec<Symbol> {
     }
 }
 
-fn is_ref_ident_char(c: char) -> bool {
+pub(super) fn is_ref_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 

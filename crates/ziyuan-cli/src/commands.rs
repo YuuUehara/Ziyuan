@@ -18,7 +18,7 @@ use ziyuan_llm::price_for;
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventLog, ExecutorLock};
 
-use crate::args::{Command, GitHubAction};
+use crate::args::{BudgetExportFormat, Command, GitHubAction};
 use crate::backend::{DEFAULT_LIMITS, env_model, model_label, plan_free, worker_backend};
 use crate::output::{StreamPrinter, changes_note, cost_note, print_draft, print_report};
 
@@ -290,6 +290,53 @@ pub(crate) fn execute(
                 println!(
                     "已打回诏令 #{} 下发工部修订诏令 #{}（入队）{}",
                     source.0,
+                    edict.id.0,
+                    seal_note(&edict.seal)
+                );
+            } else {
+                let limits = Limits {
+                    max_concurrent: 1,
+                    ..DEFAULT_LIMITS
+                };
+                let backend = backend.expect("立即执行时已构造后端");
+                run_tasks(session, Some(&[edict.id]), backend, limits)?;
+            }
+            drop(executor);
+        }
+        Command::EdictFollowUp {
+            source,
+            department,
+            scope,
+            queue,
+            question,
+        } => {
+            let executor = if queue { None } else { Some(lock_executor()?) };
+            let scope_override = (!scope.is_empty()).then_some(scope);
+            let (edict, draft) = session.issue_follow_up(
+                source,
+                &env::current_dir()?,
+                department,
+                scope_override,
+                question,
+            )?;
+            let backend = if queue { None } else { Some(worker_backend()?) };
+            if let Some(backend) = &backend
+                && session.court().mode() == GovernanceMode::Cabinet
+            {
+                session.draft(edict.id, backend.as_ref())?;
+                print_draft(session, edict.id);
+                if session.court().in_retreat() {
+                    println!("陛下修道，司礼监代批红。");
+                } else {
+                    session.approve(edict.id)?;
+                    println!("朱笔批红。");
+                }
+            }
+            if queue {
+                println!(
+                    "已依前件 #{} 下发{}只读续问诏令 #{}（入队）{}",
+                    source.0,
+                    draft.department.label(),
                     edict.id.0,
                     seal_note(&edict.seal)
                 );
@@ -946,6 +993,39 @@ pub(crate) fn execute(
                 Some(t) => println!("诏令已颁：户部度支 · {}：限 {t} tokens。", scope.label()),
                 None => println!("诏令已颁：户部度支 · {}：取消限额。", scope.label()),
             }
+        }
+        Command::BudgetExport {
+            output,
+            format,
+            bom,
+        } => {
+            let model = env_model();
+            let default = model.as_ref().map(|m| m.model().to_owned());
+            let price = |m: &str| plan_free(model.as_ref()).then(|| price_for(m)).flatten();
+            let exported = ziyuan_app::duzhi_export(session.court(), default.as_deref(), price);
+            let content = match format {
+                BudgetExportFormat::Csv => ziyuan_app::duzhi_export_csv(&exported, bom),
+                BudgetExportFormat::Json => {
+                    serde_json::to_string_pretty(&ziyuan_app::duzhi_export_json(&exported))? + "\n"
+                }
+            };
+            if let Some(parent) = output.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&output, content.as_bytes())?;
+            let label = match format {
+                BudgetExportFormat::Csv if bom => "CSV（UTF-8 BOM）",
+                BudgetExportFormat::Csv => "CSV",
+                BudgetExportFormat::Json => "JSON",
+            };
+            println!(
+                "户部度支报表已导出至 {}（{label}，共 {} 行明细，总计 {} tokens）。",
+                output.display(),
+                exported.rows.len(),
+                exported.total_tokens
+            );
         }
         Command::Debate(task, members, rounds) => {
             let backend = worker_backend()?;

@@ -1950,3 +1950,199 @@ fn sse_forward_emits_live_tool_progress_events() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn follow_up_api_issues_read_only_task_and_blocks_viewer() {
+    let (base, root) = start("follow-up-api").await;
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn v() -> u32 { 1 }\n").unwrap();
+
+    let (status, issued) = call(
+        &base,
+        "/edicts",
+        Some(TOKEN),
+        Some(json!({
+            "department": "works",
+            "text": "实现 v()",
+            "scope": ["src"],
+            "tools": ["read_file", "write_file", "run_tests"],
+            "run": false
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{issued}");
+    let id = issued["id"].as_u64().unwrap();
+
+    // 直接通过事件簿完成该诏令，检验 follow_up_draft 与 POST /tasks/{id}/follow-up。
+    let session = Session::open(EventLog::new(&root)).unwrap();
+    let worker = session.court().agents().next().unwrap().id;
+    let mut log = EventLog::new(&root);
+    let expected = log.load().unwrap().len();
+    log.append(
+        expected,
+        &[
+            CourtEvent::TaskAssigned {
+                task: TaskId(id),
+                worker,
+                model: None,
+            },
+            CourtEvent::TaskCompleted {
+                task: TaskId(id),
+                worker,
+                summary: "已完成初版实现。".into(),
+            },
+        ],
+    )
+    .unwrap();
+
+    let (status, state) = call(&base, "/state", Some(TOKEN), None).await;
+    assert_eq!(status, 200);
+    let prior = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap();
+    assert!(prior["follow_up_draft"].is_object(), "{prior}");
+
+    // 观政令牌不得发起续问。
+    let (status, _) = call(
+        &base,
+        &format!("/tasks/{id}/follow-up"),
+        Some(VIEWER),
+        Some(json!({ "question": "检查边界条件" })),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    // 皇帝令牌发起续问，应强制剥离写/测权限。
+    let (status, created) = call(
+        &base,
+        &format!("/tasks/{id}/follow-up"),
+        Some(TOKEN),
+        Some(json!({
+            "department": "rites",
+            "scope": ["src"],
+            "question": "核查文档是否同步"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["department"], "rites");
+    assert_eq!(created["scope"], json!(["src"]));
+    let new_id = created["id"].as_u64().unwrap();
+
+    let session = Session::open(EventLog::new(&root)).unwrap();
+    let follow = session.court().task(TaskId(new_id)).unwrap();
+    assert_eq!(follow.edict.department, Department::Rites);
+    assert!(
+        !follow
+            .edict
+            .seal
+            .capabilities
+            .contains(&ziyuan_core::Capability::WriteFile)
+    );
+    assert!(
+        !follow
+            .edict
+            .seal
+            .capabilities
+            .contains(&ziyuan_core::Capability::RunTests)
+    );
+    assert!(
+        follow
+            .edict
+            .seal
+            .capabilities
+            .contains(&ziyuan_core::Capability::ReadFile)
+    );
+    assert!(
+        follow
+            .edict
+            .seal
+            .capabilities
+            .contains(&ziyuan_core::Capability::SearchCode)
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duzhi_export_endpoint_serves_csv_with_bom_and_json_for_viewer() {
+    let (base, root) = start("duzhi-export-api").await;
+
+    let mut session = Session::open(EventLog::new(&root)).unwrap();
+    let edict = session
+        .issue(Department::Works, "查度支导出".into(), Seal::default())
+        .unwrap();
+    let worker = session.court().agents().next().unwrap().id;
+    let mut log = EventLog::new(&root);
+    let expected = log.load().unwrap().len();
+    log.append(
+        expected,
+        &[
+            CourtEvent::TaskAssigned {
+                task: edict.id,
+                worker,
+                model: Some("test-model".into()),
+            },
+            CourtEvent::ModelUsage {
+                task: edict.id,
+                usage: TokenUsage::with_cache(800, 200, 300, 50),
+                trace: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    let fetch_raw = |url: String, token: &'static str| async move {
+        tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut resp = agent
+                .get(&url)
+                .header("Authorization", &format!("Bearer {token}"))
+                .call()
+                .unwrap();
+            let status = resp.status().as_u16();
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let cd = resp
+                .headers()
+                .get("content-disposition")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let body = resp.body_mut().read_to_string().unwrap();
+            (status, ct, cd, body)
+        })
+        .await
+        .unwrap()
+    };
+
+    // 观政令牌也可下载 CSV（带 BOM）与 JSON。
+    let (status, ct, cd, csv) =
+        fetch_raw(format!("{base}/api/duzhi/export?format=csv&bom=1"), VIEWER).await;
+    assert_eq!(status, 200);
+    assert_eq!(ct.as_deref(), Some("text/csv; charset=utf-8"));
+    assert!(cd.as_deref().unwrap_or("").contains("duzhi-report.csv"));
+    assert!(csv.starts_with('\u{feff}'));
+    assert!(csv.contains("总计,全部用量,1000"), "{csv}");
+    assert!(csv.contains("模型,test-model,1000"), "{csv}");
+
+    let (status, ct, cd, json_str) =
+        fetch_raw(format!("{base}/api/duzhi/export?format=json"), VIEWER).await;
+    assert_eq!(status, 200);
+    assert_eq!(ct.as_deref(), Some("application/json; charset=utf-8"));
+    assert!(cd.as_deref().unwrap_or("").contains("duzhi-report.json"));
+    let parsed: Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(parsed["total_tokens"], 1000);
+    assert_eq!(parsed["cache_read_tokens"], 300);
+
+    let (status, _, _, _) = fetch_raw(format!("{base}/api/duzhi/export?format=xml"), TOKEN).await;
+    assert_eq!(status, 400);
+
+    std::fs::remove_dir_all(root).unwrap();
+}

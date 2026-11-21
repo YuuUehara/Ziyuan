@@ -290,6 +290,202 @@ pub fn duzhi_report(
     out
 }
 
+/// 户部度支导出的一条明细行（按用途、模型或承办官员汇总）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct DuzhiRow {
+    pub dimension: String,
+    pub key: String,
+    pub tokens: u64,
+    pub cost: Option<f64>,
+    pub currency: Option<String>,
+}
+
+/// 户部度支限额项（朝廷总额、官职单件限额或诏令限额）。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct DuzhiBudget {
+    pub scope: String,
+    pub limit: u64,
+    pub used: Option<u64>,
+    pub remaining: Option<u64>,
+}
+
+/// 户部度支结构化导出数据（供 CSV / JSON 报表共用）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct DuzhiExport {
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cache_hit_rate: Option<f64>,
+    pub court_limit: Option<u64>,
+    pub court_remaining: Option<u64>,
+    pub budgets: Vec<DuzhiBudget>,
+    pub rows: Vec<DuzhiRow>,
+}
+
+/// 生成户部度支结构化报表：包含总用量、缓存命中、各级限额与按用途／模型／承办官员汇总明细。
+pub fn duzhi_export(
+    court: &Court,
+    default_model: Option<&str>,
+    price: impl Fn(&str) -> Option<Price>,
+) -> DuzhiExport {
+    let total_usage = court.total_usage();
+    let used = total_usage.total();
+    let court_limit = court.budget(BudgetScope::Court);
+    let court_remaining = court_limit.map(|limit| limit.saturating_sub(used));
+
+    let mut budgets = Vec::new();
+    if let Some(limit) = court_limit {
+        budgets.push(DuzhiBudget {
+            scope: "朝廷".into(),
+            limit,
+            used: Some(used),
+            remaining: Some(limit.saturating_sub(used)),
+        });
+    }
+    for office in Office::all() {
+        if let Some(limit) = court.budget(BudgetScope::Office(office)) {
+            budgets.push(DuzhiBudget {
+                scope: format!("{}（每件）", office.label()),
+                limit,
+                used: None,
+                remaining: None,
+            });
+        }
+    }
+    for task in court.tasks() {
+        if let Some(limit) = task.budget {
+            let task_used = task.usage.total();
+            budgets.push(DuzhiBudget {
+                scope: format!("诏令 #{}", task.edict.id.0),
+                limit,
+                used: Some(task_used),
+                remaining: Some(limit.saturating_sub(task_used)),
+            });
+        }
+    }
+
+    type Tally = BTreeMap<String, (u64, f64, String)>;
+    let (mut by_use, mut by_model, mut by_official) = (Tally::new(), Tally::new(), Tally::new());
+    let who = |id: AgentId| {
+        court
+            .agent(id)
+            .map_or("?".to_owned(), |a| format!("#{} {}", a.id.0, a.name))
+    };
+    let mut items: Vec<(&str, TokenUsage, Option<&str>, String)> = Vec::new();
+    for task in court.tasks() {
+        let handler = task.handler().map_or("未承办".to_owned(), who);
+        for (purpose, usage, model) in spending(task) {
+            items.push((purpose, usage, model, handler.clone()));
+        }
+    }
+    for exam in court.exams() {
+        items.push(("科举", exam.usage, exam.model.as_deref(), who(exam.agent)));
+    }
+    for answer in court.palace_exams().iter().flat_map(|p| &p.answers) {
+        let model = answer.model.as_deref();
+        items.push(("殿试", answer.usage, model, who(answer.speaker)));
+    }
+    for (purpose, usage, model, official) in items {
+        if usage.total() == 0 {
+            continue;
+        }
+        let model = model.or(default_model);
+        let cost = model.and_then(&price).map(|p| (p.cost(usage), p.currency));
+        let keys = [
+            (&mut by_use, purpose.to_owned()),
+            (&mut by_model, model.unwrap_or("未记模型").to_owned()),
+            (&mut by_official, official),
+        ];
+        for (tally, key) in keys {
+            let entry = tally.entry(key).or_default();
+            entry.0 += usage.total();
+            if let Some((c, currency)) = &cost {
+                entry.1 += c;
+                entry.2.clone_from(currency);
+            }
+        }
+    }
+
+    let mut rows = Vec::new();
+    for (dimension, tally) in [
+        ("用途", by_use),
+        ("模型", by_model),
+        ("承办官员", by_official),
+    ] {
+        for (key, (tokens, cost, currency)) in tally {
+            let (cost, currency) = if currency.is_empty() {
+                (None, None)
+            } else {
+                (Some((cost * 10_000.0).round() / 10_000.0), Some(currency))
+            };
+            rows.push(DuzhiRow {
+                dimension: dimension.into(),
+                key,
+                tokens,
+                cost,
+                currency,
+            });
+        }
+    }
+
+    DuzhiExport {
+        total_tokens: used,
+        input_tokens: total_usage.input,
+        output_tokens: total_usage.output,
+        cache_read_tokens: total_usage.cache_read,
+        cache_write_tokens: total_usage.cache_write,
+        cache_hit_rate: total_usage.cache_hit_rate(),
+        court_limit,
+        court_remaining,
+        budgets,
+        rows,
+    }
+}
+
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_owned()
+    }
+}
+
+/// 把度支结构化报表编码为 RFC 4180 CSV（`bom` 为 `true` 时加 UTF-8 BOM，便于 Excel 直接打开）。
+pub fn duzhi_export_csv(export: &DuzhiExport, bom: bool) -> String {
+    let mut out = String::new();
+    if bom {
+        out.push('\u{feff}');
+    }
+    out.push_str("维度,名称,tokens,估算花费,币种\n");
+    out.push_str(&format!("总计,全部用量,{},,\n", export.total_tokens));
+    out.push_str(&format!("总计,输入,{},,\n", export.input_tokens));
+    out.push_str(&format!("总计,输出,{},,\n", export.output_tokens));
+    if export.cache_read_tokens > 0 || export.cache_write_tokens > 0 {
+        out.push_str(&format!("总计,缓存命中,{},,\n", export.cache_read_tokens));
+        out.push_str(&format!("总计,缓存写入,{},,\n", export.cache_write_tokens));
+    }
+    for row in &export.rows {
+        let cost = row.cost.map(|c| format!("{c:.4}")).unwrap_or_default();
+        let currency = row.currency.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "{},{},{},{},{}\n",
+            csv_escape(&row.dimension),
+            csv_escape(&row.key),
+            row.tokens,
+            cost,
+            csv_escape(currency),
+        ));
+    }
+    out
+}
+
+/// 把度支结构化报表序列化为 JSON 值。
+pub fn duzhi_export_json(export: &DuzhiExport) -> serde_json::Value {
+    serde_json::to_value(export).expect("DuzhiExport 序列化不失败")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +521,72 @@ mod tests {
             report.contains("提示词缓存：命中 600 tokens（命中率 60.0%），写入 200 tokens"),
             "{report}"
         );
+    }
+
+    #[test]
+    fn duzhi_export_produces_structured_json_and_rfc4180_csv_with_optional_bom() {
+        let mut court = Court::replay(&ziyuan_governance::founding_events(1)).unwrap();
+        let edict = court
+            .new_edict(Department::Works, "查度支".into(), Seal::default())
+            .unwrap();
+        let worker = court.route(&edict).unwrap().worker;
+        for event in [
+            CourtEvent::BudgetSet {
+                scope: BudgetScope::Court,
+                tokens: Some(10_000),
+            },
+            CourtEvent::EdictIssued(Box::new(edict)),
+            CourtEvent::TaskAssigned {
+                task: TaskId(1),
+                worker,
+                model: Some("model,with\"quote".into()),
+            },
+            CourtEvent::ModelUsage {
+                task: TaskId(1),
+                usage: TokenUsage::with_cache(1000, 200, 400, 100),
+                trace: None,
+            },
+        ] {
+            court.apply(&event).unwrap();
+        }
+        let price = |m: &str| {
+            (m == "model,with\"quote").then(|| Price {
+                input_per_million: 10.0,
+                output_per_million: 20.0,
+                currency: "元".into(),
+            })
+        };
+        let exported = duzhi_export(&court, None, price);
+        assert_eq!(exported.total_tokens, 1200);
+        assert_eq!(exported.court_limit, Some(10_000));
+        assert_eq!(exported.court_remaining, Some(8_800));
+        assert!(
+            exported
+                .rows
+                .iter()
+                .any(|r| r.dimension == "用途" && r.key == "承办")
+        );
+        assert!(
+            exported
+                .rows
+                .iter()
+                .any(|r| r.dimension == "模型" && r.cost.is_some())
+        );
+
+        let csv_plain = duzhi_export_csv(&exported, false);
+        assert!(csv_plain.starts_with("维度,名称,tokens,估算花费,币种\n"));
+        assert!(
+            csv_plain.contains("模型,\"model,with\"\"quote\",1200,0.0140,元\n"),
+            "{csv_plain}"
+        );
+        assert!(csv_plain.contains("总计,缓存命中,400,,\n"));
+
+        let csv_bom = duzhi_export_csv(&exported, true);
+        assert!(csv_bom.starts_with('\u{feff}'));
+        assert_eq!(&csv_bom['\u{feff}'.len_utf8()..], csv_plain);
+
+        let val = duzhi_export_json(&exported);
+        assert_eq!(val["total_tokens"], 1200);
+        assert_eq!(val["budgets"][0]["scope"], "朝廷");
     }
 }

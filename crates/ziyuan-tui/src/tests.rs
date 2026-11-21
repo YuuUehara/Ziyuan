@@ -1321,3 +1321,85 @@ fn live_tool_progress_renders_in_detail_and_clears_on_finish() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn follow_up_modal_and_translation_overview_key_work_in_tui() {
+    let (mut app, _rx, root) = temp_app("followup_and_overview");
+    // B 键在空译书目录下应给出清晰引导弹窗。
+    press(&mut app, "B");
+    let empty_overview = screen_at(&app, 120, 30);
+    assert!(
+        empty_overview.contains("翰林院译书概览"),
+        "{empty_overview}"
+    );
+    assert!(
+        empty_overview.contains("尚未建立译书项目"),
+        "{empty_overview}"
+    );
+    // 任意键关闭。
+    press(&mut app, " ");
+    assert!(app.modal.is_none());
+
+    // 建一件已完成诏令，按 Q 打开只读续问弹窗并下发。
+    let edict = app
+        .session
+        .issue(
+            Department::Works,
+            "先完成一项检查".into(),
+            Seal {
+                scope: vec![".".into()],
+                capabilities: [Capability::ReadFile, Capability::WriteFile]
+                    .into_iter()
+                    .collect(),
+                mcp: Default::default(),
+            },
+        )
+        .unwrap();
+    let worker = app.court().agents().next().unwrap().id;
+    let mut log = ziyuan_storage::EventLog::new(&root);
+    let expected = ziyuan_storage::EventStore::load(&log).unwrap().len();
+    ziyuan_storage::EventStore::append(
+        &mut log,
+        expected,
+        &[
+            ziyuan_core::CourtEvent::TaskAssigned {
+                task: edict.id,
+                worker,
+                model: None,
+            },
+            ziyuan_core::CourtEvent::TaskCompleted {
+                task: edict.id,
+                worker,
+                summary: "检查完毕，未发现异常。".into(),
+            },
+        ],
+    )
+    .unwrap();
+    app.reload();
+    app.selected_task = Some(edict.id);
+
+    press(&mut app, "Q");
+    let modal_screen = screen_at(&app, 120, 30);
+    assert!(modal_screen.contains("只读续问"), "{modal_screen}");
+    press(&mut app, "复核边界情况\n");
+    assert!(app.modal.is_none());
+    assert_eq!(app.court().tasks().count(), 2);
+    let follow = app.court().task(TaskId(2)).unwrap();
+    assert!(
+        !follow
+            .edict
+            .seal
+            .capabilities
+            .contains(&Capability::WriteFile)
+    );
+    assert!(
+        follow
+            .edict
+            .seal
+            .capabilities
+            .contains(&Capability::ReadFile)
+    );
+    assert!(follow.edict.text.contains("复核边界情况"));
+
+    let _ = std::fs::remove_dir_all(root);
+}

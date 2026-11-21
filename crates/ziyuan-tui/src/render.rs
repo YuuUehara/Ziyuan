@@ -1043,6 +1043,7 @@ impl App {
                 ("T", "模板"),
                 ("P", "依条陈写"),
                 ("V", "打回再改"),
+                ("Q", "续问"),
                 ("r", "执行"),
                 ("s", "停止"),
                 ("c", "撤销"),
@@ -1061,6 +1062,7 @@ impl App {
                 ("U", "加急"),
                 ("K", "考成"),
                 ("H", "度支"),
+                ("B", "译书"),
                 ("D", "修道/回朝"),
                 ("g", "改制"),
                 ("Tab", "切换"),
@@ -1124,6 +1126,7 @@ impl App {
                     InputKind::Revise(_) => {
                         ("打回再改一轮（工部修订）", "修订指示（可空）：", false)
                     }
+                    InputKind::FollowUp(_) => ("只读续问／追查", "追问内容：", true),
                     InputKind::Recruit => ("招募官员", "姓名（留空随机）：", true),
                     InputKind::Review(_, verdict) => (
                         if *verdict == Verdict::Accepted {
@@ -1148,6 +1151,7 @@ impl App {
                     | InputKind::Skip(task)
                     | InputKind::FromPlan(task)
                     | InputKind::Revise(task)
+                    | InputKind::FollowUp(task)
                     | InputKind::DagAdd(task)
                     | InputKind::DagDeps(task) => {
                         format!("{title} · 诏令 #{}", task.0)
@@ -1159,8 +1163,9 @@ impl App {
                     kind,
                     InputKind::Edict | InputKind::FromPlan(_) | InputKind::Revise(_)
                 );
+                let follow_up = matches!(kind, InputKind::FollowUp(_));
                 let dag_add = matches!(kind, InputKind::DagAdd(_));
-                let multi = edict || dag_add;
+                let multi = edict || dag_add || follow_up;
                 let popup = centered(
                     area,
                     72,
@@ -1194,6 +1199,8 @@ impl App {
                 if edict {
                     fields.push(("范围（空为整个项目）：", scope.as_str(), 1));
                     fields.push(("工具（空为只读，none 为不授）：", tools.as_str(), 2));
+                } else if follow_up {
+                    fields.push(("范围（留空沿用前件，仅只读玉玺）：", scope.as_str(), 1));
                 } else if dag_add {
                     fields.push(("承办官 ID（如 2，留空自动）：", scope.as_str(), 1));
                     fields.push(("前置依赖 ID（逗号分隔，可空）：", tools.as_str(), 2));

@@ -55,6 +55,14 @@ pub(crate) enum Command {
         queue: bool,
         note: String,
     },
+    /// 基于已完成前件实录的只读续问／追查闭环。
+    EdictFollowUp {
+        source: TaskId,
+        department: Option<Department>,
+        scope: Vec<String>,
+        queue: bool,
+        question: String,
+    },
     /// 翰林院：列出模板。
     Templates,
     /// 外藩名册。
@@ -165,6 +173,12 @@ pub(crate) enum Command {
     Pardon(AgentId),
     /// `None` 出具度支奏销；否则设定度支（`None` 额度为取消）。
     Budget(Option<(BudgetScope, Option<u64>)>),
+    /// 导出户部度支报表（CSV / JSON）。
+    BudgetExport {
+        output: std::path::PathBuf,
+        format: BudgetExportFormat,
+        bom: bool,
+    },
     /// 准奏（驳回其中若干段）。
     /// 准奏：逐段驳回的段号；`true` 落盘后记为一个 jj/git 提交。
     Apply(TaskId, Vec<u32>, bool),
@@ -186,6 +200,12 @@ pub(crate) enum Command {
     Note(crate::note_commands::NoteAction),
     /// 作品关注与更新列表：不开朝廷会话。
     Follow(FollowAction),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BudgetExportFormat {
+    Csv,
+    Json,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -385,25 +405,78 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             _ => return Err("用法: ziyuan flags [诏令ID]".into()),
         },
         "budget" => {
-            const USAGE: &str = "用法: ziyuan budget [court|<官职>|<诏令ID> <tokens|default>]";
-            match args.as_slice() {
-                [] => Command::Budget(None),
-                [scope, amount] => {
-                    let scope = match scope.as_str() {
-                        "court" => BudgetScope::Court,
-                        s if s.bytes().all(|b| b.is_ascii_digit()) => {
-                            BudgetScope::Task(TaskId(s.parse().map_err(|_| USAGE)?))
+            const USAGE: &str = "用法: ziyuan budget [court|<官职>|<诏令ID> <tokens|default>] | ziyuan budget --export <文件> [--format csv|json] [--bom]";
+            if args
+                .iter()
+                .any(|a| a == "--export" || a == "--format" || a == "--bom")
+            {
+                let mut output: Option<std::path::PathBuf> = None;
+                let mut format: Option<BudgetExportFormat> = None;
+                let mut bom = false;
+                let mut it = args.into_iter();
+                while let Some(arg) = it.next() {
+                    match arg.as_str() {
+                        "--export" => {
+                            let path = it.next().ok_or("--export 需要输出文件路径")?;
+                            if path.trim().is_empty() {
+                                return Err("--export 路径不能为空".into());
+                            }
+                            output = Some(std::path::PathBuf::from(path));
                         }
-                        s => BudgetScope::Office(s.parse()?),
-                    };
-                    let tokens = match amount.as_str() {
-                        // 「恢复默认」统一写 default；none 是 v0.6 及以前的写法，仍然接受。
-                        "default" | "none" => None,
-                        n => Some(n.parse().map_err(|_| "额度须为 tokens 数或 default")?),
-                    };
-                    Command::Budget(Some((scope, tokens)))
+                        "--format" => {
+                            let value = it.next().ok_or("--format 需要 csv 或 json")?;
+                            format = Some(match value.to_ascii_lowercase().as_str() {
+                                "csv" => BudgetExportFormat::Csv,
+                                "json" => BudgetExportFormat::Json,
+                                other => {
+                                    return Err(format!(
+                                        "不支持的导出格式「{other}」（可用 csv 或 json）"
+                                    )
+                                    .into());
+                                }
+                            });
+                        }
+                        "--bom" => bom = true,
+                        _ => return Err(USAGE.into()),
+                    }
                 }
-                _ => return Err(USAGE.into()),
+                let output = output.ok_or("导出度支报表须指定 --export <文件路径>")?;
+                let format = format.unwrap_or_else(|| {
+                    if output
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                    {
+                        BudgetExportFormat::Json
+                    } else {
+                        BudgetExportFormat::Csv
+                    }
+                });
+                Command::BudgetExport {
+                    output,
+                    format,
+                    bom,
+                }
+            } else {
+                match args.as_slice() {
+                    [] => Command::Budget(None),
+                    [scope, amount] => {
+                        let scope = match scope.as_str() {
+                            "court" => BudgetScope::Court,
+                            s if s.bytes().all(|b| b.is_ascii_digit()) => {
+                                BudgetScope::Task(TaskId(s.parse().map_err(|_| USAGE)?))
+                            }
+                            s => BudgetScope::Office(s.parse()?),
+                        };
+                        let tokens = match amount.as_str() {
+                            // 「恢复默认」统一写 default；none 是 v0.6 及以前的写法，仍然接受。
+                            "default" | "none" => None,
+                            n => Some(n.parse().map_err(|_| "额度须为 tokens 数或 default")?),
+                        };
+                        Command::Budget(Some((scope, tokens)))
+                    }
+                    _ => return Err(USAGE.into()),
+                }
             }
         }
         "split" => {
@@ -826,12 +899,13 @@ pub(crate) struct TemplateChoice {
 pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     const USAGE: &str = "用法: ziyuan edict [--plan] [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] [--queue] <诏令内容>
   或: ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]
-  或: ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]";
+  或: ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]\n  或: ziyuan edict --follow-up <诏令ID> [--dept <部门>] [--scope <路径>]... [--queue] <追问内容>";
     let mut department = None;
     let mut queue = false;
     let mut plan_mode = false;
     let mut from_plan: Option<TaskId> = None;
     let mut revise: Option<TaskId> = None;
+    let mut follow_up: Option<TaskId> = None;
     let mut note_flag: Option<String> = None;
     let mut no_tests = false;
     let mut seal = Seal::default();
@@ -867,6 +941,14 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
                 let value = args.remove(0);
                 revise = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
             }
+            "--follow-up" => {
+                if args.len() < 2 {
+                    return Err(USAGE.into());
+                }
+                args.remove(0);
+                let value = args.remove(0);
+                follow_up = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
+            }
             "--note" => {
                 if args.len() < 2 {
                     return Err(USAGE.into());
@@ -897,8 +979,11 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             _ => break,
         }
     }
-    if from_plan.is_some() && revise.is_some() {
-        return Err("`--from-plan` 与 `--revise` 不能同时使用".into());
+    let special_modes = usize::from(from_plan.is_some())
+        + usize::from(revise.is_some())
+        + usize::from(follow_up.is_some());
+    if special_modes > 1 {
+        return Err("`--from-plan`、`--revise` 与 `--follow-up` 不能同时使用".into());
     }
     if let Some(plan) = from_plan {
         if plan_mode
@@ -941,6 +1026,31 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             run_tests: no_tests.then_some(false),
             queue,
             note,
+        });
+    }
+    if let Some(source) = follow_up {
+        if plan_mode
+            || template.is_some()
+            || tools_given
+            || mcp_given
+            || note_flag.is_some()
+            || no_tests
+        {
+            return Err(
+                "`--follow-up` 固定以只读玉玺追查前件实录，不能同时使用 --plan / --template / --tools / --mcp / --note / --no-tests"
+                    .into(),
+            );
+        }
+        let question = args.join(" ");
+        if question.trim().is_empty() {
+            return Err("`--follow-up` 须提供非空的追问内容".into());
+        }
+        return Ok(Command::EdictFollowUp {
+            source,
+            department,
+            scope,
+            queue,
+            question,
         });
     }
     if note_flag.is_some() {
@@ -1361,6 +1471,37 @@ mod scheduled_tests {
         assert!(command(&["edict", "--revise", "7", "--from-plan", "6"]).is_err());
         assert!(command(&["edict", "--revise", "7", "--dept", "rites"]).is_err());
         assert!(command(&["edict", "--revise", "7", "--plan"]).is_err());
+        match command(&[
+            "edict",
+            "--follow-up",
+            "5",
+            "--dept",
+            "rites",
+            "--scope",
+            "src",
+            "--queue",
+            "再核查边界条件",
+        ])
+        .unwrap()
+        {
+            Command::EdictFollowUp {
+                source,
+                department,
+                scope,
+                queue,
+                question,
+            } => {
+                assert_eq!(source, TaskId(5));
+                assert_eq!(department, Some(Department::Rites));
+                assert_eq!(scope, vec!["src"]);
+                assert!(queue);
+                assert_eq!(question, "再核查边界条件");
+            }
+            _ => panic!("expected Command::EdictFollowUp"),
+        }
+        assert!(command(&["edict", "--follow-up", "5"]).is_err());
+        assert!(command(&["edict", "--follow-up", "5", "--tools", "write_file", "查"]).is_err());
+        assert!(command(&["edict", "--follow-up", "5", "--revise", "4", "查"]).is_err());
         assert!(command(&["edict", "--note", "只有说明", "普通诏令"]).is_err());
     }
 
@@ -1390,5 +1531,53 @@ mod scheduled_tests {
         assert!(command(&["revert"]).is_err());
         assert!(command(&["revert", "abc"]).is_err());
         assert!(command(&["revert", "7", "--force"]).is_err());
+    }
+
+    #[test]
+    fn budget_export_parses_csv_json_and_bom_flags() {
+        let cmd = parse(vec![
+            "budget".into(),
+            "--export".into(),
+            "report.csv".into(),
+            "--bom".into(),
+        ])
+        .unwrap();
+        match cmd {
+            Command::BudgetExport {
+                output,
+                format,
+                bom,
+            } => {
+                assert_eq!(output, std::path::PathBuf::from("report.csv"));
+                assert_eq!(format, BudgetExportFormat::Csv);
+                assert!(bom);
+            }
+            _ => panic!("应解析为 BudgetExport"),
+        }
+        let inferred = parse(vec![
+            "budget".into(),
+            "--export".into(),
+            "out/duzhi.json".into(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            inferred,
+            Command::BudgetExport {
+                format: BudgetExportFormat::Json,
+                bom: false,
+                ..
+            }
+        ));
+        assert!(parse(vec!["budget".into(), "--format".into(), "csv".into()]).is_err());
+        assert!(
+            parse(vec![
+                "budget".into(),
+                "--export".into(),
+                "a.csv".into(),
+                "--format".into(),
+                "yaml".into()
+            ])
+            .is_err()
+        );
     }
 }
