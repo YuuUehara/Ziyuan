@@ -81,7 +81,12 @@ pub(crate) fn office_json(office: Office, mode: GovernanceMode) -> Value {
 }
 
 pub(crate) fn usage_json(usage: TokenUsage) -> Value {
-    json!({ "input": usage.input, "output": usage.output })
+    json!({
+        "input": usage.input,
+        "output": usage.output,
+        "cache_read": usage.cache_read,
+        "cache_write": usage.cache_write,
+    })
 }
 
 pub(crate) fn record_json(r: &ServiceRecord) -> Value {

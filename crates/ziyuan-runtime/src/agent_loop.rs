@@ -1328,6 +1328,8 @@ mod tests {
             hooks.model_usage(TokenUsage {
                 input: 1000,
                 output: 50,
+                cache_read: 0,
+                cache_write: 0,
             });
             Ok(match messages.last() {
                 Some(Message::ToolOutput { .. }) => ModelTurn::Final("毕".into()),

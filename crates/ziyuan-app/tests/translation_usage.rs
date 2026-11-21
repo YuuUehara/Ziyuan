@@ -84,7 +84,12 @@ impl Ledger {
     fn usage(&mut self, task: TaskId, input: u64, output: u64) {
         self.append(CourtEvent::ModelUsage {
             task,
-            usage: TokenUsage { input, output },
+            usage: TokenUsage {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+            },
             trace: Some("shared-retry-trace".into()),
         });
     }
@@ -120,7 +125,12 @@ fn mixed_attempts_and_governance_are_priced_from_original_events_not_latest_mode
                 worker,
                 "draft".into(),
                 Some(model.into()),
-                TokenUsage { input, output },
+                TokenUsage {
+                    input,
+                    output,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
             )
             .unwrap();
         f.append(event);
@@ -155,14 +165,18 @@ fn mixed_attempts_and_governance_are_priced_from_original_events_not_latest_mode
         row.recorded_execution_usage,
         Some(TokenUsage {
             input: 1500,
-            output: 114
+            output: 114,
+            cache_read: 0,
+            cache_write: 0,
         })
     );
     assert_eq!(
         report.totals.recorded_usage,
         Some(TokenUsage {
             input: 1631,
-            output: 130
+            output: 130,
+            cache_read: 0,
+            cache_write: 0,
         })
     );
     // Independent arithmetic: CNY (1400×2 + 82×11)/1M; USD (231×7 + 48×3)/1M.
@@ -229,7 +243,9 @@ fn missing_usage_is_unknown_but_reported_zero_is_known_and_unknown_rates_are_not
         report.totals.unpriced_usage,
         TokenUsage {
             input: 90,
-            output: 15
+            output: 15,
+            cache_read: 0,
+            cache_write: 0,
         }
     );
     assert_eq!(report.totals.tasks_without_execution_usage, 1);

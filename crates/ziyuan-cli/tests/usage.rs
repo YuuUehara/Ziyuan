@@ -126,6 +126,8 @@ impl Fixture {
             TokenUsage {
                 input: 1000,
                 output: 200,
+                cache_read: 0,
+                cache_write: 0,
             },
             vec![FileChange {
                 path: format!("translations/{}/{BLOCK}/zh.json", self.project.id),
@@ -150,6 +152,8 @@ impl Fixture {
             TokenUsage {
                 input: 100,
                 output: 20,
+                cache_read: 0,
+                cache_write: 0,
             },
             vec![],
         );
@@ -159,6 +163,8 @@ impl Fixture {
             TokenUsage {
                 input: 200,
                 output: 30,
+                cache_read: 0,
+                cache_write: 0,
             },
             vec![],
         );
@@ -199,6 +205,8 @@ impl Fixture {
             TokenUsage {
                 input: 9000000,
                 output: 1000000,
+                cache_read: 0,
+                cache_write: 0,
             },
             vec![],
         );

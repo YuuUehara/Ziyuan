@@ -202,6 +202,8 @@ fn abolition_purges_chancellors_and_cabinet_edicts_need_approval() {
     let used = TokenUsage {
         input: 100,
         output: 10,
+        cache_read: 0,
+        cache_write: 0,
     };
     apply(
         vec![
@@ -976,6 +978,8 @@ fn libu_counts_only_reviewed_results_and_ranks_by_them() {
             usage: TokenUsage {
                 input: 100,
                 output: 7,
+                cache_read: 0,
+                cache_write: 0,
             },
             trace: None,
         });
@@ -1028,6 +1032,8 @@ fn libu_counts_only_reviewed_results_and_ranks_by_them() {
             usage: TokenUsage {
                 input: 400,
                 output: 28,
+                cache_read: 0,
+                cache_write: 0,
             },
             ..ServiceRecord::default()
         }
@@ -1124,6 +1130,8 @@ fn task_lifecycle_is_enforced_on_replay() {
         usage: TokenUsage {
             input: 1,
             output: 1,
+            cache_read: 0,
+            cache_write: 0,
         },
         trace: None,
     };

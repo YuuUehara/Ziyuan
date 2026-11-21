@@ -187,7 +187,10 @@ pub(crate) fn read_events(
                     usage["input_tokens"].as_u64(),
                     usage["output_tokens"].as_u64(),
                 ) {
-                    hooks.model_usage(TokenUsage { input, output });
+                    let cache_read = usage["input_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0);
+                    hooks.model_usage(TokenUsage::with_cache(input, output, cache_read, 0));
                 }
                 if calls.is_empty() {
                     return Ok(ModelTurn::Final(content));

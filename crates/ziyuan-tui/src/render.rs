@@ -8,7 +8,7 @@ use ratatui::widgets::{
     Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use ziyuan_app::{
-    AnsiStyle, DeltaStyle, HistoryEntry, HistoryFilter, HunkVerdict, ansi_lines,
+    AnsiStyle, DeltaStyle, HistoryEntry, HistoryFilter, HunkVerdict, RevertStatus, ansi_lines,
     can_execute_from_plan, can_revise_task, changes_version, describe_record, estimate_cost,
     format_time, history_entries, parse_hunk_reviews, preview_changes, seal_note, skipped_note,
     stale_files, suspicion_status, total_hunks, tz_offset, unified_hunks,
@@ -195,13 +195,20 @@ impl App {
                 Style::new().fg(Color::Magenta).bold(),
             ),
             Span::raw(format!(
-                "  在册 {} · 有职 {}  模型 {}  用量 输入 {} / 输出 {}{}",
+                "  在册 {} · 有职 {}  模型 {}  用量 输入 {} / 输出 {}{}{}",
                 court.agents().count(),
                 court.appointed_count(),
                 self.model_label(),
                 usage.input,
                 usage.output,
                 self.cost_note(court.tasks()),
+                if usage.cache_read > 0 {
+                    usage
+                        .cache_hit_rate()
+                        .map_or(String::new(), |r| format!(" · 缓存命中 {:.0}%", r * 100.0))
+                } else {
+                    String::new()
+                },
             )),
         ];
         if let (Some(limit), Some(left)) =
@@ -567,7 +574,7 @@ impl App {
             lines.push(Line::from(format!("验功所据：{tests}")));
             let state = match changes.state {
                 ChangeState::Proposed => "待准奏（w 全部落盘，m 落盘并提交，W 逐段驳回，u 驳回）",
-                ChangeState::Applied => "已落盘",
+                ChangeState::Applied => "已落盘（Z 安全回滚）",
                 ChangeState::Discarded => "已驳回",
             };
             lines.push(Line::default());
@@ -1010,6 +1017,15 @@ impl App {
             }
             (Some(Modal::Confirm(_)), _) => &[("y", "确认"), ("其他键", "取消")],
             (Some(Modal::Notice(_)), _) => &[("任意键", "退朝")],
+            (Some(Modal::Revert(report)), _) => {
+                let actionable =
+                    report.safe && report.files.iter().any(|f| f.status == RevertStatus::Ready);
+                if actionable {
+                    &[("y", "确认回滚"), ("其他键", "取消")]
+                } else {
+                    &[("任意键", "关闭")]
+                }
+            }
             (None, Tab::Edicts) => &[
                 ("n", "下诏"),
                 ("T", "模板"),
@@ -1022,6 +1038,7 @@ impl App {
                 ("t/e", "票拟/改票"),
                 ("b", "批红"),
                 ("w/W/u", "准奏/逐段/驳回改动"),
+                ("Z", "安全回滚"),
                 ("z", "改动显示"),
                 ("f/F", "分办/并行写"),
                 ("A/E", "加子诏/改依赖"),
@@ -1283,6 +1300,85 @@ impl App {
                 .block(modal_block("史官记".into()));
                 let height = paragraph.line_count(60) as u16; // 已含边框
                 let popup = centered(area, 60, height);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(paragraph, popup);
+            }
+            Modal::Revert(report) => {
+                let ready = report
+                    .files
+                    .iter()
+                    .filter(|f| f.status == RevertStatus::Ready)
+                    .count();
+                let skipped = report
+                    .files
+                    .iter()
+                    .filter(|f| f.status == RevertStatus::AlreadyReverted)
+                    .count();
+                let diverged = report
+                    .files
+                    .iter()
+                    .filter(|f| f.status == RevertStatus::Diverged)
+                    .count();
+                let actionable = report.safe && ready > 0;
+                let mut lines = Vec::new();
+                if !report.safe {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "存在 {diverged} 处磁盘冲突，已阻断回滚（fail-closed，不会修改任何文件）"
+                        ),
+                        Style::new().fg(Color::Red).bold(),
+                    )));
+                } else if ready == 0 {
+                    lines.push(Line::from(Span::styled(
+                        "全部文件均已与准奏前原文一致，无需回滚",
+                        Style::new().fg(Color::Cyan),
+                    )));
+                } else {
+                    let skip_note = if skipped > 0 {
+                        format!("，幂等跳过 {skipped} 个已恢复文件")
+                    } else {
+                        String::new()
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("核验通过：可安全回滚 {ready} 个文件{skip_note}"),
+                        Style::new().fg(Color::Green).bold(),
+                    )));
+                }
+                lines.push(Line::default());
+                const MAX_ROWS: usize = 16;
+                for file in report.files.iter().take(MAX_ROWS) {
+                    let status_style = match file.status {
+                        RevertStatus::Ready => Style::new().fg(Color::Green).bold(),
+                        RevertStatus::AlreadyReverted => Style::new().dim(),
+                        RevertStatus::Diverged => Style::new().fg(Color::Red).bold(),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  [{}] ", file.status.label()), status_style),
+                        Span::styled(format!("{} ", file.action.label()), Style::new().fg(GOLD)),
+                        Span::raw(file.path.clone()),
+                    ]));
+                }
+                if report.files.len() > MAX_ROWS {
+                    lines.push(
+                        Line::from(format!("  ……另余 {} 个文件", report.files.len() - MAX_ROWS))
+                            .dim(),
+                    );
+                }
+                lines.push(Line::default());
+                lines.push(
+                    Line::from(if actionable {
+                        "按 y 确认安全回滚，其他键取消"
+                    } else {
+                        "按任意键关闭"
+                    })
+                    .dim(),
+                );
+                let width = 76u16.min(area.width);
+                let paragraph = Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(modal_block(format!("安全回滚预览 · 诏令 #{}", report.task)));
+                let height = (paragraph.line_count(width) as u16).min(area.height);
+                let popup = centered(area, width, height);
                 frame.render_widget(Clear, popup);
                 frame.render_widget(paragraph, popup);
             }

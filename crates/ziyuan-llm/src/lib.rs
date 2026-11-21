@@ -46,6 +46,54 @@ impl Retry {
     }
 }
 
+/// 提示词缓存（Prompt Caching）控制策略。
+///
+/// - [`PromptCache::Auto`]（默认）：对 Claude 模型或 Anthropic 端点自动附加
+///   `cache_control: {"type": "ephemeral"}`（覆盖 system prompt、工具定义末尾与历史断点）；
+///   对 OpenAI / DeepSeek 等原生自动前缀缓存后端保持原始消息格式不破坏兼容性。
+/// - [`PromptCache::Anthropic`]：强制附加 Anthropic 风格 `cache_control` 断点
+///   （适用于自定义模型名经网关转发至 Claude 的场景）。
+/// - [`PromptCache::Off`]：不附加 `cache_control` 字段（仍照常统计响应中的缓存命中用量）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptCache {
+    #[default]
+    Auto,
+    Anthropic,
+    Off,
+}
+
+impl PromptCache {
+    pub fn parse(raw: &str) -> Result<Self, BoxError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "anthropic" | "on" | "1" | "true" => Ok(Self::Anthropic),
+            "off" | "0" | "false" => Ok(Self::Off),
+            other => Err(format!(
+                "ZIYUAN_LLM_PROMPT_CACHE 只能是 auto、anthropic/on 或 off，而不是 {other}"
+            )
+            .into()),
+        }
+    }
+
+    pub fn from_env() -> Result<Self, BoxError> {
+        match env::var("ZIYUAN_LLM_PROMPT_CACHE") {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Ok(Self::Auto),
+        }
+    }
+
+    fn uses_anthropic_cache_control(self, base_url: &str, model: &str) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Anthropic => true,
+            Self::Auto => {
+                model.to_ascii_lowercase().contains("claude")
+                    || base_url.to_ascii_lowercase().contains("anthropic")
+            }
+        }
+    }
+}
+
 /// 凭据：API Key（走 Chat Completions），或 ChatGPT 订阅（走 Responses API）。
 #[derive(Clone)]
 enum Auth {
@@ -59,6 +107,7 @@ pub struct OpenAiCompatible {
     model: String,
     agent: ureq::Agent,
     retry: Retry,
+    prompt_cache: PromptCache,
 }
 
 /// 一次请求的失败：可否重试、服务端要求等多久、服务端的请求 ID；
@@ -88,6 +137,7 @@ impl OpenAiCompatible {
             model: model.into(),
             agent,
             retry: Retry::default(),
+            prompt_cache: PromptCache::Auto,
         }
     }
 
@@ -109,6 +159,11 @@ impl OpenAiCompatible {
 
     pub fn with_retry(mut self, retry: Retry) -> Self {
         self.retry = retry;
+        self
+    }
+
+    pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
+        self.prompt_cache = prompt_cache;
         self
     }
 
@@ -155,7 +210,8 @@ impl OpenAiCompatible {
                 );
             }
         };
-        Ok(Some(this.with_retry(retry)))
+        let prompt_cache = PromptCache::from_env()?;
+        Ok(Some(this.with_retry(retry).with_prompt_cache(prompt_cache)))
     }
 
     pub fn model(&self) -> &str {
@@ -168,6 +224,7 @@ impl OpenAiCompatible {
             base_url: self.base_url.clone(),
             auth: self.auth.clone(),
             retry: self.retry,
+            prompt_cache: self.prompt_cache,
         }
     }
 }
@@ -176,13 +233,18 @@ pub struct Catalog {
     base_url: String,
     auth: Auth,
     retry: Retry,
+    prompt_cache: PromptCache,
 }
 
 impl ModelCatalog for Catalog {
     fn provider(&self, model: &str) -> Box<dyn ModelProvider> {
         let mut provider = OpenAiCompatible::new(self.base_url.clone(), None, model);
         provider.auth = self.auth.clone();
-        Box::new(provider.with_retry(self.retry))
+        Box::new(
+            provider
+                .with_retry(self.retry)
+                .with_prompt_cache(self.prompt_cache),
+        )
     }
 
     /// 订阅额度不按 token 计价，不估算花费。
@@ -253,15 +315,27 @@ impl ModelProvider for OpenAiCompatible {
     ) -> Result<ModelTurn, BoxError> {
         let body = match self.auth {
             Auth::Key(_) => {
+                let mut encoded_messages = encode_messages(messages);
+                let mut encoded_tools = if tools.is_empty() {
+                    None
+                } else {
+                    Some(encode_tools(tools)?)
+                };
+                if self
+                    .prompt_cache
+                    .uses_anthropic_cache_control(&self.base_url, &self.model)
+                {
+                    apply_anthropic_cache_control(&mut encoded_messages, encoded_tools.as_mut());
+                }
                 let mut body = json!({
                     "model": self.model,
-                    "messages": encode_messages(messages),
+                    "messages": encoded_messages,
                     "stream": true,
                     // 让流的最后一块携带 usage；不支持的服务会忽略。
                     "stream_options": {"include_usage": true},
                 });
-                if !tools.is_empty() {
-                    body["tools"] = encode_tools(tools)?;
+                if let Some(encoded_tools) = encoded_tools {
+                    body["tools"] = encoded_tools;
                 }
                 // 度支将尽：输出至多用完余额。
                 if let Some(room) = hooks.max_output().filter(|&room| room < MAX_TOKENS_CAP) {
@@ -575,16 +649,97 @@ fn encode_messages(messages: &[Message]) -> Vec<Value> {
     out
 }
 
-/// OpenAI 风格的 `usage` 字段（流式时位于最后一块，其 `choices` 为空）。
+/// 为 OpenAI 兼容的 Anthropic / OpenRouter 请求注入 `cache_control: {"type": "ephemeral"}` 断点：
+/// 1) system prompt；2) 工具定义数组末项；3) 多轮对话中倒数第二条之前最近的可缓存文本消息。
+///
+/// 至多 3 个断点（低于 Anthropic 4 断点上限）。
+fn apply_anthropic_cache_control(messages: &mut [Value], tools: Option<&mut Value>) {
+    let mark_content_block = |msg: &mut Value| -> bool {
+        let Some(text) = msg.get("content").and_then(Value::as_str) else {
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        let text = text.to_owned();
+        msg["content"] = json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": { "type": "ephemeral" }
+        }]);
+        true
+    };
+
+    // 断点 1：system prompt（最多标首个非空 system，避免多条 system 耗尽断点额度）。
+    for msg in messages.iter_mut() {
+        if msg["role"] == "system" && mark_content_block(msg) {
+            break;
+        }
+    }
+
+    // 断点 2：工具定义末尾（标最后一件工具即覆盖全部工具 schema）。
+    if let Some(tools) = tools
+        && let Some(last_tool) = tools.as_array_mut().and_then(|arr| arr.last_mut())
+        && let Some(obj) = last_tool.as_object_mut()
+    {
+        obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+    }
+
+    // 断点 3：多轮历史边界（跳过末尾最新一条，给前序最近一条非 system 文本消息加缓存点）。
+    let non_system: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (m["role"] != "system").then_some(i))
+        .collect();
+    if non_system.len() >= 2 {
+        for &idx in non_system[..non_system.len() - 1].iter().rev() {
+            if mark_content_block(&mut messages[idx]) {
+                break;
+            }
+        }
+    }
+}
+
+/// 解析 OpenAI / DeepSeek / Anthropic 兼容端点的 `usage` 字段（流式时位于最后一块）。
 fn report_usage(value: &Value, hooks: &dyn ExecutionHooks) {
     let usage = &value["usage"];
-    let (Some(input), Some(output)) = (
+    let cache_read = usage["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
+        .or_else(|| usage["cache_read_input_tokens"].as_u64())
+        .unwrap_or(0);
+    let cache_write = usage["cache_creation_input_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens_details"]["cache_write_tokens"].as_u64())
+        .unwrap_or(0);
+
+    let (input, output) = match (
         usage["prompt_tokens"].as_u64(),
         usage["completion_tokens"].as_u64(),
-    ) else {
-        return;
+    ) {
+        (Some(input), Some(output)) => (input, output),
+        _ => {
+            // 兼容 Anthropic 风格字段名：其 `input_tokens` 不含缓存读写部分，统一折算进总输入。
+            let (Some(uncached_input), Some(output)) = (
+                usage["input_tokens"].as_u64(),
+                usage["output_tokens"].as_u64(),
+            ) else {
+                return;
+            };
+            (
+                uncached_input
+                    .saturating_add(cache_read)
+                    .saturating_add(cache_write),
+                output,
+            )
+        }
     };
-    hooks.model_usage(TokenUsage { input, output });
+    hooks.model_usage(TokenUsage::with_cache(
+        input,
+        output,
+        cache_read,
+        cache_write,
+    ));
 }
 
 fn decode_turn(response: &Value) -> Result<ModelTurn, BoxError> {
@@ -930,7 +1085,9 @@ mod tests {
             *hooks.usage.borrow(),
             [TokenUsage {
                 input: 120,
-                output: 40
+                output: 40,
+                cache_read: 0,
+                cache_write: 0,
             }]
         );
     }
@@ -1061,7 +1218,9 @@ mod tests {
             *hooks.usage.borrow(),
             [TokenUsage {
                 input: 321,
-                output: 9
+                output: 9,
+                cache_read: 0,
+                cache_write: 0,
             }]
         );
     }
@@ -1094,6 +1253,8 @@ mod tests {
         let usage = TokenUsage {
             input: 1_000_000,
             output: 500_000,
+            cache_read: 0,
+            cache_write: 0,
         };
         assert_eq!(price.cost(usage), 6.0);
         assert_eq!(price.describe(usage), "约 6.0000 元");
@@ -1236,5 +1397,159 @@ mod tests {
         assert_eq!(encoded.len(), 4);
         assert_eq!(encoded[1]["tool_calls"].as_array().unwrap().len(), 2);
         assert_eq!(encoded[3]["tool_call_id"], "b");
+    }
+
+    #[test]
+    fn prompt_cache_injects_anthropic_breakpoints_only_when_applicable() {
+        let messages = vec![
+            Message::System("你是工部官员".into()),
+            Message::User("读取 src/lib.rs".into()),
+            Message::ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                args_json: r#"{"path":"src/lib.rs"}"#.into(),
+            },
+            Message::ToolOutput {
+                call_id: "c1".into(),
+                output: "fn main() {}".into(),
+            },
+            Message::User("再检查一下测试".into()),
+        ];
+        let tools = vec![
+            ToolSpec {
+                name: "read_file".into(),
+                description: "读文件".into(),
+                input_schema_json: r#"{"type":"object"}"#.into(),
+            },
+            ToolSpec {
+                name: "write_file".into(),
+                description: "写文件".into(),
+                input_schema_json: r#"{"type":"object"}"#.into(),
+            },
+        ];
+
+        // 1. Auto + Claude 模型：自动加 system / 末个 tool / 历史边界三处 cache_control。
+        let (url, seen) = mock_server(vec![(200, final_reply("ok"))]);
+        OpenAiCompatible::new(url, Some("k".into()), "anthropic/claude-sonnet-4.5")
+            .with_retry(Retry {
+                attempts: 0,
+                ..Retry::default()
+            })
+            .next_turn(&messages, &tools, &())
+            .unwrap();
+        let body = &seen.lock().unwrap()[0].0;
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // 历史断点打在倒数第二条（tool output）上，最后一条新用户输入保持纯文本。
+        assert_eq!(
+            body["messages"][3]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(body["messages"][4]["content"], "再检查一下测试");
+
+        // 2. Auto + DeepSeek / OpenAI：保持原始纯文本格式，不注入 cache_control。
+        let (url, seen) = mock_server(vec![(200, final_reply("ok"))]);
+        OpenAiCompatible::new(url, Some("k".into()), "deepseek-v4-pro")
+            .with_retry(Retry {
+                attempts: 0,
+                ..Retry::default()
+            })
+            .next_turn(&messages, &tools, &())
+            .unwrap();
+        let body = &seen.lock().unwrap()[0].0;
+        assert_eq!(body["messages"][0]["content"], "你是工部官员");
+        assert!(body["tools"][1].get("cache_control").is_none());
+
+        // 3. Off + Claude：显式关闭时不注入。
+        let (url, seen) = mock_server(vec![(200, final_reply("ok"))]);
+        OpenAiCompatible::new(url, Some("k".into()), "claude-opus-4")
+            .with_prompt_cache(PromptCache::Off)
+            .with_retry(Retry {
+                attempts: 0,
+                ..Retry::default()
+            })
+            .next_turn(&messages, &tools, &())
+            .unwrap();
+        let body = &seen.lock().unwrap()[0].0;
+        assert_eq!(body["messages"][0]["content"], "你是工部官员");
+        assert!(body["tools"][1].get("cache_control").is_none());
+
+        // 4. Anthropic 强制模式：自定义模型名也注入。
+        let (url, seen) = mock_server(vec![(200, final_reply("ok"))]);
+        OpenAiCompatible::new(url, Some("k".into()), "my-proxy-model")
+            .with_prompt_cache(PromptCache::Anthropic)
+            .with_retry(Retry {
+                attempts: 0,
+                ..Retry::default()
+            })
+            .next_turn(&messages, &tools, &())
+            .unwrap();
+        let body = &seen.lock().unwrap()[0].0;
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(PromptCache::parse("auto").unwrap(), PromptCache::Auto);
+        assert_eq!(PromptCache::parse("on").unwrap(), PromptCache::Anthropic);
+        assert_eq!(PromptCache::parse("off").unwrap(), PromptCache::Off);
+        assert!(PromptCache::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn report_usage_parses_openai_deepseek_and_anthropic_cache_fields() {
+        // OpenAI / OpenRouter: prompt_tokens_details.cached_tokens + cache_write_tokens
+        let hooks = Recorder::default();
+        report_usage(
+            &json!({
+                "usage": {
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 80,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 900,
+                        "cache_write_tokens": 200
+                    }
+                }
+            }),
+            &hooks,
+        );
+        // DeepSeek: prompt_cache_hit_tokens
+        report_usage(
+            &json!({
+                "usage": {
+                    "prompt_tokens": 500,
+                    "completion_tokens": 40,
+                    "prompt_cache_hit_tokens": 350,
+                    "prompt_cache_miss_tokens": 150
+                }
+            }),
+            &hooks,
+        );
+        // Anthropic 风格：input_tokens 不含 cache_read/cache_creation，折算入总 input
+        report_usage(
+            &json!({
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 800,
+                    "cache_creation_input_tokens": 300
+                }
+            }),
+            &hooks,
+        );
+        assert_eq!(
+            *hooks.usage.borrow(),
+            [
+                TokenUsage::with_cache(1200, 80, 900, 200),
+                TokenUsage::with_cache(500, 40, 350, 0),
+                TokenUsage::with_cache(1200, 50, 800, 300),
+            ]
+        );
     }
 }

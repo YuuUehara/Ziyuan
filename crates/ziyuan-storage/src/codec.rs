@@ -408,9 +408,17 @@ pub(crate) fn encode_event(event: &CourtEvent) -> String {
         ),
         ModelUsage { task, usage, trace } => {
             let line = format!("v1\tUSAGE\t{}\t{}\t{}", task.0, usage.input, usage.output);
-            match trace {
-                Some(trace) => format!("{line}\t{}", to_hex(trace)),
-                None => line,
+            if usage.cache_read > 0 || usage.cache_write > 0 {
+                let trace_hex = trace.as_deref().map(to_hex).unwrap_or_default();
+                format!(
+                    "{line}\t{trace_hex}\t{}\t{}",
+                    usage.cache_read, usage.cache_write
+                )
+            } else {
+                match trace {
+                    Some(trace) => format!("{line}\t{}", to_hex(trace)),
+                    None => line,
+                }
             }
         }
         Clock(at) => format!("v1\tCLOCK\t{at}"),
@@ -557,6 +565,8 @@ fn decode_speeches(field: &str) -> Result<Vec<Speech>, String> {
                 usage: TokenUsage {
                     input: number(input)?,
                     output: number(output)?,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
                 model: match model {
                     "" => None,
@@ -602,6 +612,8 @@ fn decode_votes(field: &str) -> Result<Vec<Nomination>, String> {
                 usage: TokenUsage {
                     input: number(input)?,
                     output: number(output)?,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
                 model: match model {
                     "" => None,
@@ -786,6 +798,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             usage: TokenUsage {
                 input: id(5)?,
                 output: id(6)?,
+                cache_read: 0,
+                cache_write: 0,
             },
             model: match parts.len() {
                 7 => None,
@@ -927,6 +941,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             usage: TokenUsage {
                 input: id(5)?,
                 output: id(6)?,
+                cache_read: 0,
+                cache_write: 0,
             },
             model: match parts.len() {
                 7 => None,
@@ -991,6 +1007,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             usage: TokenUsage {
                 input: id(5)?,
                 output: id(6)?,
+                cache_read: 0,
+                cache_write: 0,
             },
             answer: from_hex(field(7)?)?,
             model: match parts.len() {
@@ -1081,6 +1099,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             usage: TokenUsage {
                 input: id(9)?,
                 output: id(10)?,
+                cache_read: 0,
+                cache_write: 0,
             },
             model: match parts.len() {
                 11 => None,
@@ -1103,6 +1123,8 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             usage: TokenUsage {
                 input: id(7)?,
                 output: id(8)?,
+                cache_read: 0,
+                cache_write: 0,
             },
             model: match parts.len() {
                 9 => None,
@@ -1119,18 +1141,43 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
             source: from_hex(field(4)?)?,
             excerpt: from_hex(field(5)?)?,
         },
-        // v0.4 及更早的日志没有 trace 字段。
-        "USAGE" => ModelUsage {
-            task: TaskId(id(2)?),
-            usage: TokenUsage {
-                input: id(3)?,
-                output: id(4)?,
-            },
-            trace: match parts.len() {
-                5 => None,
-                _ => Some(from_hex(field(5)?)?),
-            },
-        },
+        // v0.4 及更早的日志无 trace；v1.33 及更早的日志无 cache_read/cache_write。
+        "USAGE" => {
+            let (trace, cache_read, cache_write) = match parts.len() {
+                5 => (None, 0, 0),
+                6 => {
+                    let raw = field(5)?;
+                    (
+                        if raw.is_empty() {
+                            None
+                        } else {
+                            Some(from_hex(raw)?)
+                        },
+                        0,
+                        0,
+                    )
+                }
+                _ => {
+                    let raw = field(5)?;
+                    let trace = if raw.is_empty() {
+                        None
+                    } else {
+                        Some(from_hex(raw)?)
+                    };
+                    (trace, id(6)?, id(7)?)
+                }
+            };
+            ModelUsage {
+                task: TaskId(id(2)?),
+                usage: TokenUsage {
+                    input: id(3)?,
+                    output: id(4)?,
+                    cache_read,
+                    cache_write,
+                },
+                trace,
+            }
+        }
         "CLOCK" => Clock(id(2)?),
         "REVIEWED" => TaskReviewed {
             task: TaskId(id(2)?),
@@ -1226,6 +1273,7 @@ pub(crate) fn decode_event(line: &str) -> Result<CourtEvent, DecodeError> {
         EdictDrafted { .. } => 8,
         OfficeCeilingSet { .. } => 5,
         EdictIssued(_) if parts.len() == 5 => 5,
+        ModelUsage { usage, .. } if usage.cache_read > 0 || usage.cache_write > 0 => 8,
         ModelUsage { trace: Some(_), .. } => 6,
         AgentRegistered(_) | TaskCompleted { .. } | TaskReviewed { .. } | ModelUsage { .. } => 5,
         Clock(_) => 3,
@@ -1340,6 +1388,7 @@ pub(crate) fn readable_since(line: &str) -> Result<u32, DecodeError> {
         },
         // 不带玉玺字段的旧式诏令 v0.1 即可读；带玉玺的自 v0.2。
         EdictIssued(e) => seal(&e.seal, if line.split('\t').count() == 5 { 1 } else { 2 }),
+        ModelUsage { usage, .. } if usage.cache_read > 0 || usage.cache_write > 0 => 70,
         ModelUsage { trace: Some(_), .. } => 5,
         CourierReplied { op: Some(_), .. } | CourierDispatched { .. } => 11,
         EdictDag { .. } => 12,
@@ -1684,6 +1733,8 @@ mod tests {
                 usage: TokenUsage {
                     input: 9,
                     output: 2,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
             },
             CourtEvent::SuspicionReviewed {
@@ -1705,6 +1756,8 @@ mod tests {
                 usage: TokenUsage {
                     input: 8,
                     output: 2,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
             },
             CourtEvent::ExamTaken {
@@ -1781,6 +1834,8 @@ mod tests {
                         usage: TokenUsage {
                             input: 30,
                             output: 5,
+                            cache_read: 0,
+                            cache_write: 0,
                         },
                     },
                     Nomination {
@@ -1874,6 +1929,8 @@ mod tests {
                 usage: TokenUsage {
                     input: 5,
                     output: 1,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
             },
             CourtEvent::EdictSplit {
@@ -1947,6 +2004,8 @@ mod tests {
                         usage: TokenUsage {
                             input: 9,
                             output: 3,
+                            cache_read: 0,
+                            cache_write: 0,
                         },
                     },
                     Speech {
@@ -1972,6 +2031,8 @@ mod tests {
                 usage: TokenUsage {
                     input: 9,
                     output: 2,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
             },
             CourtEvent::CensorReported {
@@ -1993,6 +2054,8 @@ mod tests {
                 usage: TokenUsage {
                     input: 300,
                     output: 20,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
             },
             CourtEvent::EdictDrafted {
@@ -2008,6 +2071,8 @@ mod tests {
                 usage: TokenUsage {
                     input: 12_345,
                     output: 678,
+                    cache_read: 0,
+                    cache_write: 0,
                 },
                 trace: None,
             },
@@ -2015,6 +2080,16 @@ mod tests {
                 task,
                 usage: TokenUsage::default(),
                 trace: Some("zy-0123456789ab".into()),
+            },
+            CourtEvent::ModelUsage {
+                task,
+                usage: TokenUsage::with_cache(10_000, 320, 8_000, 1_500),
+                trace: Some("zy-cache1234567".into()),
+            },
+            CourtEvent::ModelUsage {
+                task,
+                usage: TokenUsage::with_cache(5_000, 120, 4_000, 0),
+                trace: None,
             },
             CourtEvent::Clock(1_792_909_102),
             CourtEvent::TaskReviewed {

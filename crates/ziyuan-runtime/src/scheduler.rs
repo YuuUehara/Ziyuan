@@ -576,6 +576,8 @@ mod tests {
                 hooks.model_usage(TokenUsage {
                     input: 30,
                     output: 10,
+                    cache_read: 0,
+                    cache_write: 0,
                 });
             }
             Ok(format!("done {}", job.edict.id.0))
@@ -651,6 +653,8 @@ mod tests {
             hooks.model_usage(TokenUsage {
                 input: 30,
                 output: 10,
+                cache_read: 0,
+                cache_write: 0,
             });
             Ok(format!("{before:?} {:?}", hooks.token_allowance()))
         }
@@ -706,6 +710,8 @@ mod tests {
                 hooks.model_usage(TokenUsage {
                     input: got / 2,
                     output: got - got / 2,
+                    cache_read: 0,
+                    cache_write: 0,
                 });
                 hooks.settle_tokens(true);
                 self.lowest

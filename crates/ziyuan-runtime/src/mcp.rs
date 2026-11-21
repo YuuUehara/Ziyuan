@@ -924,56 +924,68 @@ for line in sys.stdin:
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
+$null = [System.Reflection.Assembly]::LoadWithPartialName('System.Web.Extensions')
+$js = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
 function Send-Json($obj) {
-  [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 12))
+  [Console]::Out.WriteLine($js.Serialize($obj))
   [Console]::Out.Flush()
 }
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   if ([string]::IsNullOrWhiteSpace($line)) { continue }
-  $m = $line | ConvertFrom-Json
-  if ($null -eq $m.id -or $null -eq $m.method) { continue }
-  if ($m.method -eq 'initialize') {
-    Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ protocolVersion = '2025-06-18'; capabilities = @{}; serverInfo = @{ name = 'fake-ps' } } }
-  } elseif ($m.method -eq 'tools/list') {
-    $tools = @(
-      @{ name = 'probe'; description = 'probe'; inputSchema = @{ type = 'object' } },
-      @{ name = 'audit'; description = 'audit'; inputSchema = @{ type = 'object' } }
-    )
-    Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ tools = $tools } }
-  } elseif ($m.method -eq 'tools/call') {
-    $name = $m.params.name
-    $a = $m.params.arguments
-    if ($name -eq 'probe') {
-      $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { (Get-Location).Path }
-      $out = ''
-      foreach ($p in @([string]$a.outside, [System.IO.Path]::Combine($tmpBase, 'ok'))) {
-        try {
-          [System.IO.File]::WriteAllText($p, 'x', $utf8)
-          $out += 'w'
-        } catch {
-          $out += '-'
+  $reqId = $null
+  try {
+    $m = $js.DeserializeObject($line)
+    if ($null -eq $m -or -not $m.ContainsKey('id') -or -not $m.ContainsKey('method')) { continue }
+    $reqId = $m['id']
+    $method = [string]$m['method']
+    if ($method -eq 'initialize') {
+      Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ protocolVersion = '2025-06-18'; capabilities = @{}; serverInfo = @{ name = 'fake-ps' } } }
+    } elseif ($method -eq 'tools/list') {
+      $tools = @(
+        @{ name = 'probe'; description = 'probe'; inputSchema = @{ type = 'object' } },
+        @{ name = 'audit'; description = 'audit'; inputSchema = @{ type = 'object' } }
+      )
+      Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ tools = $tools } }
+    } elseif ($method -eq 'tools/call') {
+      $p = $m['params']
+      $name = [string]$p['name']
+      $a = $p['arguments']
+      if ($name -eq 'probe') {
+        $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { [Environment]::CurrentDirectory }
+        $out = ''
+        foreach ($path in @([string]$a['outside'], [System.IO.Path]::Combine($tmpBase, 'ok'))) {
+          try {
+            [System.IO.File]::WriteAllText($path, 'x', $utf8)
+            $out += 'w'
+          } catch {
+            $out += '-'
+          }
         }
+        Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ content = @(@{ type = 'text'; text = $out }) } }
+      } elseif ($name -eq 'audit') {
+        $readme = [System.IO.File]::ReadAllText([System.IO.Path]::Combine($PSScriptRoot, 'readme.txt'), $utf8)
+        $snapWriteBlocked = $false
+        try { [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'mutated.txt'), 'x', $utf8) } catch { $snapWriteBlocked = $true }
+        $ziyuanHidden = -not [System.IO.File]::Exists([System.IO.Path]::Combine($PSScriptRoot, '.ziyuan', 'mcp.json'))
+        $envHidden = -not [System.IO.File]::Exists([System.IO.Path]::Combine($PSScriptRoot, '.env'))
+        $hostSecretBlocked = $false
+        try { $null = [System.IO.File]::ReadAllText([string]$a['secret'], $utf8) } catch { $hostSecretBlocked = $true }
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $ar = $client.BeginConnect('127.0.0.1', [int]$a['port'], $null, $null)
+        $connected = $false
+        if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {
+          try { $client.EndConnect($ar); $connected = $client.Connected } catch { $connected = $false }
+        }
+        $client.Close()
+        $tok = if ($env:CUSTOM_TOKEN) { $env:CUSTOM_TOKEN } else { '-' }
+        $llm = if ($env:ZIYUAN_LLM_API_KEY) { $env:ZIYUAN_LLM_API_KEY } else { '-' }
+        $summary = "$readme|snapRo=$snapWriteBlocked|ziyuanHidden=$ziyuanHidden|envHidden=$envHidden|secretBlocked=$hostSecretBlocked|net=$connected|tok=$tok|llm=$llm"
+        Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ content = @(@{ type = 'text'; text = $summary }) } }
       }
-      Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ content = @(@{ type = 'text'; text = $out }) } }
-    } elseif ($name -eq 'audit') {
-      $readme = [System.IO.File]::ReadAllText([System.IO.Path]::Combine($PSScriptRoot, 'readme.txt'), $utf8)
-      $snapWriteBlocked = $false
-      try { [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'mutated.txt'), 'x', $utf8) } catch { $snapWriteBlocked = $true }
-      $ziyuanHidden = -not [System.IO.File]::Exists([System.IO.Path]::Combine($PSScriptRoot, '.ziyuan', 'mcp.json'))
-      $envHidden = -not [System.IO.File]::Exists([System.IO.Path]::Combine($PSScriptRoot, '.env'))
-      $hostSecretBlocked = $false
-      try { $null = [System.IO.File]::ReadAllText([string]$a.secret, $utf8) } catch { $hostSecretBlocked = $true }
-      $client = [System.Net.Sockets.TcpClient]::new()
-      $ar = $client.BeginConnect('127.0.0.1', [int]$a.port, $null, $null)
-      $connected = $false
-      if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {
-        try { $client.EndConnect($ar); $connected = $client.Connected } catch { $connected = $false }
-      }
-      $client.Close()
-      $tok = if ($env:CUSTOM_TOKEN) { $env:CUSTOM_TOKEN } else { '-' }
-      $llm = if ($env:ZIYUAN_LLM_API_KEY) { $env:ZIYUAN_LLM_API_KEY } else { '-' }
-      $summary = "$readme|snapRo=$snapWriteBlocked|ziyuanHidden=$ziyuanHidden|envHidden=$envHidden|secretBlocked=$hostSecretBlocked|net=$connected|tok=$tok|llm=$llm"
-      Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ content = @(@{ type = 'text'; text = $summary }) } }
+    }
+  } catch {
+    if ($null -ne $reqId) {
+      Send-Json @{ jsonrpc = '2.0'; id = $reqId; error = @{ code = -32000; message = $_.Exception.ToString() } }
     }
   }
 }

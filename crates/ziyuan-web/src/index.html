@@ -1503,7 +1503,7 @@ function taskHtml(t) {
     t.worker ? `承办：${esc(t.worker)}` : "",
     t.tool_calls ? `工具 ${t.tool_calls} 次${t.tool_failures ? `（失败 ${t.tool_failures}）` : ""}` : "",
     t.budget ? `度支 ${fmt(t.usage.input + t.usage.output)} / ${fmt(t.budget)}` : "",
-    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${t.model ? ` · ${esc(t.model)}` : ""}${cost(t.cost)}` : "",
+    t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${t.usage.cache_read ? `（缓存命中 ${fmt(t.usage.cache_read)}${t.usage.input ? ` [${Math.round((Math.min(t.usage.cache_read, t.usage.input) / t.usage.input) * 100)}%]` : ""}）` : ""}${t.model ? ` · ${esc(t.model)}` : ""}${cost(t.cost)}` : "",
   ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
   let body = "";
   if (streams[t.id] !== undefined && open) {
@@ -4330,7 +4330,10 @@ function render() {
   $("task-count").textContent = s.task_total;
   $("open-count").textContent = open;
   $("usage-total").textContent = fmt(s.usage.input + s.usage.output);
-  $("cost-total").textContent = s.cost ? `（${s.cost}）` : "";
+  const cacheHit = s.usage.cache_read && s.usage.input
+    ? ` · 缓存命中 ${Math.round((Math.min(s.usage.cache_read, s.usage.input) / s.usage.input) * 100)}%`
+    : "";
+  $("cost-total").textContent = (s.cost ? `（${s.cost}）` : "") + cacheHit;
   $("treasury-stat").hidden = !s.treasury;
   if (s.treasury) {
     $("treasury-left").textContent = `${fmt(s.treasury.remaining)} / ${fmt(s.treasury.limit)}`;

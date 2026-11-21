@@ -3,7 +3,7 @@
 use ratatui::crossterm::event::Event;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use ziyuan_app::{AppError, Session};
+use ziyuan_app::{AppError, RevertReport, Session};
 use ziyuan_core::{AgentId, Office, TaskId, Verdict};
 use ziyuan_governance::{Court, Task};
 use ziyuan_runtime::Outcome;
@@ -85,6 +85,8 @@ pub(crate) enum Modal {
     Confirm(ConfirmKind),
     /// 史官记：任意键关闭。
     Notice(String),
+    /// 安全回滚预览：核验通过且有可回滚文件时按 `y` 确认，其他键关闭。
+    Revert(RevertReport),
 }
 
 #[derive(Clone)]

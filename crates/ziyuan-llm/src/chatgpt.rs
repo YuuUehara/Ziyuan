@@ -866,7 +866,7 @@ mod tests {
                                 "type": "function_call", "call_id": "c1", "name": "read_file",
                                 "namespace": "ziyuan", "arguments": "{\"path\":\"a\"}"}}),
                                 json!({"type": "response.completed", "response": {
-                                "usage": {"input_tokens": 12, "output_tokens": 5}}}),
+                                "usage": {"input_tokens": 12, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 8}}}}),
                             ]),
                         ),
                         _ => (
@@ -941,7 +941,9 @@ mod tests {
             hooks.usage.lock().unwrap()[0],
             TokenUsage {
                 input: 12,
-                output: 5
+                output: 5,
+                cache_read: 8,
+                cache_write: 0,
             }
         );
         {

@@ -10,6 +10,8 @@ pub(crate) fn execution_usage(task: &Task) -> TokenUsage {
     for (_, extra, _) in overheads(task) {
         usage.input = usage.input.saturating_sub(extra.input);
         usage.output = usage.output.saturating_sub(extra.output);
+        usage.cache_read = usage.cache_read.saturating_sub(extra.cache_read);
+        usage.cache_write = usage.cache_write.saturating_sub(extra.cache_write);
     }
     usage
 }
@@ -175,7 +177,8 @@ pub fn duzhi_report(
         |(a, o)| format!("{}{}谨奏。", o.label(), a.name),
     );
     let mut out = format!("度支奏销　{minister}\n");
-    let used = court.total_usage().total();
+    let total_usage = court.total_usage();
+    let used = total_usage.total();
     out.push_str(&match court.budget(BudgetScope::Court) {
         Some(limit) => format!(
             "朝廷度支：{limit} tokens，已用 {used}，余 {}\n",
@@ -183,6 +186,19 @@ pub fn duzhi_report(
         ),
         None => format!("朝廷度支：未设上限，已用 {used} tokens\n"),
     });
+    if total_usage.cache_read > 0 || total_usage.cache_write > 0 {
+        let rate = total_usage
+            .cache_hit_rate()
+            .map_or(String::new(), |r| format!("（命中率 {:.1}%）", r * 100.0));
+        let write = match total_usage.cache_write {
+            0 => String::new(),
+            w => format!("，写入 {w} tokens"),
+        };
+        out.push_str(&format!(
+            "提示词缓存：命中 {} tokens{rate}{write}\n",
+            total_usage.cache_read
+        ));
+    }
     for office in Office::all() {
         if let Some(limit) = court.budget(BudgetScope::Office(office)) {
             out.push_str(&format!("{}每件限 {limit} tokens\n", office.label()));
@@ -272,4 +288,42 @@ pub fn duzhi_report(
         }
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ziyuan_core::{CourtEvent, Seal, TaskId};
+
+    #[test]
+    fn duzhi_report_renders_prompt_cache_summary_only_when_nonzero() {
+        let mut court = Court::replay(&ziyuan_governance::founding_events(1)).unwrap();
+        let plain = duzhi_report(&court, None, |_| None);
+        assert!(!plain.contains("提示词缓存"), "{plain}");
+
+        let edict = court
+            .new_edict(Department::Works, "查缓存".into(), Seal::default())
+            .unwrap();
+        let worker = court.route(&edict).unwrap().worker;
+        for event in [
+            CourtEvent::EdictIssued(Box::new(edict)),
+            CourtEvent::TaskAssigned {
+                task: TaskId(1),
+                worker,
+                model: Some("claude-sonnet-4".into()),
+            },
+            CourtEvent::ModelUsage {
+                task: TaskId(1),
+                usage: TokenUsage::with_cache(1000, 100, 600, 200),
+                trace: None,
+            },
+        ] {
+            court.apply(&event).unwrap();
+        }
+        let report = duzhi_report(&court, None, |_| None);
+        assert!(
+            report.contains("提示词缓存：命中 600 tokens（命中率 60.0%），写入 200 tokens"),
+            "{report}"
+        );
+    }
 }

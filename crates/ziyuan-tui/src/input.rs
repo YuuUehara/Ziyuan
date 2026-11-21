@@ -4,8 +4,8 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModif
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    ABOLITION_NOTE, AddedSubtask, HunkVerdict, draft_plan_execution, draft_revision, duzhi_report,
-    kaocheng_report, parse_hunk_reviews, skipped_note, total_hunks,
+    ABOLITION_NOTE, AddedSubtask, HunkVerdict, RevertStatus, draft_plan_execution, draft_revision,
+    duzhi_report, kaocheng_report, parse_hunk_reviews, skipped_note, total_hunks,
 };
 use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
 use ziyuan_governance::TaskStatus;
@@ -432,6 +432,10 @@ impl App {
             }
             KeyCode::Char('v') => self.start_debate(task),
             KeyCode::Char('z') => self.cycle_diff_view(),
+            KeyCode::Char('Z') => match self.session.preview_revert(task, &self.config.root) {
+                Ok(report) => self.modal = Some(Modal::Revert(report)),
+                Err(e) => self.error(e.to_string()),
+            },
             KeyCode::Char('w') => {
                 let root = self.config.root.clone();
                 self.mutate(
@@ -577,6 +581,36 @@ impl App {
                 }
                 return;
             }
+            Some(Modal::Revert(_)) => {
+                let Some(Modal::Revert(report)) = self.modal.take() else {
+                    return;
+                };
+                let actionable =
+                    report.safe && report.files.iter().any(|f| f.status == RevertStatus::Ready);
+                if actionable && matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                    let root = self.config.root.clone();
+                    let task = TaskId(report.task);
+                    let version = report.version;
+                    self.mutate(
+                        |s| s.revert_changes(task, &root, Some(&version)),
+                        |done| {
+                            let base = if done.skipped > 0 {
+                                format!(
+                                    "诏令 #{} 安全回滚完成：恢复 {} 个文件，跳过 {} 个已恢复文件",
+                                    done.task, done.reverted, done.skipped
+                                )
+                            } else {
+                                format!(
+                                    "诏令 #{} 安全回滚完成：已恢复 {} 个文件",
+                                    done.task, done.reverted
+                                )
+                            };
+                            apply_note(base, &done.problems)
+                        },
+                    );
+                }
+                return;
+            }
             _ => {}
         }
         let count = match &self.modal {
@@ -636,7 +670,7 @@ impl App {
                 _ => {}
             },
             // 已在本函数开头处理。
-            Modal::Confirm(_) | Modal::Notice(_) => {}
+            Modal::Confirm(_) | Modal::Notice(_) | Modal::Revert(_) => {}
         }
         if key.code == KeyCode::Enter && matches!(self.modal, Some(Modal::Input { .. })) {
             self.submit_input();

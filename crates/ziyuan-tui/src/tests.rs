@@ -1057,3 +1057,216 @@ async fn tui_parallel_split_fails_closed_and_dag_add_and_deps_work() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn tui_safe_revert_preview_confirm_idempotent_conflict_and_header_cache_rate() {
+    let (mut app, _messages, root) = temp_app("tui-safe-revert");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/mod.rs"), "fn old() {}\n").unwrap();
+    std::fs::write(root.join("src/gone.rs"), "// old\n").unwrap();
+
+    // 1. 下发诏令 #1 并提议修改/新建/删除 3 处改动，附带缓存命中用量。
+    let task1 = {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let mut seal = Seal::default();
+        seal.capabilities.insert(Capability::WriteFile);
+        let edict = s.issue(Department::Works, "重构模块".into(), seal).unwrap();
+        let worker = s.court().route(&edict).unwrap().worker;
+        let task = edict.id;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker,
+                    model: Some("claude-sonnet-4".into()),
+                },
+                CourtEvent::ModelUsage {
+                    task,
+                    usage: TokenUsage::with_cache(1000, 200, 750, 100),
+                    trace: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task,
+                    changes: vec![
+                        FileChange {
+                            path: "src/mod.rs".into(),
+                            before: Some("fn old() {}\n".into()),
+                            after: "fn new() {}\n".into(),
+                            deleted: false,
+                        },
+                        FileChange {
+                            path: "src/added.rs".into(),
+                            before: None,
+                            after: "pub const X: u32 = 1;\n".into(),
+                            deleted: false,
+                        },
+                        FileChange {
+                            path: "src/gone.rs".into(),
+                            before: Some("// old\n".into()),
+                            after: String::new(),
+                            deleted: true,
+                        },
+                    ],
+                },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker,
+                    summary: "完成重构".into(),
+                },
+            ],
+        )
+        .unwrap();
+        task
+    };
+    app.reload();
+    app.selected_task = Some(task1);
+
+    // 页头应显示提示词缓存命中率（750 / 1000 = 75%）。
+    let wide = screen_at(&app, 160, 40);
+    assert!(wide.contains("缓存命中 75%"), "{wide}");
+
+    // 未落盘前按 Z 应报错且不打开弹窗。
+    press(&mut app, "Z");
+    assert!(app.modal.is_none());
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|(m, err)| *err && m.contains("尚未落盘")),
+        "status: {:?}",
+        app.status
+    );
+
+    // 准奏落盘后按 Z 打开安全回滚预览弹窗。
+    press(&mut app, "w");
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/mod.rs")).unwrap(),
+        "fn new() {}\n"
+    );
+    assert!(root.join("src/added.rs").exists());
+    assert!(!root.join("src/gone.rs").exists());
+
+    let detail = screen_at(&app, 120, 40);
+    assert!(detail.contains("已落盘（Z 安全回滚）"), "{detail}");
+
+    press(&mut app, "Z");
+    let modal = screen_at(&app, 120, 40);
+    assert!(modal.contains("安全回滚预览"), "{modal}");
+    assert!(modal.contains("可安全回滚 3 个文件"), "{modal}");
+    assert!(modal.contains("src/mod.rs"), "{modal}");
+    assert!(modal.contains("src/added.rs"), "{modal}");
+    assert!(modal.contains("src/gone.rs"), "{modal}");
+    assert!(modal.contains("按 y 确认安全回滚"), "{modal}");
+
+    // 按 Esc 取消：关闭弹窗且不触碰磁盘。
+    press(&mut app, "⎋");
+    assert!(app.modal.is_none());
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/mod.rs")).unwrap(),
+        "fn new() {}\n"
+    );
+
+    // 再次按 Z 并按 y 确认回滚：3 个文件全部恢复原状。
+    press(&mut app, "Z");
+    press(&mut app, "y");
+    assert!(app.modal.is_none());
+    assert!(
+        app.status
+            .as_ref()
+            .is_some_and(|(m, err)| !err && m.contains("已恢复 3 个文件")),
+        "status: {:?}",
+        app.status
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/mod.rs")).unwrap(),
+        "fn old() {}\n"
+    );
+    assert!(!root.join("src/added.rs").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/gone.rs")).unwrap(),
+        "// old\n"
+    );
+
+    // 回滚后再次按 Z：显示全部已恢复、无需回滚，按 y 只关闭弹窗不报错。
+    press(&mut app, "Z");
+    let idempotent = screen_at(&app, 120, 40);
+    assert!(idempotent.contains("无需回滚"), "{idempotent}");
+    assert!(idempotent.contains("按任意键关闭"), "{idempotent}");
+    press(&mut app, "y");
+    assert!(app.modal.is_none());
+
+    // 2. fail-closed 冲突验证：再准奏一件诏令 #2，手工改写其中一个文件后按 Z。
+    std::fs::write(root.join("src/a.rs"), "a1\n").unwrap();
+    std::fs::write(root.join("src/b.rs"), "b1\n").unwrap();
+    let task2 = {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let mut seal = Seal::default();
+        seal.capabilities.insert(Capability::WriteFile);
+        let edict = s
+            .issue(Department::Works, "双文件改动".into(), seal)
+            .unwrap();
+        let worker = s.court().route(&edict).unwrap().worker;
+        let task = edict.id;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task,
+                    changes: vec![
+                        FileChange {
+                            path: "src/a.rs".into(),
+                            before: Some("a1\n".into()),
+                            after: "a2\n".into(),
+                            deleted: false,
+                        },
+                        FileChange {
+                            path: "src/b.rs".into(),
+                            before: Some("b1\n".into()),
+                            after: "b2\n".into(),
+                            deleted: false,
+                        },
+                    ],
+                },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker,
+                    summary: "完".into(),
+                },
+            ],
+        )
+        .unwrap();
+        s.apply_changes(task, &root, Vec::new()).unwrap();
+        task
+    };
+    std::fs::write(root.join("src/b.rs"), "b3-manual\n").unwrap();
+    app.reload();
+    app.selected_task = Some(task2);
+
+    press(&mut app, "Z");
+    let conflict = screen_at(&app, 120, 40);
+    assert!(conflict.contains("已阻断回滚"), "{conflict}");
+    assert!(conflict.contains("落盘后已被改动"), "{conflict}");
+    assert!(conflict.contains("按任意键关闭"), "{conflict}");
+    // 即使按 y 也绝不触碰磁盘（包括未冲突的 src/a.rs）。
+    press(&mut app, "y");
+    assert!(app.modal.is_none());
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+        "a2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/b.rs")).unwrap(),
+        "b3-manual\n"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

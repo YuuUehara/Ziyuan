@@ -386,11 +386,15 @@ impl WorkerBackend for Streaming {
         hooks.model_usage(TokenUsage {
             input: 10,
             output: 1,
+            cache_read: 0,
+            cache_write: 0,
         });
         hooks.text_delta("后");
         hooks.model_usage(TokenUsage {
             input: 20,
             output: 2,
+            cache_read: 0,
+            cache_write: 0,
         });
         Ok("先后".into())
     }
@@ -431,7 +435,9 @@ async fn streamed_text_arrives_before_finish_and_is_not_persisted() {
         reopened.court().task(edict.id).unwrap().usage,
         TokenUsage {
             input: 30,
-            output: 3
+            output: 3,
+            cache_read: 0,
+            cache_write: 0,
         }
     );
 }
@@ -547,6 +553,8 @@ impl WorkerBackend for Examinee {
         let usage = TokenUsage {
             input: 10,
             output: 5,
+            cache_read: 0,
+            cache_write: 0,
         };
         let full =
             system.contains(&Persona::of(AgentId(2)).prompt()) && system.contains("工部尚书");
@@ -718,6 +726,8 @@ impl WorkerBackend for Ballot {
             TokenUsage {
                 input: 10,
                 output: 5,
+                cache_read: 0,
+                cache_write: 0,
             },
         ))
     }
@@ -943,6 +953,8 @@ impl WorkerBackend for Judge {
             TokenUsage {
                 input: 8,
                 output: 2,
+                cache_read: 0,
+                cache_write: 0,
             },
         ))
     }
@@ -1119,6 +1131,8 @@ impl WorkerBackend for Spender {
             hooks.model_usage(TokenUsage {
                 input: 30,
                 output: 10,
+                cache_read: 0,
+                cache_write: 0,
             });
         }
         Ok("办毕".into())
@@ -1135,6 +1149,8 @@ impl WorkerBackend for Spender {
         let usage = TokenUsage {
             input: 40,
             output: 10,
+            cache_read: 0,
+            cache_write: 0,
         };
         Ok(("臣附议".into(), usage))
     }
@@ -1286,6 +1302,8 @@ impl WorkerBackend for Debaters {
         let usage = TokenUsage {
             input: 10,
             output: 1,
+            cache_read: 0,
+            cache_write: 0,
         };
         // 第二段照抄纪要格式自报家门。
         let me = user
@@ -1446,6 +1464,8 @@ impl WorkerBackend for Cabinet {
             TokenUsage {
                 input: 50,
                 output: 5,
+                cache_read: 0,
+                cache_write: 0,
             },
         ))
     }
@@ -1910,6 +1930,8 @@ fn history_filters_by_task_official_kind_and_time() {
         usage: TokenUsage {
             input: 3,
             output: 4,
+            cache_read: 0,
+            cache_write: 0,
         },
         trace: Some("zy-abc".into()),
     });
@@ -2336,6 +2358,8 @@ impl WorkerBackend for Cited {
             TokenUsage {
                 input: 10,
                 output: 2,
+                cache_read: 0,
+                cache_write: 0,
             },
         ))
     }
@@ -2644,6 +2668,8 @@ impl WorkerBackend for Planner {
             TokenUsage {
                 input: 5,
                 output: 2,
+                cache_read: 0,
+                cache_write: 0,
             },
         ))
     }
