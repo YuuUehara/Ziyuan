@@ -2841,8 +2841,9 @@ mod tests {
         #[cfg(not(windows))]
         let check = "grep -q staged src/main.rs && test -f src/new/a.rs && test ! -e .env && test ! -d .ziyuan && echo COPY-OK";
         // cmd 的 echo 按本地代码页输出，标记用 ASCII。
+        // 不使用 `>nul`：Windows Server 默认不对 AppContainer 开放 \Device\Null 写权限。
         #[cfg(windows)]
-        let check = r"findstr /c:staged src\main.rs >nul && if exist src\new\a.rs if not exist .env if not exist .ziyuan echo COPY-OK";
+        let check = r"findstr /c:staged src\main.rs && if exist src\new\a.rs if not exist .env if not exist .ziyuan echo COPY-OK";
         let sealed = sealed_tools(&root, &seal(&Capability::ALL, &["src"]), Some(check)).unwrap();
         let find = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
         let (write, read, test) = (find("write_file"), find("read_file"), find("run_tests"));

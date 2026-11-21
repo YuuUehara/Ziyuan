@@ -938,7 +938,7 @@ mod tests {
                 .filter_map(|k| std::env::var_os(k).map(|v| ((*k).to_owned(), v)))
                 .collect();
         let cmd = format!(
-            "echo INSIDE_OK>inside.txt && type \"{}\" 2>NUL & echo W2_DONE",
+            "echo INSIDE_OK>inside.txt && type \"{}\" & echo W2_DONE",
             secret_file.display()
         );
         let out = run_shell(&ShellRunSpec {

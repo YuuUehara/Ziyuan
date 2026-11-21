@@ -668,16 +668,26 @@ if ($connected) {{ throw 'sandbox unexpectedly connected to host loopback' }}
 Write-Output 'REAL_TOOLCHAIN_PS_OK=1'
 "#,
             host_profile = host_userprofile.replace('\'', "''"),
-            secret = host_secret.to_string_lossy().replace('\'', "''"),
+            secret = fs::canonicalize(&host_secret)
+                .ok()
+                .and_then(|p| {
+                    p.to_str()
+                        .and_then(|s| s.strip_prefix(r"\\?\"))
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| host_secret.to_string_lossy().into_owned())
+                .replace('\'', "''"),
             port = addr.port(),
         ),
     )
     .unwrap();
 
+    // Pass relative `-File run_suite.ps1` so PowerShell inherits the normalized long-path
+    // CWD from `run_shell_sandboxed` even when `std::env::temp_dir()` contains an 8.3 short
+    // component (e.g. `RUNNER~1` on GitHub Actions).
     let cmd = format!(
-        "\"{}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
-        powershell_exe.display(),
-        script.display()
+        "\"{}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File run_suite.ps1",
+        powershell_exe.display()
     );
     let res = run_shell_sandboxed(
         &ShellSpec {

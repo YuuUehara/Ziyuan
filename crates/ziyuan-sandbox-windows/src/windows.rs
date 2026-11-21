@@ -1061,6 +1061,31 @@ pub(crate) fn run_shell_sandboxed(
     run_sandboxed_inner(&launch, cancel, true, Some(&raw_cmdline))
 }
 
+/// Expands 8.3 short path components (e.g. `RUNNER~1`) to their canonical Win32 long path
+/// without keeping a `\\?\` prefix for standard drive-letter paths.
+///
+/// Inside an AppContainer, ancestor directories above the admitted workspace (such as
+/// `C:\Users\<user>`) are not listable. Runtimes such as .NET / Windows PowerShell invoke
+/// `GetLongPathNameW` whenever a path contains `~`, which enumerates ancestor directories
+/// and fails with `ERROR_ACCESS_DENIED`. Expanding to the long path on the host after
+/// `reject_reparse_point` prevents short-name expansion inside the sandbox.
+fn normalize_win32_long_path(path: &Path) -> io::Result<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    if let Some(raw) = canonical.to_str()
+        && let Some(stripped) = raw.strip_prefix(r"\\?\")
+    {
+        let bytes = stripped.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(canonical)
+}
+
 fn run_sandboxed_inner(
     spec: &LaunchSpec,
     cancel: Option<&AtomicBool>,
@@ -1080,7 +1105,8 @@ fn run_sandboxed_inner(
             format!("sandbox program is not a file: {}", spec.program.display()),
         ));
     }
-    if let Some(cwd) = &spec.cwd {
+    let program = normalize_win32_long_path(&spec.program)?;
+    let resolved_cwd = if let Some(cwd) = &spec.cwd {
         reject_reparse_point(cwd)?;
         if !cwd.is_dir() {
             return Err(io::Error::new(
@@ -1088,7 +1114,10 @@ fn run_sandboxed_inner(
                 format!("sandbox cwd is not a directory: {}", cwd.display()),
             ));
         }
-    }
+        Some(normalize_win32_long_path(cwd)?)
+    } else {
+        None
+    };
     for dir in spec.writable_dirs.iter().chain(&spec.readonly_dirs) {
         reject_reparse_point(dir)?;
         if !dir.is_dir() {
@@ -1100,9 +1129,10 @@ fn run_sandboxed_inner(
     }
 
     let mut profile = Profile::create()?;
-    let temp_dir = profile.path.join("tmp");
-    let home_dir = profile.path.join("home");
-    let appdata_dir = profile.path.join("appdata");
+    let profile_dir = normalize_win32_long_path(&profile.path)?;
+    let temp_dir = profile_dir.join("tmp");
+    let home_dir = profile_dir.join("home");
+    let appdata_dir = profile_dir.join("appdata");
     fs::create_dir(&temp_dir)?;
     fs::create_dir(&home_dir)?;
     fs::create_dir(&appdata_dir)?;
@@ -1152,13 +1182,13 @@ fn run_sandboxed_inner(
     }
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
 
-    let application = wide(&spec.program);
-    let cwd = spec.cwd.as_deref().unwrap_or(&profile.path);
+    let application = wide(&program);
+    let cwd = resolved_cwd.as_deref().unwrap_or(&profile_dir);
     let directory = wide(cwd);
     let cmdline = if let Some(raw) = raw_cmdline {
         raw.to_owned()
     } else {
-        let program_arg = quote_windows_arg(&spec.program.to_string_lossy())?;
+        let program_arg = quote_windows_arg(&program.to_string_lossy())?;
         let mut built = program_arg;
         for arg in &spec.args {
             built.push(' ');
@@ -1168,7 +1198,7 @@ fn run_sandboxed_inner(
     };
     let mut command = wide(cmdline);
     let environment =
-        build_environment(&profile.path, &temp_dir, &home_dir, &appdata_dir, &spec.env)?;
+        build_environment(&profile_dir, &temp_dir, &home_dir, &appdata_dir, &spec.env)?;
     let mut desktop = if ordinary_control {
         PrivateDesktop::create(profile.sid).ok()
     } else {
