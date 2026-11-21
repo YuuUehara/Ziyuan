@@ -22,7 +22,7 @@ use ziyuan_app::Session;
 use ziyuan_storage::EventLog;
 
 use crate::args::{Command, parse};
-use crate::backend::{DEFAULT_LIMITS, login, logout, worker_backend};
+use crate::backend::{DEFAULT_LIMITS, login, logout, web_model_profiles, worker_backend};
 use crate::commands::execute;
 use crate::help::{HELP, JSON_COMMANDS, completions};
 use crate::output::json_output;
@@ -172,6 +172,8 @@ fn frontend(command: Command) -> Result<(), Box<dyn Error>> {
                 .enable_all()
                 .build()?;
             let root = env::current_dir()?;
+            let backend = worker_backend()?;
+            let model_profiles = web_model_profiles(&root);
             let config = ziyuan_web::Config {
                 token: ziyuan_web::load_or_create_token(&root, rotate)?,
                 viewer_token: match viewer {
@@ -179,9 +181,10 @@ fn frontend(command: Command) -> Result<(), Box<dyn Error>> {
                     false => None,
                 },
                 root,
-                backend: worker_backend()?,
+                backend,
                 limits: DEFAULT_LIMITS,
                 github: ziyuan_github::GitHub::from_env()?.map(Arc::new),
+                model_profiles,
             };
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::bind((bind, port)).await?;

@@ -32,17 +32,34 @@ pub(crate) async fn reform(
         .await
 }
 
-/// `{ office, model }`；`model` 为 null 或空串时恢复默认模型。
+/// `{ office, model }` 或 `{ department, model }`；`model` 为 null 或空串时恢复默认模型。
 pub(crate) async fn office_model(
     State(app): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let office = parse::<Office>(str_field(&body, "office")?)?;
     let model = body["model"]
         .as_str()
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map(str::to_owned);
+    let has_office = body.get("office").is_some_and(|v| !v.is_null());
+    let has_dept = body.get("department").is_some_and(|v| !v.is_null());
+    if has_office && has_dept {
+        return Err(ApiError::bad("不能同时提供 `office` 与 `department`"));
+    }
+    if has_dept {
+        let department = parse::<Department>(str_field(&body, "department")?)?;
+        return app
+            .mutate(move |s| {
+                let offices = s.set_department_model(department, model)?;
+                Ok(json!({
+                    "ok": true,
+                    "offices": offices.iter().map(|o| o.code()).collect::<Vec<_>>(),
+                }))
+            })
+            .await;
+    }
+    let office = parse::<Office>(str_field(&body, "office")?)?;
     app.mutate(move |s| {
         s.set_office_model(office, model)?;
         Ok(json!({ "ok": true }))

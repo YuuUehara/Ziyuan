@@ -567,3 +567,70 @@ fn text_recovery_temps_text_mode_reports_the_same_verdict() {
     assert!(!temp.exists(), "确认后应删除");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn model_list_and_department_batch_routing_work_and_reject_plaintext_keys() {
+    let dir = temp_court("model-profiles");
+    let models_json = dir.join(".ziyuan").join("models.json");
+    std::fs::write(
+        &models_json,
+        r#"{
+  "profiles": {
+    "claude-sonnet": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "api_key_env": "ZIYUAN_TEST_MISSING_ANTHROPIC_KEY"
+    },
+    "gemini-flash": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key_env": "ZIYUAN_TEST_MISSING_GEMINI_KEY"
+    }
+  }
+}"#,
+    )
+    .unwrap();
+
+    ok(&dir, &["model", "--dept", "works", "claude-sonnet"]);
+    let out = ok(&dir, &["model", "list", "--json"]);
+    let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let profiles = parsed["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0]["name"], "claude-sonnet");
+    assert_eq!(profiles[0]["provider"], "anthropic");
+    assert_eq!(
+        profiles[0]["api_key_env"],
+        "ZIYUAN_TEST_MISSING_ANTHROPIC_KEY"
+    );
+    assert_eq!(profiles[0]["api_key_ready"], false);
+
+    let overrides = parsed["office_overrides"].as_array().unwrap();
+    assert_eq!(overrides.len(), 3);
+    for code in ["minister:works", "vice-minister:works", "clerk:works"] {
+        assert!(
+            overrides
+                .iter()
+                .any(|o| o["office"] == code && o["model"] == "claude-sonnet"),
+            "{overrides:?}"
+        );
+    }
+
+    ok(&dir, &["model", "--dept", "works", "default"]);
+    let out = ok(&dir, &["model", "list", "--json"]);
+    let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(parsed["office_overrides"].as_array().unwrap().is_empty());
+
+    // 写入明文 api_key 必须被拒绝。
+    std::fs::write(
+        &models_json,
+        r#"{"profiles":{"bad":{"provider":"anthropic","model":"claude-sonnet-4","api_key":"sk-ant-secret"}}}"#,
+    )
+    .unwrap();
+    let bad = ziyuan(&dir, &["model", "list"]);
+    assert_eq!(bad.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("api_key_env"), "{stderr}");
+    assert!(!stderr.contains("sk-ant-secret"), "不得回显明文密钥");
+
+    std::fs::remove_dir_all(dir).unwrap();
+}

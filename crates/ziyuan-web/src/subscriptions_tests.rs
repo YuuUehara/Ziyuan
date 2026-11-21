@@ -105,6 +105,7 @@ fn config(service: &Service) -> crate::Config {
             timeout: std::time::Duration::from_secs(10),
         },
         github: None,
+        model_profiles: Vec::new(),
     }
 }
 async fn start(service: Service) -> (String, tokio::task::JoinHandle<()>) {

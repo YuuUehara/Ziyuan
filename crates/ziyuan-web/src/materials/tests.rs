@@ -80,6 +80,7 @@ async fn start_with_backend(
             timeout: std::time::Duration::from_secs(10),
         },
         github: None,
+        model_profiles: Vec::new(),
     });
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();

@@ -59,6 +59,7 @@ pub(crate) async fn state(
     value["running"] = json!(running);
     value["watching"] = json!(app.watching());
     value["github"] = json!(app.0.config.github.as_ref().map(|g| g.repo().to_owned()));
+    value["model_profiles"] = json!(app.0.config.model_profiles);
     value["viewer"] = json!(role == Role::Viewer);
     // 首次要实跑探测 git-delta，放到阻塞线程。
     value["delta"] = json!(

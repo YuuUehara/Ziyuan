@@ -450,6 +450,7 @@ async fn start(name: &str, found: bool) -> (String, PathBuf) {
             timeout: Duration::from_secs(10),
         },
         github: None,
+        model_profiles: Vec::new(),
     };
     tokio::spawn(async move {
         axum::serve(listener, router(config)).await.unwrap();

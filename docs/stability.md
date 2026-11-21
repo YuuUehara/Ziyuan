@@ -188,6 +188,7 @@
   - `1.20.0`：新增 `ziyuan split --parallel-writes`、Web `parallel_writes` 与环境变量 `ZIYUAN_JJ_WORKSPACE`（`auto|always|off`，默认 `auto`）；非 `jj` 仓库下请求写并行分办失败关闭；落盘继续逐段准奏与原文核验。
 - **1.21.0（运行中调整 DAG）**：事件簿仍为格式 v1，新增 `DagSubtaskAdded`（编码 `DAGADD`）与 `DagDependenciesUpdated`（编码 `DAGDEPS`），最低读取版本登记为序号 55（`1.21.0`）；未使用运行中调整的旧事件簿不抬高读取门槛。CLI 新增 `ziyuan dag add` 与 `ziyuan dag deps`；仅允许在父诏令未结束前追加子诏令（仍守单层 2–8 件上限）或修改 `Pending` 子诏令前置依赖，已开始／已结束节点不可改写。
 - **1.22.0（导入文件日文 JIS 编码支持）**：TXT／Markdown 预览与导入、原文更新、SRT 字幕、CSV／TBX 术语表及 TMX 导入在 UTF-8 之外新增日文 JIS（`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`）严格解码（绝不作有损替换）；带 UTF-8 BOM 或有效 UTF-8 输入保持原样字节零拷贝归档，非 UTF-8 JIS 输入在导入边界转换为规范 UTF-8 归档（解码后同样受 8 MiB 上限约束），不改变 `project.json` schema 2 与朝廷事件簿格式。
+- **1.40.0（异构多模型原生接入与按部／按官职路由，零新增事件）**：不新增朝廷事件类型与玉玺代码，不提高旧事件簿读取门槛。新增 `.ziyuan/models.json` 异构多模型路由表（严格禁止明文密钥字段，仅存 `api_key_env` 环境变量名；256 KiB／64 项上限，拒绝符号链接），新增 `ziyuan model list [--json]`、`ziyuan model --dept <部门> <模型|配置名|default>` 与 Web `POST /api/offices/model` 的 `{ department, model }` 批量分派（观政只读 403，前端只展示非机密配置摘要）；户部度支汇总与导出在混用不同币种模型（如 USD 与元）时按币种分别累计，绝不跨币种相加。原生 Anthropic Messages API 与原生 Google Gemini API 适配仅经本地模拟服务验证，列为下方实验性功能。
 - **1.38.0（Windows 原生号舍 W3 门吏代理与快照内 `haoshe.write`，零新增事件）**：不新增朝廷事件与玉玺代码，不提高旧事件簿读取门槛。Windows 上 `ZIYUAN_SANDBOX_ALLOW` 与 MCP `haoshe.network: [...]` 经宿主机保护 SDDL 命名管道（`\\.\pipe\ziyuan-door-…`）＋同 SID 0 能力 AppContainer 桥接按域名白名单出站，容器保持零网络 capability、零 loopback 豁免与零宿主防火墙／注册表／ACL 改动；MCP `haoshe.write` 仅映射到任务私有只读快照内对应子目录（拒绝绝对路径、越界路径、控制目录与重解析点），宿主项目目录零写入。开放联网（`Network::Open`／MCP `haoshe: true`）、外部 `CARGO_TARGET_DIR` 与越界 `haoshe.write` 继续返回 `SandboxUnavailable` 失败关闭。
 - **1.37.0（只读续问闭环、增量符号索引缓存与度支导出，零新增事件）**：不新增朝廷事件与玉玺代码，不提高旧事件簿读取门槛。`ziyuan edict --follow-up <ID>`、Web `POST /api/tasks/{id}/follow-up`（观政只读 403）与 TUI `Q` 仅基于已结诏令派生常规只读 `EdictIssued`（代码级剥离写／测／MCP 工具），前件实录包裹于隔离围栏内；`ziyuan budget --export <文件> [--format csv|json] [--bom]` 与 Web `GET /api/duzhi/export` 仅新增只读导出；`.ziyuan/index/symbols-v1.json` 为可丢弃重建的增量符号索引缓存，不在冻结范围内。
 - **1.36.0（多语种确定性 QA、双语成稿导出、候选术语提案与追更扩展，零新增事件）**：不新增朝廷事件与玉玺代码。确定性检查新增 `source_script_leak` 与 `punctuation_mismatch`（沿用既有定稿规则）；`text export-finished --bilingual`（HTML／Markdown）不改变单语导出字节且拒绝 `--format txt --bilingual`；`termbase export --bom` 与 `termbase propose`（仅写入 `proposals/term-candidates.json`，不触碰上下文与译稿）沿用既有安全边界；`follow add` 新增 Kakuyomu 与 `feed:https://…`（仅取元数据、丢弃正文、拒绝私网 SSRF）。
@@ -210,6 +211,8 @@
 
 下列功能可用，但只用模拟服务测过，1.0 起不承诺兼容：行为、参数与凭据格式都可能调整，变化写进 CHANGELOG。用真实服务实测通过后转为冻结。
 
+- **Anthropic 原生接口**：`ZIYUAN_LLM_PROVIDER=anthropic` 及 `.ziyuan/models.json` 中 `provider: "anthropic"`（仅经本地模拟 HTTP 服务测过流式文本、思维链、`tool_use`/`tool_result`、`cache_control` 断点与缓存用量统计，尚未以真实 Anthropic 账号实测）。
+- **Gemini 原生接口**：`ZIYUAN_LLM_PROVIDER=gemini` 及 `.ziyuan/models.json` 中 `provider: "gemini"`（仅经本地模拟 HTTP 服务测过 `x-goog-api-key` 鉴权、`streamGenerateContent?alt=sse`、`functionCall`/`functionResponse`、`thought` 与 `cachedContentTokenCount`，尚未以真实 Gemini 账号实测）。
 - **ChatGPT 订阅**：`ZIYUAN_LLM_PROVIDER=chatgpt`、`ziyuan login` / `logout` 及其凭据（变量名本身冻结，`chatgpt` 这一取值的行为不冻结）。
 - **HTTP 外藩**：`.ziyuan/mcp.json` 中以 `url` 登记的 Streamable HTTP 服务（以 `command` 登记的本地服务已冻结）。
 

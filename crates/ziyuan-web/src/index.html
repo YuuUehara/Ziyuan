@@ -918,9 +918,12 @@
             <h3>官职配置 <small class="hint">模型与玉玺上限</small></h3>
             <select id="config-office" data-keep></select>
             <p class="hint" id="config-current"></p>
+            <p class="hint" id="model-profiles-hint" hidden></p>
             <div class="row">
-              <input type="text" id="config-model" data-keep placeholder="模型，如 deepseek-v4-pro">
+              <input type="text" id="config-model" list="model-profiles-list" data-keep placeholder="模型或配置名，如 claude-sonnet">
+              <datalist id="model-profiles-list"></datalist>
               <button class="small shrink" id="model-set">指定</button>
+              <button class="small shrink" id="model-dept-set" title="同时设为该官职所属整个部门（尚书、侍郎、郎中）的模型" hidden>同部</button>
               <button class="small shrink" id="model-clear">默认</button>
             </div>
             <div class="row">
@@ -1442,6 +1445,34 @@ function renderOfficeConfig(s) {
   if (!office) return;
   $("config-current").textContent =
     `模型：${office.model || (s.model ? `默认（${s.model}）` : "演示后端")}；玉玺上限：${office.ceiling || "无"}；每件度支：${office.budget ? fmt(office.budget) + " tokens" : "不限"}`;
+  const deptBtn = $("model-dept-set");
+  if (deptBtn) {
+    deptBtn.hidden = !office.department;
+    deptBtn.dataset.dept = office.department || "";
+  }
+  const list = $("model-profiles-list");
+  const hint = $("model-profiles-hint");
+  const profiles = Array.isArray(s.model_profiles) ? s.model_profiles : [];
+  if (list) {
+    list.replaceChildren();
+    for (const p of profiles) {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.label = `${p.provider_label} · ${p.model}${p.api_key_ready ? "" : "（未设凭据）"}`;
+      list.appendChild(opt);
+    }
+  }
+  if (hint) {
+    if (profiles.length > 0) {
+      hint.hidden = false;
+      hint.textContent = "models.json 配置：" + profiles
+        .map((p) => `${p.name}（${p.provider}${p.api_key_ready ? "" : "·缺凭据"}）`)
+        .join("、");
+    } else {
+      hint.hidden = true;
+      hint.textContent = "";
+    }
+  }
 }
 
 function chronicle(note) {
@@ -4700,6 +4731,12 @@ $("config-office").addEventListener("change", () => renderOfficeConfig(state));
 const configOffice = () => $("config-office").value;
 $("model-set").addEventListener("click", () =>
   act(api("/offices/model", { office: configOffice(), model: $("config-model").value.trim() }), "已指定模型"));
+$("model-dept-set").addEventListener("click", () => {
+  const dept = $("model-dept-set").dataset.dept;
+  if (!dept) return;
+  const val = $("config-model").value.trim();
+  act(api("/offices/model", { department: dept, model: val || null }), val ? "已为全部分派模型" : "已恢复全部默认模型");
+});
 $("model-clear").addEventListener("click", () =>
   act(api("/offices/model", { office: configOffice(), model: null }), "已恢复默认模型"));
 $("ceiling-set").addEventListener("click", () => act(api("/offices/ceiling", {

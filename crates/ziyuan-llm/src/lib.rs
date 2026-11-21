@@ -3,21 +3,30 @@
 //!
 //! 同步、流式（SSE）；文本片段经 `ExecutionHooks::text_delta` 实时报告。只实现 Tool Calling 所需的最小字段。
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use ziyuan_core::{Price, TokenUsage};
 use ziyuan_runtime::agent_loop::{Message, ModelProvider, ModelTurn, ToolRequest, ToolSpec};
 use ziyuan_runtime::{BoxError, ExecutionHooks, ModelCatalog, guard};
 
+pub mod anthropic;
 pub mod chatgpt;
+pub mod config;
+pub mod gemini;
 mod responses;
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub use anthropic::AnthropicMessages;
+pub use config::{ModelProfile, ModelsConfig, ProfileSummary, ProviderKind};
+pub use gemini::GeminiNative;
+
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// 度支余额低于此数时才向 API 传 `max_tokens`（再高的值有些服务会拒绝）。
-const MAX_TOKENS_CAP: u64 = 8192;
+pub(crate) const MAX_TOKENS_CAP: u64 = 8192;
 
 /// 请求失败（网络错误、429、5xx）时的重试：第 n 次重试前等待 `base × 2ⁿ`（不超过 `max`），
 /// 服务端给了 `Retry-After` 则照办（同样不超过 `max`）。流式响应开始之后不重试。
@@ -39,7 +48,7 @@ impl Default for Retry {
 }
 
 impl Retry {
-    fn delay(&self, retry: u32, after: Option<Duration>) -> Duration {
+    pub(crate) fn delay(&self, retry: u32, after: Option<Duration>) -> Duration {
         after
             .unwrap_or_else(|| self.base.saturating_mul(1 << retry.min(16)))
             .min(self.max)
@@ -105,6 +114,7 @@ pub struct OpenAiCompatible {
     base_url: String,
     auth: Auth,
     model: String,
+    display_name: Option<String>,
     agent: ureq::Agent,
     retry: Retry,
     prompt_cache: PromptCache,
@@ -112,12 +122,12 @@ pub struct OpenAiCompatible {
 
 /// 一次请求的失败：可否重试、服务端要求等多久、服务端的请求 ID；
 /// `reauth` 为被拒的订阅访问令牌（401），续期后可再试一次。
-struct Failure {
-    error: BoxError,
-    retryable: bool,
-    after: Option<Duration>,
-    request_id: Option<String>,
-    reauth: Option<String>,
+pub(crate) struct Failure {
+    pub(crate) error: BoxError,
+    pub(crate) retryable: bool,
+    pub(crate) after: Option<Duration>,
+    pub(crate) request_id: Option<String>,
+    pub(crate) reauth: Option<String>,
 }
 
 impl OpenAiCompatible {
@@ -135,6 +145,7 @@ impl OpenAiCompatible {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             auth: Auth::Key(api_key),
             model: model.into(),
+            display_name: None,
             agent,
             retry: Retry::default(),
             prompt_cache: PromptCache::Auto,
@@ -167,6 +178,11 @@ impl OpenAiCompatible {
         self
     }
 
+    pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
+        self.display_name = Some(name.into());
+        self
+    }
+
     /// 读取 `ZIYUAN_LLM_MODEL`（必需）、`ZIYUAN_LLM_BASE_URL`、`ZIYUAN_LLM_API_KEY`；
     /// `ZIYUAN_LLM_PROVIDER=chatgpt` 改用 `ziyuan login` 登录的 ChatGPT 订阅（不需要 Key）。
     /// 未设置模型时返回 `None`；选了订阅却未登录、未授权时报错。
@@ -188,7 +204,7 @@ impl OpenAiCompatible {
             retry.attempts = n;
         }
         let this = match env::var("ZIYUAN_LLM_PROVIDER").unwrap_or_default().as_str() {
-            "" | "api" => Self::new(
+            "" | "api" | "openai" => Self::new(
                 base_url.unwrap_or_else(|| DEFAULT_BASE_URL.into()),
                 api_key,
                 model,
@@ -215,40 +231,175 @@ impl OpenAiCompatible {
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        self.display_name.as_deref().unwrap_or(&self.model)
     }
 
     /// 同一服务地址与 Key 下的模型目录，供按官职切换模型。
     pub fn catalog(&self) -> Catalog {
+        let default_kind = match self.auth {
+            Auth::Key(_) => ProviderKind::OpenAi,
+            Auth::Plan(_) => ProviderKind::ChatGpt,
+        };
         Catalog {
+            default_kind,
             base_url: self.base_url.clone(),
             auth: self.auth.clone(),
             retry: self.retry,
             prompt_cache: self.prompt_cache,
+            profiles: BTreeMap::new(),
         }
     }
 }
 
+/// 某项配置缺少必需凭据或账号时返回的占位提供方：仅在真正调用该配置时报错，
+/// 避免影响朝廷中其他使用正常配置的官职。
+struct FailingProvider {
+    model: String,
+    message: String,
+}
+
+impl ModelProvider for FailingProvider {
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
+
+    fn next_turn(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _hooks: &dyn ExecutionHooks,
+    ) -> Result<ModelTurn, BoxError> {
+        Err(self.message.clone().into())
+    }
+}
+
+/// 异构多模型目录：优先按 `.ziyuan/models.json` 中的配置名路由至对应提供方协议、
+/// 端点与凭据环境变量；未登记于配置表时回落到默认提供方。
 pub struct Catalog {
+    default_kind: ProviderKind,
     base_url: String,
     auth: Auth,
     retry: Retry,
     prompt_cache: PromptCache,
+    profiles: BTreeMap<String, ModelProfile>,
+}
+
+impl Catalog {
+    pub fn with_profiles(mut self, profiles: BTreeMap<String, ModelProfile>) -> Self {
+        self.profiles = profiles;
+        self
+    }
+
+    /// 按配置表或默认提供方构造单次模型实例（供异构路由与单测使用）。
+    fn build_from_profile(&self, profile: &ModelProfile) -> Box<dyn ModelProvider> {
+        let prompt_cache = profile.prompt_cache.unwrap_or(self.prompt_cache);
+        let api_key = match &profile.api_key_env {
+            Some(var) => match env::var(var).ok().filter(|v| !v.is_empty()) {
+                Some(key) => Some(key),
+                None => {
+                    return Box::new(FailingProvider {
+                        model: profile.name.clone(),
+                        message: format!(
+                            "模型配置 {} 需要环境变量 {var}（当前未设置）",
+                            profile.name
+                        ),
+                    });
+                }
+            },
+            None => None,
+        };
+        match profile.provider {
+            ProviderKind::OpenAi => Box::new(
+                OpenAiCompatible::new(profile.base_url.clone(), api_key, profile.model.clone())
+                    .with_display_name(profile.name.clone())
+                    .with_retry(self.retry)
+                    .with_prompt_cache(prompt_cache),
+            ),
+            ProviderKind::Anthropic => Box::new(
+                AnthropicMessages::new(profile.base_url.clone(), api_key, profile.model.clone())
+                    .with_display_name(profile.name.clone())
+                    .with_retry(self.retry)
+                    .with_prompt_cache(prompt_cache),
+            ),
+            ProviderKind::Gemini => Box::new(
+                GeminiNative::new(profile.base_url.clone(), api_key, profile.model.clone())
+                    .with_display_name(profile.name.clone())
+                    .with_retry(self.retry),
+            ),
+            ProviderKind::ChatGpt => match chatgpt::Account::from_env() {
+                Ok(account) => match account.load() {
+                    Ok(Some(creds)) if creds.plan_enabled() => Box::new(
+                        OpenAiCompatible::chatgpt_plan(
+                            Arc::new(account),
+                            profile.base_url.clone(),
+                            profile.model.clone(),
+                        )
+                        .with_display_name(profile.name.clone())
+                        .with_retry(self.retry),
+                    ),
+                    Ok(_) => Box::new(FailingProvider {
+                        model: profile.name.clone(),
+                        message: format!(
+                            "模型配置 {} 使用 ChatGPT 订阅，但尚未登录，请先执行 `ziyuan login`",
+                            profile.name
+                        ),
+                    }),
+                    Err(e) => Box::new(FailingProvider {
+                        model: profile.name.clone(),
+                        message: format!("模型配置 {} 读取 ChatGPT 凭据失败: {e}", profile.name),
+                    }),
+                },
+                Err(e) => Box::new(FailingProvider {
+                    model: profile.name.clone(),
+                    message: format!("模型配置 {} 初始化 ChatGPT 账号失败: {e}", profile.name),
+                }),
+            },
+        }
+    }
+
+    fn build_default_provider(&self, model: &str) -> Box<dyn ModelProvider> {
+        let key = match &self.auth {
+            Auth::Key(k) => k.clone(),
+            Auth::Plan(_) => None,
+        };
+        match self.default_kind {
+            ProviderKind::OpenAi | ProviderKind::ChatGpt => {
+                let mut provider = OpenAiCompatible::new(self.base_url.clone(), None, model);
+                provider.auth = self.auth.clone();
+                Box::new(
+                    provider
+                        .with_retry(self.retry)
+                        .with_prompt_cache(self.prompt_cache),
+                )
+            }
+            ProviderKind::Anthropic => Box::new(
+                AnthropicMessages::new(self.base_url.clone(), key, model)
+                    .with_retry(self.retry)
+                    .with_prompt_cache(self.prompt_cache),
+            ),
+            ProviderKind::Gemini => Box::new(
+                GeminiNative::new(self.base_url.clone(), key, model).with_retry(self.retry),
+            ),
+        }
+    }
 }
 
 impl ModelCatalog for Catalog {
     fn provider(&self, model: &str) -> Box<dyn ModelProvider> {
-        let mut provider = OpenAiCompatible::new(self.base_url.clone(), None, model);
-        provider.auth = self.auth.clone();
-        Box::new(
-            provider
-                .with_retry(self.retry)
-                .with_prompt_cache(self.prompt_cache),
-        )
+        if let Some(profile) = self.profiles.get(model) {
+            return self.build_from_profile(profile);
+        }
+        self.build_default_provider(model)
     }
 
-    /// 订阅额度不按 token 计价，不估算花费。
+    /// 订阅额度不按 token 计价，不估算花费；`.ziyuan/models.json` 自定义单价优先于内置价目。
     fn price(&self, model: &str) -> Option<Price> {
+        if let Some(profile) = self.profiles.get(model) {
+            if profile.provider == ProviderKind::ChatGpt {
+                return None;
+            }
+            return profile.price.clone().or_else(|| price_for(&profile.model));
+        }
         match self.auth {
             Auth::Key(_) => price_for(model),
             Auth::Plan(_) => None,
@@ -256,33 +407,348 @@ impl ModelCatalog for Catalog {
     }
 }
 
-/// 估算花费所用的单价。内置价目取 DeepSeek 官方 2026-10 的高峰时段、未命中缓存价，是估算上限：
-/// 空闲时段与缓存命中都更便宜。不在价目中的模型用 `ZIYUAN_LLM_PRICE`（「输入,输出[,币种]」，
-/// 每百万 token），未设置则返回 `None`。
+/// 解析后的默认执行模型与异构路由目录（整合环境变量与可选 `.ziyuan/models.json`）。
+pub struct ResolvedBackend {
+    pub provider: Box<dyn ModelProvider>,
+    pub catalog: Catalog,
+    pub model_label: String,
+    pub provider_kind: ProviderKind,
+    pub uses_chatgpt_plan: bool,
+}
+
+fn retry_from_env() -> Retry {
+    let mut retry = Retry::default();
+    if let Some(n) = env::var("ZIYUAN_LLM_RETRIES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+    {
+        retry.attempts = n;
+    }
+    retry
+}
+
+fn provider_from_profile_strict(
+    profile: &ModelProfile,
+    retry: Retry,
+    default_prompt_cache: PromptCache,
+) -> Result<(Box<dyn ModelProvider>, Auth), BoxError> {
+    let prompt_cache = profile.prompt_cache.unwrap_or(default_prompt_cache);
+    let api_key = match &profile.api_key_env {
+        Some(var) => {
+            let val = env::var(var)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "默认模型配置 {} 需要环境变量 {var}（当前未设置）",
+                        profile.name
+                    )
+                })?;
+            Some(val)
+        }
+        None => None,
+    };
+    match profile.provider {
+        ProviderKind::OpenAi => Ok((
+            Box::new(
+                OpenAiCompatible::new(
+                    profile.base_url.clone(),
+                    api_key.clone(),
+                    profile.model.clone(),
+                )
+                .with_display_name(profile.name.clone())
+                .with_retry(retry)
+                .with_prompt_cache(prompt_cache),
+            ),
+            Auth::Key(api_key),
+        )),
+        ProviderKind::Anthropic => Ok((
+            Box::new(
+                AnthropicMessages::new(
+                    profile.base_url.clone(),
+                    api_key.clone(),
+                    profile.model.clone(),
+                )
+                .with_display_name(profile.name.clone())
+                .with_retry(retry)
+                .with_prompt_cache(prompt_cache),
+            ),
+            Auth::Key(api_key),
+        )),
+        ProviderKind::Gemini => Ok((
+            Box::new(
+                GeminiNative::new(
+                    profile.base_url.clone(),
+                    api_key.clone(),
+                    profile.model.clone(),
+                )
+                .with_display_name(profile.name.clone())
+                .with_retry(retry),
+            ),
+            Auth::Key(api_key),
+        )),
+        ProviderKind::ChatGpt => {
+            let account = chatgpt::Account::from_env()?;
+            if !account.load()?.is_some_and(|c| c.plan_enabled()) {
+                return Err(format!(
+                    "默认模型配置 {} 使用 ChatGPT 订阅，但尚未登录，请先执行 `ziyuan login`",
+                    profile.name
+                )
+                .into());
+            }
+            let account = Arc::new(account);
+            Ok((
+                Box::new(
+                    OpenAiCompatible::chatgpt_plan(
+                        account.clone(),
+                        profile.base_url.clone(),
+                        profile.model.clone(),
+                    )
+                    .with_display_name(profile.name.clone())
+                    .with_retry(retry),
+                ),
+                Auth::Plan(account),
+            ))
+        }
+    }
+}
+
+/// 统一解析模型后端与异构路由目录：
+///
+/// 优先级：`ZIYUAN_LLM_*` 环境变量覆盖默认模型（若仅设 `ZIYUAN_LLM_MODEL` 且其值匹配
+/// `.ziyuan/models.json` 中的配置名，则直接启用该配置）；未设 `ZIYUAN_LLM_MODEL` 时若
+/// `.ziyuan/models.json` 指定了 `default`，则以该默认配置启动；否则返回 `Ok(None)`（演示模式）。
+/// 只要存在 `.ziyuan/models.json`，其中全部配置均注入 `Catalog` 供按官职／按部异构路由。
+pub fn resolve_backend(root: Option<&Path>) -> Result<Option<ResolvedBackend>, BoxError> {
+    let config = match root {
+        Some(dir) => ModelsConfig::load(dir)?,
+        None => None,
+    };
+    let profiles = config
+        .as_ref()
+        .map(|c| c.profiles.clone())
+        .unwrap_or_default();
+    let retry = retry_from_env();
+    let prompt_cache = PromptCache::from_env()?;
+
+    let env_model = env::var("ZIYUAN_LLM_MODEL").ok().filter(|m| !m.is_empty());
+    let env_provider = env::var("ZIYUAN_LLM_PROVIDER")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let env_base_url = env::var("ZIYUAN_LLM_BASE_URL")
+        .ok()
+        .filter(|u| !u.is_empty());
+    let env_api_key = env::var("ZIYUAN_LLM_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
+
+    // 若仅设 ZIYUAN_LLM_MODEL 且命中 models.json 配置名，则直接启用该配置。
+    if let Some(model_name) = &env_model
+        && env_provider.is_none()
+        && env_base_url.is_none()
+        && env_api_key.is_none()
+        && let Some(profile) = profiles.get(model_name)
+    {
+        let (provider, auth) = provider_from_profile_strict(profile, retry, prompt_cache)?;
+        let catalog = Catalog {
+            default_kind: profile.provider,
+            base_url: profile.base_url.clone(),
+            auth,
+            retry,
+            prompt_cache: profile.prompt_cache.unwrap_or(prompt_cache),
+            profiles: profiles.clone(),
+        };
+        return Ok(Some(ResolvedBackend {
+            provider,
+            catalog,
+            model_label: profile.name.clone(),
+            provider_kind: profile.provider,
+            uses_chatgpt_plan: profile.provider == ProviderKind::ChatGpt,
+        }));
+    }
+
+    if let Some(model) = env_model {
+        let kind = match env_provider.as_deref() {
+            Some(raw) => ProviderKind::parse(raw)?,
+            None => ProviderKind::OpenAi,
+        };
+        let base_url = env_base_url.unwrap_or_else(|| kind.default_base_url().to_owned());
+        let (provider, auth): (Box<dyn ModelProvider>, Auth) = match kind {
+            ProviderKind::OpenAi => (
+                Box::new(
+                    OpenAiCompatible::new(base_url.clone(), env_api_key.clone(), model.clone())
+                        .with_retry(retry)
+                        .with_prompt_cache(prompt_cache),
+                ),
+                Auth::Key(env_api_key),
+            ),
+            ProviderKind::Anthropic => (
+                Box::new(
+                    AnthropicMessages::new(base_url.clone(), env_api_key.clone(), model.clone())
+                        .with_retry(retry)
+                        .with_prompt_cache(prompt_cache),
+                ),
+                Auth::Key(env_api_key),
+            ),
+            ProviderKind::Gemini => (
+                Box::new(
+                    GeminiNative::new(base_url.clone(), env_api_key.clone(), model.clone())
+                        .with_retry(retry),
+                ),
+                Auth::Key(env_api_key),
+            ),
+            ProviderKind::ChatGpt => {
+                let account = chatgpt::Account::from_env()?;
+                if !account.load()?.is_some_and(|c| c.plan_enabled()) {
+                    return Err("ZIYUAN_LLM_PROVIDER=chatgpt：尚未登录 ChatGPT 订阅，请先执行 `ziyuan login`".into());
+                }
+                let account = Arc::new(account);
+                (
+                    Box::new(
+                        OpenAiCompatible::chatgpt_plan(
+                            account.clone(),
+                            base_url.clone(),
+                            model.clone(),
+                        )
+                        .with_retry(retry)
+                        .with_prompt_cache(prompt_cache),
+                    ),
+                    Auth::Plan(account),
+                )
+            }
+        };
+        let catalog = Catalog {
+            default_kind: kind,
+            base_url,
+            auth,
+            retry,
+            prompt_cache,
+            profiles,
+        };
+        return Ok(Some(ResolvedBackend {
+            provider,
+            catalog,
+            model_label: model,
+            provider_kind: kind,
+            uses_chatgpt_plan: kind == ProviderKind::ChatGpt,
+        }));
+    }
+
+    if let Some(cfg) = config
+        && let Some(default_name) = &cfg.default_profile
+        && let Some(profile) = cfg.profiles.get(default_name).cloned()
+    {
+        let (provider, auth) = provider_from_profile_strict(&profile, retry, prompt_cache)?;
+        let catalog = Catalog {
+            default_kind: profile.provider,
+            base_url: profile.base_url.clone(),
+            auth,
+            retry,
+            prompt_cache: profile.prompt_cache.unwrap_or(prompt_cache),
+            profiles: cfg.profiles,
+        };
+        return Ok(Some(ResolvedBackend {
+            provider,
+            catalog,
+            model_label: profile.name,
+            provider_kind: profile.provider,
+            uses_chatgpt_plan: profile.provider == ProviderKind::ChatGpt,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// 估算花费所用的单价（支持 `.ziyuan/models.json` 配置单价、内置参考价目与 `ZIYUAN_LLM_PRICE`）。
 pub fn price_for(model: &str) -> Option<Price> {
     price_quote(model).map(|(price, _)| price)
 }
 
+/// 按项目 `.ziyuan/models.json`（若有）与内置价目查询模型估算单价。
+pub fn price_for_in_workspace(root: Option<&Path>, model: &str) -> Option<Price> {
+    if let Some(dir) = root
+        && let Ok(Some(cfg)) = ModelsConfig::load(dir)
+        && let Some(profile) = cfg.profiles.get(model)
+    {
+        if profile.provider == ProviderKind::ChatGpt {
+            return None;
+        }
+        return profile.price.clone().or_else(|| price_for(&profile.model));
+    }
+    price_for(model)
+}
+
 /// Current estimation rate and its provenance, not a historical billing rate.
 pub fn price_quote(model: &str) -> Option<(Price, &'static str)> {
-    let (input, output) = match model {
-        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => (2.0, 8.0),
-        "deepseek-v4-pro" => (9.0, 27.0),
-        _ => {
-            return env::var("ZIYUAN_LLM_PRICE")
-                .ok()
-                .and_then(|s| parse_price(&s))
-                .map(|price| (price, "ZIYUAN_LLM_PRICE（本次读取，非历史费率）"));
-        }
+    let bare = model
+        .rsplit_once('/')
+        .map_or(model, |(_, suffix)| suffix)
+        .trim();
+    let lower = bare.to_ascii_lowercase();
+
+    // DeepSeek（人民币元 / 百万 token）
+    let deepseek = match lower.as_str() {
+        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => Some((2.0, 8.0)),
+        "deepseek-v4-pro" => Some((9.0, 27.0)),
+        "deepseek-chat" => Some((2.0, 8.0)),
+        "deepseek-reasoner" => Some((4.0, 16.0)),
+        _ => None,
     };
-    Some((
-        Price {
-            input_per_million: input,
-            output_per_million: output,
-            currency: "元".into(),
-        },
-        "内置 DeepSeek 2026-10 高峰未命中缓存估价（未实时核价）",
-    ))
+    if let Some((input, output)) = deepseek {
+        return Some((
+            Price {
+                input_per_million: input,
+                output_per_million: output,
+                currency: "元".into(),
+            },
+            "内置 DeepSeek 2026-10 高峰未命中缓存估价（未实时核价）",
+        ));
+    }
+
+    // 主流国际旗舰参考估价（USD / 百万 token，未实时核价，仅作估算上限）
+    let usd = if lower.starts_with("claude-opus-4") {
+        Some((15.0, 75.0))
+    } else if lower.starts_with("claude-sonnet-4")
+        || lower.starts_with("claude-3-7-sonnet")
+        || lower.starts_with("claude-3-5-sonnet")
+    {
+        Some((3.0, 15.0))
+    } else if lower.starts_with("claude-haiku-4") || lower.starts_with("claude-3-5-haiku") {
+        Some((0.8, 4.0))
+    } else if lower.starts_with("gpt-5-mini") {
+        Some((0.25, 2.0))
+    } else if lower == "gpt-5" || lower.starts_with("gpt-5-") {
+        Some((1.25, 10.0))
+    } else if lower.starts_with("gpt-4.1-mini") {
+        Some((0.40, 1.60))
+    } else if lower == "gpt-4.1" || lower.starts_with("gpt-4.1-") {
+        Some((2.0, 8.0))
+    } else if lower.starts_with("gpt-4o-mini") {
+        Some((0.15, 0.60))
+    } else if lower == "gpt-4o" || lower.starts_with("gpt-4o-") {
+        Some((2.5, 10.0))
+    } else if lower.starts_with("gemini-2.5-pro") {
+        Some((1.25, 10.0))
+    } else if lower.starts_with("gemini-2.5-flash") {
+        Some((0.15, 0.60))
+    } else {
+        None
+    };
+    if let Some((input, output)) = usd {
+        return Some((
+            Price {
+                input_per_million: input,
+                output_per_million: output,
+                currency: "USD".into(),
+            },
+            "内置旗舰参考估价（未实时核价，仅作估算）",
+        ));
+    }
+
+    env::var("ZIYUAN_LLM_PRICE")
+        .ok()
+        .and_then(|s| parse_price(&s))
+        .map(|price| (price, "ZIYUAN_LLM_PRICE（本次读取，非历史费率）"))
 }
 
 fn parse_price(spec: &str) -> Option<Price> {
@@ -302,7 +768,7 @@ fn parse_price(spec: &str) -> Option<Price> {
 
 impl ModelProvider for OpenAiCompatible {
     fn model_name(&self) -> Option<&str> {
-        Some(&self.model)
+        Some(self.model())
     }
 
     /// 每次调用带一个 trace ID（请求头 `X-Client-Request-Id`，重试沿用），出错时连同服务端的
@@ -1551,5 +2017,403 @@ mod tests {
                 TokenUsage::with_cache(1200, 50, 800, 300),
             ]
         );
+    }
+
+    type RawRequests = Arc<Mutex<Vec<(Value, String)>>>;
+
+    fn mock_http(replies: Vec<(u16, &'static str, &'static str, String)>) -> (String, RawRequests) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        thread::spawn(move || {
+            for (status, content_type, extra, reply) in replies {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut length = 0usize;
+                let mut raw_headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    raw_headers.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                log.lock().unwrap().push((
+                    serde_json::from_slice(&body).unwrap(),
+                    raw_headers.to_ascii_lowercase(),
+                ));
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+        });
+        (url, seen)
+    }
+
+    fn expect_final(turn: ModelTurn) -> String {
+        match turn {
+            ModelTurn::Final(text) => text,
+            other => panic!("expected ModelTurn::Final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_native_streams_tools_thinking_and_cache_usage() {
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":120,\"cache_creation_input_tokens\":300,\"cache_read_input_tokens\":800,\"output_tokens\":1}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"先看源码\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"我来查一下\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"src/lib.rs\\\"}\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":45}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        let (url, seen) = mock_http(vec![
+            (
+                529,
+                "application/json",
+                "",
+                "{\"error\":\"overloaded\"}".into(),
+            ),
+            (200, "text/event-stream", "", sse.into()),
+        ]);
+        let messages = vec![
+            Message::System("你是工部尚书".into()),
+            Message::User("检查 lib.rs".into()),
+            Message::CallPrelude {
+                text: "先列出文件".into(),
+                reasoning: "内部思维链不回传".into(),
+            },
+            Message::ToolCall {
+                id: "toolu_0".into(),
+                name: "list_files".into(),
+                args_json: "{}".into(),
+            },
+            Message::ToolOutput {
+                call_id: "toolu_0".into(),
+                output: "src/lib.rs".into(),
+            },
+            Message::User("请继续读取".into()),
+        ];
+        let tools = vec![ToolSpec {
+            name: "read_file".into(),
+            description: "读取文件".into(),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#
+                .into(),
+        }];
+        let hooks = Recorder::default();
+        let provider = AnthropicMessages::new(url, Some("sk-ant-test".into()), "claude-sonnet-4-5")
+            .with_retry(Retry {
+                attempts: 1,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(5),
+            });
+        let turn = provider.next_turn(&messages, &tools, &hooks).unwrap();
+        match turn {
+            ModelTurn::Calls {
+                calls,
+                text,
+                reasoning,
+            } => {
+                assert_eq!(text, "我来查一下");
+                assert_eq!(reasoning, "先看源码");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "toolu_1");
+                assert_eq!(calls[0].name, "read_file");
+                assert_eq!(calls[0].args_json, r#"{"path":"src/lib.rs"}"#);
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+        assert_eq!(
+            *hooks.usage.borrow(),
+            [TokenUsage::with_cache(1220, 45, 800, 300)]
+        );
+        assert_eq!(hooks.deltas.borrow().concat(), "我来查一下\n");
+
+        let recorded = seen.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        let (body, headers) = &recorded[1];
+        assert!(headers.contains("x-api-key: sk-ant-test"));
+        assert!(headers.contains("anthropic-version: 2023-06-01"));
+        assert_eq!(body["model"], "claude-sonnet-4-5");
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // 连续 user 消息（ToolOutput + User）合并为同一条 user 消息，且倒数第二条消息有缓存断点。
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
+        assert_eq!(
+            msgs[1]["content"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][1]["type"], "text");
+    }
+
+    #[test]
+    fn gemini_native_streams_tools_thought_and_cached_usage() {
+        let sse = concat!(
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"先分析结构\",\"thought\":true},{\"text\":\"开始查阅\"}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"search_code\",\"args\":{\"query\":\"main\"}}}]}}],\"usageMetadata\":{\"promptTokenCount\":900,\"candidatesTokenCount\":35,\"cachedContentTokenCount\":600}}\n\n"
+        );
+        let (url, seen) = mock_http(vec![(200, "text/event-stream", "", sse.into())]);
+        let messages = vec![
+            Message::System("你是都察院御史".into()),
+            Message::User("查 main".into()),
+            Message::ToolCall {
+                id: "gemini-call-0".into(),
+                name: "list_files".into(),
+                args_json: "{}".into(),
+            },
+            Message::ToolOutput {
+                call_id: "gemini-call-0".into(),
+                output: "src/main.rs".into(),
+            },
+        ];
+        let tools = vec![ToolSpec {
+            name: "search_code".into(),
+            description: "搜索代码".into(),
+            input_schema_json: r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"properties":{"query":{"type":"string"}}}"#.into(),
+        }];
+        let hooks = Recorder::default();
+        let provider = GeminiNative::new(url, Some("gem-secret-key".into()), "gemini-2.5-pro")
+            .with_retry(Retry {
+                attempts: 0,
+                ..Retry::default()
+            });
+        let turn = provider.next_turn(&messages, &tools, &hooks).unwrap();
+        match turn {
+            ModelTurn::Calls {
+                calls,
+                text,
+                reasoning,
+            } => {
+                assert_eq!(text, "开始查阅");
+                assert_eq!(reasoning, "先分析结构");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "gemini-call-0");
+                assert_eq!(calls[0].name, "search_code");
+                assert_eq!(calls[0].args_json, r#"{"query":"main"}"#);
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+        assert_eq!(
+            *hooks.usage.borrow(),
+            [TokenUsage::with_cache(900, 35, 600, 0)]
+        );
+
+        let recorded = seen.lock().unwrap();
+        let (body, headers) = &recorded[0];
+        assert!(headers.contains("x-goog-api-key: gem-secret-key"));
+        assert!(!headers.contains("key=gem-secret-key"));
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "你是都察院御史"
+        );
+        assert!(
+            body["tools"][0]["functionDeclarations"][0]["parameters"]
+                .get("$schema")
+                .is_none()
+        );
+        assert!(
+            body["tools"][0]["functionDeclarations"][0]["parameters"]
+                .get("additionalProperties")
+                .is_none()
+        );
+        // ToolOutput 对应回传的 functionResponse.name 还原为 list_files。
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "list_files"
+        );
+    }
+
+    #[test]
+    fn models_config_forbids_plaintext_secrets_and_validates_fields() {
+        let bad_secret = r#"{
+            "profiles": {
+                "claude": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5",
+                    "api_key": "sk-ant-never-put-here"
+                }
+            }
+        }"#;
+        let err = ModelsConfig::parse(bad_secret).unwrap_err().to_string();
+        assert!(err.contains("禁止写入明文密钥"), "{err}");
+
+        let bad_default = r#"{
+            "default": "missing",
+            "profiles": {
+                "local": { "model": "qwen3:32b", "base_url": "http://localhost:11434/v1" }
+            }
+        }"#;
+        assert!(ModelsConfig::parse(bad_default).is_err());
+
+        let valid = r#"{
+            "default": "deepseek",
+            "profiles": {
+                "deepseek": {
+                    "provider": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "model": "deepseek-v4-pro",
+                    "api_key_env": "DEEPSEEK_API_KEY"
+                },
+                "claude-sonnet": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                    "prompt_cache": "anthropic",
+                    "price": { "input": 3.0, "output": 15.0, "currency": "USD" }
+                },
+                "gemini-pro": {
+                    "provider": "gemini",
+                    "model": "gemini-2.5-pro",
+                    "api_key_env": "GEMINI_API_KEY"
+                }
+            }
+        }"#;
+        let cfg = ModelsConfig::parse(valid).unwrap();
+        assert_eq!(cfg.default_profile.as_deref(), Some("deepseek"));
+        assert_eq!(cfg.profiles.len(), 3);
+        assert_eq!(
+            cfg.profiles["claude-sonnet"].provider,
+            ProviderKind::Anthropic
+        );
+        assert_eq!(cfg.profiles["gemini-pro"].provider, ProviderKind::Gemini);
+    }
+
+    #[test]
+    fn heterogeneous_catalog_routes_openai_anthropic_and_gemini_and_fails_missing_key_per_profile()
+    {
+        let (openai_url, _) = mock_server(vec![(200, final_reply("来自 OpenAI 兼容"))]);
+        let (anthropic_url, _) = mock_http(vec![(
+            200,
+            "application/json",
+            "",
+            json!({
+                "content": [{"type": "text", "text": "来自 Anthropic 原生"}],
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            })
+            .to_string(),
+        )]);
+        let (gemini_url, _) = mock_http(vec![(
+            200,
+            "application/json",
+            "",
+            json!({
+                "candidates": [{"content": {"role": "model", "parts": [{"text": "来自 Gemini 原生"}]}}],
+                "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 6}
+            })
+            .to_string(),
+        )]);
+
+        let cfg = ModelsConfig::parse(
+            &json!({
+                "default": "oai",
+                "profiles": {
+                    "oai": {
+                        "provider": "openai",
+                        "base_url": openai_url,
+                        "model": "deepseek-v4-pro"
+                    },
+                    "ant": {
+                        "provider": "anthropic",
+                        "base_url": anthropic_url,
+                        "model": "claude-sonnet-4-5",
+                        "price": {"input": 3.0, "output": 15.0, "currency": "USD"}
+                    },
+                    "gem": {
+                        "provider": "gemini",
+                        "base_url": gemini_url,
+                        "model": "gemini-2.5-pro"
+                    },
+                    "needs-key": {
+                        "provider": "anthropic",
+                        "base_url": "http://127.0.0.1:9/v1",
+                        "model": "claude-opus-4",
+                        "api_key_env": "ZIYUAN_TEST_DEFINITELY_UNSET_KEY_99999"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let catalog = OpenAiCompatible::new("http://127.0.0.1:9/v1", None, "fallback")
+            .with_retry(Retry {
+                attempts: 0,
+                ..Retry::default()
+            })
+            .catalog()
+            .with_profiles(cfg.profiles);
+
+        let msgs = [Message::User("请回奏".into())];
+        assert_eq!(
+            expect_final(catalog.provider("oai").next_turn(&msgs, &[], &()).unwrap()),
+            "来自 OpenAI 兼容"
+        );
+        assert_eq!(
+            expect_final(catalog.provider("ant").next_turn(&msgs, &[], &()).unwrap()),
+            "来自 Anthropic 原生"
+        );
+        assert_eq!(
+            expect_final(catalog.provider("gem").next_turn(&msgs, &[], &()).unwrap()),
+            "来自 Gemini 原生"
+        );
+        // 缺少环境变量仅在调用该配置时报错，不影响其余配置。
+        let err = catalog
+            .provider("needs-key")
+            .next_turn(&msgs, &[], &())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ZIYUAN_TEST_DEFINITELY_UNSET_KEY_99999"),
+            "{err}"
+        );
+
+        assert_eq!(catalog.price("oai").unwrap().currency, "元");
+        assert_eq!(catalog.price("ant").unwrap().currency, "USD");
+        assert_eq!(catalog.price("gem").unwrap().currency, "USD");
+        assert_eq!(
+            price_for("anthropic/claude-sonnet-4-5")
+                .unwrap()
+                .input_per_million,
+            3.0
+        );
+        assert_eq!(price_for("gpt-5").unwrap().currency, "USD");
     }
 }

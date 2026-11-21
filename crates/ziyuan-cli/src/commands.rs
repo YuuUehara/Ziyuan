@@ -14,12 +14,13 @@ use ziyuan_core::{
     AgentId, BudgetScope, GovernanceMode, NO_ART, Persona, Seal, TaskId, missing_sections,
 };
 use ziyuan_governance::{ChangeState, TaskStatus};
-use ziyuan_llm::price_for;
 use ziyuan_runtime::{CancelToken, Limits, Outcome, Scheduler, WorkerBackend};
 use ziyuan_storage::{EventLog, ExecutorLock};
 
 use crate::args::{BudgetExportFormat, Command, GitHubAction};
-use crate::backend::{DEFAULT_LIMITS, env_model, model_label, plan_free, worker_backend};
+use crate::backend::{
+    DEFAULT_LIMITS, model_label, resolved_backend, worker_backend, workspace_price_for,
+};
 use crate::output::{StreamPrinter, changes_note, cost_note, print_draft, print_report};
 
 pub(crate) fn execute(
@@ -629,11 +630,81 @@ pub(crate) fn execute(
                 println!("提示：新制度如无协调者，请先任命。 ");
             }
         }
+        Command::ModelList => {
+            let cwd = env::current_dir()?;
+            let config = ziyuan_llm::ModelsConfig::load(&cwd).map_err(|e| e.to_string())?;
+            match resolved_backend() {
+                Some(r) => println!(
+                    "默认承办模型：{} [{}]",
+                    r.model_label,
+                    r.provider_kind.label()
+                ),
+                None => println!("默认承办模型：演示（未接模型）"),
+            }
+            match config {
+                Some(cfg) if !cfg.profiles.is_empty() => {
+                    println!("多模型配置（.ziyuan/models.json，仅记录环境变量名、不含明文密钥）：");
+                    for p in cfg.summaries() {
+                        let key_note = match &p.api_key_env {
+                            Some(var) if p.api_key_ready => format!("{var}（已就绪）"),
+                            Some(var) => format!("{var}（未设置）"),
+                            None if p.provider == "chatgpt" => {
+                                if p.api_key_ready {
+                                    "ChatGPT 订阅（已登录）".into()
+                                } else {
+                                    "ChatGPT 订阅（未登录）".into()
+                                }
+                            }
+                            None => "无需凭据".into(),
+                        };
+                        let def = if p.is_default { " [默认]" } else { "" };
+                        println!(
+                            "  {:<20} [{}] 模型 {}  凭据 {}{}",
+                            p.name, p.provider_label, p.model, key_note, def
+                        );
+                    }
+                }
+                _ => {
+                    println!(
+                        "尚未配置 .ziyuan/models.json（可按需登记 openai / anthropic / gemini / chatgpt 配置，并用 `ziyuan model --dept <部门> <配置名>` 分派）。"
+                    );
+                }
+            }
+            let court = session.court();
+            let overrides: Vec<_> = ziyuan_core::Office::all()
+                .into_iter()
+                .filter_map(|o| court.office_model(o).map(|m| (o, m)))
+                .collect();
+            if overrides.is_empty() {
+                println!("各官职模型分派：全部沿用默认。");
+            } else {
+                println!("各官职模型分派：");
+                for (office, model) in overrides {
+                    println!("  {:<24}（{}）→ {model}", office.code(), office.label());
+                }
+            }
+        }
         Command::Model(office, model) => {
             session.set_office_model(office, model.clone())?;
             match model {
                 Some(m) => println!("诏令已颁：{}改用模型 {m}。", office.label()),
                 None => println!("诏令已颁：{}恢复默认模型。", office.label()),
+            }
+        }
+        Command::ModelDept(department, model) => {
+            let offices = session.set_department_model(department, model.clone())?;
+            let labels: Vec<_> = offices.iter().map(|o| o.label()).collect();
+            match model {
+                Some(m) => println!(
+                    "诏令已颁：{}（{}）改用模型 {m}。",
+                    department.label(),
+                    labels.join("、")
+                ),
+                None => println!(
+                    "诏令已颁：{}（{}）恢复默认模型。",
+                    department.label(),
+                    labels.join("、")
+                ),
             }
         }
         Command::Ceiling(office, ceiling) => {
@@ -979,12 +1050,10 @@ pub(crate) fn execute(
             println!("{note}");
         }
         Command::Budget(None) => {
-            let model = env_model();
-            let default = model.as_ref().map(|m| m.model().to_owned());
-            let price = |m: &str| plan_free(model.as_ref()).then(|| price_for(m)).flatten();
+            let default = resolved_backend().map(|m| m.model_label);
             println!(
                 "{}",
-                duzhi_report(session.court(), default.as_deref(), price)
+                duzhi_report(session.court(), default.as_deref(), workspace_price_for)
             );
         }
         Command::Budget(Some((scope, tokens))) => {
@@ -999,10 +1068,9 @@ pub(crate) fn execute(
             format,
             bom,
         } => {
-            let model = env_model();
-            let default = model.as_ref().map(|m| m.model().to_owned());
-            let price = |m: &str| plan_free(model.as_ref()).then(|| price_for(m)).flatten();
-            let exported = ziyuan_app::duzhi_export(session.court(), default.as_deref(), price);
+            let default = resolved_backend().map(|m| m.model_label);
+            let exported =
+                ziyuan_app::duzhi_export(session.court(), default.as_deref(), workspace_price_for);
             let content = match format {
                 BudgetExportFormat::Csv => ziyuan_app::duzhi_export_csv(&exported, bom),
                 BudgetExportFormat::Json => {

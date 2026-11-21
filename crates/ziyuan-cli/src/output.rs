@@ -8,12 +8,11 @@ use ziyuan_app::{
 };
 use ziyuan_core::TaskId;
 use ziyuan_governance::{ChangeState, Task};
-use ziyuan_llm::price_for;
 use ziyuan_runtime::Outcome;
 use ziyuan_storage::EventLog;
 
 use crate::args::Command;
-use crate::backend::{env_model, plan_free, worker_backend};
+use crate::backend::{resolved_backend, worker_backend, workspace_price_for};
 
 /// 把模型的流式输出实时写到 stderr，每行以 `#诏令ID│` 开头，并发任务不会混在同一行。
 /// 最终回奏仍由 [`print_report`] 写到 stdout，便于脚本处理。
@@ -54,8 +53,8 @@ pub(crate) fn print_report(report: &TaskReport) {
     // 演示后端不调用模型；服务端未报告用量时也不显示。
     if report.usage.total() > 0 {
         let model = report.model.as_deref().unwrap_or("?");
-        let cost =
-            price_for(model).map_or(String::new(), |p| format!("，{}", p.describe(report.usage)));
+        let cost = workspace_price_for(model)
+            .map_or(String::new(), |p| format!("，{}", p.describe(report.usage)));
         println!("用量：{}（{model}）{cost}", report.usage);
     }
 }
@@ -63,12 +62,9 @@ pub(crate) fn print_report(report: &TaskReport) {
 /// 显示用的承办模型（与 [`worker_backend`] 的选择一致）：演示后端不调用模型。
 /// 按各诏令实际所用模型估算的花费（单价见 `ziyuan_llm::price_for`）；查不到单价时为空。
 pub(crate) fn cost_note<'a>(tasks: impl IntoIterator<Item = &'a Task>) -> String {
-    let model = env_model();
-    if !plan_free(model.as_ref()) {
-        return String::new();
-    }
-    let default = model.map(|m| m.model().to_owned());
-    estimate_cost(tasks, default.as_deref(), price_for).map_or(String::new(), |c| format!("，{c}"))
+    let default = resolved_backend().map(|m| m.model_label);
+    estimate_cost(tasks, default.as_deref(), workspace_price_for)
+        .map_or(String::new(), |c| format!("，{c}"))
 }
 
 /// 呈报改动的状态，如「；改动 2 个文件待准奏」；没有改动时为空。
@@ -148,6 +144,50 @@ pub(crate) fn json_output(
                 }
             }
             flags.into()
+        }
+        Command::ModelList => {
+            let cwd = std::env::current_dir()?;
+            let config = ziyuan_llm::ModelsConfig::load(&cwd).map_err(|e| e.to_string())?;
+            let resolved = resolved_backend();
+            let profiles: Vec<_> = config
+                .map(|c| c.summaries())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "name": p.name,
+                        "provider": p.provider,
+                        "provider_label": p.provider_label,
+                        "model": p.model,
+                        "base_url": p.base_url,
+                        "api_key_env": p.api_key_env,
+                        "api_key_ready": p.api_key_ready,
+                        "is_default": p.is_default,
+                    })
+                })
+                .collect();
+            let court = session.court();
+            let office_overrides: Vec<_> = ziyuan_core::Office::all()
+                .into_iter()
+                .filter_map(|o| {
+                    court.office_model(o).map(|m| {
+                        serde_json::json!({
+                            "office": o.code(),
+                            "label": o.label(),
+                            "model": m,
+                        })
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "default_model": resolved.as_ref().map(|r| r.model_label.clone()),
+                "default_provider": resolved.as_ref().map(|r| r.provider_kind.code()),
+                "profiles": profiles,
+                "office_overrides": office_overrides,
+            })
+        }
+        Command::Model(..) | Command::ModelDept(..) => {
+            return Err("--json 仅支持 `ziyuan model list`".into());
         }
         Command::Mcp => ziyuan_runtime::mcp::survey(&std::env::current_dir()?)
             .map_err(|e| e.to_string())?

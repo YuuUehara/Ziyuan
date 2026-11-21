@@ -48,14 +48,25 @@ pub(crate) fn spending(task: &Task) -> Vec<(&'static str, TokenUsage, Option<&st
 
 /// 按各诏令实际所用的模型估算花费，如「约 0.0123 元」。`default_model` 用于未记下模型的早期诏令；
 /// 查不到单价的诏令不计入。全部查不到（或没有用量）时返回 `None`。
+fn format_currency_totals(costs: &BTreeMap<String, f64>) -> Option<String> {
+    if costs.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = costs
+        .iter()
+        .map(|(currency, cost)| format!("{cost:.4} {currency}"))
+        .collect();
+    Some(format!("约 {}", parts.join(" + ")))
+}
+
 pub fn estimate_cost<'a>(
     tasks: impl IntoIterator<Item = &'a Task>,
     default_model: Option<&str>,
     price: impl Fn(&str) -> Option<Price>,
 ) -> Option<String> {
-    let mut total = None::<(f64, String)>;
+    let mut totals: BTreeMap<String, f64> = BTreeMap::new();
     for task in tasks {
-        // 承办、票拟、拆分、复核与廷议可能用不同模型，分别计价。
+        // 承办、票拟、拆分、复核与廷议可能用不同模型，按币种分别计价，避免混加不同币种。
         for (_, usage, model) in spending(task) {
             if usage.total() == 0 {
                 continue;
@@ -63,11 +74,10 @@ pub fn estimate_cost<'a>(
             let Some(p) = model.or(default_model).and_then(&price) else {
                 continue;
             };
-            let entry = total.get_or_insert((0.0, p.currency.clone()));
-            entry.0 += p.cost(usage);
+            *totals.entry(p.currency.clone()).or_insert(0.0) += p.cost(usage);
         }
     }
-    total.map(|(cost, currency)| format!("约 {cost:.4} {currency}"))
+    format_currency_totals(&totals)
 }
 
 pub fn describe_record(r: &ServiceRecord) -> String {
@@ -213,8 +223,8 @@ pub fn duzhi_report(
             ));
         }
     }
-    // (tokens, 花费, 币种)；花费只计查得到单价的部分。
-    type Tally = BTreeMap<String, (u64, f64, String)>;
+    // (tokens, 各币种花费)；花费只计查得到单价的部分，不同币种分开汇总。
+    type Tally = BTreeMap<String, (u64, BTreeMap<String, f64>)>;
     let (mut by_use, mut by_model, mut by_official) = (Tally::new(), Tally::new(), Tally::new());
     let who = |id: AgentId| {
         court
@@ -251,8 +261,7 @@ pub fn duzhi_report(
             let entry = tally.entry(key).or_default();
             entry.0 += usage.total();
             if let Some((cost, currency)) = &cost {
-                entry.1 += cost;
-                entry.2.clone_from(currency);
+                *entry.1.entry(currency.clone()).or_insert(0.0) += cost;
             }
         }
     }
@@ -270,9 +279,9 @@ pub fn duzhi_report(
         let rows: Vec<_> = tally
             .iter()
             .map(
-                |(key, (tokens, cost, currency))| match currency.is_empty() {
-                    true => format!("{key} {tokens}"),
-                    false => format!("{key} {tokens}（约 {cost:.4} {currency}）"),
+                |(key, (tokens, costs))| match format_currency_totals(costs) {
+                    None => format!("{key} {tokens}"),
+                    Some(summary) => format!("{key} {tokens}（{summary}）"),
                 },
             )
             .collect();
@@ -366,7 +375,7 @@ pub fn duzhi_export(
         }
     }
 
-    type Tally = BTreeMap<String, (u64, f64, String)>;
+    type Tally = BTreeMap<String, (u64, BTreeMap<String, f64>)>;
     let (mut by_use, mut by_model, mut by_official) = (Tally::new(), Tally::new(), Tally::new());
     let who = |id: AgentId| {
         court
@@ -402,8 +411,7 @@ pub fn duzhi_export(
             let entry = tally.entry(key).or_default();
             entry.0 += usage.total();
             if let Some((c, currency)) = &cost {
-                entry.1 += c;
-                entry.2.clone_from(currency);
+                *entry.1.entry(currency.clone()).or_insert(0.0) += c;
             }
         }
     }
@@ -414,19 +422,35 @@ pub fn duzhi_export(
         ("模型", by_model),
         ("承办官员", by_official),
     ] {
-        for (key, (tokens, cost, currency)) in tally {
-            let (cost, currency) = if currency.is_empty() {
-                (None, None)
+        for (key, (tokens, costs)) in tally {
+            if costs.is_empty() {
+                rows.push(DuzhiRow {
+                    dimension: dimension.into(),
+                    key,
+                    tokens,
+                    cost: None,
+                    currency: None,
+                });
+            } else if costs.len() == 1 {
+                let (currency, cost) = costs.into_iter().next().expect("单币种");
+                rows.push(DuzhiRow {
+                    dimension: dimension.into(),
+                    key,
+                    tokens,
+                    cost: Some((cost * 10_000.0).round() / 10_000.0),
+                    currency: Some(currency),
+                });
             } else {
-                (Some((cost * 10_000.0).round() / 10_000.0), Some(currency))
-            };
-            rows.push(DuzhiRow {
-                dimension: dimension.into(),
-                key,
-                tokens,
-                cost,
-                currency,
-            });
+                for (currency, cost) in costs {
+                    rows.push(DuzhiRow {
+                        dimension: dimension.into(),
+                        key: format!("{key} [{currency}]"),
+                        tokens,
+                        cost: Some((cost * 10_000.0).round() / 10_000.0),
+                        currency: Some(currency),
+                    });
+                }
+            }
         }
     }
 
@@ -588,5 +612,79 @@ mod tests {
         let val = duzhi_export_json(&exported);
         assert_eq!(val["total_tokens"], 1200);
         assert_eq!(val["budgets"][0]["scope"], "朝廷");
+    }
+
+    #[test]
+    fn estimate_cost_and_duzhi_report_keep_multiple_currencies_separate() {
+        let events = [
+            ziyuan_core::CourtEvent::Founded(GovernanceMode::DirectRule),
+            ziyuan_core::CourtEvent::AgentRegistered(ziyuan_core::Agent {
+                id: AgentId(1),
+                name: "陈工".into(),
+                speciality: Department::Works,
+            }),
+            ziyuan_core::CourtEvent::OfficialAppointed {
+                agent: AgentId(1),
+                office: Office::Minister(Department::Works),
+            },
+            ziyuan_core::CourtEvent::EdictIssued(Box::new(ziyuan_core::Edict {
+                id: ziyuan_core::TaskId(1),
+                department: Department::Works,
+                text: "任务一".into(),
+                seal: ziyuan_core::Seal::default(),
+            })),
+            ziyuan_core::CourtEvent::TaskAssigned {
+                task: ziyuan_core::TaskId(1),
+                worker: AgentId(1),
+                model: Some("deepseek-v4-pro".into()),
+            },
+            ziyuan_core::CourtEvent::ModelUsage {
+                task: ziyuan_core::TaskId(1),
+                usage: TokenUsage::new(1_000_000, 0),
+                trace: None,
+            },
+            ziyuan_core::CourtEvent::EdictIssued(Box::new(ziyuan_core::Edict {
+                id: ziyuan_core::TaskId(2),
+                department: Department::Works,
+                text: "任务二".into(),
+                seal: ziyuan_core::Seal::default(),
+            })),
+            ziyuan_core::CourtEvent::TaskAssigned {
+                task: ziyuan_core::TaskId(2),
+                worker: AgentId(1),
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            ziyuan_core::CourtEvent::ModelUsage {
+                task: ziyuan_core::TaskId(2),
+                usage: TokenUsage::new(1_000_000, 0),
+                trace: None,
+            },
+        ];
+        let court = Court::replay(&events).unwrap();
+        let price = |m: &str| match m {
+            "deepseek-v4-pro" => Some(Price {
+                input_per_million: 9.0,
+                output_per_million: 27.0,
+                currency: "元".into(),
+            }),
+            "claude-sonnet-4-5" => Some(Price {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                currency: "USD".into(),
+            }),
+            _ => None,
+        };
+        let est = estimate_cost(court.tasks(), None, price).unwrap();
+        assert_eq!(est, "约 3.0000 USD + 9.0000 元");
+        let report = duzhi_report(&court, None, price);
+        assert!(report.contains("3.0000 USD + 9.0000 元"), "{report}");
+        assert!(
+            report.contains("deepseek-v4-pro 1000000（约 9.0000 元）"),
+            "{report}"
+        );
+        assert!(
+            report.contains("claude-sonnet-4-5 1000000（约 3.0000 USD）"),
+            "{report}"
+        );
     }
 }

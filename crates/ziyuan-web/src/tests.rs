@@ -396,6 +396,7 @@ async fn start_with_backend(name: &str, backend: Arc<dyn WorkerBackend>) -> (Str
             timeout: Duration::from_secs(10),
         },
         github: None,
+        model_profiles: Vec::new(),
     };
     // Embedding is deliberately timer-free: tests never contact the production source.
     tokio::spawn(async move {
@@ -1911,6 +1912,7 @@ fn sse_forward_emits_live_tool_progress_events() {
             token: TOKEN.into(),
             viewer_token: None,
             github: None,
+            model_profiles: Vec::new(),
         },
         crate::subscriptions::Service::new(root.clone()),
     );
@@ -2143,6 +2145,119 @@ async fn duzhi_export_endpoint_serves_csv_with_bom_and_json_for_viewer() {
 
     let (status, _, _, _) = fetch_raw(format!("{base}/api/duzhi/export?format=xml"), TOKEN).await;
     assert_eq!(status, 400);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn office_model_supports_department_batch_and_exposes_model_profiles() {
+    let root = std::env::temp_dir().join(format!("ziyuan-web-dept-model-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    Session::found(EventLog::new(&root)).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let config = Config {
+        root: root.clone(),
+        token: TOKEN.into(),
+        viewer_token: Some(VIEWER.into()),
+        backend: Arc::new(ziyuan_runtime::DemoBackend),
+        limits: Limits {
+            max_concurrent: 2,
+            timeout: Duration::from_secs(10),
+        },
+        github: None,
+        model_profiles: vec![crate::ModelProfileInfo {
+            name: "claude-sonnet".into(),
+            provider: "anthropic".into(),
+            provider_label: "Anthropic（实验性）".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            api_key_env: Some("ANTHROPIC_API_KEY".into()),
+            api_key_ready: false,
+            is_default: false,
+        }],
+    };
+    tokio::spawn(async move {
+        axum::serve(listener, router(config)).await.unwrap();
+    });
+
+    // 观政可读取 model_profiles，且不得修改模型。
+    let (status, state) = call(&base, "/state", Some(VIEWER), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(state["model_profiles"][0]["name"], "claude-sonnet");
+    assert_eq!(
+        state["model_profiles"][0]["api_key_env"],
+        "ANTHROPIC_API_KEY"
+    );
+    assert!(state["model_profiles"][0].get("api_key").is_none());
+
+    let (status, _) = call(
+        &base,
+        "/offices/model",
+        Some(VIEWER),
+        Some(json!({ "department": "works", "model": "claude-sonnet" })),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    // 不能同时传 office 和 department。
+    let (status, _) = call(
+        &base,
+        "/offices/model",
+        Some(TOKEN),
+        Some(
+            json!({ "office": "minister:works", "department": "works", "model": "claude-sonnet" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // 按部批量设置工部三职（尚书、侍郎、郎中）。
+    let (status, res) = call(
+        &base,
+        "/offices/model",
+        Some(TOKEN),
+        Some(json!({ "department": "works", "model": "claude-sonnet" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{res}");
+    assert_eq!(
+        res["offices"],
+        json!(["minister:works", "vice-minister:works", "clerk:works"])
+    );
+
+    let (status, state) = call(&base, "/state", Some(TOKEN), None).await;
+    assert_eq!(status, 200);
+    for code in ["minister:works", "vice-minister:works", "clerk:works"] {
+        let entry = state["offices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["code"] == code)
+            .unwrap();
+        assert_eq!(entry["model"], "claude-sonnet", "{code}");
+    }
+
+    // 恢复工部默认。
+    let (status, _) = call(
+        &base,
+        "/offices/model",
+        Some(TOKEN),
+        Some(json!({ "department": "works", "model": null })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_, state) = call(&base, "/state", Some(TOKEN), None).await;
+    for code in ["minister:works", "vice-minister:works", "clerk:works"] {
+        let entry = state["offices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["code"] == code)
+            .unwrap();
+        assert!(entry["model"].is_null(), "{code}");
+    }
 
     std::fs::remove_dir_all(root).unwrap();
 }

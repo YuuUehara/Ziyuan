@@ -97,8 +97,12 @@ pub(crate) enum Command {
     Retreat(bool),
     Dismiss(AgentId),
     Purge(AgentId),
+    /// 列出 `.ziyuan/models.json` 模型配置与当前各官职模型分派。
+    ModelList,
     /// `None` 恢复默认模型。
     Model(Office, Option<String>),
+    /// 按部批量指定本部门（尚书、侍郎、郎中）模型；`None` 恢复默认。
+    ModelDept(Department, Option<String>),
     /// `None` 取消上限。
     Ceiling(Office, Option<Seal>),
     Abolish,
@@ -332,11 +336,20 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "dismiss" => Command::Dismiss(parse_id(&args, "ziyuan dismiss <官员ID>")?),
         "purge" => Command::Purge(parse_id(&args, "ziyuan purge <官员ID>")?),
         "abolish" => no_args(args, Command::Abolish)?,
-        "model" => match <[String; 2]>::try_from(args) {
-            Ok([office, model]) => {
-                Command::Model(office.parse()?, (model != "default").then_some(model))
+        "model" => match args.as_slice() {
+            [sub] if sub == "list" => Command::ModelList,
+            [flag, dept, model] if flag == "--dept" => {
+                Command::ModelDept(dept.parse()?, (model != "default").then(|| model.clone()))
             }
-            Err(_) => return Err("用法: ziyuan model <官职> <模型|default>".into()),
+            [office, model] => {
+                Command::Model(office.parse()?, (model != "default").then(|| model.clone()))
+            }
+            _ => {
+                return Err(
+                    "用法: ziyuan model list | ziyuan model <官职> <模型|配置名|default> | ziyuan model --dept <部门> <模型|配置名|default>"
+                        .into(),
+                );
+            }
         },
         "ceiling" => parse_ceiling(args)?,
         "draft" => match args.as_slice() {

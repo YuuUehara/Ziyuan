@@ -136,6 +136,19 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         .into_response()
 }
 
+/// 对外只读展示的模型配置摘要（来自 `.ziyuan/models.json`；绝不包含明文密钥）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ModelProfileInfo {
+    pub name: String,
+    pub provider: String,
+    pub provider_label: String,
+    pub model: String,
+    pub base_url: String,
+    pub api_key_env: Option<String>,
+    pub api_key_ready: bool,
+    pub is_default: bool,
+}
+
 pub struct Config {
     /// 朝廷所在目录（含 `.ziyuan/`），也是玉玺查阅范围的根。
     pub root: PathBuf,
@@ -147,6 +160,8 @@ pub struct Config {
     pub limits: Limits,
     /// 兵部驿站 · GitHub（`ZIYUAN_GITHUB_REPO` 未设时为 `None`）；凭据只在其中。
     pub github: Option<Arc<ziyuan_github::GitHub>>,
+    /// `.ziyuan/models.json` 登记的非机密模型配置摘要。
+    pub model_profiles: Vec<ModelProfileInfo>,
 }
 
 /// 在 `listener` 上提供 Web 界面，直到出错。

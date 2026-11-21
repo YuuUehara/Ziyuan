@@ -71,19 +71,69 @@ ziyuan logout                      # 撤销令牌
 
 **OpenAI：** 按官方文档的响应格式由模拟服务测试覆盖（工具调用分块、`finish_reason`、末块 usage、推理 token），度支将尽时按 OpenAI 要求传 `max_completion_tokens`。**未经真实账号实测**，欢迎有 Key 的用户反馈。
 
-另有些服务把思维链以 `<think>…</think>` 写在正文开头，也会自动移出回奏。
-
-**花费估算：** 用量后附「约 X 元」。`deepseek-flash`、`deepseek-v4-pro` 内置官方高峰时段、未命中缓存的单价，是估算上限（空闲时段半价，缓存命中更便宜）；其他模型设置 `ZIYUAN_LLM_PRICE` 后才显示。估算按当前模型单价计算全部历史用量，以服务商账单为准。
-
-**按官职配模型与玉玺上限：**
+**原生 Anthropic Messages API 与 Google Gemini API（实验性）：** 除 OpenAI 兼容端点外，还支持经 `ZIYUAN_LLM_PROVIDER=anthropic` 或 `ZIYUAN_LLM_PROVIDER=gemini` 直连原生接口（不经第三方中转）：
 
 ```bash
+# 原生 Anthropic Messages API（实验性，默认 https://api.anthropic.com/v1）
+export ZIYUAN_LLM_PROVIDER=anthropic
+export ZIYUAN_LLM_API_KEY="你的 Anthropic Key"
+export ZIYUAN_LLM_MODEL=claude-sonnet-4-20250514
+
+# 原生 Google Gemini API（实验性，默认 https://generativelanguage.googleapis.com/v1beta）
+export ZIYUAN_LLM_PROVIDER=gemini
+export ZIYUAN_LLM_API_KEY="你的 Gemini Key"
+export ZIYUAN_LLM_MODEL=gemini-2.5-pro
+```
+
+- Anthropic 原生实现发送 `x-api-key`、`anthropic-version: 2023-06-01`，解析 `text_delta`、`thinking_delta`、`input_json_delta` 流式事件并自动按 `ZIYUAN_LLM_PROMPT_CACHE` 注入最多 3 处 `cache_control: {"type":"ephemeral"}` 断点，精确记录 `cache_read_input_tokens` 与 `cache_creation_input_tokens`。
+- Gemini 原生实现经 `x-goog-api-key` 请求头鉴权（绝不把密钥拼入 URL），使用 `streamGenerateContent?alt=sse` 流式接口、过滤 JSON Schema 保留字段、记录 `thought` 推理与 `cachedContentTokenCount`。
+- **两项原生适配均仅经本地模拟 HTTP 服务测试覆盖**（流式文本、思维链、工具调用、缓存用量与重试），尚未以真实 Anthropic／Gemini 付费账号实测，列为实验性功能（见 [stability.md](stability.md#实验性)）。
+
+另有些服务把思维链以 `<think>…</think>` 写在正文开头，也会自动移出回奏。
+
+**异构多模型路由表（`.ziyuan/models.json`）：** 若希望不同官职或不同部门直连不同模型提供方（例如工部用 Claude、御史用 Gemini、翰林／郎中用 DeepSeek），可在项目下建立 `.ziyuan/models.json`：
+
+```json
+{
+  "default": "deepseek",
+  "profiles": {
+    "deepseek": {
+      "provider": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-pro",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    },
+    "claude-sonnet": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "prompt_cache": "anthropic"
+    },
+    "gemini-flash": {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key_env": "GEMINI_API_KEY"
+    }
+  }
+}
+```
+
+- **安全硬约束**：`.ziyuan/models.json` **严禁写入明文 API Key**（一旦出现 `api_key`／`token`／`secret` 等字段即直接拒绝加载），只允许在 `api_key_env` 中填写环境变量名。`ziyuan model list` 与 Web `/api/state` 只展示配置名、提供方、环境变量名及「已就绪／未设置」状态，绝不泄露密钥值。
+- 某项配置缺少环境变量时只在真正调用该配置的官职上报错，不影响朝廷中其他使用正常配置的官职。
+
+**花费估算：** 用量后附估算花费（如 `约 0.1200 元` 或多币种分列 `约 0.3500 USD + 0.1200 元`）。内置 DeepSeek（人民币）及主流 Claude / GPT / Gemini（美元）官方公开参考价，也可在 `.ziyuan/models.json` 单项配置里指定 `"price": {"input": …, "output": …, "currency": "…"}` 或用 `ZIYUAN_LLM_PRICE` 覆盖。估算为未命中缓存上限，以服务商实际账单为准。
+
+**按官职／按部配模型与玉玺上限：**
+
+```bash
+ziyuan model list                                   # 查看 models.json 配置与各官职模型分派（不含密钥）
 ziyuan model clerk:works deepseek-flash             # 郎中用便宜模型
-ziyuan model minister:works deepseek-v4-pro         # 尚书用强模型；default 恢复默认
+ziyuan model minister:works claude-sonnet           # 尚书用 models.json 中的配置名；default 恢复默认
+ziyuan model --dept works claude-sonnet             # 一键为工部全体（尚书、侍郎、郎中）指定同一模型／配置
 ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 ```
 
-- 模型沿用同一服务地址与 Key；每次派工把实际所用模型记入 `TaskAssigned`，花费按各诏令实际模型分别计价。
+- 指定名命中 `.ziyuan/models.json` 时按对应提供方协议、端点与环境变量名异构路由；未命中时沿用默认服务地址与 Key。每次派工把实际所用模型／配置名记入 `TaskAssigned`，花费按各诏令实际模型与币种分别计价。
 - 承办时诏令玉玺与官职上限取交集（工具取交集，范围收窄到上限内），派工路线中注明；诏令范围全在上限之外则判为失败，不予承办。
 - Web 百官面板的「官职配置」与 CLI 等效；`officials`、`examine`、Web 与 TUI 显示每位官员的模型与上限。
 

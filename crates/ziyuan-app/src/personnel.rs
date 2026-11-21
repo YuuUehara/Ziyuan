@@ -542,6 +542,27 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 为某部全部官职（尚书、侍郎、郎中）一次指定承办模型；`None` 恢复默认。
+    pub fn set_department_model(
+        &mut self,
+        department: Department,
+        model: Option<String>,
+    ) -> Result<Vec<Office>, AppError> {
+        let offices = vec![
+            Office::Minister(department),
+            Office::ViceMinister(department),
+            Office::Clerk(department),
+        ];
+        self.commit(|court| {
+            let mut events = Vec::with_capacity(offices.len());
+            for &office in &offices {
+                events.push(court.propose_office_model(office, model.clone())?);
+            }
+            Ok(events)
+        })?;
+        Ok(offices)
+    }
+
     /// 户部度支：设定朝廷总额、某官职每件或某件诏令的 token 限额；`None` 取消。
     pub fn set_budget(&mut self, scope: BudgetScope, tokens: Option<u64>) -> Result<(), AppError> {
         self.commit(|court| Ok(vec![court.propose_budget(scope, tokens)?]))?;

@@ -1,11 +1,13 @@
-//! 模型后端的选择与 ChatGPT 登录。
+//! 模型后端的选择、异构多模型目录与 ChatGPT 登录。
 
 use std::env;
 use std::error::Error;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use ziyuan_llm::OpenAiCompatible;
-use ziyuan_runtime::{AgentBackend, DemoBackend, Limits, WorkerBackend};
+use ziyuan_core::Price;
+use ziyuan_llm::{ModelsConfig, ResolvedBackend, price_for_in_workspace, resolve_backend};
+use ziyuan_runtime::{AgentBackend, DemoBackend, Limits, ModelCatalog, WorkerBackend};
 
 /// 单件诏令默认最多的模型调用步数（`ZIYUAN_MAX_STEPS` 可改）。
 pub(crate) const MAX_AGENT_STEPS: usize = 12;
@@ -66,35 +68,68 @@ pub(crate) fn open_browser(url: &str) {
         .spawn();
 }
 
-/// 环境变量所配的模型；配置有误（如选了订阅却未登录）时视为未配，执行时再报错。
-pub(crate) fn env_model() -> Option<OpenAiCompatible> {
-    OpenAiCompatible::from_env().ok().flatten()
-}
-
-/// 按 token 计价（未用 ChatGPT 订阅额度）。
-pub(crate) fn plan_free(model: Option<&OpenAiCompatible>) -> bool {
-    !model.is_some_and(OpenAiCompatible::uses_chatgpt_plan)
+/// 尝试解析环境变量或 `.ziyuan/models.json` 所配的模型；配置有误时视为未配，执行时再报错。
+pub(crate) fn resolved_backend() -> Option<ResolvedBackend> {
+    resolve_backend(env::current_dir().ok().as_deref())
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn model_label() -> String {
-    env_model().map_or("演示（未接模型）".into(), |m| m.model().to_owned())
+    resolved_backend().map_or("演示（未接模型）".into(), |m| m.model_label)
 }
 
-/// 设置了 `ZIYUAN_LLM_MODEL` 时使用真实模型与只读工具（以当前目录为项目根），否则使用演示后端。
+/// 按当前工作区（含 `.ziyuan/models.json` 自定义单价）查询某模型／配置名的单价；
+/// 使用 ChatGPT 订阅额度时不按 token 计价，返回 `None`。
+pub(crate) fn workspace_price_for(model: &str) -> Option<Price> {
+    if let Some(resolved) = resolved_backend() {
+        return resolved.catalog.price(model);
+    }
+    let cwd = env::current_dir().ok();
+    price_for_in_workspace(cwd.as_deref(), model)
+}
+
+/// 供 Web 界面只读展示的 `.ziyuan/models.json` 摘要（绝不含明文 API Key）。
+pub(crate) fn web_model_profiles(root: &Path) -> Vec<ziyuan_web::ModelProfileInfo> {
+    ModelsConfig::load(root)
+        .ok()
+        .flatten()
+        .map(|cfg| {
+            cfg.summaries()
+                .into_iter()
+                .map(|s| ziyuan_web::ModelProfileInfo {
+                    name: s.name,
+                    provider: s.provider,
+                    provider_label: s.provider_label,
+                    model: s.model,
+                    base_url: s.base_url,
+                    api_key_env: s.api_key_env,
+                    api_key_ready: s.api_key_ready,
+                    is_default: s.is_default,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 解析真实模型与异构路由目录（环境变量优先，其次 `.ziyuan/models.json` 的 `default`）；
+/// 两者均未配置时使用演示后端。
 pub(crate) fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>> {
-    let Some(model) = OpenAiCompatible::from_env().map_err(|e| e as Box<dyn Error>)? else {
+    let cwd = env::current_dir()?;
+    let Some(resolved) = resolve_backend(Some(&cwd)).map_err(|e| e as Box<dyn Error>)? else {
         return Ok(Arc::new(DemoBackend));
     };
-    let plan = if model.uses_chatgpt_plan() {
+    let plan = if resolved.uses_chatgpt_plan {
         "，计入 ChatGPT 订阅额度"
     } else {
         ""
     };
     eprintln!(
-        "执行后端：{}{plan}（工具与查阅范围由各诏令的玉玺决定）",
-        model.model()
+        "执行后端：{} [{}]{plan}（工具与查阅范围由各诏令的玉玺决定）",
+        resolved.model_label,
+        resolved.provider_kind.label(),
     );
-    let catalog = Box::new(model.catalog());
+    let catalog = Box::new(resolved.catalog);
     let steps = match env::var("ZIYUAN_MAX_STEPS") {
         Ok(n) => n
             .parse()
@@ -119,7 +154,7 @@ pub(crate) fn worker_backend() -> Result<Arc<dyn WorkerBackend>, Box<dyn Error>>
         Err(_) => return Err("ZIYUAN_TEST_COMMANDS 须为有效 Unicode 字符串".into()),
     };
     Ok(Arc::new(
-        AgentBackend::new(Box::new(model), env::current_dir()?, steps)
+        AgentBackend::new(resolved.provider, cwd, steps)
             .with_context_tokens(context_tokens)
             .with_catalog(catalog)
             .with_test_command(env::var("ZIYUAN_TEST_COMMAND").ok())

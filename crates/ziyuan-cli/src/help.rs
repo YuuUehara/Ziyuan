@@ -43,7 +43,10 @@ pub(crate) const HELP: &str = concat!(
   ziyuan dismiss <官员ID>              罢免现任官职
   ziyuan purge <官员ID>                革职：削去仕籍，永不叙用
   ziyuan abolish                       一键朱元璋：罢中书省，株连百官（全部在任官员革职削籍）
-  ziyuan model <官职> <模型|default>   为官职指定承办模型（同一服务地址与 Key）
+  ziyuan model list                    列出 .ziyuan/models.json 多模型配置与当前各官职模型分派（不含密钥）
+  ziyuan model <官职> <模型|配置名|default>
+  ziyuan model --dept <部门> <模型|配置名|default>
+                                       为单个官职或整部（尚书、侍郎、郎中）指定承办模型或 models.json 配置名
   ziyuan ceiling <官职> [--scope <路径>]... [--tools <工具>] [--mcp <授权>] | default
                                        设定官职的玉玺上限：该职承办时，诏令玉玺与上限取交集
   ziyuan split <诏令ID> [--parallel-writes] [官员ID:子诏令]...
@@ -176,7 +179,10 @@ pub(crate) const HELP: &str = concat!(
   ZIYUAN_LLM_RETRIES   网络错误、429、5xx 时的重试次数（默认 3，指数退避，遵守 Retry-After）
   ZIYUAN_MAX_STEPS     单件诏令最多的模型调用步数（默认 12）；用尽后官员不带工具据已查阅的内容回奏
   ZIYUAN_CONTEXT_TOKENS 旧工具输出的节略阈值（正整数，默认 48000）；不是模型窗口或度支上限
-  ZIYUAN_LLM_PROVIDER  设为 chatgpt 时改用 ChatGPT 订阅（先 `ziyuan login`），走 Responses API
+  ZIYUAN_LLM_PROVIDER  默认 openai/api（OpenAI 兼容）；设为 anthropic 走原生 Anthropic Messages API（实验性）；
+                       设为 gemini 走原生 Google Gemini API（实验性）；设为 chatgpt 改用 ChatGPT 订阅（先 `ziyuan login`）
+  .ziyuan/models.json  异构多模型路由表：登记多组 provider/model/base_url/api_key_env（严禁写明文密钥），
+                       支持按官职／按部路由至不同提供方
   ZIYUAN_TZ            起居注显示与筛选时间所用的时区，如 +08:00（默认 UTC）
   ZIYUAN_CONFIG_DIR    用户配置目录（存 ChatGPT 订阅凭据；默认 $XDG_CONFIG_HOME/ziyuan 或 ~/.config/ziyuan）
   ZIYUAN_GITHUB_REPO   兵部驿站·GitHub 的仓库（owner/repo）；与 ZIYUAN_GITHUB_TOKEN 一同设置后可用 github 子命令
@@ -282,6 +288,7 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "migrate",
     "flags",
     "mcp",
+    "model",
     "text",
     "follow",
     "note",
@@ -346,7 +353,8 @@ pub(crate) fn completions(shell: Shell) -> String {
     --tools) words="{tools} none" ;;
     --plan) [ "${{COMP_WORDS[1]}}" = "split" ] && {{ COMPREPLY=($(compgen -f -- "$cur")); return; }} ;;
     *) case "${{COMP_WORDS[1]}}" in
-         appoint|model|ceiling|nominate|recommend) words="{offices}" ;;
+         appoint|ceiling|nominate|recommend) words="{offices}" ;;
+         model) words="list --dept {offices}" ;;
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
@@ -436,9 +444,10 @@ complete -F _ziyuan ziyuan
                 ),
                 format!("{} -l all", seen("follow")),
                 format!("{} -l json", seen(&json)),
+                format!("{} -a 'list'", seen("model")),
                 format!(
                     "{} -l dept -x -a '{departments}'",
-                    seen("edict post template text")
+                    seen("edict post template text model")
                 ),
                 format!(
                     "{} -l tools -x -a '{tools} none'",
