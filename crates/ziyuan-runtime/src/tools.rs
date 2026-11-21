@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use ziyuan_core::{CHANGELOG, Capability, FileChange, Record, Seal, search_records};
@@ -1649,28 +1649,41 @@ impl Tool for WriteFile {
 
 struct ReplaceText(Arc<Sandbox>);
 
+struct ReplaceEdit {
+    old: String,
+    new: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+}
+
 impl Tool for ReplaceText {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "replace_text".into(),
             description: format!(
-                "把授权范围（{}）内某个文本文件里唯一的一段 old 换成 new，或通过 edits 数组在单次调用内按顺序原子应用多处补丁（最多 {MAX_REPLACE_EDITS} 处；任一处找不到或出现不止一处即整批拒绝，不留半截改动）。不做模糊匹配，也不新建或删除文件。改动只暂存，与 write_file 一样等准奏后才落盘。结果最多 {MAX_WRITE_BYTES} 字节。",
+                "把授权范围（{}）内某个文本文件里唯一的一段 old 换成 new，或通过 edits 数组在单次调用内按顺序原子应用多处补丁（最多 {MAX_REPLACE_EDITS} 处；任一处找不到或出现不止一处即整批拒绝，不留半截改动）。支持可选的 start_line/end_line（1 起始含首尾行号）将匹配限定在指定行范围以消除歧义；匹配失败时会返回候选行号或歧义行号便于定位。不做模糊替换，也不新建或删除文件。改动只暂存，与 write_file 一样等准奏后才落盘。结果最多 {MAX_WRITE_BYTES} 字节。",
                 self.0.scope_label()
             ),
             input_schema_json: format!(
-                r#"{{"type":"object","properties":{{"path":{{"type":"string","description":"相对项目根目录的文件路径"}},"old":{{"type":"string","description":"单处替换时的原文，必须在文件中恰好出现一次（与 edits 二选一）"}},"new":{{"type":"string","description":"单处替换后的文本，可以是空字符串（与 edits 二选一）"}},"edits":{{"type":"array","description":"批量补丁数组（最多 {MAX_REPLACE_EDITS} 项，与 old/new 二选一），按顺序原子应用","items":{{"type":"object","properties":{{"old":{{"type":"string","description":"该处要替换的原文，须唯一匹配"}},"new":{{"type":"string","description":"替换后的文本，可以是空字符串"}}}},"required":["old","new"],"additionalProperties":false}}}}}},"required":["path"],"additionalProperties":false}}"#
+                r#"{{"type":"object","properties":{{"path":{{"type":"string","description":"相对项目根目录的文件路径"}},"old":{{"type":"string","description":"单处替换时的原文，须在文件（或指定行范围）中恰好出现一次（与 edits 二选一）"}},"new":{{"type":"string","description":"单处替换后的文本，可以是空字符串（与 edits 二选一）"}},"start_line":{{"type":"integer","description":"可选，单处替换时限定的起始行号（从 1 起，含该行；须与 old/new 同用）"}},"end_line":{{"type":"integer","description":"可选，单处替换时限定的结束行号（从 1 起，含该行；须与 old/new 同用）"}},"edits":{{"type":"array","description":"批量补丁数组（最多 {MAX_REPLACE_EDITS} 项，与 old/new 二选一），按顺序基于当前文本原子应用","items":{{"type":"object","properties":{{"old":{{"type":"string","description":"该处要替换的原文，须在文件或行范围内唯一匹配"}},"new":{{"type":"string","description":"替换后的文本，可以是空字符串"}},"start_line":{{"type":"integer","description":"可选，该处补丁限定的起始行号（从 1 起，含该行）"}},"end_line":{{"type":"integer","description":"可选，该处补丁限定的结束行号（从 1 起，含该行）"}}}},"required":["old","new"],"additionalProperties":false}}}}}},"required":["path"],"additionalProperties":false}}"#
             ),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let args = object_args(args_json, &["path", "old", "new", "edits"])?;
+        let args = object_args(
+            args_json,
+            &["path", "old", "new", "start_line", "end_line", "edits"],
+        )?;
         let relative = required_string(&args, "path")?;
         let has_edits = args.contains_key("edits");
-        let has_single = args.contains_key("old") || args.contains_key("new");
-        let (batch_mode, edits): (bool, Vec<(String, String)>) = if has_edits {
+        let has_single = args.contains_key("old")
+            || args.contains_key("new")
+            || args.contains_key("start_line")
+            || args.contains_key("end_line");
+        let (batch_mode, edits): (bool, Vec<ReplaceEdit>) = if has_edits {
             if has_single {
-                return Err("edits 与 old/new 不能同时传入".into());
+                return Err("edits 与 old/new/start_line/end_line 不能同时传入".into());
             }
             let arr = args
                 .get("edits")
@@ -1688,7 +1701,7 @@ impl Tool for ReplaceText {
                     .as_object()
                     .ok_or_else(|| format!("第 {} 处补丁须为 JSON 对象", i + 1))?;
                 for key in obj.keys() {
-                    if key != "old" && key != "new" {
+                    if !matches!(key.as_str(), "old" | "new" | "start_line" | "end_line") {
                         return Err(format!("第 {} 处补丁含未知字段：{key}", i + 1).into());
                     }
                 }
@@ -1700,29 +1713,62 @@ impl Tool for ReplaceText {
                     .get("new")
                     .and_then(Value::as_str)
                     .ok_or_else(|| format!("第 {} 处补丁缺少字符串参数 new", i + 1))?;
-                parsed.push((old.to_owned(), new.to_owned()));
+                let start_line = parse_optional_line(obj, "start_line")
+                    .map_err(|e| format!("第 {} 处补丁：{e}", i + 1))?;
+                let end_line = parse_optional_line(obj, "end_line")
+                    .map_err(|e| format!("第 {} 处补丁：{e}", i + 1))?;
+                parsed.push(ReplaceEdit {
+                    old: old.to_owned(),
+                    new: new.to_owned(),
+                    start_line,
+                    end_line,
+                });
             }
             (true, parsed)
         } else {
             let old = required_string(&args, "old")?;
             let new = required_string(&args, "new")?;
-            (false, vec![(old, new)])
+            let start_line = parse_optional_line(&args, "start_line")?;
+            let end_line = parse_optional_line(&args, "end_line")?;
+            (
+                false,
+                vec![ReplaceEdit {
+                    old,
+                    new,
+                    start_line,
+                    end_line,
+                }],
+            )
         };
         // 路径先过玉玺和禁区。空 old、新旧相同都不能让越界路径报成功。
         let (path, key) = self.0.resolve_write(&relative)?;
         if path.is_dir() {
             return Err(format!("{key} 是目录").into());
         }
-        for (i, (old, _)) in edits.iter().enumerate() {
-            if old.is_empty() {
+        for (i, edit) in edits.iter().enumerate() {
+            if edit.old.is_empty() {
                 return Err(if batch_mode {
                     format!("第 {} 处补丁的 old 不能为空", i + 1).into()
                 } else {
                     "old 不能为空".into()
                 });
             }
+            if let (Some(start), Some(end)) = (edit.start_line, edit.end_line)
+                && start > end
+            {
+                let msg = format!("start_line ({start}) 不能大于 end_line ({end})");
+                return Err(if batch_mode {
+                    format!("第 {} 处补丁：{msg}", i + 1).into()
+                } else {
+                    msg.into()
+                });
+            }
         }
-        if !batch_mode && edits[0].0 == edits[0].1 {
+        if !batch_mode
+            && edits[0].start_line.is_none()
+            && edits[0].end_line.is_none()
+            && edits[0].old == edits[0].new
+        {
             return Ok("新旧文本相同，未写入暂存".into());
         }
         let mut staged = self.0.staged.lock().expect("暂存区锁未中毒");
@@ -1741,25 +1787,44 @@ impl Tool for ReplaceText {
         let mut working = current.clone();
         let mut old_bytes = 0usize;
         let mut new_bytes = 0usize;
-        for (i, (old, new)) in edits.iter().enumerate() {
-            let count = working.match_indices(old).count();
-            if count == 0 {
+        for (i, edit) in edits.iter().enumerate() {
+            let spans = line_spans(&working);
+            let win = resolve_line_window(&spans, working.len(), edit.start_line, edit.end_line)
+                .map_err(|e| {
+                    if batch_mode {
+                        BoxError::from(format!("第 {} 处补丁：{e}", i + 1))
+                    } else {
+                        e
+                    }
+                })?;
+            let window = &working[win.start..win.end];
+            let matches: Vec<usize> = window
+                .match_indices(&edit.old)
+                .map(|(pos, _)| pos)
+                .collect();
+            if matches.is_empty() {
+                let detail = format_missing_match(
+                    &working, &spans, win.start, win.end, &edit.old, win.range,
+                );
                 return Err(if batch_mode {
-                    format!("第 {} 处补丁：找不到要替换的文本", i + 1).into()
+                    format!("第 {} 处补丁：{detail}", i + 1).into()
                 } else {
-                    "找不到要替换的文本".into()
+                    detail.into()
                 });
             }
-            if count > 1 {
+            if matches.len() > 1 {
+                let detail = format_ambiguous_matches(&spans, win.start, &matches, win.range);
                 return Err(if batch_mode {
-                    format!("第 {} 处补丁：匹配到 {count} 处，须唯一才能替换", i + 1).into()
+                    format!("第 {} 处补丁：{detail}", i + 1).into()
                 } else {
-                    format!("匹配到 {count} 处，须唯一才能替换").into()
+                    detail.into()
                 });
             }
-            working = working.replacen(old, new, 1);
-            old_bytes += old.len();
-            new_bytes += new.len();
+            let abs_start = win.start + matches[0];
+            let abs_end = abs_start + edit.old.len();
+            working.replace_range(abs_start..abs_end, &edit.new);
+            old_bytes += edit.old.len();
+            new_bytes += edit.new.len();
         }
         if working.len() > MAX_WRITE_BYTES {
             return Err(format!("替换后超过 {MAX_WRITE_BYTES} 字节").into());
@@ -1781,6 +1846,203 @@ impl Tool for ReplaceText {
             edits.len(),
         ))
     }
+}
+
+fn parse_optional_line(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<usize>, BoxError> {
+    match optional_i64(args, key)? {
+        None => Ok(None),
+        Some(n) if n < 1 => Err(format!("`{key}` 从 1 起").into()),
+        Some(n) => usize::try_from(n)
+            .map(Some)
+            .map_err(|_| format!("`{key}` 过大").into()),
+    }
+}
+
+struct LineWindow {
+    start: usize,
+    end: usize,
+    range: Option<(usize, usize)>,
+}
+
+fn resolve_line_window(
+    spans: &[(usize, usize)],
+    text_len: usize,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<LineWindow, BoxError> {
+    if start_line.is_none() && end_line.is_none() {
+        return Ok(LineWindow {
+            start: 0,
+            end: text_len,
+            range: None,
+        });
+    }
+    if spans.is_empty() {
+        return Err("文件为空，无法按行范围替换".into());
+    }
+    let total = spans.len();
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or(total);
+    if start > end {
+        return Err(format!("start_line ({start}) 不能大于 end_line ({end})").into());
+    }
+    if start > total || end > total {
+        return Err(format!("行范围 {start}..={end} 超出文件总行数 {total}").into());
+    }
+    Ok(LineWindow {
+        start: spans[start - 1].0,
+        end: spans[end - 1].1,
+        range: Some((start, end)),
+    })
+}
+
+fn byte_offset_to_line(spans: &[(usize, usize)], offset: usize) -> usize {
+    if spans.is_empty() {
+        return 1;
+    }
+    (spans.partition_point(|&(_, end)| end <= offset) + 1).min(spans.len())
+}
+
+fn format_line_list(lines: &[usize]) -> String {
+    let preview: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
+    if lines.len() > 5 {
+        format!("第 {} 行等共 {} 处", preview.join("、"), lines.len())
+    } else {
+        format!("第 {} 行", preview.join("、"))
+    }
+}
+
+fn format_ambiguous_matches(
+    spans: &[(usize, usize)],
+    win_start: usize,
+    matches: &[usize],
+    range: Option<(usize, usize)>,
+) -> String {
+    let lines: Vec<usize> = matches
+        .iter()
+        .map(|&rel| byte_offset_to_line(spans, win_start + rel))
+        .collect();
+    let count = matches.len();
+    let lines_desc = format_line_list(&lines);
+    match range {
+        Some((start, end)) => format!(
+            "在指定行范围 {start}..={end} 内匹配到 {count} 处（{lines_desc}），须唯一才能替换；请缩小 start_line/end_line 或补充前后上下文"
+        ),
+        None => format!(
+            "匹配到 {count} 处（{lines_desc}），须唯一才能替换；可补充前后上下文，或通过 start_line/end_line 指定行范围唯一锚定"
+        ),
+    }
+}
+
+fn format_missing_match(
+    working: &str,
+    spans: &[(usize, usize)],
+    win_start: usize,
+    win_end: usize,
+    old: &str,
+    range: Option<(usize, usize)>,
+) -> String {
+    if let Some((start, end)) = range {
+        let anywhere: Vec<usize> = working
+            .match_indices(old)
+            .map(|(pos, _)| byte_offset_to_line(spans, pos))
+            .collect();
+        if !anywhere.is_empty() {
+            return format!(
+                "在指定行范围 {start}..={end} 内找不到要替换的文本（但文件其他位置{}存在完全匹配，请核对行号）",
+                format_line_list(&anywhere)
+            );
+        }
+    }
+    let base = match range {
+        Some((start, end)) => format!("在指定行范围 {start}..={end} 内找不到要替换的文本"),
+        None => "找不到要替换的文本".to_owned(),
+    };
+    let candidates = find_candidate_lines(working, spans, win_start, win_end, old);
+    if candidates.is_empty() {
+        return base;
+    }
+    let formatted: Vec<String> = candidates
+        .into_iter()
+        .map(|(line_no, snippet)| format!("  L{line_no}: {snippet}"))
+        .collect();
+    format!("{base}。最接近的候选行：\n{}", formatted.join("\n"))
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_tokens(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|tok| tok.len() >= 2)
+        .collect()
+}
+
+fn find_candidate_lines(
+    working: &str,
+    spans: &[(usize, usize)],
+    win_start: usize,
+    win_end: usize,
+    old: &str,
+) -> Vec<(usize, String)> {
+    let anchor = old
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| old.trim());
+    if anchor.is_empty() {
+        return Vec::new();
+    }
+    let anchor_ws = collapse_whitespace(anchor);
+    let anchor_tokens = extract_tokens(anchor);
+    let mut scored: Vec<(u32, usize, String)> = Vec::new();
+    for (idx, &(s, e)) in spans.iter().enumerate() {
+        if e <= win_start || s >= win_end {
+            continue;
+        }
+        let raw = working[s..e].trim_end_matches(['\r', '\n']);
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let score = if trimmed == anchor {
+            1000
+        } else if !anchor_ws.is_empty() && collapse_whitespace(trimmed) == anchor_ws {
+            850
+        } else if (anchor.len() >= 4 && trimmed.contains(anchor))
+            || (trimmed.len() >= 4 && anchor.contains(trimmed))
+        {
+            650
+        } else if anchor_tokens.len() >= 2 {
+            let line_tokens = extract_tokens(trimmed);
+            let matched = anchor_tokens
+                .iter()
+                .filter(|tok| line_tokens.contains(tok))
+                .count();
+            if matched >= 2 && matched * 2 >= anchor_tokens.len() {
+                200 + ((matched as u32 * 300) / anchor_tokens.len() as u32)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        if score > 0 {
+            let preview = clip_str(raw, 100);
+            let suffix = if preview.len() < raw.len() { "…" } else { "" };
+            scored.push((score, idx + 1, format!("{preview}{suffix}")));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(_, line_no, preview)| (line_no, preview))
+        .collect()
 }
 
 struct DeleteFile(Arc<Sandbox>);
@@ -1975,9 +2237,17 @@ impl Tool for RunTests {
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        self.execute_with_cancel(args_json, None)
+    }
+
+    fn execute_with_cancel(
+        &self,
+        args_json: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<String, BoxError> {
         let args = object_args(args_json, &["preset"])?;
         let preset = optional_string(&args, "preset")?;
-        self.run_preset(preset.as_deref(), crate::haoshe::Mode::from_env()?)
+        self.run_preset(preset.as_deref(), crate::haoshe::Mode::from_env()?, cancel)
     }
 }
 
@@ -2020,15 +2290,19 @@ impl RunTests {
 
     #[cfg(test)]
     fn run(&self, mode: crate::haoshe::Mode) -> Result<String, BoxError> {
-        self.run_preset(None, mode)
+        self.run_preset(None, mode, None)
     }
 
     fn run_preset(
         &self,
         preset: Option<&str>,
         mode: crate::haoshe::Mode,
+        cancel: Option<&AtomicBool>,
     ) -> Result<String, BoxError> {
         let command = self.resolve_command(preset)?;
+        if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(format!("测试 `{command}`：已取消（启动前已收到撤销信号）").into());
+        }
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
             "ziyuan-test-{}-{}",
@@ -2036,7 +2310,7 @@ impl RunTests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let copy = base.join("project");
-        let result = self.run_in_copy(command, mode, &base, &copy);
+        let result = self.run_in_copy(command, mode, &base, &copy, cancel);
         let _ = fs::remove_dir_all(&base);
         result
     }
@@ -2047,6 +2321,7 @@ impl RunTests {
         mode: crate::haoshe::Mode,
         base: &Path,
         copy: &Path,
+        cancel: Option<&AtomicBool>,
     ) -> Result<String, BoxError> {
         copy_tree(&self.0.root, &self.0.root, copy)?;
         for change in self.0.staged.lock().expect("暂存区锁未中毒").values() {
@@ -2085,7 +2360,7 @@ impl RunTests {
             timeout: TEST_TIMEOUT,
             max_output: MAX_TEST_OUTPUT,
             max_failure_scan: MAX_FAILURE_SCAN,
-            cancel: None,
+            cancel,
         })?;
         let note = if run.tail_truncated {
             format!("（仅最后 {MAX_TEST_OUTPUT} 字节）")
@@ -3748,6 +4023,171 @@ export function bootUi() {}
             get("find_references")
                 .execute(r#"{"symbol":"compute","path":".env"}"#)
                 .is_err()
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_text_line_range_disambiguates_and_validates_bounds() {
+        let dir = workspace("replace-range");
+        let root = dir.join("project");
+        fs::write(
+            root.join("src/multi.rs"),
+            "fn a() -> Result<(), ()> {\n    return Ok(());\n}\n\nfn b() -> Result<(), ()> {\n    return Ok(());\n}\n\nfn c() -> Result<(), ()> {\n    return Ok(());\n}\n",
+        )
+        .unwrap();
+        let sealed = sealed_tools(
+            &root,
+            &seal(&[Capability::ReadFile, Capability::WriteFile], &["src"]),
+            None,
+        )
+        .unwrap();
+        let replace = sealed
+            .tools
+            .iter()
+            .find(|t| t.spec().name == "replace_text")
+            .unwrap();
+
+        let ambig = replace
+            .execute(r#"{"path":"src/multi.rs","old":"return Ok(());","new":"Ok(())"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            ambig.contains("匹配到 3 处")
+                && ambig.contains("第 2、6、10 行")
+                && ambig.contains("start_line/end_line"),
+            "{ambig}"
+        );
+
+        replace
+            .execute(r#"{"path":"src/multi.rs","old":"return Ok(());","new":"Ok(())","start_line":5,"end_line":7}"#)
+            .unwrap();
+        let after_one = &sealed.changes()[0].after;
+        assert_eq!(after_one.matches("return Ok(());").count(), 2);
+        assert_eq!(after_one.matches("    Ok(())").count(), 1);
+        assert!(after_one.contains("fn b() -> Result<(), ()> {\n    Ok(())\n}"));
+
+        replace
+            .execute(r#"{"path":"src/multi.rs","edits":[{"old":"return Ok(());","new":"Ok(()) // a","start_line":1,"end_line":3},{"old":"return Ok(());","new":"Ok(()) // c","start_line":9,"end_line":11}]}"#)
+            .unwrap();
+        let after_batch = &sealed.changes()[0].after;
+        assert!(after_batch.contains("Ok(()) // a"));
+        assert!(after_batch.contains("Ok(()) // c"));
+        assert_eq!(after_batch.matches("return Ok(());").count(), 0);
+
+        assert!(
+            replace
+                .execute(r#"{"path":"src/multi.rs","old":"fn a","new":"fn x","start_line":0}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("从 1 起")
+        );
+        assert!(
+            replace
+                .execute(r#"{"path":"src/multi.rs","old":"fn a","new":"fn x","start_line":5,"end_line":3}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("不能大于")
+        );
+        assert!(
+            replace
+                .execute(r#"{"path":"src/multi.rs","old":"fn a","new":"fn x","start_line":1,"end_line":999}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("超出文件总行数")
+        );
+        assert!(
+            replace
+                .execute(r#"{"path":"src/multi.rs","start_line":1,"edits":[{"old":"fn a","new":"fn x"}]}"#)
+                .is_err()
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_text_missing_match_reports_outside_range_or_candidate_lines() {
+        let dir = workspace("replace-diag");
+        let root = dir.join("project");
+        fs::write(
+            root.join("src/diag.rs"),
+            "fn alpha() {\n    let count = 1;\n}\nfn beta() {\n    let total_items = compute_sum(a, b);\n}\n",
+        )
+        .unwrap();
+        let sealed = sealed_tools(
+            &root,
+            &seal(&[Capability::ReadFile, Capability::WriteFile], &["src"]),
+            None,
+        )
+        .unwrap();
+        let replace = sealed
+            .tools
+            .iter()
+            .find(|t| t.spec().name == "replace_text")
+            .unwrap();
+
+        let outside = replace
+            .execute(r#"{"path":"src/diag.rs","old":"let total_items = compute_sum(a, b);","new":"let total_items = 0;","start_line":1,"end_line":3}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            outside.contains("找不到要替换的文本") && outside.contains("第 5 行存在完全匹配"),
+            "{outside}"
+        );
+
+        let near = replace
+            .execute(r#"{"path":"src/diag.rs","old":"let total_items = compute_sum(a, c);","new":"let total_items = 0;"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            near.contains("找不到要替换的文本")
+                && near.contains("最接近的候选行")
+                && near.contains("L5:     let total_items = compute_sum(a, b);"),
+            "{near}"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn run_tests_cancels_inflight_command_promptly() {
+        let dir = workspace("run-tests-cancel");
+        let root = dir.join("project");
+        #[cfg(windows)]
+        let slow_cmd = "ping -n 15 127.0.0.1";
+        #[cfg(not(windows))]
+        let slow_cmd = "sleep 15";
+
+        let sandbox = Arc::new(
+            Sandbox::new(&root, &[".".to_owned()], Some(slow_cmd), BTreeMap::new()).unwrap(),
+        );
+        let tool = RunTests(sandbox);
+
+        let already = AtomicBool::new(true);
+        let early = tool
+            .run_preset(None, crate::haoshe::Mode::Off, Some(&already))
+            .unwrap_err()
+            .to_string();
+        assert!(early.contains("已取消"), "{early}");
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&flag);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        let err = tool
+            .run_preset(None, crate::haoshe::Mode::Off, Some(&flag))
+            .unwrap_err()
+            .to_string();
+        let elapsed = started.elapsed();
+        handle.join().unwrap();
+        assert!(err.contains("已取消"), "{err}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "取消传播过慢: {elapsed:?}"
         );
 
         fs::remove_dir_all(dir).unwrap();

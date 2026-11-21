@@ -6,18 +6,24 @@ use crate::{ExecutionHooks, Treasury, WorkerBackend};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use ziyuan_core::{Agent, Edict, FileChange, Record, TaskId, Threat, TokenUsage};
 
-/// 可克隆的撤销信号；同步代码用 `is_cancelled` 轮询，异步代码 `await cancelled()`。
+/// 可克隆的撤销信号；同步代码用 `is_cancelled` / `flag()` 轮询，异步代码 `await cancelled()`。
 #[derive(Clone, Debug)]
-pub struct CancelToken(Arc<watch::Sender<bool>>);
+pub struct CancelToken {
+    tx: Arc<watch::Sender<bool>>,
+    flag: Arc<AtomicBool>,
+}
 
 impl Default for CancelToken {
     fn default() -> Self {
-        Self(Arc::new(watch::Sender::new(false)))
+        Self {
+            tx: Arc::new(watch::Sender::new(false)),
+            flag: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -27,16 +33,22 @@ impl CancelToken {
     }
 
     pub fn cancel(&self) {
-        self.0.send_replace(true);
+        self.flag.store(true, Ordering::SeqCst);
+        self.tx.send_replace(true);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        *self.0.borrow()
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    /// 返回与本令牌同步的原子布尔标志，供长耗时子进程（如 `run_tests`）主动感知取消或超时。
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.flag)
     }
 
     pub async fn cancelled(&self) {
         // 发送端由 self 持有，等待不会因通道关闭而提前返回。
-        let _ = self.0.subscribe().wait_for(|cancelled| *cancelled).await;
+        let _ = self.tx.subscribe().wait_for(|cancelled| *cancelled).await;
     }
 }
 
@@ -314,6 +326,10 @@ impl ExecutionHooks for TaskHooks {
 
     fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.cancel.flag())
     }
 
     fn model_usage(&self, usage: TokenUsage) {
@@ -795,5 +811,74 @@ mod tests {
                 (3, Outcome::NotStarted)
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_flag_tracks_manual_cancel_and_timeout() {
+        let token = CancelToken::new();
+        let flag = token.flag();
+        assert!(!flag.load(Ordering::SeqCst));
+        token.cancel();
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(token.is_cancelled());
+
+        struct WaitOnFlag {
+            observed: Arc<AtomicBool>,
+        }
+        impl WorkerBackend for WaitOnFlag {
+            fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+                let flag = hooks.cancel_flag().expect("TaskHooks 应提供 cancel_flag");
+                let start = std::time::Instant::now();
+                while !flag.load(Ordering::SeqCst) {
+                    if start.elapsed() > Duration::from_secs(3) {
+                        return Err("未收到取消标志".into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                self.observed.store(true, Ordering::SeqCst);
+                Err("已取消".into())
+            }
+        }
+
+        // 1) 单任务超时应触发 TaskHooks::cancel_flag
+        let observed_timeout = Arc::new(AtomicBool::new(false));
+        let scheduler = Scheduler::new(
+            Arc::new(WaitOnFlag {
+                observed: observed_timeout.clone(),
+            }),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_millis(80),
+            },
+        );
+        let progress = collect(scheduler.start(vec![job(1)], &CancelToken::new())).await;
+        assert!(matches!(outcomes(&progress)[0].1, Outcome::Failed(ref s) if s.contains("超时")));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !observed_timeout.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(observed_timeout.load(Ordering::SeqCst));
+
+        // 2) 手动撤销同样触发 TaskHooks::cancel_flag
+        let observed_cancel = Arc::new(AtomicBool::new(false));
+        let scheduler = Scheduler::new(
+            Arc::new(WaitOnFlag {
+                observed: observed_cancel.clone(),
+            }),
+            Limits {
+                max_concurrent: 1,
+                timeout: Duration::from_secs(10),
+            },
+        );
+        let cancel = CancelToken::new();
+        let rx = scheduler.start(vec![job(2)], &cancel);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+        assert_eq!(outcomes(&collect(rx).await), [(2, Outcome::Cancelled)]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !observed_cancel.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(observed_cancel.load(Ordering::SeqCst));
     }
 }

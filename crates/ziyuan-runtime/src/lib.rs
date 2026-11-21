@@ -4,6 +4,7 @@
 //! [`Scheduler`] 在 Tokio 上并发执行任务，负责并发上限、超时与撤销。
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, atomic::AtomicBool};
 use ziyuan_core::{
     Capability, FileChange, Persona, Price, Seal, Threat, TokenUsage, missing_sections,
 };
@@ -147,6 +148,10 @@ pub trait ExecutionHooks {
     /// 超时或被撤销后为真；后端应尽快停止并返回。
     fn is_cancelled(&self) -> bool {
         false
+    }
+    /// 可选的原子撤销标志，供 `run_tests` 等长耗时子进程在执行期间主动感知撤销或超时并及时终止。
+    fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        None
     }
     fn tool_invoked(&self, _tool: &str, _args_json: &str, _ok: bool) {}
     /// 模型生成的一段文本（流式）。只用于实时显示，不写入事件簿。

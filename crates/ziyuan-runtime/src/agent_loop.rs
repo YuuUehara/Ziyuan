@@ -3,6 +3,7 @@ use crate::{BoxError, ExecutionHooks, guard};
 use serde_json::Value;
 use std::cell::Cell;
 use std::fmt;
+use std::sync::{Arc, atomic::AtomicBool};
 use ziyuan_core::{FileChange, Threat, TokenUsage};
 
 /// 对话估算超过此数（tokens）时节略较早的工具输出。
@@ -11,6 +12,15 @@ pub const CONTEXT_TOKENS: u64 = 48_000;
 const KEEP_RECENT_OUTPUTS: usize = 4;
 /// 节略后每份工具输出保留的开头字数。
 const ABRIDGED_HEAD: usize = 200;
+/// 二阶段轮次压缩时原样保留的最近完整轮次数。
+const KEEP_RECENT_TURNS: usize = 4;
+/// 二阶段轮次压缩至少一次折叠的较早轮次数（避免单轮抖动）。
+const MIN_FOLD_TURNS: usize = 2;
+/// 结构化历史压缩摘要的字符上限。
+const MAX_DIGEST_CHARS: usize = 3_000;
+/// 二阶段历史压缩摘要前的固定系统说明，保持与后续 User 摘要的严格角色交替。
+const COMPACT_ACK: &str =
+    "〔系统注：以下为较早工作轮次的结构化压缩摘要，原文已归档以节省上下文窗口。〕";
 /// 度支余额扣去预计输入后不足此数，就不再发请求（只够几个字的回答没有意义）。
 const MIN_OUTPUT: u64 = 64;
 /// 每次调用为输出预留的上限。Adapter 只在输出上限低于 8192 时才向 API 传 `max_tokens`，
@@ -118,6 +128,15 @@ pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn execute(&self, args_json: &str) -> Result<String, BoxError>;
 
+    /// 支持协作式撤销的执行入口；长耗时工具（如 `run_tests`）可覆写此方法，在 `cancel` 置位后尽快终止子进程。
+    fn execute_with_cancel(
+        &self,
+        args_json: &str,
+        _cancel: Option<&AtomicBool>,
+    ) -> Result<String, BoxError> {
+        self.execute(args_json)
+    }
+
     /// 只读无副作用工具可返回 `true`，同一模型回合内连续多条只读调用将并发执行，
     /// 并按原始调用顺序回传结果与触发钩子；写操作、测试与外部 MCP 工具默认返回 `false`。
     fn is_read_only(&self) -> bool {
@@ -182,6 +201,305 @@ pub fn abridge(messages: &mut [Message], tools: &[ToolSpec], limit: u64, nonce: 
         abridged += 1;
     }
     abridged
+}
+
+/// 二阶段可控轮次压缩：经 [`abridge`] 节略旧工具输出后，若估算 token 仍超出 `limit`
+/// 且已积累足够多的完整历史轮次（至少保留最近 [`KEEP_RECENT_TURNS`] 轮完整对话），
+/// 则把较早的完整轮次折叠为一条带外来文书边界的结构化工作摘要（保留已修改文件、
+/// 测试诊断与查阅足迹），不调用模型，且严格保持 `CallPrelude`/`ToolCall`/`ToolOutput`
+/// 配对与 `user`/`assistant` 交替协议。返回本次折叠的轮次数。
+pub fn compact_turns(
+    messages: &mut Vec<Message>,
+    tools: &[ToolSpec],
+    limit: u64,
+    nonce: &str,
+) -> usize {
+    compact_turns_inner(messages, None, tools, limit, nonce)
+}
+
+fn compact_turns_inner(
+    messages: &mut Vec<Message>,
+    successful_reads: Option<&mut Vec<(usize, String)>>,
+    tools: &[ToolSpec],
+    limit: u64,
+    nonce: &str,
+) -> usize {
+    if estimate_tokens(messages, tools) <= limit {
+        return 0;
+    }
+    // 保留开头全部 System 与首条任务 User 消息；若开头无 User 消息则不介入。
+    let prefix_end = messages
+        .iter()
+        .take_while(|m| matches!(m, Message::System(_) | Message::User(_)))
+        .count();
+    if prefix_end == 0
+        || !messages[..prefix_end]
+            .iter()
+            .any(|m| matches!(m, Message::User(_)))
+    {
+        return 0;
+    }
+    let (turns_start, previous_digest) =
+        match (messages.get(prefix_end), messages.get(prefix_end + 1)) {
+            (Some(Message::Assistant(ack)), Some(Message::User(digest))) if ack == COMPACT_ACK => (
+                prefix_end + 2,
+                Some(guard::unfence(digest, nonce).to_owned()),
+            ),
+            _ => (prefix_end, None),
+        };
+    let turns = collect_foldable_turns(messages, turns_start);
+    if turns.len() < KEEP_RECENT_TURNS + MIN_FOLD_TURNS {
+        return 0;
+    }
+    let fold_count = turns.len() - KEEP_RECENT_TURNS;
+    let fold_start = prefix_end;
+    let fold_end = turns[fold_count - 1].1;
+    let digest_body = build_turn_digest(
+        &messages[turns_start..fold_end],
+        fold_count,
+        previous_digest.as_deref(),
+        nonce,
+    );
+    let replacement = [
+        Message::Assistant(COMPACT_ACK.to_owned()),
+        Message::User(guard::fence(&digest_body, nonce)),
+    ];
+    let before_tokens = estimate_tokens(&messages[fold_start..fold_end], &[]);
+    let after_tokens = estimate_tokens(&replacement, &[]);
+    if after_tokens >= before_tokens {
+        return 0;
+    }
+    let removed_len = fold_end - fold_start;
+    messages.splice(fold_start..fold_end, replacement);
+    if let Some(reads) = successful_reads {
+        reads.retain_mut(|(idx, _)| {
+            if *idx < fold_start {
+                true
+            } else if *idx < fold_end {
+                false
+            } else {
+                *idx = *idx - removed_len + 2;
+                true
+            }
+        });
+    }
+    fold_count
+}
+
+/// 从 `start` 起扫描连续的完整原子轮次，绝不拆散 `CallPrelude`/`ToolCall`/`ToolOutput`。
+fn collect_foldable_turns(messages: &[Message], start: usize) -> Vec<(usize, usize)> {
+    let mut turns = Vec::new();
+    let mut i = start;
+    while i < messages.len() {
+        match &messages[i] {
+            Message::CallPrelude { .. } | Message::ToolCall { .. } => {
+                let turn_start = i;
+                if matches!(messages[i], Message::CallPrelude { .. }) {
+                    i += 1;
+                }
+                let mut saw_call = false;
+                while i < messages.len() && matches!(messages[i], Message::ToolCall { .. }) {
+                    saw_call = true;
+                    i += 1;
+                }
+                if !saw_call {
+                    break;
+                }
+                while i < messages.len() && matches!(messages[i], Message::ToolOutput { .. }) {
+                    i += 1;
+                }
+                turns.push((turn_start, i));
+            }
+            Message::Assistant(_) => {
+                let turn_start = i;
+                i += 1;
+                if i < messages.len() && matches!(messages[i], Message::User(_)) {
+                    i += 1;
+                }
+                turns.push((turn_start, i));
+            }
+            _ => break,
+        }
+    }
+    turns
+}
+
+fn clip_chars(text: &str, max_chars: usize) -> String {
+    let mut out: String = text.chars().take(max_chars).collect();
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+fn first_meaningful_line(text: &str, max_chars: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    clip_chars(line, max_chars)
+}
+
+fn build_turn_digest(
+    slice: &[Message],
+    fold_count: usize,
+    previous_digest: Option<&str>,
+    nonce: &str,
+) -> String {
+    use std::collections::{BTreeMap, HashMap};
+
+    let mut outputs: HashMap<&str, String> = HashMap::new();
+    for msg in slice {
+        if let Message::ToolOutput { call_id, output } = msg {
+            let clean = guard::strip_fences(guard::unfence(output, nonce), nonce);
+            outputs.insert(call_id.as_str(), clean);
+        }
+    }
+
+    let mut total_calls = 0usize;
+    let mut edits: BTreeMap<String, String> = BTreeMap::new();
+    let mut tests: Vec<String> = Vec::new();
+    let mut explorations: Vec<String> = Vec::new();
+
+    for msg in slice {
+        let Message::ToolCall {
+            id,
+            name,
+            args_json,
+        } = msg
+        else {
+            continue;
+        };
+        total_calls += 1;
+        let args: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+        let output = outputs.get(id.as_str()).map(String::as_str).unwrap_or("");
+        let is_err = output.starts_with("tool error:");
+        let summary_line = first_meaningful_line(output, 120);
+
+        match name.as_str() {
+            "write_file" | "replace_text" | "delete_file" => {
+                let path = args["path"].as_str().unwrap_or("<unknown>").to_owned();
+                let status = if is_err {
+                    format!("{name} 失败（{}）", clip_chars(&summary_line, 80))
+                } else {
+                    format!("{name} 已暂存")
+                };
+                edits.insert(path, status);
+            }
+            "rename_file" => {
+                let from = args["from"].as_str().unwrap_or("?");
+                let to = args["to"].as_str().unwrap_or("?");
+                let key = format!("{from} -> {to}");
+                let status = if is_err {
+                    format!("rename_file 失败（{}）", clip_chars(&summary_line, 80))
+                } else {
+                    "rename_file 已暂存".to_owned()
+                };
+                edits.insert(key, status);
+            }
+            "run_tests" => {
+                let preset = args["preset"]
+                    .as_str()
+                    .map(|p| format!("[{p}] "))
+                    .unwrap_or_default();
+                let lines: Vec<&str> = output
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .take(2)
+                    .collect();
+                let excerpt = clip_chars(&lines.join(" | "), 160);
+                tests.push(format!("{preset}{excerpt}"));
+            }
+            "read_file" => {
+                if let Some(path) = args["path"].as_str() {
+                    let entry = match (args["offset"].as_i64(), args["lines"].as_i64()) {
+                        (Some(o), Some(l)) => format!("read_file:{path} (L{o}+{l})"),
+                        (Some(o), None) => format!("read_file:{path} (L{o}-)"),
+                        _ => format!("read_file:{path}"),
+                    };
+                    if !explorations.contains(&entry) {
+                        explorations.push(entry);
+                    }
+                }
+            }
+            "search_code" | "find_symbols" | "find_references" | "search_records" => {
+                let q = args["query"]
+                    .as_str()
+                    .or_else(|| args["name"].as_str())
+                    .or_else(|| args["symbol"].as_str())
+                    .unwrap_or("");
+                let entry = if q.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}:`{}`", clip_chars(q, 40))
+                };
+                if !explorations.contains(&entry) {
+                    explorations.push(entry);
+                }
+            }
+            _ => {
+                let target = args["path"].as_str().unwrap_or("");
+                let entry = if target.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}:{target}")
+                };
+                if !explorations.contains(&entry) {
+                    explorations.push(entry);
+                }
+            }
+        }
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(prev) = previous_digest.map(str::trim).filter(|s| !s.is_empty()) {
+        sections.push(format!(
+            "【更早归档摘要】
+{}",
+            clip_chars(&guard::strip_fences(prev, nonce), 1_200)
+        ));
+    }
+    sections.push(format!(
+        "【阶段历史压缩】已折叠 {fold_count} 轮较早对话（共 {total_calls} 次工具调用；如需细节可重新调用只读工具核查）。"
+    ));
+    if !edits.is_empty() {
+        let mut lines = vec!["已暂存／尝试的改动：".to_owned()];
+        for (path, status) in &edits {
+            lines.push(format!("- {path}: {status}"));
+        }
+        sections.push(lines.join(
+            "
+",
+        ));
+    }
+    if !tests.is_empty() {
+        let mut lines = vec!["近期测试／检查结果：".to_owned()];
+        let skip = tests.len().saturating_sub(4);
+        for item in &tests[skip..] {
+            lines.push(format!("- {item}"));
+        }
+        sections.push(lines.join(
+            "
+",
+        ));
+    }
+    if !explorations.is_empty() {
+        let shown: Vec<&str> = explorations.iter().take(20).map(String::as_str).collect();
+        let tail = if explorations.len() > 20 {
+            format!(" 等共 {} 项", explorations.len())
+        } else {
+            String::new()
+        };
+        sections.push(format!("已查阅／检索：{}{tail}", shown.join("、")));
+    }
+
+    let combined = sections.join(
+        "
+",
+    );
+    clip_chars(&guard::strip_fences(&combined, nonce), MAX_DIGEST_CHARS)
 }
 
 /// 按 JSON Schema 的常用子集（`type`、`properties`、`required`、`additionalProperties: false`、
@@ -263,6 +581,9 @@ impl ExecutionHooks for Metered<'_> {
     fn is_cancelled(&self) -> bool {
         self.inner.is_cancelled()
     }
+    fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.inner.cancel_flag()
+    }
     fn tool_invoked(&self, tool: &str, args_json: &str, ok: bool) {
         self.inner.tool_invoked(tool, args_json, ok);
     }
@@ -298,6 +619,11 @@ impl ExecutionHooks for Metered<'_> {
 }
 
 impl Metered<'_> {
+    /// 历史消息被二阶段压缩后重置上次用量基线，令下一次调用按压缩后的上下文重新估算。
+    fn reset_baseline(&self) {
+        self.last.set((0, TokenUsage::default()));
+    }
+
     /// 预计本次输入：有上次的实际用量时，为上次的输入与输出加上新增消息的估算；
     /// 否则为整段对话的估算。估算部分加两成余量。
     fn predict(&self, messages: &[Message], specs: &[ToolSpec]) -> u64 {
@@ -466,6 +792,16 @@ pub fn run_with_context(
     let mut successful_reads = Vec::new();
     for _ in 0..max_steps {
         abridge(&mut messages, &specs, context_tokens, nonce);
+        if compact_turns_inner(
+            &mut messages,
+            Some(&mut successful_reads),
+            &specs,
+            context_tokens,
+            nonce,
+        ) > 0
+        {
+            hooks.reset_baseline();
+        }
         let request = compact_reads(&messages, &successful_reads, nonce);
         match hooks.call(model, &request, &specs)? {
             ModelTurn::Final(answer) if unchecked => {
@@ -503,6 +839,7 @@ pub fn run_with_context(
                         args_json: call.args_json.clone(),
                     });
                 }
+                let cancel_flag = hooks.cancel_flag();
                 let mut idx = 0;
                 while idx < resolved.len() {
                     if hooks.is_cancelled() {
@@ -527,10 +864,14 @@ pub fn run_with_context(
                                             .iter()
                                             .map(|(tool, call)| {
                                                 let tool = *tool;
+                                                let cancel = cancel_flag.as_deref();
                                                 scope.spawn(move || {
                                                     check_args(&tool.spec(), &call.args_json)
                                                         .and_then(|()| {
-                                                            tool.execute(&call.args_json)
+                                                            tool.execute_with_cancel(
+                                                                &call.args_json,
+                                                                cancel,
+                                                            )
                                                         })
                                                 })
                                             })
@@ -561,8 +902,9 @@ pub fn run_with_context(
                         }
                     }
                     let (tool, call) = &resolved[idx];
-                    let result = check_args(&tool.spec(), &call.args_json)
-                        .and_then(|()| tool.execute(&call.args_json));
+                    let result = check_args(&tool.spec(), &call.args_json).and_then(|()| {
+                        tool.execute_with_cancel(&call.args_json, cancel_flag.as_deref())
+                    });
                     record_tool_result(
                         call,
                         result,
@@ -581,6 +923,16 @@ pub fn run_with_context(
         "已用尽 {max_steps} 步，不能再调用工具。请就已查阅的内容按体例回奏，没查完的列入「未办之事」。"
     )));
     abridge(&mut messages, &[], context_tokens, nonce);
+    if compact_turns_inner(
+        &mut messages,
+        Some(&mut successful_reads),
+        &[],
+        context_tokens,
+        nonce,
+    ) > 0
+    {
+        hooks.reset_baseline();
+    }
     let request = compact_reads(&messages, &successful_reads, nonce);
     match hooks.call(model, &request, &[]) {
         Ok(ModelTurn::Final(answer)) => Ok(format!(
@@ -1360,5 +1712,290 @@ mod tests {
         let mut tail = events[2..].to_vec();
         tail.sort();
         assert_eq!(tail, vec!["after1", "after2"]);
+    }
+
+    #[test]
+    fn tool_execute_with_cancel_receives_hooks_cancel_flag() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        struct FlagHooks(Arc<AtomicBool>);
+        impl ExecutionHooks for FlagHooks {
+            fn is_cancelled(&self) -> bool {
+                self.0.load(Ordering::SeqCst)
+            }
+            fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+                Some(Arc::clone(&self.0))
+            }
+        }
+
+        struct CancellableTool(Arc<AtomicBool>);
+        impl Tool for CancellableTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "slow_test".into(),
+                    description: "slow".into(),
+                    input_schema_json: r#"{"type":"object"}"#.into(),
+                }
+            }
+            fn execute(&self, _args_json: &str) -> Result<String, BoxError> {
+                panic!("应优先走 execute_with_cancel");
+            }
+            fn execute_with_cancel(
+                &self,
+                _args_json: &str,
+                cancel: Option<&AtomicBool>,
+            ) -> Result<String, BoxError> {
+                let flag = cancel.expect("应收到 ExecutionHooks 传入的 cancel_flag");
+                let start = Instant::now();
+                while !flag.load(Ordering::SeqCst) {
+                    if start.elapsed() > Duration::from_secs(2) {
+                        return Err("超时未取消".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                self.0.store(true, Ordering::SeqCst);
+                Err("已取消".into())
+            }
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let saw_cancel = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&flag);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let model = Script::new(vec![
+            ModelTurn::Calls {
+                calls: vec![ToolRequest {
+                    id: "c1".into(),
+                    name: "slow_test".into(),
+                    args_json: "{}".into(),
+                }],
+                text: String::new(),
+                reasoning: String::new(),
+            },
+            ModelTurn::Final("不应到达".into()),
+        ]);
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(CancellableTool(Arc::clone(&saw_cancel)))];
+        let hooks = FlagHooks(flag);
+        let result = run(
+            &model,
+            &tools,
+            vec![Message::User("run".into())],
+            3,
+            "n",
+            &hooks,
+        );
+        handle.join().unwrap();
+        assert!(matches!(result, Err(LoopError::Cancelled)), "{result:?}");
+        assert!(saw_cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn compact_turns_folds_old_turns_preserves_recent_and_pairing() {
+        let mut messages = vec![
+            Message::System("sys".into()),
+            Message::User("请修复 bug 并跑测试".into()),
+        ];
+        let push_turn = |msgs: &mut Vec<Message>, i: usize, name: &str, args: &str, out: &str| {
+            msgs.push(Message::CallPrelude {
+                text: format!("第 {i} 步思考 {}", "思".repeat(120)),
+                reasoning: "链".repeat(200),
+            });
+            msgs.push(Message::ToolCall {
+                id: format!("call-{i}"),
+                name: name.into(),
+                args_json: args.into(),
+            });
+            msgs.push(Message::ToolOutput {
+                call_id: format!("call-{i}"),
+                output: guard::fence(out, "n"),
+            });
+        };
+        push_turn(
+            &mut messages,
+            0,
+            "read_file",
+            r#"{"path":"src/lib.rs","offset":1,"lines":50}"#,
+            &"x".repeat(400),
+        );
+        push_turn(
+            &mut messages,
+            1,
+            "search_code",
+            r#"{"query":"parse_header"}"#,
+            &"y".repeat(400),
+        );
+        push_turn(
+            &mut messages,
+            2,
+            "replace_text",
+            r#"{"path":"src/lib.rs","old":"a","new":"b"}"#,
+            "已暂存 src/lib.rs：替换 1 处",
+        );
+        push_turn(
+            &mut messages,
+            3,
+            "run_tests",
+            r#"{"preset":"check"}"#,
+            "tool error: 测试 `cargo check`：未通过（退出码 101）\nerror[E0308]: mismatched types",
+        );
+        for i in 4..8 {
+            push_turn(
+                &mut messages,
+                i,
+                "read_file",
+                &format!(r#"{{"path":"src/recent_{i}.rs"}}"#),
+                &format!("recent body {i}"),
+            );
+        }
+
+        let before = estimate_tokens(&messages, &[]);
+        assert_eq!(
+            compact_turns(&mut messages, &[], before, "n"),
+            0,
+            "未超限不折叠"
+        );
+
+        let folded = compact_turns(&mut messages, &[], 200, "n");
+        assert_eq!(folded, 4, "8 轮保留最近 4 轮，应折叠最早 4 轮");
+        let after = estimate_tokens(&messages, &[]);
+        assert!(after < before, "压缩后估算应严格下降: {after} vs {before}");
+
+        assert!(matches!(&messages[0], Message::System(s) if s == "sys"));
+        assert!(matches!(&messages[1], Message::User(u) if u.contains("修复 bug")));
+        assert!(matches!(&messages[2], Message::Assistant(a) if a == COMPACT_ACK));
+        let Message::User(digest_msg) = &messages[3] else {
+            panic!("索引 3 应为围栏包裹的摘要消息: {:?}", messages[3]);
+        };
+        assert!(
+            digest_msg.starts_with("〔外来文书 n 起〕\n"),
+            "{digest_msg}"
+        );
+        assert!(digest_msg.ends_with("\n〔外来文书 n 止〕"), "{digest_msg}");
+        assert!(
+            digest_msg.contains("src/lib.rs: replace_text 已暂存"),
+            "{digest_msg}"
+        );
+        assert!(
+            digest_msg.contains("[check]") && digest_msg.contains("E0308"),
+            "{digest_msg}"
+        );
+        assert!(
+            digest_msg.contains("read_file:src/lib.rs (L1+50)"),
+            "{digest_msg}"
+        );
+        assert!(
+            digest_msg.contains("search_code:`parse_header`"),
+            "{digest_msg}"
+        );
+
+        let call_ids: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolCall { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let out_ids: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolOutput { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(call_ids, vec!["call-4", "call-5", "call-6", "call-7"]);
+        assert_eq!(out_ids, call_ids);
+
+        // 再追加 3 轮后再次触发压缩：合并到同一条摘要对中，不产生重复摘要块
+        for i in 8..11 {
+            push_turn(
+                &mut messages,
+                i,
+                "write_file",
+                &format!(r#"{{"path":"src/later_{i}.rs","content":"ok"}}"#),
+                "已暂存",
+            );
+        }
+        let folded2 = compact_turns(&mut messages, &[], 200, "n");
+        assert_eq!(folded2, 3);
+        let ack_count = messages
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant(a) if a == COMPACT_ACK))
+            .count();
+        assert_eq!(ack_count, 1, "多次压缩只保留唯一摘要块");
+        let Message::User(merged_digest) = &messages[3] else {
+            unreachable!()
+        };
+        assert!(merged_digest.contains("更早归档摘要"), "{merged_digest}");
+        assert!(merged_digest.contains("src/lib.rs"), "{merged_digest}");
+    }
+
+    #[test]
+    fn run_with_context_stage2_compaction_keeps_read_dedup_indices_valid() {
+        struct ReadStub;
+        impl Tool for ReadStub {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "read_file".into(),
+                    description: "read".into(),
+                    input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#.into(),
+                }
+            }
+            fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+                let v: Value = serde_json::from_str(args_json)?;
+                let p = v["path"].as_str().unwrap_or("x");
+                Ok(format!("FILE({p}): {}", "内".repeat(300)))
+            }
+        }
+        let mut turns = Vec::new();
+        for i in 0..7 {
+            let path = if i >= 5 {
+                "same.rs".to_owned()
+            } else {
+                format!("f{i}.rs")
+            };
+            turns.push(ModelTurn::Calls {
+                calls: vec![ToolRequest {
+                    id: format!("c{i}"),
+                    name: "read_file".into(),
+                    args_json: format!(r#"{{"path":"{path}"}}"#),
+                }],
+                text: "思".repeat(120),
+                reasoning: "链".repeat(200),
+            });
+        }
+        turns.push(ModelTurn::Final("完成".into()));
+        let model = Script::new(turns);
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(ReadStub)];
+        let ans = run_with_context(
+            &model,
+            &tools,
+            vec![Message::System("s".into()), Message::User("u".into())],
+            10,
+            "n",
+            &(),
+            400,
+        )
+        .unwrap();
+        assert_eq!(ans, "完成");
+        let seen = model.seen.lock().unwrap();
+        let last_msgs = &seen.last().unwrap().1;
+        assert!(
+            last_msgs
+                .iter()
+                .any(|m| matches!(m, Message::Assistant(a) if a == COMPACT_ACK)),
+            "长对话应触发二阶段轮次压缩"
+        );
+        let c5 = last_msgs
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolOutput { call_id, output } if call_id == "c5" => Some(output),
+                _ => None,
+            })
+            .expect("c5 属于最近 4 轮应保留");
+        assert!(c5.contains("重复读取") && c5.contains("c6"), "{c5}");
     }
 }
