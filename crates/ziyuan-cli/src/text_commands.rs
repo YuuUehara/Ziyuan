@@ -46,7 +46,7 @@ pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan i
                                        缺失用量为未知；用量记录和工具调用不是 HTTP 请求数，估价不是账单
                                        未设本件预算不等于免费，也不取消朝廷或官员限额
   ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html]
-                            [--layout chapters|book] [--output <new.tar>]
+                            [--layout chapters|book] [--bilingual] [--output <new.tar>]
                                        导出有效定稿，默认 TXT、按章；缺块或失效则整批拒绝，需要朝廷
   ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]
                                        原件按原字节导出，不依赖朝廷，不接受 --format/--layout
@@ -168,7 +168,7 @@ const HUMAN_APPROVE_USAGE: &str =
 const HUMAN_FINALIZE_USAGE: &str = "用法: ziyuan text human finalize <项目ID> <块ID> [--json]（只记定稿事实；要求磁盘已是准奏目标）";
 const HUMAN_APPLY_USAGE: &str =
     "用法: ziyuan text human apply <项目ID> <块ID> [--json]（只读核对准奏时已落盘的 zh.json）";
-const EXPORT_FINISHED_USAGE: &str = "用法: ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html] [--layout chapters|book] [--output <new.tar>]";
+const EXPORT_FINISHED_USAGE: &str = "用法: ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html] [--layout chapters|book] [--bilingual] [--output <new.tar>]";
 const EXPORT_ORIGINALS_USAGE: &str =
     "用法: ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output <new.tar>]";
 const CHECK_USAGE: &str =
@@ -368,6 +368,10 @@ fn parse_export(args: &[String], originals: bool) -> Result<TextAction, Box<dyn 
             return Err(format!("{flag} 只能给一次。{usage}").into());
         }
         given.push(flag.clone());
+        if flag == "--bilingual" && !originals {
+            options.bilingual = true;
+            continue;
+        }
         let value = rest
             .next()
             .filter(|value| !value.starts_with('-') && !value.trim().is_empty())

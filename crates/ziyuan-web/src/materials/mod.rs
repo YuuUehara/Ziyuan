@@ -8,7 +8,7 @@ mod wire;
 pub(crate) use identity::workspace_identity;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as UrlPath, State, rejection::BytesRejection};
+use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, State, rejection::BytesRejection};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -37,6 +37,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/text/{project}/materials/termbase",
             get(termbase_export).post(termbase_import),
+        )
+        .route(
+            "/text/{project}/blocks/{block}/term-proposals",
+            post(term_proposals),
         )
         .route(
             "/text/{project}/materials/termbase-tbx",
@@ -346,17 +350,25 @@ async fn termbase_tbx_import(
     .await
 }
 
+#[derive(Default, serde::Deserialize)]
+struct TermbaseExportQuery {
+    #[serde(default)]
+    bom: Option<String>,
+}
+
 async fn termbase_export(
     State(app): State<AppState>,
     UrlPath(project): UrlPath<String>,
+    Query(query): Query<TermbaseExportQuery>,
 ) -> Response {
     let id = match workspace(&app) {
         Ok(id) => id,
         Err(response) => return *response,
     };
+    let bom = matches!(query.bom.as_deref(), Some("1" | "true" | "TRUE" | "yes"));
     let root = app.0.config.root.clone();
     match tokio::task::spawn_blocking(move || {
-        Translations::new(&root).export_termbase_csv(&project)
+        Translations::new(&root).export_termbase_csv_with_bom(&project, bom)
     })
     .await
     {
@@ -369,6 +381,31 @@ async fn termbase_export(
             None,
         ),
     }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TermProposalBody {
+    #[serde(default)]
+    write: bool,
+}
+
+async fn term_proposals(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Json(body): Json<TermProposalBody>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let root = app.0.config.root.clone();
+    run(id, move || {
+        Translations::new(&root)
+            .propose_block_terms(&project, &block, body.write)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
 
 async fn termbase_import(

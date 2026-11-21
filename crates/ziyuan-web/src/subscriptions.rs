@@ -12,8 +12,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use ziyuan_app::subscriptions::{
-    CheckMode, CheckStatus, CheckSummary, SourceError, Subscription, SubscriptionError,
-    Subscriptions, SyosetuSource, WorkSource,
+    CheckMode, CheckStatus, CheckSummary, CompositeSource, SourceError, Subscription,
+    SubscriptionError, Subscriptions, WorkSource,
 };
 use ziyuan_app::{AppError, FollowCourier};
 
@@ -37,7 +37,7 @@ impl Service {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
-            source: Arc::new(SyosetuSource::new()),
+            source: Arc::new(CompositeSource::new()),
             clock: Arc::new(|| {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)

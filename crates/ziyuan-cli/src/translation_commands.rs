@@ -31,8 +31,11 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text reopen <项目ID> <块ID> --reason <理由>     退回重修
   ziyuan text context prepare <项目ID>                 把本地资料草稿准备为生产 glossary.json（尚未批准）
   ziyuan text context diff <项目ID>                    只读对比本地草稿与已批准资料
-  ziyuan text qa <项目ID> <块ID>                       确定性检查（空译、数字、段号、术语、人物）
-  ziyuan text termbase export <项目ID> <术语表.csv>    导出本地草稿术语/人物 CSV
+  ziyuan text qa <项目ID> <块ID>                       确定性检查（空译、数字、段号、源语残留、标点、术语）
+  ziyuan text termbase export <项目ID> <术语表.csv> [--bom]
+                                                    导出本地草稿术语/人物 CSV（--bom 加 UTF-8 BOM 适配 Excel）
+  ziyuan text termbase propose <项目ID> <块ID> [--write]
+                                                    确定性提取候选术语（不入库；--write 仅写入 proposals/）
   ziyuan text termbase import <项目ID> <术语表.csv>    合并 CSV 到本地资料草稿（未批准）
   ziyuan text concordance <项目ID> <原文片段>         模糊检索本项目已有译文（双语对照）
   ziyuan text tm list <项目ID>                       列出本地翻译记忆
@@ -86,7 +89,8 @@ pub(crate) enum TranslationAction {
     ContextPrepare(String),
     ContextDiff(String),
     Qa(String, String),
-    TermbaseExport(String, PathBuf),
+    TermbaseExport(String, PathBuf, bool),
+    TermbasePropose(String, String, bool),
     TermbaseImport(String, PathBuf),
     Concordance(String, String),
     TmList(String),
@@ -203,7 +207,16 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
             TranslationAction::Qa((*p).into(), (*b).into())
         }
         ["termbase", "export", p, f] if positional(p) && positional(f) => {
-            TranslationAction::TermbaseExport((*p).into(), (*f).into())
+            TranslationAction::TermbaseExport((*p).into(), (*f).into(), false)
+        }
+        ["termbase", "export", p, f, "--bom"] if positional(p) && positional(f) => {
+            TranslationAction::TermbaseExport((*p).into(), (*f).into(), true)
+        }
+        ["termbase", "propose", p, b] if positional(p) && positional(b) => {
+            TranslationAction::TermbasePropose((*p).into(), (*b).into(), false)
+        }
+        ["termbase", "propose", p, b, "--write"] if positional(p) && positional(b) => {
+            TranslationAction::TermbasePropose((*p).into(), (*b).into(), true)
         }
         ["termbase", "import", p, f] if positional(p) && positional(f) => {
             TranslationAction::TermbaseImport((*p).into(), (*f).into())
@@ -755,15 +768,49 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
             }
             return Ok(());
         }
-        TranslationAction::TermbaseExport(project, file) => {
-            let csv = translations.export_termbase_csv(&project)?;
+        TranslationAction::TermbaseExport(project, file, bom) => {
+            let csv = translations.export_termbase_csv_with_bom(&project, bom)?;
             std::fs::write(&file, csv.as_bytes())?;
             if json {
-                print_json(
-                    serde_json::json!({"project": project, "file": file, "bytes": csv.len()}),
-                )?;
+                print_json(serde_json::json!({
+                    "project": project,
+                    "file": file,
+                    "bytes": csv.len(),
+                    "bom": bom,
+                }))?;
             } else {
-                println!("已导出术语表：{}（{} 字节）。", file.display(), csv.len());
+                println!(
+                    "已导出术语表：{}（{} 字节{}）。",
+                    file.display(),
+                    csv.len(),
+                    if bom { "，含 UTF-8 BOM" } else { "" }
+                );
+            }
+            return Ok(());
+        }
+        TranslationAction::TermbasePropose(project, block, write) => {
+            let report = translations.propose_block_terms(&project, &block, write)?;
+            if json {
+                print_json(serde_json::to_value(&report)?)?;
+            } else {
+                println!(
+                    "项目 {project} 块 {block}：发现 {} 条候选术语（不自动入库）。",
+                    report.candidates.len()
+                );
+                for c in &report.candidates {
+                    println!(
+                        "  {}（{} 次 · {} · {}）",
+                        c.source,
+                        c.count,
+                        c.reason,
+                        c.paragraphs.join(",")
+                    );
+                }
+                if report.written {
+                    println!("已写入提案文件：{}", report.path);
+                } else if !report.candidates.is_empty() {
+                    println!("仅预览未写入；加 --write 可写入 {}", report.path);
+                }
             }
             return Ok(());
         }

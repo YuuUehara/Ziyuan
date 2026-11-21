@@ -1,7 +1,8 @@
 //! Self-contained, inert finished prose with every supported target mark.
 use super::{DraftParagraph, Result, TargetMarkKind};
 use std::collections::BTreeMap;
-fn escape(text: &str) -> String {
+
+pub(super) fn escape(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '&' => "&amp;".into(),
@@ -13,6 +14,7 @@ fn escape(text: &str) -> String {
         })
         .collect()
 }
+
 pub(super) fn marked_html(paragraph: &DraftParagraph) -> Result<String> {
     super::markup::validate(std::slice::from_ref(paragraph))?;
     let mut ranges: BTreeMap<(usize, usize), Vec<&TargetMarkKind>> = BTreeMap::new();
@@ -48,8 +50,15 @@ pub(super) fn marked_html(paragraph: &DraftParagraph) -> Result<String> {
     out.push_str(&escape(&paragraph.text[cursor..]));
     Ok(out)
 }
+
 pub(super) fn document(body: &str) -> String {
     format!(
         "<!doctype html>\n<html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>定稿</title><style>body{{max-width:48rem;margin:auto;padding:2rem;font:1.1rem/1.9 serif;overflow-wrap:anywhere}}p{{white-space:pre-wrap}}.emphasis-dots{{text-emphasis:filled dot;-webkit-text-emphasis:filled dot}}rt{{font-size:.55em}}section{{break-after:page}}</style></head><body>{body}</body></html>\n"
+    )
+}
+
+pub(super) fn document_bilingual(body: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>双语对照定稿</title><style>body{{max-width:72rem;margin:auto;padding:2rem;font:1.05rem/1.85 serif;overflow-wrap:anywhere}}p{{white-space:pre-wrap}}.bilingual-pair{{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;align-items:start;margin:0 0 1rem;padding:0 0 .85rem;border-bottom:1px solid #e5e5e5}}.bilingual-source{{margin:0;color:#4a4a4a}}.bilingual-target{{margin:0}}.emphasis-dots{{text-emphasis:filled dot;-webkit-text-emphasis:filled dot}}rt{{font-size:.55em}}section{{break-after:page}}@media (max-width:48rem){{.bilingual-pair{{grid-template-columns:1fr;gap:.4rem}}}}</style></head><body>{body}</body></html>\n"
     )
 }

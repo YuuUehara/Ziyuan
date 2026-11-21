@@ -1,22 +1,150 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 use ziyuan_storage::JsonFileError;
 
-/// Accept a strict NCode (four digits, one to six ASCII letters) or canonical work URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkCodeKind<'a> {
+    Syosetu(&'a str),
+    Kakuyomu(&'a str),
+    Feed(&'a str),
+}
+
+pub fn classify_code(code: &str) -> Option<WorkCodeKind<'_>> {
+    if let Some(id) = code.strip_prefix("kakuyomu:") {
+        is_kakuyomu_id(id).then_some(WorkCodeKind::Kakuyomu(id))
+    } else if let Some(url) = code.strip_prefix("feed:") {
+        normalize_feed_url(url)
+            .ok()
+            .filter(|canonical| canonical == url)
+            .map(|_| WorkCodeKind::Feed(url))
+    } else if is_syosetu_ncode(code) {
+        Some(WorkCodeKind::Syosetu(code))
+    } else {
+        None
+    }
+}
+
+pub fn work_url(code: &str) -> Option<String> {
+    match classify_code(code)? {
+        WorkCodeKind::Syosetu(ncode) => Some(format!("https://ncode.syosetu.com/{ncode}/")),
+        WorkCodeKind::Kakuyomu(id) => Some(format!("https://kakuyomu.jp/works/{id}")),
+        WorkCodeKind::Feed(url) => Some(url.to_owned()),
+    }
+}
+
+fn is_syosetu_ncode(code: &str) -> bool {
+    let b = code.as_bytes();
+    (6..=11).contains(&b.len())
+        && b[0] == b'n'
+        && b[1..5].iter().all(u8::is_ascii_digit)
+        && b[5..].iter().all(u8::is_ascii_lowercase)
+}
+
+fn is_kakuyomu_id(id: &str) -> bool {
+    (10..=24).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+pub(crate) fn is_forbidden_feed_host(host: &str) -> bool {
+    if host.is_empty()
+        || host.len() > 253
+        || host.contains(':')
+        || host.starts_with('[')
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || !host.contains('.')
+        || host.parse::<IpAddr>().is_ok()
+    {
+        return true;
+    }
+    let lower = host.to_ascii_lowercase();
+    for suffix in [
+        ".localhost",
+        ".local",
+        ".internal",
+        ".test",
+        ".invalid",
+        ".example",
+        ".arpa",
+        ".lan",
+        ".localdomain",
+    ] {
+        if lower.ends_with(suffix) {
+            return true;
+        }
+    }
+    if lower == "localhost" {
+        return true;
+    }
+    lower.split('.').any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+
+fn normalize_feed_url(url: &str) -> Result<String, SubscriptionError> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or(SubscriptionError::InvalidInput)?;
+    if url.len() > 512
+        || url
+            .bytes()
+            .any(|b| !b.is_ascii_graphic() || matches!(b, b'?' | b'#' | b'@' | b'\\'))
+    {
+        return Err(SubscriptionError::InvalidInput);
+    }
+    let Some((host, path_rest)) = rest.split_once('/') else {
+        return Err(SubscriptionError::InvalidInput);
+    };
+    if is_forbidden_feed_host(host) || path_rest.is_empty() {
+        return Err(SubscriptionError::InvalidInput);
+    }
+    if path_rest.split('/').any(|seg| seg == ".." || seg == ".") {
+        return Err(SubscriptionError::InvalidInput);
+    }
+    Ok(format!("https://{}/{path_rest}", host.to_ascii_lowercase()))
+}
+
+/// Accept a strict Syosetu NCode/URL, Kakuyomu work ID/URL, or explicit `feed:https://...` RSS/Atom URL.
 /// Chapter URLs, ports, credentials, query strings and fragments are deliberately not accepted.
 pub fn normalize_code(input: &str) -> Result<String, SubscriptionError> {
+    if let Some(rest) = input.strip_prefix("https://kakuyomu.jp/works/") {
+        let id = rest.strip_suffix('/').unwrap_or(rest);
+        return if is_kakuyomu_id(id) {
+            Ok(format!("kakuyomu:{id}"))
+        } else {
+            Err(SubscriptionError::InvalidInput)
+        };
+    }
+    if let Some(id) = input
+        .strip_prefix("kakuyomu:")
+        .or_else(|| input.strip_prefix("KAKUYOMU:"))
+    {
+        return if is_kakuyomu_id(id) {
+            Ok(format!("kakuyomu:{id}"))
+        } else {
+            Err(SubscriptionError::InvalidInput)
+        };
+    }
+    if let Some(url) = input
+        .strip_prefix("feed:")
+        .or_else(|| input.strip_prefix("FEED:"))
+    {
+        let canonical = normalize_feed_url(url)?;
+        return Ok(format!("feed:{canonical}"));
+    }
     let raw = if let Some(path) = input.strip_prefix("https://ncode.syosetu.com/") {
         path.strip_suffix('/').unwrap_or(path)
     } else {
         input
     };
     let code = raw.to_ascii_lowercase();
-    let b = code.as_bytes();
-    if (6..=11).contains(&b.len())
-        && b[0] == b'n'
-        && b[1..5].iter().all(u8::is_ascii_digit)
-        && b[5..].iter().all(u8::is_ascii_lowercase)
-    {
+    if is_syosetu_ncode(&code) {
         Ok(code)
     } else {
         Err(SubscriptionError::InvalidInput)

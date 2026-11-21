@@ -515,6 +515,11 @@ impl Translations {
                 issues,
             });
         };
+        let source_language = self
+            .project(project)
+            .map(|p| p.metadata.source_language)
+            .unwrap_or_default();
+        let allowed_terms = collect_allowed_glossary_terms(material.context.as_ref());
         let source = &material.source.paragraphs;
         let target = &translation.paragraphs;
         let mut seen_ids = std::collections::HashSet::new();
@@ -570,6 +575,29 @@ impl Translations {
                     code: "number_mismatch",
                     message: format_number_mismatch(&source_digits, &target_digits),
                 });
+            }
+            if !target_para.text.trim().is_empty()
+                && target_para.text.trim() != source_para.text.trim()
+            {
+                if let Some(message) = detect_source_script_leak(
+                    &source_language,
+                    &source_para.text,
+                    &target_para.text,
+                    &allowed_terms,
+                ) {
+                    issues.push(QaIssue {
+                        paragraph: source_para.id.clone(),
+                        code: "source_script_leak",
+                        message,
+                    });
+                }
+                if let Some(message) = detect_punctuation_mismatch(&target_para.text) {
+                    issues.push(QaIssue {
+                        paragraph: source_para.id.clone(),
+                        code: "punctuation_mismatch",
+                        message,
+                    });
+                }
             }
         }
         if target.len() > source.len() {
@@ -775,9 +803,237 @@ fn format_number_mismatch(source_digits: &str, target_digits: &str) -> String {
     )
 }
 
+fn collect_allowed_glossary_terms(context: Option<&super::ContextSnapshot>) -> Vec<String> {
+    let mut allowed = Vec::new();
+    if let Some(context) = context {
+        match &context.glossary {
+            crate::translation::Glossary::Legacy(entries) => {
+                for entry in entries {
+                    allowed.extend(
+                        entry
+                            .allowed
+                            .iter()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+            }
+            crate::translation::Glossary::Structured(glossary) => {
+                for term in &glossary.terms {
+                    allowed.extend(
+                        term.allowed
+                            .iter()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+                for person in &glossary.persons {
+                    let name = person.name.trim();
+                    if !name.is_empty() {
+                        allowed.push(name.to_owned());
+                    }
+                    allowed.extend(
+                        person
+                            .aliases
+                            .iter()
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+    }
+    allowed.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    allowed.dedup();
+    allowed
+}
+
+fn mask_allowed_terms(text: &str, allowed: &[String]) -> String {
+    let mut masked = text.to_owned();
+    for term in allowed {
+        if masked.contains(term.as_str()) {
+            masked = masked.replace(term.as_str(), " ");
+        }
+    }
+    masked
+}
+
+fn is_japanese_kana(ch: char) -> bool {
+    matches!(ch, '\u{3040}'..='\u{309F}')
+        || (matches!(ch, '\u{30A1}'..='\u{30FF}') && !matches!(ch, '・' | 'ー'))
+}
+
+fn is_hangul(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{AC00}'..='\u{D7A3}' | '\u{1100}'..='\u{11FF}' | '\u{3131}'..='\u{318E}'
+    )
+}
+
+fn first_script_run(
+    text: &str,
+    predicate: impl Fn(char) -> bool,
+    extend: impl Fn(char) -> bool,
+) -> Option<String> {
+    let mut run = String::new();
+    for ch in text.chars() {
+        if run.is_empty() {
+            if predicate(ch) {
+                run.push(ch);
+            }
+        } else if predicate(ch) || extend(ch) {
+            if run.chars().count() < 16 {
+                run.push(ch);
+            }
+        } else {
+            break;
+        }
+    }
+    (!run.is_empty()).then_some(run)
+}
+
+fn extract_western_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_alphabetic() || ((ch == '-' || ch == '\'') && !current.is_empty()) {
+            current.push(ch);
+        } else if !current.is_empty() {
+            let trimmed = current.trim_matches(['-', '\'']);
+            if !trimmed.is_empty() {
+                words.push(trimmed.to_owned());
+            }
+            current.clear();
+        }
+    }
+    let trimmed = current.trim_matches(['-', '\'']);
+    if !trimmed.is_empty() {
+        words.push(trimmed.to_owned());
+    }
+    words
+}
+
+fn detect_source_script_leak(
+    source_language: &str,
+    source: &str,
+    target: &str,
+    allowed: &[String],
+) -> Option<String> {
+    let masked = mask_allowed_terms(target, allowed);
+    match source_language {
+        "ja" => first_script_run(&masked, is_japanese_kana, |ch| ch == 'ー')
+            .map(|sample| format!("译文残留日语假名「{sample}」，请确认是否漏译。")),
+        "ko" => first_script_run(&masked, is_hangul, |_| false)
+            .map(|sample| format!("译文残留韩文字符「{sample}」，请确认是否漏译。")),
+        "fr" | "de" => {
+            const FR_DIACRITICS: &str = "éèêëàâçîïôùûüÿœæÉÈÊËÀÂÇÎÏÔÙÛÜŸŒÆ";
+            const DE_DIACRITICS: &str = "äöüßÄÖÜ";
+            let diacritics = if source_language == "fr" {
+                FR_DIACRITICS
+            } else {
+                DE_DIACRITICS
+            };
+            let source_words: std::collections::HashSet<String> = extract_western_words(source)
+                .into_iter()
+                .map(|w| w.to_lowercase())
+                .collect();
+            for word in extract_western_words(&masked) {
+                if word.chars().count() >= 2
+                    && word.chars().any(|c| diacritics.contains(c))
+                    && source_words.contains(&word.to_lowercase())
+                {
+                    return Some(format!("译文残留源语词「{word}」，请确认是否漏译。"));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn strip_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("http://").or_else(|| rest.find("https://")) {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let end = tail
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '）' | '」' | '』' | '》' | '】' | ')' | ']')
+            })
+            .unwrap_or(tail.len());
+        out.push(' ');
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_cjk_ideograph(ch: char) -> bool {
+    matches!(ch, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+}
+
+fn detect_punctuation_mismatch(target: &str) -> Option<String> {
+    let cleaned = strip_urls(target);
+    const PAIRS: &[(char, char, &str)] = &[
+        ('「', '」', "「」"),
+        ('『', '』', "『』"),
+        ('“', '”', "“”"),
+        ('《', '》', "《》"),
+        ('（', '）', "（）"),
+        ('【', '】', "【】"),
+    ];
+    let mut bad_pairs = Vec::new();
+    for &(open, close, label) in PAIRS {
+        let mut depth: i32 = 0;
+        let mut broken = false;
+        for ch in cleaned.chars() {
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
+                depth -= 1;
+                if depth < 0 {
+                    broken = true;
+                    depth = 0;
+                }
+            }
+        }
+        if broken || depth != 0 {
+            bad_pairs.push(label);
+        }
+    }
+    let mut halfwidth = Vec::new();
+    let mut prev: Option<char> = None;
+    for ch in cleaned.chars() {
+        if matches!(ch, ',' | '?' | '!' | ';' | ':')
+            && prev.is_some_and(is_cjk_ideograph)
+            && !halfwidth.contains(&ch)
+        {
+            halfwidth.push(ch);
+        }
+        prev = Some(ch);
+    }
+    let mut parts = Vec::new();
+    if !bad_pairs.is_empty() {
+        parts.push(format!("{}未配对", bad_pairs.join("、")));
+    }
+    if !halfwidth.is_empty() {
+        let joined: Vec<String> = halfwidth.into_iter().map(|c| c.to_string()).collect();
+        parts.push(format!("含贴近汉字的半角标点（{}）", joined.join("、")));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("标点异常：{}。", parts.join("；")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_number_mismatch;
+    use super::{detect_punctuation_mismatch, detect_source_script_leak, format_number_mismatch};
 
     #[test]
     fn formats_number_mismatch_without_debug_quotes() {
@@ -789,5 +1045,69 @@ mod tests {
             format_number_mismatch("1904", "1905"),
             "数字不一致：原文含 1904，译文含 1905。"
         );
+    }
+
+    #[test]
+    fn detects_source_script_leaks_per_language_and_respects_glossary() {
+        assert!(
+            detect_source_script_leak("ja", "雨の夜でした。", "那是一个雨の夜。", &[])
+                .unwrap()
+                .contains("の")
+        );
+        assert!(
+            detect_source_script_leak("ja", "アルカディアへ", "前往アルカディア。", &[])
+                .unwrap()
+                .contains("アルカディア")
+        );
+        assert!(
+            detect_source_script_leak(
+                "ja",
+                "アルカディアへ",
+                "前往アルカディア。",
+                &["アルカディア".into()]
+            )
+            .is_none()
+        );
+        // Standalone middle dot used in Chinese transliterated names must not trigger.
+        assert!(detect_source_script_leak("ja", "テスト", "亚瑟・潘德拉贡", &[]).is_none());
+
+        assert!(
+            detect_source_script_leak("ko", "안녕하세요", "你好 안녕하세요", &[])
+                .unwrap()
+                .contains("안녕하세요")
+        );
+        assert!(detect_source_script_leak("ko", "안녕하세요", "你好。", &[]).is_none());
+
+        assert!(
+            detect_source_script_leak("fr", "Un été à Paris", "巴黎的一个 été。", &[])
+                .unwrap()
+                .contains("été")
+        );
+        assert!(detect_source_script_leak("fr", "Un été à Paris", "巴黎的夏天。", &[]).is_none());
+        assert!(
+            detect_source_script_leak("fr", "Le café de Flore", "在 café 小坐。", &["café".into()])
+                .is_none()
+        );
+
+        assert!(
+            detect_source_script_leak("de", "Über die Straße", "穿过那条 Straße。", &[])
+                .unwrap()
+                .contains("Straße")
+        );
+        assert!(detect_source_script_leak("de", "Über die Straße", "穿过街道。", &[]).is_none());
+    }
+
+    #[test]
+    fn detects_punctuation_mismatches_without_false_positives() {
+        assert!(detect_punctuation_mismatch("「今天天气真好。」（记于长安）").is_none());
+        assert!(
+            detect_punctuation_mismatch("详见 https://example.com/a?x=1:2 与 12:30。").is_none()
+        );
+        let unclosed = detect_punctuation_mismatch("「今天天气真好。").unwrap();
+        assert!(unclosed.contains("「」未配对"), "{unclosed}");
+        let half = detect_punctuation_mismatch("真的吗?太好了!").unwrap();
+        assert!(half.contains("?") && half.contains("!"), "{half}");
+        let both = detect_punctuation_mismatch("《长安记，你好,世界").unwrap();
+        assert!(both.contains("《》未配对") && both.contains(","), "{both}");
     }
 }

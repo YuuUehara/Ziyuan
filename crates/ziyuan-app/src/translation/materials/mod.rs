@@ -9,4 +9,5 @@ mod validation;
 
 pub use diff::*;
 pub use model::*;
+pub use termbase::{TermCandidate, TermProposalReport};
 pub use validation::{MAX_MATERIAL_BYTES, check_material_editable, validate_material};

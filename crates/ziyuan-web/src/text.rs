@@ -210,6 +210,8 @@ pub(crate) struct ExportQuery {
     #[serde(default)]
     layout: ExportLayout,
     #[serde(default)]
+    bilingual: bool,
+    #[serde(default)]
     chapters: String,
     #[serde(default)]
     preview: bool,
@@ -235,16 +237,19 @@ pub(crate) async fn export(
         chapters
     };
     if matches!(&query.kind, ExportKind::Original)
-        && (query.format != ExportFormat::Txt || query.layout != ExportLayout::Chapters)
+        && (query.format != ExportFormat::Txt
+            || query.layout != ExportLayout::Chapters
+            || query.bilingual)
     {
         return Err(ApiError::bad(
-            "原件按归档字节导出，不接受成稿格式或排版选项",
+            "原件按归档字节导出，不接受成稿格式、双语或排版选项",
         ));
     }
     let options = ExportOptions {
         chapters,
         format: query.format,
         layout: query.layout,
+        bilingual: query.bilingual,
     };
     // Never reflect project titles, chapter titles or filesystem errors into headers/errors.
     let safe_id: String = id
@@ -272,6 +277,7 @@ pub(crate) async fn export(
                     message,
                 )) = &e
                     && (message.starts_with("不能导出成稿")
+                        || message.starts_with("双语对照导出仅支持")
                         || message.contains("：原段含行内代码，"))
                 {
                     return ApiError::bad(message.clone());

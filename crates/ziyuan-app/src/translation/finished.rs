@@ -33,6 +33,9 @@ pub struct ExportOptions {
     pub chapters: Vec<String>,
     pub format: ExportFormat,
     pub layout: ExportLayout,
+    /// 双语对照成稿（仅 Markdown 与 HTML；TXT 明确拒绝）。
+    #[serde(default)]
+    pub bilingual: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ExportFile {
@@ -165,6 +168,12 @@ impl<S: EventStore> Session<S> {
         id: &str,
         options: &ExportOptions,
     ) -> std::result::Result<ExportBundle, AppError> {
+        if options.bilingual && options.format == ExportFormat::Txt {
+            return Err(invalid(
+                "双语对照导出仅支持 Markdown 或 HTML（请指定 --format md 或 --format html）",
+            )
+            .into());
+        }
         let t = Translations::new(root);
         let p = t.project(id)?;
         let chapters = selection(&p, &options.chapters)?;
@@ -335,7 +344,17 @@ impl<S: EventStore> Session<S> {
             if sha256_hex(&raw) != c.sha256 {
                 return Err(invalid("原件在导出期间有变").into());
             }
-            let body = render_chapter(c, &raw, &texts, options.format, &mut warnings)?;
+            let body = if options.bilingual {
+                render_bilingual_chapter(
+                    c,
+                    &texts,
+                    options.format,
+                    &p.metadata.source_language,
+                    &mut warnings,
+                )?
+            } else {
+                render_chapter(c, &raw, &texts, options.format, &mut warnings)?
+            };
             rendered.push((c.id.clone(), body));
             records.push(
                 json!({"chapter":c.id,"title":title(c),"source_sha256":c.sha256,
@@ -374,11 +393,13 @@ impl<S: EventStore> Session<S> {
         };
         if options.format == ExportFormat::Html {
             for file in &mut files {
-                file.bytes = super::html_export::document(
-                    std::str::from_utf8(&file.bytes)
-                        .map_err(|_| invalid("成稿不是有效的 UTF-8"))?,
-                )
-                .into_bytes();
+                let text = std::str::from_utf8(&file.bytes)
+                    .map_err(|_| invalid("成稿不是有效的 UTF-8"))?;
+                file.bytes = if options.bilingual {
+                    super::html_export::document_bilingual(text).into_bytes()
+                } else {
+                    super::html_export::document(text).into_bytes()
+                };
             }
         }
         warnings.sort();
@@ -647,6 +668,123 @@ fn render_chapter(
     Ok(out)
 }
 
+fn source_rendered(text: &str, inlines: &[Inline], format: ExportFormat) -> Result<String> {
+    if format == ExportFormat::Html {
+        if inlines.is_empty() {
+            return Ok(super::html_export::escape(text));
+        }
+        let mut out = String::new();
+        for inline in inlines {
+            match inline {
+                Inline::Text { text } => out.push_str(&super::html_export::escape(text)),
+                Inline::Emphasis { text } => {
+                    out.push_str(&format!("<em>{}</em>", super::html_export::escape(text)))
+                }
+                Inline::Ruby { base, reading, .. } => out.push_str(&format!(
+                    "<ruby>{}<rt>{}</rt></ruby>",
+                    super::html_export::escape(base),
+                    super::html_export::escape(reading)
+                )),
+            }
+        }
+        Ok(out)
+    } else {
+        translated_text(text, inlines, ExportFormat::Markdown)
+    }
+}
+
+fn finished_bilingual_paragraphs(
+    c: &Chapter,
+    texts: &BTreeMap<String, String>,
+    format: ExportFormat,
+) -> Result<Vec<(String, String)>> {
+    let join_segments = c
+        .parsing
+        .as_ref()
+        .is_some_and(|p| p.format == SourceFormat::Text && p.options.split_long_paragraphs);
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut previous_end = None;
+    for paragraph in &c.paragraphs {
+        let src = source_rendered(&paragraph.text, &paragraph.inlines, format)?;
+        let tgt = &texts[&paragraph.id];
+        if join_segments && previous_end == Some(paragraph.byte_start) {
+            let last = out.last_mut().expect("previous paragraph");
+            last.0.push_str(&src);
+            last.1.push_str(tgt);
+        } else {
+            out.push((src, tgt.clone()));
+        }
+        previous_end = Some(paragraph.byte_end);
+    }
+    Ok(out)
+}
+
+fn render_bilingual_chapter(
+    c: &Chapter,
+    texts: &BTreeMap<String, String>,
+    format: ExportFormat,
+    source_language: &str,
+    warnings: &mut Vec<String>,
+) -> Result<String> {
+    let pairs = finished_bilingual_paragraphs(c, texts, format)?;
+    let is_md = c
+        .parsing
+        .as_ref()
+        .is_some_and(|p| p.format == SourceFormat::Markdown);
+    if format == ExportFormat::Html {
+        if is_md {
+            warnings.push(
+                "双语对照 HTML 保留原文与批准译文的正文及文学标记；原件的代码、链接、图片及版式请另取归档原件。"
+                    .into(),
+            );
+        }
+        let lang_attr = if source_language
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !source_language.is_empty()
+        {
+            format!(" lang=\"{source_language}\"")
+        } else {
+            String::new()
+        };
+        let mut html = format!(
+            "<section><h1>{}</h1>\n",
+            super::html_export::escape(title(c))
+        );
+        for (src, tgt) in pairs {
+            html.push_str(&format!(
+                "<div class=\"bilingual-pair\"><p class=\"bilingual-source\"{lang_attr}>{src}</p><p class=\"bilingual-target\" lang=\"zh-CN\">{tgt}</p></div>\n"
+            ));
+        }
+        html.push_str("</section>\n");
+        return Ok(html);
+    }
+    if is_md {
+        warnings.push(
+            "双语对照 Markdown 按段并列原文与定稿译文；原件代码、链接与图片请另取归档原件。".into(),
+        );
+    }
+    let heading = title(c).replace(['\r', '\n'], " ");
+    let mut out = format!("# {}\n\n", markdown_text(&heading));
+    for (src, tgt) in pairs {
+        for line in src.split('\n') {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&tgt);
+        out.push_str("\n\n");
+    }
+    while out.ends_with("\n\n\n") {
+        out.pop();
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod working_segment_tests {
     use super::*;
@@ -688,5 +826,60 @@ mod working_segment_tests {
             finished_paragraphs(&chapter, &texts),
             ["前半", "后半", "另段"]
         );
+    }
+
+    #[test]
+    fn bilingual_exports_pair_source_and_target_in_html_and_markdown() {
+        let chapter: Chapter = serde_json::from_value(json!({
+            "id": "c0001", "source_name": "sample.txt", "original_path": "sample.txt",
+            "sha256": "", "byte_len": 20, "blocks": [],
+            "paragraphs": [
+                {
+                    "id": "p1", "byte_start": 0, "byte_end": 10, "text": "東京の夜",
+                    "inlines": [
+                        {"kind": "ruby", "base": "東京", "reading": "とうきょう", "byte_start": 0, "byte_end": 6},
+                        {"kind": "text", "text": "の夜"}
+                    ]
+                },
+                {"id": "p2", "byte_start": 12, "byte_end": 20, "text": "雨が降る"}
+            ],
+            "parsing": {"version": 1, "format": "text", "options": {"split_long_paragraphs": false},
+                "source_file": 1, "part": 0, "title": "第一章", "byte_start": 0, "byte_end": 20, "warnings": []}
+        }))
+        .unwrap();
+        let texts = BTreeMap::from([
+            ("p1".into(), "东京之夜".into()),
+            ("p2".into(), "下起了雨".into()),
+        ]);
+        let html =
+            render_bilingual_chapter(&chapter, &texts, ExportFormat::Html, "ja", &mut Vec::new())
+                .unwrap();
+        assert!(html.contains("<div class=\"bilingual-pair\">"), "{html}");
+        assert!(html.contains("lang=\"ja\""), "{html}");
+        assert!(
+            html.contains("<ruby>東京<rt>とうきょう</rt></ruby>の夜"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<p class=\"bilingual-target\" lang=\"zh-CN\">东京之夜</p>"),
+            "{html}"
+        );
+        let doc = super::super::html_export::document_bilingual(&html);
+        assert!(doc.contains("default-src 'none'"), "{doc}");
+        assert!(doc.contains(".bilingual-pair"), "{doc}");
+
+        let md = render_bilingual_chapter(
+            &chapter,
+            &texts,
+            ExportFormat::Markdown,
+            "ja",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            md.contains("> <ruby>東京<rt>とうきょう</rt></ruby>の夜\n\n东京之夜"),
+            "{md}"
+        );
+        assert!(md.contains("> 雨が降る\n\n下起了雨"), "{md}");
     }
 }

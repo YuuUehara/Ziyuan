@@ -1085,6 +1085,8 @@
                 <div class="tool-group">
                   <span class="tool-group-label">交换备份</span>
                   <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
+                  <button class="small" id="materials-termbase-export-bom" type="button">导出 Excel CSV（BOM）</button>
+                  <button class="small" id="materials-termbase-propose" type="button">提取候选术语到 proposals</button>
                   <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
                   <button class="small" id="materials-tbx-export" type="button">导出 TBX</button>
                   <button class="small" id="materials-tbx-import" type="button">导入 TBX</button>
@@ -1102,7 +1104,7 @@
               <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（只看名称、译法与备注，隐藏范围与称谓规则）</label></p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
-              <div class="materials-qa-bar"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="no_translation">没有有效译稿</option><option value="missing_paragraph">缺段</option><option value="paragraph_id_mismatch">段号不一致</option><option value="duplicate_paragraph">段号重复</option><option value="extra_paragraph">多段</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字不一致</option><option value="duplicate_text">重复译文</option><option value="term_inconsistent">术语不一致</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
+              <div class="materials-qa-bar"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="no_translation">没有有效译稿</option><option value="missing_paragraph">缺段</option><option value="paragraph_id_mismatch">段号不一致</option><option value="duplicate_paragraph">段号重复</option><option value="extra_paragraph">多段</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字不一致</option><option value="duplicate_text">重复译文</option><option value="term_inconsistent">术语不一致</option><option value="source_script_leak">源语字符残留</option><option value="punctuation_mismatch">标点异常</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
               <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
               <div id="materials-tm-result" class="materials-report" aria-live="polite"></div>
               <div id="materials-comment-result" class="materials-report" aria-live="polite"></div>
@@ -1211,13 +1213,13 @@
     </section>
     <div id="subscription-panel">
       <section class="card full" id="subscription-card">
-        <h2>兵部驿站 · 作品关注 <small>syosetu · 只查询作品信息</small><span class="viewer-badge">只读：不能添加、检查或改设置</span></h2>
+        <h2>兵部驿站 · 作品关注 <small>syosetu / Kakuyomu / RSS · 只查询作品信息</small><span class="viewer-badge">只读：不能添加、检查或改设置</span></h2>
         <div class="body">
           <p class="hint">首次检查会记录当前状态，之后变化才提醒。不下载正文、不调用模型、不向外部推送。普通官方接口无法取得 R18 或搜索排除作品；信息反映平均约 5 分钟、最长约 2 小时，不保证实时。</p>
           <fieldset id="subscription-writes" class="write" disabled>
             <form id="subscription-add-form">
               <label for="subscription-input">作品链接或作品代码</label>
-              <div class="row"><input id="subscription-input" type="text" placeholder="https://ncode.syosetu.com/n1234ab/ 或 n1234ab" autocomplete="off" required><button id="subscription-add" type="submit" class="primary shrink">添加关注</button><button id="subscription-check" type="button" class="shrink">立即检查</button></div>
+              <div class="row"><input id="subscription-input" type="text" placeholder="n1234ab、https://kakuyomu.jp/works/<ID> 或 feed:https://..." autocomplete="off" required><button id="subscription-add" type="submit" class="primary shrink">添加关注</button><button id="subscription-check" type="button" class="shrink">立即检查</button></div>
             </form>
             <form id="subscription-settings-form">
               <label for="subscription-enabled" class="check"><input id="subscription-enabled" type="checkbox">服务器定时检查</label>
@@ -2319,6 +2321,36 @@ $("materials-termbase-export")?.addEventListener("click", async () => {
     $("materials-status").textContent = "已导出术语表 CSV（本地草稿）。";
   } catch (e) { $("materials-status").textContent = "导出失败：" + materialAdvice(e.message); }
 });
+$("materials-termbase-export-bom")?.addEventListener("click", async () => {
+  if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
+  try {
+    const response = await fetch("api/text/" + encodeURIComponent(textProjectId) + "/materials/termbase?bom=1");
+    if (!response.ok) throw new Error("导出失败");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "ziyuan-termbase-" + textProjectId + "-excel.csv"; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    $("materials-status").textContent = "已导出 Excel 友好术语表 CSV（含 UTF-8 BOM）。";
+  } catch (e) { $("materials-status").textContent = "导出失败：" + materialAdvice(e.message); }
+});
+$("materials-termbase-propose")?.addEventListener("click", async () => {
+  if (!textProjectId || !textBlockId) { $("materials-status").textContent = "请先选择项目和块。"; return; }
+  try {
+    const report = await api(
+      "/text/" + encodeURIComponent(textProjectId) + "/blocks/" + encodeURIComponent(textBlockId) + "/term-proposals",
+      { write: true }
+    );
+    const list = report.candidates || [];
+    $("materials-status").textContent = list.length
+      ? `已提取 ${list.length} 条候选术语并写入 ${report.path}（不自动入库）。`
+      : `当前块未发现新的候选术语（已写入 ${report.path}）。`;
+    const host = $("materials-diff");
+    host.textContent = list.length
+      ? list.map((c) => `${c.source}（${c.count} 次 · ${c.reason} · ${(c.paragraphs || []).join(",")}）`).join("\n")
+      : "当前块无新的候选术语。";
+  } catch (e) { $("materials-status").textContent = "提取失败：" + materialAdvice(e.body?.error || e.message); }
+});
 $("materials-termbase-import")?.addEventListener("click", () => $("materials-termbase-file")?.click());
 $("materials-termbase-file")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
@@ -2346,7 +2378,7 @@ $("materials-qa")?.addEventListener("click", async () => {
   }
 });
 function renderQaIssues() {
-  const labels = { no_translation: "没有有效译稿", missing_paragraph: "缺段", paragraph_id_mismatch: "段号不一致", extra_paragraph: "多段", duplicate_paragraph: "段号重复", empty_translation: "空译", untranslated: "疑似未翻译", number_mismatch: "数字不一致", duplicate_text: "重复译文", term_inconsistent: "术语不一致" };
+  const labels = { no_translation: "没有有效译稿", missing_paragraph: "缺段", paragraph_id_mismatch: "段号不一致", extra_paragraph: "多段", duplicate_paragraph: "段号重复", empty_translation: "空译", untranslated: "疑似未翻译", number_mismatch: "数字不一致", duplicate_text: "重复译文", term_inconsistent: "术语不一致", source_script_leak: "源语字符残留", punctuation_mismatch: "标点异常" };
   const filter = $("materials-qa-filter")?.value || "";
   const host = $("materials-qa-result");
   host.replaceChildren();
@@ -2838,7 +2870,7 @@ let importDraft = null;
 const exportDrafts = new Map();
 let exportActiveProject = null, exportEpoch = 0;
 function exportState() {
-  if (!exportDrafts.has(textProjectId)) exportDrafts.set(textProjectId, { chapters: null, format: "txt", layout: "chapters", busy: false, message: "", preview: null });
+  if (!exportDrafts.has(textProjectId)) exportDrafts.set(textProjectId, { chapters: null, format: "txt", layout: "chapters", bilingual: false, busy: false, message: "", preview: null });
   return exportDrafts.get(textProjectId);
 }
 function renderExport() {
@@ -2852,7 +2884,8 @@ function renderExport() {
     <div class="actions"><button type="button" class="small" data-view data-export-all ${d.busy ? "disabled" : ""}>全选章节</button></div>
     <div class="text-note-list checks" role="group" aria-label="导出章节">${outline.map((c, i) => `<label><input type="checkbox" data-view data-keep data-export-chapter="${esc(c.chapter)}" id="${esc(prefix)}-chapter-${i}" ${d.chapters === null || d.chapters.includes(c.chapter) ? "checked" : ""} ${d.busy ? "disabled" : ""}> ${esc(c.title || textLocation(c.chapter))}</label>`).join("")}</div>
     <div class="row"><label for="${esc(prefix)}-format">定稿格式<select data-view data-keep data-export-option="format" id="${esc(prefix)}-format" ${d.busy ? "disabled" : ""}><option value="txt" ${d.format === "txt" ? "selected" : ""}>TXT</option><option value="markdown" ${d.format === "markdown" ? "selected" : ""}>Markdown</option><option value="html" ${d.format === "html" ? "selected" : ""}>HTML（保留文学标记）</option></select></label>
-    <label for="${esc(prefix)}-layout">定稿编排<select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></label></div>
+    <label for="${esc(prefix)}-layout">定稿编排<select data-view data-keep data-export-option="layout" id="${esc(prefix)}-layout" ${d.busy ? "disabled" : ""}><option value="chapters" ${d.layout === "chapters" ? "selected" : ""}>逐章</option><option value="book" ${d.layout === "book" ? "selected" : ""}>合并全书</option></select></label>
+    <label class="check"><input type="checkbox" data-view data-keep data-export-bilingual id="${esc(prefix)}-bilingual" ${d.bilingual ? "checked" : ""} ${d.busy || d.format === "txt" ? "disabled" : ""}> 双语对照（Markdown / HTML）</label></div>
     <p class="hint">格式与编排只用于导出定稿。取回原件固定按归档字节、逐章请求，不沿用这两项；接口若收到其他格式或编排会拒绝。先查看文件列表和警告，再确认下载；下载时仍会重新检查材料。同一原件若包含多章，只打包一次，取回时可能包含未选章节。</p>
     <div class="actions"><button type="button" class="small" data-view data-export-kind="original" ${d.busy || !outline.length ? "disabled" : ""}>取回原件 TAR</button><button type="button" class="small" data-view data-export-kind="finished" ${d.busy || !outline.length ? "disabled" : ""}>导出定稿 TAR</button></div>
     <p class="hint" role="status" aria-live="polite">${esc(d.message)}</p>
@@ -2861,7 +2894,11 @@ function renderExport() {
 $("text-export").addEventListener("change", (e) => {
   const d = exportState();
   if (e.target.hasAttribute("data-export-chapter")) d.chapters = [...$("text-export").querySelectorAll("[data-export-chapter]:checked")].map((el) => el.dataset.exportChapter);
-  if (e.target.dataset.exportOption) d[e.target.dataset.exportOption] = e.target.value;
+  if (e.target.dataset.exportOption) {
+    d[e.target.dataset.exportOption] = e.target.value;
+    if (d.format === "txt") d.bilingual = false;
+  }
+  if (e.target.hasAttribute("data-export-bilingual")) d.bilingual = e.target.checked;
   d.preview = null; d.message = "选择已修改，下载前将重新预览。";
   renderExport();
 });
@@ -2880,6 +2917,7 @@ async function downloadTextExport(kind, confirmed = false) {
   const format = kind === "original" ? "txt" : d.format;
   const layout = kind === "original" ? "chapters" : d.layout;
   const query = new URLSearchParams({ kind, format, layout, chapters: chapters.join(",") });
+  if (kind === "finished" && d.bilingual && format !== "txt") query.set("bilingual", "true");
   if (confirmed) query.set("snapshot", d.preview.manifest.snapshot_sha256);
   const path = `/text/${encodeURIComponent(project)}/export?${query}`;
   d.busy = true; d.message = confirmed ? "正在重新检查并打包…" : "正在检查并预览…";
@@ -4247,12 +4285,21 @@ function subscriptionText(tag, text, className = "") {
 }
 function subscriptionLink(code, title) {
   // Never trust a URL or HTML from a source response.
-  if (!/^n[0-9]{4}[a-z]{1,6}$/.test(code)) return subscriptionText("span", title);
-  const link = subscriptionText("a", title);
-  link.href = "https://ncode.syosetu.com/" + code + "/";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  return link;
+  if (/^n[0-9]{4}[a-z]{1,6}$/.test(code)) {
+    const link = subscriptionText("a", title);
+    link.href = "https://ncode.syosetu.com/" + code + "/";
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  }
+  if (/^kakuyomu:[0-9]{10,24}$/.test(code)) {
+    const link = subscriptionText("a", title);
+    link.href = "https://kakuyomu.jp/works/" + code.slice(9);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  }
+  return subscriptionText("span", title);
 }
 function subscriptionTime(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString("zh-CN") : "尚未检查";

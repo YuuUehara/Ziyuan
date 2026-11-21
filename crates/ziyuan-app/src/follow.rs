@@ -1,6 +1,8 @@
 //! 兵部驿站 · 作品关注：未读的新章节提醒入队为诏令，交工部，只入队不执行。
 //! 每次都重扫全部未读提醒、按站名去重，因此上次入队失败的下次自动补上。
-use crate::subscriptions::{Notice, NoticeKind, SubscriptionError, Subscriptions};
+use crate::subscriptions::{
+    Notice, NoticeKind, SubscriptionError, Subscriptions, WorkCodeKind, classify_code, work_url,
+};
 use crate::{AppError, Session};
 use serde::Serialize;
 use std::path::Path;
@@ -9,16 +11,34 @@ use ziyuan_storage::{EventLog, EventStore};
 
 /// 驿站名：同一作品同一章数只入队一次。
 pub fn follow_station(code: &str, chapter_count: u64) -> String {
-    format!("syosetu:{code}#{chapter_count}")
+    match classify_code(code) {
+        Some(WorkCodeKind::Kakuyomu(id)) => format!("kakuyomu:{id}#{chapter_count}"),
+        Some(WorkCodeKind::Feed(url)) => {
+            let digest = ring::digest::digest(&ring::digest::SHA256, url.as_bytes());
+            let mut hex = String::with_capacity(16);
+            for byte in &digest.as_ref()[..8] {
+                hex.push_str(&format!("{byte:02x}"));
+            }
+            format!("feed:{hex}#{chapter_count}")
+        }
+        _ => format!("syosetu:{code}#{chapter_count}"),
+    }
 }
 
 fn follow_text(notice: &Notice, increase: u64) -> String {
     let work = &notice.observation;
+    let source = match classify_code(&notice.code) {
+        Some(WorkCodeKind::Kakuyomu(_)) => "Kakuyomu",
+        Some(WorkCodeKind::Feed(_)) => "RSS/Atom",
+        _ => "syosetu",
+    };
+    let link = work_url(&notice.code)
+        .unwrap_or_else(|| format!("https://ncode.syosetu.com/{}/", notice.code));
     format!(
-        "syosetu 作品更新：《{}》（{}）新增 {increase} 章，共 {} 章\n作者：{}\n\
-         https://ncode.syosetu.com/{}/\n\n\
+        "{source} 作品更新：《{}》（{}）新增 {increase} 章，共 {} 章\n作者：{}\n\
+         {link}\n\n\
          本程序不下载正文；原文需用户自行取得并确认翻译与上传权限。",
-        work.title, notice.code, work.chapter_count, work.author, notice.code
+        work.title, notice.code, work.chapter_count, work.author
     )
 }
 

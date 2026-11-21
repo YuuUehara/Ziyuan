@@ -371,6 +371,98 @@ impl Translations {
         Ok(lines.join("\n") + "\n")
     }
 
+    /// 导出本地资料草稿 CSV；`bom = true` 时在文件头写入 UTF-8 BOM（Excel 双击不乱码）。
+    pub fn export_termbase_csv_with_bom(&self, project: &str, bom: bool) -> Result<String> {
+        let csv = self.export_termbase_csv(project)?;
+        if bom {
+            Ok(format!("\u{feff}{csv}"))
+        } else {
+            Ok(csv)
+        }
+    }
+
+    /// 按提示块确定性提取候选术语（不调用模型，不自动写入 `context/`）。
+    /// `write = true` 时将候选提案写入 `translations/<项目>/<块>/proposals/term-candidates.json`。
+    pub fn propose_block_terms(
+        &self,
+        project: &str,
+        block: &str,
+        write: bool,
+    ) -> Result<TermProposalReport> {
+        let proj = self.project(project)?;
+        let (_, _, blk) = super::super::find_block(&proj, block)?;
+        let existing = self.collect_existing_term_sources(project);
+        let candidates =
+            extract_term_candidates(&proj.metadata.source_language, &blk.paragraphs, &existing);
+        let path = format!(
+            "{}term-candidates.json",
+            super::super::proposals_rel(project, block)
+        );
+        if write {
+            let full = self.root().join(&path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let payload = serde_json::json!({
+                "schema_version": 1,
+                "notice": "候选术语提案：仅存于 proposals/，不会自动进入术语库或生效；请人工审阅后手工入库。",
+                "project": project,
+                "block": block,
+                "source_language": proj.metadata.source_language,
+                "candidates": candidates,
+            });
+            let bytes = serde_json::to_vec_pretty(&payload)?;
+            std::fs::write(&full, bytes)?;
+        }
+        Ok(TermProposalReport {
+            project: project.to_owned(),
+            block: block.to_owned(),
+            source_language: proj.metadata.source_language,
+            path,
+            written: write,
+            candidates,
+        })
+    }
+
+    fn collect_existing_term_sources(&self, project: &str) -> std::collections::HashSet<String> {
+        let mut set = std::collections::HashSet::new();
+        if let Ok(Some(draft)) = self.material_draft(project) {
+            for t in &draft.material.terms {
+                set.insert(t.source.trim().to_owned());
+                set.insert(t.source.trim().to_lowercase());
+            }
+            for p in &draft.material.persons {
+                set.insert(p.name.trim().to_owned());
+                set.insert(p.name.trim().to_lowercase());
+                for a in &p.aliases {
+                    set.insert(a.trim().to_owned());
+                    set.insert(a.trim().to_lowercase());
+                }
+            }
+        }
+        if let Ok(Some(ctx)) = self.current_context(project) {
+            match &ctx.glossary {
+                super::super::Glossary::Legacy(entries) => {
+                    for e in entries {
+                        set.insert(e.source.trim().to_owned());
+                        set.insert(e.source.trim().to_lowercase());
+                    }
+                }
+                super::super::Glossary::Structured(g) => {
+                    for t in &g.terms {
+                        set.insert(t.source.trim().to_owned());
+                        set.insert(t.source.trim().to_lowercase());
+                    }
+                    for p in &g.persons {
+                        set.insert(p.name.trim().to_owned());
+                        set.insert(p.name.trim().to_lowercase());
+                    }
+                }
+            }
+        }
+        set
+    }
+
     /// 合并 CSV 到当前草稿。旧八列表头仍可读，缺的字段取安全默认值。
     pub fn import_termbase_csv(&self, project: &str, bytes: &[u8]) -> Result<MaterialReceipt> {
         let source_language = self
@@ -812,4 +904,388 @@ fn category_text(category: &TermCategory) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "common".into())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TermCandidate {
+    pub source: String,
+    pub count: usize,
+    pub reason: String,
+    pub paragraphs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TermProposalReport {
+    pub project: String,
+    pub block: String,
+    pub source_language: String,
+    pub path: String,
+    pub written: bool,
+    pub candidates: Vec<TermCandidate>,
+}
+
+fn record_candidate(
+    map: &mut BTreeMap<String, (usize, String, Vec<String>)>,
+    term: &str,
+    reason: &str,
+    paragraph_id: &str,
+    existing: &std::collections::HashSet<String>,
+) {
+    let trimmed = term.trim();
+    if trimmed.is_empty()
+        || existing.contains(trimmed)
+        || existing.contains(&trimmed.to_lowercase())
+    {
+        return;
+    }
+    let entry = map
+        .entry(trimmed.to_owned())
+        .or_insert_with(|| (0, reason.to_owned(), Vec::new()));
+    entry.0 += 1;
+    if !entry.2.iter().any(|p| p == paragraph_id) {
+        entry.2.push(paragraph_id.to_owned());
+    }
+}
+
+fn extract_quoted_phrases(text: &str) -> Vec<String> {
+    const QUOTES: &[(char, char)] = &[('「', '」'), ('『', '』'), ('《', '》')];
+    let mut out = Vec::new();
+    for &(open, close) in QUOTES {
+        let mut rest = text;
+        while let Some(start) = rest.find(open) {
+            let after = &rest[start + open.len_utf8()..];
+            let Some(end) = after.find(close) else {
+                break;
+            };
+            let inner = after[..end].trim();
+            let len = inner.chars().count();
+            if (2..=12).contains(&len) && !inner.contains(['。', '！', '？', '!', '?', '\n', '\r'])
+            {
+                out.push(inner.to_owned());
+            }
+            rest = &after[end + close.len_utf8()..];
+        }
+    }
+    out
+}
+
+fn extract_term_candidates(
+    source_language: &str,
+    paragraphs: &[crate::text_project::BlockParagraph],
+    existing: &std::collections::HashSet<String>,
+) -> Vec<TermCandidate> {
+    let mut map: BTreeMap<String, (usize, String, Vec<String>)> = BTreeMap::new();
+    match source_language {
+        "ja" => {
+            for para in paragraphs {
+                let mut run = String::new();
+                for ch in para.text.chars() {
+                    if matches!(ch, '\u{30A1}'..='\u{30FA}' | 'ー' | '・') {
+                        run.push(ch);
+                    } else if !run.is_empty() {
+                        let cleaned = run.trim_matches(['・', 'ー']);
+                        if cleaned.chars().count() >= 3 {
+                            record_candidate(
+                                &mut map,
+                                cleaned,
+                                "片假名专名候选",
+                                &para.id,
+                                existing,
+                            );
+                        }
+                        run.clear();
+                    }
+                }
+                let cleaned = run.trim_matches(['・', 'ー']);
+                if cleaned.chars().count() >= 3 {
+                    record_candidate(&mut map, cleaned, "片假名专名候选", &para.id, existing);
+                }
+                for phrase in extract_quoted_phrases(&para.text) {
+                    record_candidate(&mut map, &phrase, "引号短语候选", &para.id, existing);
+                }
+            }
+        }
+        "ko" => {
+            let mut word_counts: BTreeMap<String, (usize, Vec<String>)> = BTreeMap::new();
+            for para in paragraphs {
+                for phrase in extract_quoted_phrases(&para.text) {
+                    record_candidate(&mut map, &phrase, "引号短语候选", &para.id, existing);
+                }
+                let mut run = String::new();
+                fn ko_stem(word: &str) -> &str {
+                    let count = word.chars().count();
+                    if count >= 4
+                        && let Some(last) = word.chars().last()
+                        && matches!(
+                            last,
+                            '은' | '는'
+                                | '이'
+                                | '가'
+                                | '을'
+                                | '를'
+                                | '의'
+                                | '에'
+                                | '로'
+                                | '도'
+                                | '와'
+                                | '과'
+                        )
+                    {
+                        return &word[..word.len() - last.len_utf8()];
+                    }
+                    word
+                }
+                for ch in para.text.chars() {
+                    if matches!(ch, '\u{AC00}'..='\u{D7A3}') {
+                        run.push(ch);
+                    } else if !run.is_empty() {
+                        let stem = ko_stem(&run);
+                        if stem.chars().count() >= 2 {
+                            let e = word_counts.entry(stem.to_owned()).or_default();
+                            e.0 += 1;
+                            if !e.1.iter().any(|p| p == &para.id) {
+                                e.1.push(para.id.clone());
+                            }
+                        }
+                        run.clear();
+                    }
+                }
+                let stem = ko_stem(&run);
+                if stem.chars().count() >= 2 {
+                    let e = word_counts.entry(stem.to_owned()).or_default();
+                    e.0 += 1;
+                    if !e.1.iter().any(|p| p == &para.id) {
+                        e.1.push(para.id.clone());
+                    }
+                }
+            }
+            for (word, (count, paras)) in word_counts {
+                if count >= 2
+                    && !existing.contains(&word)
+                    && !existing.contains(&word.to_lowercase())
+                {
+                    let entry = map
+                        .entry(word)
+                        .or_insert_with(|| (0, "高频韩语词候选".into(), Vec::new()));
+                    entry.0 = entry.0.max(count);
+                    for pid in paras {
+                        if !entry.2.contains(&pid) {
+                            entry.2.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            // en / fr / de: capitalized multi-word phrases or repeated mid-sentence capitalized tokens
+            let mut single_counts: BTreeMap<String, (usize, Vec<String>)> = BTreeMap::new();
+            for para in paragraphs {
+                for phrase in extract_quoted_phrases(&para.text) {
+                    record_candidate(&mut map, &phrase, "引号短语候选", &para.id, existing);
+                }
+                let tokens: Vec<&str> = para.text.split_whitespace().collect();
+                let mut i = 0;
+                while i < tokens.len() {
+                    fn clean_word(t: &str) -> &str {
+                        t.trim_matches(|c: char| !c.is_alphabetic() && c != '-' && c != '\'')
+                    }
+                    let word = clean_word(tokens[i]);
+                    let starts_upper = word.chars().next().is_some_and(char::is_uppercase);
+                    if starts_upper && word.chars().count() >= 2 {
+                        let mut phrase = vec![word];
+                        let mut j = i + 1;
+                        while j < tokens.len() && phrase.len() < 4 {
+                            let prev_ends_sentence = tokens[j - 1]
+                                .chars()
+                                .last()
+                                .is_some_and(|c| matches!(c, '.' | '!' | '?' | ':' | ';'));
+                            if prev_ends_sentence {
+                                break;
+                            }
+                            let next_w = clean_word(tokens[j]);
+                            if next_w.chars().next().is_some_and(char::is_uppercase)
+                                && next_w.chars().count() >= 2
+                            {
+                                phrase.push(next_w);
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if phrase.len() >= 2 {
+                            let joined = phrase.join(" ");
+                            record_candidate(&mut map, &joined, "专名短语候选", &para.id, existing);
+                            i = j;
+                            continue;
+                        }
+                        let is_sentence_start = i == 0
+                            || tokens[i - 1]
+                                .chars()
+                                .last()
+                                .is_some_and(|c| matches!(c, '.' | '!' | '?' | '"' | '«' | '„'));
+                        if !is_sentence_start && word.chars().count() >= 3 {
+                            let e = single_counts.entry(word.to_owned()).or_default();
+                            e.0 += 1;
+                            if !e.1.iter().any(|p| p == &para.id) {
+                                e.1.push(para.id.clone());
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            for (word, (count, paras)) in single_counts {
+                if count >= 2
+                    && !existing.contains(&word)
+                    && !existing.contains(&word.to_lowercase())
+                {
+                    let entry = map
+                        .entry(word)
+                        .or_insert_with(|| (0, "高频专名候选".into(), Vec::new()));
+                    entry.0 = entry.0.max(count);
+                    for pid in paras {
+                        if !entry.2.contains(&pid) {
+                            entry.2.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut candidates: Vec<TermCandidate> = map
+        .into_iter()
+        .map(|(source, (count, reason, paragraphs))| TermCandidate {
+            source,
+            count,
+            reason,
+            paragraphs,
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.source.cmp(&b.source)));
+    candidates.truncate(64);
+    candidates
+}
+
+#[cfg(test)]
+mod a3_tests {
+    use super::*;
+    use crate::text_project::BlockParagraph;
+
+    fn para(id: &str, text: &str) -> BlockParagraph {
+        BlockParagraph {
+            id: id.into(),
+            text: text.into(),
+            inlines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extracts_candidates_for_ja_ko_fr_de_and_skips_existing_terms() {
+        let existing = std::collections::HashSet::from(["既知ワード".to_owned()]);
+        let ja = extract_term_candidates(
+            "ja",
+            &[
+                para("p1", "アルカディアへ向かう。既知ワードは無視。"),
+                para("p2", "「星辰の塔」とアルカディアの記録。"),
+            ],
+            &existing,
+        );
+        assert!(
+            ja.iter()
+                .any(|c| c.source == "アルカディア" && c.count == 2)
+        );
+        assert!(ja.iter().any(|c| c.source == "星辰の塔"));
+        assert!(!ja.iter().any(|c| c.source == "既知ワード"));
+
+        let ko = extract_term_candidates(
+            "ko",
+            &[para("p1", "아르카디아는 멀다. 아르카디아로 가자.")],
+            &std::collections::HashSet::new(),
+        );
+        assert!(ko.iter().any(|c| c.source == "아르카디아" && c.count == 2));
+
+        let fr = extract_term_candidates(
+            "fr",
+            &[
+                para("p1", "Ils visitent Château de Chambord et Étoile."),
+                para("p2", "Le nom Étoile revient souvent."),
+            ],
+            &std::collections::HashSet::new(),
+        );
+        assert!(fr.iter().any(|c| c.source == "Étoile" && c.count == 2));
+    }
+
+    #[test]
+    fn bom_csv_round_trips_and_propose_writes_only_to_proposals() {
+        let dir = std::env::temp_dir().join(format!("ziyuan-a3-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let projects = crate::text_project::TextProjects::new(&dir);
+        let project = projects
+            .create(crate::text_project::NewProject {
+                title: "星辰记".into(),
+                source_language: "ja".into(),
+                target_language: "zh-CN".into(),
+                provenance: crate::text_project::Provenance {
+                    source: "local".into(),
+                    rights: "owned".into(),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let src_file = dir.join("ch1.txt");
+        std::fs::write(
+            &src_file,
+            "アルカディアへ向かう。\nアルカディアの「星辰の塔」を見上げた。\n",
+        )
+        .unwrap();
+        let project = projects.import(&project.id, &[src_file]).unwrap();
+        let block_id = project.chapters[0].blocks[0].block_id.clone();
+
+        let translations = Translations::new(&dir);
+        let csv_in = "kind,id,source,allowed,status\nterm,t1,星辰,星辰,confirmed\n";
+        translations
+            .import_termbase_csv(&project.id, csv_in.as_bytes())
+            .unwrap();
+        let bom_csv = translations
+            .export_termbase_csv_with_bom(&project.id, true)
+            .unwrap();
+        assert!(bom_csv.starts_with('\u{feff}'));
+        assert!(bom_csv.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]));
+        // Re-importing BOM CSV must succeed cleanly without corrupting headers.
+        translations
+            .import_termbase_csv(&project.id, bom_csv.as_bytes())
+            .unwrap();
+
+        let preview = translations
+            .propose_block_terms(&project.id, &block_id, false)
+            .unwrap();
+        assert!(!preview.written);
+        assert!(
+            preview
+                .candidates
+                .iter()
+                .any(|c| c.source == "アルカディア" && c.count == 2)
+        );
+        assert!(!dir.join(&preview.path).exists());
+
+        let written = translations
+            .propose_block_terms(&project.id, &block_id, true)
+            .unwrap();
+        assert!(written.written);
+        assert!(written.path.contains("/proposals/term-candidates.json"));
+        assert!(dir.join(&written.path).exists());
+        // Proposals must never auto-enter approved context or material draft.
+        assert!(translations.current_context(&project.id).unwrap().is_none());
+        let draft = translations.material_draft(&project.id).unwrap().unwrap();
+        assert!(
+            !draft
+                .material
+                .terms
+                .iter()
+                .any(|t| t.source == "アルカディア")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

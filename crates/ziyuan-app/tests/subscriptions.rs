@@ -356,3 +356,44 @@ fn one_malformed_work_does_not_stop_valid_results_and_failed_save_keeps_baseline
     assert_eq!(s.list().unwrap()[0].baseline, Some(work()));
     assert!(s.updates(false).unwrap().is_empty());
 }
+
+#[test]
+fn kakuyomu_and_feed_codes_work_offline_and_generate_distinct_stations() {
+    assert_eq!(
+        normalize_code("https://kakuyomu.jp/works/16817330656114206864/").unwrap(),
+        "kakuyomu:16817330656114206864"
+    );
+    assert_eq!(
+        normalize_code("feed:https://Novels.Example.org/rss/work.xml").unwrap(),
+        "feed:https://novels.example.org/rss/work.xml"
+    );
+    assert_eq!(
+        ziyuan_app::follow_station("n1234ab", 5),
+        "syosetu:n1234ab#5"
+    );
+    assert_eq!(
+        ziyuan_app::follow_station("kakuyomu:16817330656114206864", 7),
+        "kakuyomu:16817330656114206864#7"
+    );
+    let feed_station =
+        ziyuan_app::follow_station("feed:https://novels.example.org/rss/work.xml", 3);
+    assert!(feed_station.starts_with("feed:") && feed_station.ends_with("#3"));
+
+    let t = Temp::new();
+    let s = t.service();
+    let k = s
+        .add("https://kakuyomu.jp/works/16817330656114206864", 10)
+        .unwrap();
+    assert_eq!(k.code, "kakuyomu:16817330656114206864");
+    let f = s
+        .add("feed:https://novels.example.org/rss/work.xml", 20)
+        .unwrap();
+    assert_eq!(f.code, "feed:https://novels.example.org/rss/work.xml");
+    assert_eq!(s.list().unwrap().len(), 2);
+    assert!(s.remove("kakuyomu:16817330656114206864").unwrap());
+    assert!(
+        s.remove("feed:https://novels.example.org/rss/work.xml")
+            .unwrap()
+    );
+    assert!(s.list().unwrap().is_empty());
+}

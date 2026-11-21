@@ -7,14 +7,16 @@ use std::env;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 use ziyuan_app::subscriptions::{
-    CheckMode, CheckStatus, CheckSummary, Notice, NoticeKind, ObservedWork, SourceError,
-    Subscription, SubscriptionError, Subscriptions, SyosetuSource, WorkSource, normalize_code,
+    CheckMode, CheckStatus, CheckSummary, CompositeSource, Notice, NoticeKind, ObservedWork,
+    SourceError, Subscription, SubscriptionError, Subscriptions, WorkSource, normalize_code,
+    work_url,
 };
 use ziyuan_app::{FollowCourier, FollowCourierStatus, follow_courier, format_time, tz_offset};
 
 pub(crate) const FOLLOW_HELP: &str = r#"作品关注（不需要 ziyuan init，不调用模型；只查作品信息，不下载正文）：
   ziyuan follow add <作品链接|作品代码>
-                                       关注 syosetu 作品，如 https://ncode.syosetu.com/n1234ab/ 或 n1234ab
+                                       关注 syosetu / Kakuyomu / RSS(Atom) 作品，如 n1234ab、
+                                       https://kakuyomu.jp/works/<ID> 或 feed:https://<host>/<path>
                                        （不接受章节链接）；只写本地列表，不联网；已关注的不做改动
   ziyuan follow list                   列出关注的作品、上次记录的章节数与上次检查的错误
   ziyuan follow remove <作品链接|作品代码>
@@ -111,8 +113,8 @@ fn code_arg(rest: &[String], usage: &str) -> Result<String, Box<dyn Error>> {
     match rest {
         [input] if !input.starts_with("--") => normalize_code(input).map_err(|_| {
             format!(
-                "作品链接或代码无效：{input}。应为作品目录链接 https://ncode.syosetu.com/n1234ab/ \
-                 或作品代码 n1234ab（不接受章节链接）"
+                "作品链接或代码无效：{input}。应为 syosetu（https://ncode.syosetu.com/n1234ab/ 或 n1234ab）、\
+                 Kakuyomu（https://kakuyomu.jp/works/<ID> 或 kakuyomu:<ID>）或公开 HTTPS 订阅源 feed:https://<host>/<path>（不接受章节链接）"
             )
             .into()
         }),
@@ -171,7 +173,7 @@ pub(crate) fn run(action: FollowAction, json: bool) -> Result<(), Box<dyn Error>
             }
         }
         FollowAction::Check => {
-            let report = check(&service, &SyosetuSource::new(), now).map_err(failure)?;
+            let report = check(&service, &CompositeSource::new(), now).map_err(failure)?;
             // 入队的成败只写进报告，不改变检查的退出码。
             let courier = follow_courier(&root);
             match json {
@@ -250,7 +252,7 @@ fn print_json(value: Value) -> Result<(), Box<dyn Error>> {
 }
 
 fn url(code: &str) -> String {
-    format!("https://ncode.syosetu.com/{code}/")
+    work_url(code).unwrap_or_else(|| format!("https://ncode.syosetu.com/{code}/"))
 }
 
 fn when(at: u64) -> String {

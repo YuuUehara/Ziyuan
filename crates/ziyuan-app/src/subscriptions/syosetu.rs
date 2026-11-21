@@ -1,7 +1,7 @@
 //! Fixed official ordinary API only; R18 and search-excluded works may be unavailable.
 //! Official metadata latency is approximately five minutes on average, up to two hours,
 //! not a real-time guarantee. No response links or user-supplied URLs are fetched.
-use super::{ObservedWork, SourceError, WorkSource, normalize_code};
+use super::{ObservedWork, SourceError, WorkCodeKind, WorkSource, classify_code, normalize_code};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -74,11 +74,9 @@ fn request_url(codes: &[String]) -> Result<String, SourceError> {
     let mut seen = HashSet::new();
     if codes.is_empty()
         || codes.len() > 50
-        || codes.iter().any(|c| {
-            normalize_code(c).is_err()
-                || normalize_code(c).ok().as_ref() != Some(c)
-                || !seen.insert(c)
-        })
+        || codes
+            .iter()
+            .any(|c| !matches!(classify_code(c), Some(WorkCodeKind::Syosetu(_))) || !seen.insert(c))
     {
         return Err(SourceError::Malformed);
     }
