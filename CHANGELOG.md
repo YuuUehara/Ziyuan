@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.34.0 — 2026-11-21
+
+- **Windows 原生号舍 W3 断网长连接 stdio 外藩沙箱（`ziyuan-sandbox-windows` + `ziyuan-runtime`）**：
+  - `ziyuan-sandbox-windows` 新增 `StdioLaunchSpec`、`SandboxedStdioChild` 与 `spawn_stdio_sandboxed`，通过匿名双向管道＋`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 仅向子进程放行指定标准句柄、在 0 能力 AppContainer＋独立隐藏桌面 `PrivateDesktop`＋`KILL_ON_JOB_CLOSE` Job Object 中托管长连接子进程，析构／中止时自动整树排空清理。
+  - `ziyuan-runtime` 新增 `haoshe::spawn_stdio` 并在 `mcp.rs` 接入 Windows 断网只读快照模式（每个外藩实例隔离于独立私有只读项目快照＋私有 scratch 目录，自动规范化 8.3 短路径并拒绝宿主凭据与出站网络）；Windows 下的开放联网、`ZIYUAN_SANDBOX_ALLOW` 按域名放行与 `haoshe.write` 继续显式失败关闭（`SandboxUnavailable`）。
+- **Prompt Caching 与缓存用量透明（`ziyuan-core` + `ziyuan-storage` + `ziyuan-llm` + `ziyuan-app` + `ziyuan-web` + `ziyuan-tui`）**：
+  - `TokenUsage` 新增向后兼容字段 `cache_read`、`cache_write` 与 `cache_hit_rate()`（零缓存时 JSON 与 `Display` 保持原样不变）；事件簿 `USAGE` 保持 v1 格式，零缓存时仍为 5/6 列旧编码，非零缓存时行尾追加 `cache_read`、`cache_write` 两列（`readable_since` 登记为 `1.34.0` 序号 70，零缓存旧日志不提高读取门槛）。
+  - `ziyuan-llm` 新增 `PromptCache` 与环境变量 `ZIYUAN_LLM_PROMPT_CACHE`（默认 `auto`，支持 `anthropic`/`on`/`off`）：在 `auto` 模式下检测到模型名含 `claude` 或接口地址含 `anthropic` 时自动为系统提示、工具定义末尾与倒数第二条历史消息注入最多 3 处 `cache_control: {"type":"ephemeral"}` 断点（OpenAI / DeepSeek / Ollama 请求体原样不变）；统一解析 OpenAI `prompt_tokens_details.cached_tokens`、Responses API `input_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens` 与 Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`。
+  - CLI `ziyuan budget`（度支奏销）在有缓存时展示命中 token、命中率与写入量；TUI 页头展示 `缓存命中 X%`；Web `/api/state` 与页面统计栏／诏令卡片展示 `cache_read` / `cache_write` 及命中徽标。
+- **TUI 安全回滚预览弹窗与确认热键（`ziyuan-tui`）**：
+  - 诏令页新增 `Z` 快捷键（与 `z` 改动视图相邻），调用 `Session::preview_revert` 弹出「安全回滚预览」弹窗，逐文件列出操作（写回原文／删除新建文件／恢复已删文件）与磁盘核验状态（可回滚／已恢复将跳过／落盘后已被改动阻断）。
+  - 仅在核验全部通过且存在可回滚文件时允许按 `y` 执行 `Session::revert_changes`（带乐观 `version` 校验与清理诊断提示）；存在磁盘冲突或已全部恢复时 fail-closed 阻断且按 `y` 仅关闭弹窗、绝不触碰磁盘。
+- 登记次版本 `1.34.0`（序号 70，零新增事件类型与玉玺代码；仅含非零缓存的 `USAGE` 行要求 `1.34.0` 及以上读取）；同步更新 [使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md) 与 [路线图](docs/roadmap.md)；验收见 [1.34.0 验收记录](docs/acceptance/1.34.0.md)。
+
 ## 1.33.0 — 2026-11-21
 
 - **符号起止行号与 `read_file` 可选 `end_line`**：

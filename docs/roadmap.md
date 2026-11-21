@@ -8,6 +8,7 @@
 - **1.1 – 1.4（小说翻译闭环、参考与勘校）**：UTF-8 TXT／Markdown 预览（含显式 ruby 注音与安全显示）及确认导入；逐块初译、双路审校、逐段朱批、修订与御览定稿；受管写入与租约临时文件清理；本地译文记忆（`local`）与显式预览参考绑定；词证、六事逐段勘校、逐阶段用量账本与成稿 TAR 导出；syosetu 关注与新章节自动入队。
 - **1.5 – 1.13（人工工作台与多格式回填）**：独立人工草稿（含注音／着重／粗斜体标记编辑器与浏览器暂存）；结构化人物／术语／称谓规则资料与段旁只读提示；三态自动版本快照与对比清理；DOCX／EPUB 导入与定稿文字回填；字幕（SRT）、本地翻译记忆与审校评论；Web 新建空项目；确定性检查、CSV／TBX 术语交换与双语检索。
 - **1.14 – 1.15（连续翻译与全工作台整理）**：完整工作区备份与恢复、多格式原文追加与单章修订（TXT／Markdown／DOCX／EPUB）、跨章待查、连续双语通读与交稿预检、HTML 成稿保留完整标记、全文检索与草稿替换、纯文本 TMX 交换、终端人工译稿以及须按项目授权的远程嵌入。
+- **1.34.0（Windows 原生号舍 W3 断网 stdio 外藩、Prompt Caching 与 TUI 安全回滚）**：`ziyuan-sandbox-windows` 与 `ziyuan-runtime` 落地 W3 双向匿名管道 AppContainer＋`PrivateDesktop`＋Job 长连接 stdio MCP 沙箱（断网＋独立只读项目快照＋私有 scratch，开放联网／域名白名单／`haoshe.write` 继续失败关闭）；新增 `ZIYUAN_LLM_PROMPT_CACHE`（默认 `auto` 自动为 Claude/Anthropic 注入最多 3 处 `cache_control` 断点）与跨服务商缓存命中解析，度支奏销、TUI 页头与 Web 透明展示缓存命中与写入，`USAGE` 零缓存保持旧编码、非零缓存追加两列（`readable_since = 1.34.0`）；TUI 诏令页新增 `Z` 安全回滚预览弹窗与 `y` 确认（冲突 fail-closed 阻断），与 CLI／Web 完整对齐。
 - **1.33.0（辅助编程工作流闭环：符号起止行号、`read_file end_line` 与安全回滚）**：`file_outline` / `find_symbols` 为 6 类语言符号输出起止行号（`42-98`），`read_file` 新增与 `lines` 互斥的可选 `end_line` 与 `replace_text` 行范围无缝衔接；新增 `ziyuan revert <ID> [--dry-run] [--json]` 与 Web `GET`/`POST /api/tasks/{id}/changes/revert` 及「安全回滚」按钮，在工作区锁下逐字节核验磁盘后 fail-closed 回滚已落盘诏令（支持 `--skip` 还原与幂等跳过），零新增事件与玉玺代码。
 - **1.32.0（辅助编程执行体验增强：主动取消、精准替换与长对话压缩）**：`ExecutionHooks::cancel_flag` / `CancelToken::flag` 与 `Tool::execute_with_cancel` 打通 `run_tests` 撤销／超时／度支停支的在途子进程主动终止；`replace_text` 支持单处与批量 `edits[]` 可选 `start_line`/`end_line` 行范围锚定及歧义／失配候选行号诊断；`agent_loop::compact_turns` 在长对话超限时确定性折叠较早完整轮次为围栏结构化工作摘要（完整保留最近 4 轮与工具配对），零新增事件与玉玺代码。
 - **1.31.0（Windows 原生号舍 W2 正式接入生产）**：完成 `ziyuan-sandbox-windows` crates.io 首发与 Trusted Publishing 配置及维护者签核，`ziyuan-runtime::haoshe::run_shell` 在 Windows 默认 `auto`／`require` 下正式接入 0 能力 AppContainer＋`PrivateDesktop`＋Job Object 执行 `run_tests`（全断网、过滤 12 项宿主保留变量、有界尾部与失败扫描窗口、主动取消与整树清理），工作区维持 `unsafe_code = "forbid"`；`ZIYUAN_SANDBOX_ALLOW`、外部 `CARGO_TARGET_DIR` 与长连接 stdio 外藩继续显式失败关闭（留待 W3），零新增事件。
@@ -34,7 +35,7 @@
 
 以下议题属于独立工程研究或长期评估方向，必须经过对应平台实测或人工盲评门槛后再决定是否并入生产流程：
 
-1. **Windows 原生号舍 W3 扩展（按域名放行与长连接 stdio 外藩）**：W2 一次性断网 `run_tests` 已于 1.31.0 正式接入生产；后续按需评估 Windows 下的 `ZIYUAN_SANDBOX_ALLOW` 门吏代理、双向管道长连接 stdio 外藩（`mcp.rs`）及工具链私有只读副本准入方案，此前继续显式失败关闭。
+1. **Windows 原生号舍 W3 后续扩展（按域名放行与 `haoshe.write`）**：W2 一次性断网 `run_tests` 已于 1.31.0 落地，W3 断网只读快照长连接 stdio 外藩（`mcp.rs`）已于 1.34.0 正式接入生产；Windows 下的 `ZIYUAN_SANDBOX_ALLOW` 门吏代理、`haoshe.write` 及外部 `CARGO_TARGET_DIR` 仍按需评估，此前继续显式失败关闭。
 2. **持久化代码索引与混合检索**：轻量免索引的 `file_outline`／`find_symbols` 已在 1.18.0 落地；面向超大型仓库的持久化符号／语义混合检索与评测基线仍待后续评估。
 3. **长篇翻译文学效果评估**：在同等模型、术语、预算与审批规则下开展双语盲评，详见[译文记忆评估步骤](memory.md#文学效果要怎样另行评估)。
 
