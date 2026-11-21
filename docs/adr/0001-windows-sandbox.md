@@ -112,11 +112,13 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 2. **W2 生产正式接入范围（`run_tests`）**：
    - `ziyuan-runtime` 在 `target.'cfg(windows)'` 下接入 `ziyuan-sandbox-windows`，保持自身 `unsafe_code = "forbid"`；
    - `haoshe::run_shell` 在 Windows `Mode::Auto`／`Mode::Require` 且 `Network::Off`、无外部 `CARGO_TARGET_DIR` 时，经 `probe_capability()` 核验 `FileSystemAndNetworkIsolated` 后调用 `run_shell_sandboxed`（0 能力 `AppContainerChildCapable`＋`PrivateDesktop`＋`KILL_ON_JOB_CLOSE` Job Object），过滤 12 项宿主保留环境变量、按 `max_output` 与 `max_failure_scan` 有界采集输出、支持主动取消与整树排空清理，结果如实标注 `号舍（Windows AppContainer＋Job）`。
-3. **仍保持失败关闭的边界（留待 W3）**：
-   - `ZIYUAN_SANDBOX_ALLOW`（`Network::Only`）与 `Network::Open` 显式拒绝（`SandboxUnavailable`）；
-   - 外部 `CARGO_TARGET_DIR` 等额外可写目录显式拒绝（`SandboxUnavailable`）；
-   - 配置了 `haoshe` 的本地长连接 stdio 外藩（`mcp.rs`）继续显式拒绝（`SandboxUnavailable`）；
-   - 宿主 `%USERPROFILE%` 下工具链（如默认 `cargo.exe`）未经准入仍被内核拒绝，绝不放宽宿主用户目录或系统 ACL。
+3. **W3 首批落地（长连接断网 stdio 外藩）**：
+   - `ziyuan-sandbox-windows` 新增 `StdioSpec`、`SandboxedStdio`（`Send`）与 `spawn_stdio_sandboxed`，通过 Win32 匿名双向管道（`CreatePipe`）仅把子端 `[child_stdin_read, child_stdout_write, stderr_nul]` 纳入 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`、父端保持非继承且恢复前核验父端不可见；复用 0 能力 `AppContainerChildCapable`＋`PrivateDesktop`＋`KILL_ON_JOB_CLOSE` Job Object，在 `shutdown()`/`Drop` 时先排空整棵 Job 进程树再回收目录与 profile；
+   - `ziyuan-runtime::haoshe::spawn_stdio_windows` 与 `mcp.rs` 接入 Windows W3：对名册写了 `"haoshe": { "network": false }` 且 `write` 为空的本地 stdio 外藩，将项目复制到任务私有只读快照（`readonly_dirs`，保护 DACL＋低 IL，自动跳过 `.ziyuan`、`.git`、`.jj`、`.env*`、构建产物与重解析点；绝不改写宿主 ACL），仅准入任务私有 `scratch` 目录（同步注入 `TMPDIR`）与容器私有 `TEMP`/`TMP`/`HOME` 可写；解析 `PATH` 时自动跳过 `WindowsApps` 等重解析点／应用别名。
+4. **仍保持失败关闭的边界（后续按需扩展）**：
+   - `ZIYUAN_SANDBOX_ALLOW`（`Network::Only`）、`Network::Open`（含 MCP `"haoshe": true` 与域名白名单）显式拒绝（`SandboxUnavailable`）；
+   - 外部 `CARGO_TARGET_DIR` 与 MCP `haoshe.write` 等宿主额外可写目录显式拒绝（`SandboxUnavailable`）；
+   - 宿主 `%USERPROFILE%` 下程序／工具链（如默认 `cargo.exe` 或安装于 `AppData` 的解释器）未经准入仍被内核拒绝，绝不放宽宿主用户目录或系统 ACL。
 
 ## 参考
 

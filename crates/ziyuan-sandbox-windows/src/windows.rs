@@ -36,6 +36,7 @@ use windows_sys::Win32::{
         Com::CoTaskMemFree,
         JobObjects::*,
         LibraryLoader::{GetProcAddress, LoadLibraryW},
+        Pipes::CreatePipe,
         Threading::*,
         WindowsProgramming::PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT,
     },
@@ -43,7 +44,7 @@ use windows_sys::Win32::{
 
 use crate::{
     DEFAULT_MAX_OUTPUT_BYTES, ExitOutcome, LaunchSpec, RunResult, SandboxCapability, SandboxMode,
-    ShellSpec,
+    ShellSpec, StdioSpec,
 };
 
 pub(super) static PROFILE_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -198,6 +199,10 @@ impl Drop for Profile {
         }
     }
 }
+
+// SAFETY: `Profile` uniquely owns the API-allocated SID (`FreeSid`) and profile registration
+// (`DeleteAppContainerProfile`); neither has Win32 thread affinity.
+unsafe impl Send for Profile {}
 
 // Attribute-list storage requires native allocation alignment. This fixed-size
 // element provides 16-byte alignment without relying on Vec<u8>'s allocator.
@@ -420,6 +425,11 @@ impl Drop for PrivateDesktop {
         }
     }
 }
+
+// SAFETY: `PrivateDesktop` uniquely owns its `HDESK` (never assigned to the host thread via
+// `SetThreadDesktop`) and `user32.dll` `HMODULE`; `CloseDesktop` and `FreeLibrary` have no
+// thread affinity.
+unsafe impl Send for PrivateDesktop {}
 
 pub(super) struct Child {
     pub(super) process: OwnedHandle,
@@ -1339,4 +1349,322 @@ fn run_sandboxed_inner(
         active_processes_after,
         cleanup_warnings,
     })
+}
+
+fn create_anonymous_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
+    let mut read_raw = null_mut();
+    let mut write_raw = null_mut();
+    // SAFETY: null SECURITY_ATTRIBUTES creates both ends non-inheritable by default;
+    // both newly created handles are immediately wrapped in OwnedHandle.
+    unsafe {
+        checked(CreatePipe(&mut read_raw, &mut write_raw, null(), 0))?;
+        let read = own(read_raw)?;
+        let write = own(write_raw)?;
+        Ok((read, write))
+    }
+}
+
+pub(crate) struct SandboxedStdioInner {
+    stdin: Option<File>,
+    stdout: Option<File>,
+    child: Option<Child>,
+    job: Option<OwnedHandle>,
+    desktop: Option<PrivateDesktop>,
+    profile: Option<Profile>,
+    temp_dir: PathBuf,
+    home_dir: PathBuf,
+    appdata_dir: PathBuf,
+    cleaned: bool,
+    cleanup_warnings: Vec<String>,
+}
+
+impl SandboxedStdioInner {
+    pub(crate) fn take_stdin(&mut self) -> Option<File> {
+        self.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<File> {
+        self.stdout.take()
+    }
+
+    pub(crate) fn cleanup_warnings(&self) -> &[String] {
+        &self.cleanup_warnings
+    }
+
+    pub(crate) fn shutdown(&mut self) -> io::Result<u32> {
+        if self.cleaned {
+            return Ok(0);
+        }
+        self.cleaned = true;
+        drop(self.stdin.take());
+        drop(self.stdout.take());
+
+        let mut active_processes_after = 0u32;
+        let mut drain_err = None;
+        if let Some(job) = self.job.as_ref() {
+            match terminate_job_and_drain(job.as_raw_handle(), Duration::from_secs(5)) {
+                Ok(active) => active_processes_after = active,
+                Err(err) => drain_err = Some(err),
+            }
+        }
+        let stop_result = if let Some(child) = self.child.take() {
+            let res = child.stop();
+            drop(child);
+            res
+        } else {
+            Ok(())
+        };
+        drop(self.job.take());
+        drop(self.desktop.take());
+
+        for (label, dir) in [
+            ("temp dir", &self.temp_dir),
+            ("home dir", &self.home_dir),
+            ("appdata dir", &self.appdata_dir),
+        ] {
+            if let Err(err) = fs::remove_dir_all(dir)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                self.cleanup_warnings
+                    .push(format!("{label} cleanup: {err}"));
+            }
+        }
+        if let Some(mut profile) = self.profile.take() {
+            if active_processes_after == 0 && drain_err.is_none() {
+                if let Err(err) = profile.cleanup() {
+                    self.cleanup_warnings
+                        .push(format!("profile cleanup: {err}"));
+                }
+            } else {
+                profile.registered = false;
+                self.cleanup_warnings.push(format!(
+                    "retained profile due to {active_processes_after} active processes"
+                ));
+            }
+        }
+
+        if let Some(err) = drain_err {
+            return Err(err);
+        }
+        stop_result?;
+        Ok(active_processes_after)
+    }
+}
+
+pub(crate) fn spawn_stdio_sandboxed(spec: &StdioSpec) -> io::Result<SandboxedStdioInner> {
+    let ordinary_control = matches!(spec.mode, SandboxMode::AppContainerChildCapable);
+    reject_reparse_point(&spec.program)?;
+    if !spec.program.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("sandbox program is not a file: {}", spec.program.display()),
+        ));
+    }
+    let program = normalize_win32_long_path(&spec.program)?;
+    let resolved_cwd = if let Some(cwd) = &spec.cwd {
+        reject_reparse_point(cwd)?;
+        if !cwd.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("sandbox cwd is not a directory: {}", cwd.display()),
+            ));
+        }
+        Some(normalize_win32_long_path(cwd)?)
+    } else {
+        None
+    };
+    for dir in spec.writable_dirs.iter().chain(&spec.readonly_dirs) {
+        reject_reparse_point(dir)?;
+        if !dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("admitted path is not a directory: {}", dir.display()),
+            ));
+        }
+    }
+
+    let profile = Profile::create()?;
+    let profile_dir = normalize_win32_long_path(&profile.path)?;
+    let temp_dir = profile_dir.join("tmp");
+    let home_dir = profile_dir.join("home");
+    let appdata_dir = profile_dir.join("appdata");
+    fs::create_dir(&temp_dir)?;
+    fs::create_dir(&home_dir)?;
+    fs::create_dir(&appdata_dir)?;
+
+    for dir in &spec.writable_dirs {
+        admit_tree(dir, profile.sid, true)?;
+    }
+    for dir in &spec.readonly_dirs {
+        admit_tree(dir, profile.sid, false)?;
+    }
+
+    let (child_stdin_read, parent_stdin_write) = create_anonymous_pipe()?;
+    let (parent_stdout_read, child_stdout_write) = create_anonymous_pipe()?;
+    let stderr_nul = OpenOptions::new().write(true).open("NUL")?;
+    let job = create_kill_on_close_job()?;
+
+    // SAFETY: mark ONLY the three child-side stdio handles inheritable; parent pipe ends remain
+    // non-inheritable and are verified absent from the suspended child before resuming.
+    unsafe {
+        for handle in [
+            child_stdin_read.as_raw_handle(),
+            child_stdout_write.as_raw_handle(),
+            stderr_nul.as_raw_handle(),
+        ] {
+            checked(SetHandleInformation(
+                handle,
+                HANDLE_FLAG_INHERIT,
+                HANDLE_FLAG_INHERIT,
+            ))?;
+        }
+    }
+
+    let capabilities = SECURITY_CAPABILITIES {
+        AppContainerSid: profile.sid,
+        Capabilities: null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    };
+    let policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+    let handles = [
+        child_stdin_read.as_raw_handle(),
+        child_stdout_write.as_raw_handle(),
+        stderr_nul.as_raw_handle(),
+    ];
+    let mut attributes = Attributes::new()?;
+    attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
+    if !ordinary_control {
+        attributes.set(
+            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+            &policy,
+        )?;
+    }
+    attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
+
+    let application = wide(&program);
+    let cwd = resolved_cwd.as_deref().unwrap_or(&profile_dir);
+    let directory = wide(cwd);
+    let mut built = quote_windows_arg(&program.to_string_lossy())?;
+    for arg in &spec.args {
+        built.push(' ');
+        built.push_str(&quote_windows_arg(arg)?);
+    }
+    let mut command = wide(built);
+    let environment =
+        build_environment(&profile_dir, &temp_dir, &home_dir, &appdata_dir, &spec.env)?;
+    let mut desktop = if ordinary_control {
+        PrivateDesktop::create(profile.sid).ok()
+    } else {
+        None
+    };
+
+    // SAFETY: extended startup cb, valid aligned attributes, mutable command buffer,
+    // allowlisted Unicode environment, and optional private desktop string live through CreateProcessW.
+    let child = unsafe {
+        let mut startup: STARTUPINFOEXW = zeroed();
+        startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        if let Some(desk) = desktop.as_mut() {
+            startup.StartupInfo.lpDesktop = desk.lp_desktop.as_mut_ptr();
+        }
+        startup.StartupInfo.hStdInput = child_stdin_read.as_raw_handle();
+        startup.StartupInfo.hStdOutput = child_stdout_write.as_raw_handle();
+        startup.StartupInfo.hStdError = stderr_nul.as_raw_handle();
+        startup.lpAttributeList = attributes.ptr();
+        let mut info: PROCESS_INFORMATION = zeroed();
+        checked(CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            CREATE_SUSPENDED
+                | EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW,
+            environment.as_ptr().cast(),
+            directory.as_ptr(),
+            &startup.StartupInfo,
+            &mut info,
+        ))?;
+        Child {
+            process: own(info.hProcess)?,
+            thread: own(info.hThread)?,
+        }
+    };
+
+    let mut inner = SandboxedStdioInner {
+        stdin: Some(File::from(parent_stdin_write)),
+        stdout: Some(File::from(parent_stdout_read)),
+        child: Some(child),
+        job: Some(job),
+        desktop,
+        profile: Some(profile),
+        temp_dir,
+        home_dir,
+        appdata_dir,
+        cleaned: false,
+        cleanup_warnings: Vec::new(),
+    };
+
+    let startup_result = (|| -> io::Result<()> {
+        let child_ref = inner.child.as_ref().expect("child present");
+        let job_ref = inner.job.as_ref().expect("job present");
+        let stdin_parent = inner.stdin.as_ref().expect("stdin present").as_raw_handle();
+        let stdout_parent = inner
+            .stdout
+            .as_ref()
+            .expect("stdout present")
+            .as_raw_handle();
+        // SAFETY: process is suspended; Job membership, AppContainer/LPAC identity,
+        // zero capabilities, and handle allowlist (including absence of parent pipe ends)
+        // are verified before any user code runs.
+        unsafe {
+            checked(AssignProcessToJobObject(
+                job_ref.as_raw_handle(),
+                child_ref.process.as_raw_handle(),
+            ))?;
+        }
+        if !in_job(child_ref.process.as_raw_handle(), job_ref.as_raw_handle())?
+            || token_flag(child_ref.process.as_raw_handle(), TokenIsAppContainer)? != 1
+            || aap_access(child_ref.process.as_raw_handle())? != ordinary_control
+            || token_capability_count(child_ref.process.as_raw_handle())? != 0
+            || !handle_available(
+                child_ref.process.as_raw_handle(),
+                child_stdin_read.as_raw_handle(),
+            )?
+            || !handle_available(
+                child_ref.process.as_raw_handle(),
+                child_stdout_write.as_raw_handle(),
+            )?
+            || handle_available(child_ref.process.as_raw_handle(), stdin_parent)?
+            || handle_available(child_ref.process.as_raw_handle(), stdout_parent)?
+        {
+            return Err(io::Error::other(
+                "suspended W3 stdio AppContainer / Job / capability / handle verification failed",
+            ));
+        }
+        // SAFETY: primary thread is suspended and all pre-resume invariants passed.
+        unsafe {
+            if ResumeThread(child_ref.thread.as_raw_handle()) == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    })();
+
+    // Drop child-side pipe ends and attribute list in the parent immediately so EOF and
+    // broken-pipe semantics work identically to std::process::Child.
+    drop(attributes);
+    drop(child_stdin_read);
+    drop(child_stdout_write);
+    drop(stderr_nul);
+
+    if let Err(err) = startup_result {
+        let _ = inner.shutdown();
+        return Err(err);
+    }
+
+    Ok(inner)
 }

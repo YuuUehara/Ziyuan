@@ -6,10 +6,11 @@
 //! separated from the standalone verification probe CLI in `probe`.
 //!
 //! Production `ziyuan-runtime` uses [`run_shell_sandboxed`] on Windows for offline
-//! one-shot `run_tests` execution (W2); persistent stdio MCP servers remain fail-closed
-//! until W3.
+//! one-shot `run_tests` execution (W2) and [`spawn_stdio_sandboxed`] for offline
+//! long-lived stdio MCP servers (W3). Network-open, domain-allowlist, and host-writable
+//! policies remain fail-closed.
 
-use std::{io, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
+use std::{fs::File, io, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
 
 #[cfg(windows)]
 mod files;
@@ -36,7 +37,7 @@ pub enum SandboxCapability {
     FileSystemAndNetworkIsolated,
 }
 
-/// Isolation profile for [`run_sandboxed_with_mode`].
+/// Isolation profile for [`run_sandboxed_with_mode`] and [`spawn_stdio_sandboxed`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SandboxMode {
     /// Strict Less Privileged AppContainer (`AAP_ACCESS=0`, `TokenCapabilities=0`) + Job.
@@ -93,6 +94,101 @@ pub struct ShellSpec {
     /// Maximum tail bytes read into memory from the captured output file.
     /// `None` uses [`DEFAULT_MAX_OUTPUT_BYTES`].
     pub max_output_bytes: Option<u64>,
+}
+
+/// Safe description of a long-lived bidirectional stdio process to run inside an isolated
+/// per-task zero-capability Windows AppContainer + `KILL_ON_JOB_CLOSE` Job Object (W3).
+#[derive(Clone, Debug)]
+pub struct StdioSpec {
+    /// Absolute path to the executable to launch (must not be a reparse point).
+    pub program: PathBuf,
+    /// Command-line arguments forwarded to `program`.
+    pub args: Vec<String>,
+    /// Absolute working directory inside an admitted task-private directory.
+    /// If `None`, defaults to the freshly created task AppContainer profile directory.
+    pub cwd: Option<PathBuf>,
+    /// Task-private directories admitted read/write/execute for this container SID only.
+    /// Callers must pass only freshly created task-private directories, never host source trees.
+    pub writable_dirs: Vec<PathBuf>,
+    /// Task-private directories admitted read/execute only (protected DACL + low IL).
+    pub readonly_dirs: Vec<PathBuf>,
+    /// Extra environment variables (filtered; cannot override `SystemRoot` or private dirs).
+    pub env: Vec<(String, String)>,
+    /// Isolation mode (use [`SandboxMode::AppContainerChildCapable`] for runtimes/interpreters
+    /// that spawn helper processes, or [`SandboxMode::StrictLpac`] for single-process servers).
+    pub mode: SandboxMode,
+}
+
+/// Running sandboxed process with bidirectional anonymous stdio pipes (W3).
+///
+/// Owns the Job Object, process/thread handles, private desktop, and AppContainer profile.
+/// Calling [`SandboxedStdio::shutdown`] or dropping this handle terminates and drains the
+/// entire Job process tree and cleans up per-task profile storage.
+pub struct SandboxedStdio {
+    #[cfg(windows)]
+    inner: windows::SandboxedStdioInner,
+    #[cfg(not(windows))]
+    _unsupported: (),
+}
+
+impl SandboxedStdio {
+    /// Takes ownership of the parent write end of the child's stdin pipe.
+    pub fn take_stdin(&mut self) -> Option<File> {
+        #[cfg(windows)]
+        {
+            self.inner.take_stdin()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// Takes ownership of the parent read end of the child's stdout pipe.
+    pub fn take_stdout(&mut self) -> Option<File> {
+        #[cfg(windows)]
+        {
+            self.inner.take_stdout()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// Terminates and drains the entire Job process tree, releases kernel handles and private
+    /// desktop, and deletes per-task AppContainer profile storage. Idempotent: subsequent calls
+    /// return `Ok(0)`.
+    ///
+    /// Returns the number of active processes remaining in the Job after draining (expected `0`).
+    pub fn shutdown(&mut self) -> io::Result<u32> {
+        #[cfg(windows)]
+        {
+            self.inner.shutdown()
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(0)
+        }
+    }
+
+    /// Non-fatal cleanup diagnostics recorded during [`Self::shutdown`].
+    pub fn cleanup_warnings(&self) -> &[String] {
+        #[cfg(windows)]
+        {
+            self.inner.cleanup_warnings()
+        }
+        #[cfg(not(windows))]
+        {
+            &[]
+        }
+    }
+}
+
+impl Drop for SandboxedStdio {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
 }
 
 /// How the sandboxed process tree ended.
@@ -180,6 +276,29 @@ pub fn run_shell_sandboxed(spec: &ShellSpec, cancel: Option<&AtomicBool>) -> io:
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows AppContainer shell sandbox is only available on Windows",
+        ))
+    }
+}
+
+/// Spawns a long-lived bidirectional stdio process inside a zero-capability Windows AppContainer
+/// + `KILL_ON_JOB_CLOSE` Job Object (W3).
+///
+/// Only the child ends of two anonymous pipes (`stdin` read, `stdout` write) and a `NUL` `stderr`
+/// handle are inherited via `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`; parent pipe ends are non-inheritable
+/// and verified absent from the child before resuming. No network capabilities are granted, host
+/// directories are never admitted, and dropping the returned [`SandboxedStdio`] terminates and
+/// drains the entire Job tree before cleaning up the AppContainer profile.
+pub fn spawn_stdio_sandboxed(spec: &StdioSpec) -> io::Result<SandboxedStdio> {
+    #[cfg(windows)]
+    {
+        windows::spawn_stdio_sandboxed(spec).map(|inner| SandboxedStdio { inner })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = spec;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows AppContainer stdio sandbox is only available on Windows",
         ))
     }
 }

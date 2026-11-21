@@ -2415,7 +2415,13 @@ impl RunTests {
     }
 }
 
-/// 复制 `from` 到 `to`：跳过禁区、构建产物与符号链接。
+/// 将项目根目录复制到任务私有目录，跳过禁区（`.ziyuan`、`.git`、`.jj`、`.env*`）、构建产物与符号链接／重解析点。
+#[cfg(windows)]
+pub(crate) fn copy_project_tree(root: &Path, dest: &Path) -> io::Result<()> {
+    copy_tree(root, root, dest)
+}
+
+/// 复制 `from` 到 `to`：跳过禁区、构建产物与符号链接／重解析点。
 fn copy_tree(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
@@ -2424,6 +2430,17 @@ fn copy_tree(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
         let name = entry.file_name();
         if is_denied(root, &path) || SKIPPED_DIRS.iter().any(|d| name == *d) {
             continue;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+            if fs::symlink_metadata(&path)
+                .map(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                .unwrap_or(true)
+            {
+                continue;
+            }
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {

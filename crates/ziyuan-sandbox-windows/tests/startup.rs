@@ -1,7 +1,8 @@
 #![cfg(windows)]
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     process::Command,
@@ -13,8 +14,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use ziyuan_sandbox_windows::{
-    ExitOutcome, LaunchSpec, SandboxCapability, SandboxMode, ShellSpec, probe_capability,
-    run_sandboxed, run_sandboxed_with_mode, run_shell_sandboxed,
+    ExitOutcome, LaunchSpec, SandboxCapability, SandboxMode, SandboxedStdio, ShellSpec, StdioSpec,
+    probe_capability, run_sandboxed, run_sandboxed_with_mode, run_shell_sandboxed,
+    spawn_stdio_sandboxed,
 };
 
 static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -867,4 +869,198 @@ if ($connected) {{ throw 'sandbox unexpectedly connected to host loopback' }}
     }
 
     let _ = fs::remove_dir_all(&stage);
+}
+
+#[test]
+fn w3_stdio_bidirectional_pipes_isolate_fs_network_and_drain_job_tree() {
+    fn assert_send<T: Send>() {}
+    assert_send::<SandboxedStdio>();
+
+    let system_root = std::env::var_os("SystemRoot").expect("SystemRoot must be set");
+    let powershell_exe = PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    assert!(powershell_exe.is_file());
+
+    let stage = unique_temp_dir("w3-stdio");
+    let ro_dir = stage.join("workspace_ro");
+    let rw_dir = stage.join("scratch_rw");
+    let host_secret_dir = stage.join("host_secret");
+    fs::create_dir(&ro_dir).unwrap();
+    fs::create_dir(&rw_dir).unwrap();
+    fs::create_dir(&host_secret_dir).unwrap();
+    fs::write(ro_dir.join("data.txt"), "READONLY_CONTENT").unwrap();
+    let host_secret = host_secret_dir.join("secret.txt");
+    fs::write(&host_secret, "HOST_W3_SECRET").unwrap();
+
+    let canonical_no_prefix = |p: &PathBuf| -> String {
+        fs::canonicalize(p)
+            .ok()
+            .and_then(|c| {
+                c.to_str()
+                    .and_then(|s| s.strip_prefix(r"\\?\"))
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| p.to_string_lossy().into_owned())
+    };
+    let rw_str = canonical_no_prefix(&rw_dir);
+    let secret_str = canonical_no_prefix(&host_secret);
+
+    // Host loopback listener with positive control.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop_listener = Arc::new(AtomicBool::new(false));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let stop_bg = Arc::clone(&stop_listener);
+    let hits_bg = Arc::clone(&hits);
+    let accept_thread = thread::spawn(move || {
+        while !stop_bg.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((_stream, _peer)) => {
+                    hits_bg.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let host_conn = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).unwrap();
+    drop(host_conn);
+    thread::sleep(Duration::from_millis(50));
+    assert!(hits.swap(0, Ordering::SeqCst) >= 1);
+
+    let script = ro_dir.join("stdio_server.ps1");
+    fs::write(
+        &script,
+        format!(
+            r#"$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+while ($null -ne ($line = [Console]::In.ReadLine())) {{
+  if ($line -eq 'ping') {{
+    [Console]::Out.WriteLine("pong:$($env:TEST_TOKEN)")
+    [Console]::Out.Flush()
+  }} elseif ($line -eq 'fs_probe') {{
+    $roRead = [System.IO.File]::ReadAllText([System.IO.Path]::Combine($PSScriptRoot, 'data.txt'), $utf8)
+    $rwFile = [System.IO.Path]::Combine('{rw}', 'ok.txt')
+    [System.IO.File]::WriteAllText($rwFile, 'written', $utf8)
+    $roWriteBlocked = $false
+    try {{
+      [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'escaped.txt'), 'x', $utf8)
+    }} catch {{ $roWriteBlocked = $true }}
+    $secretBlocked = $false
+    try {{
+      $null = [System.IO.File]::ReadAllText('{secret}', $utf8)
+    }} catch {{ $secretBlocked = $true }}
+    [Console]::Out.WriteLine("fs:$roRead|roBlocked=$roWriteBlocked|secretBlocked=$secretBlocked")
+    [Console]::Out.Flush()
+  }} elseif ($line -eq 'net_probe') {{
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $ar = $client.BeginConnect('127.0.0.1', {port}, $null, $null)
+    $connected = $false
+    if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {{
+      try {{
+        $client.EndConnect($ar)
+        $connected = $client.Connected
+      }} catch {{ $connected = $false }}
+    }}
+    $client.Close()
+    [Console]::Out.WriteLine("net:connected=$connected")
+    [Console]::Out.Flush()
+  }} elseif ($line -eq 'spawn_child') {{
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($env:ComSpec, '/D /C ping -n 60 127.0.0.1 >nul')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    [Console]::Out.WriteLine("spawned:$($p.Id)")
+    [Console]::Out.Flush()
+  }}
+}}
+"#,
+            rw = rw_str.replace('\'', "''"),
+            secret = secret_str.replace('\'', "''"),
+            port = addr.port(),
+        ),
+    )
+    .unwrap();
+
+    let mut sandbox = spawn_stdio_sandboxed(&StdioSpec {
+        program: powershell_exe,
+        args: vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-ExecutionPolicy".into(),
+            "Bypass".into(),
+            "-File".into(),
+            "stdio_server.ps1".into(),
+        ],
+        cwd: Some(ro_dir.clone()),
+        writable_dirs: vec![rw_dir.clone()],
+        readonly_dirs: vec![ro_dir.clone()],
+        env: vec![("TEST_TOKEN".into(), "ok-token".into())],
+        mode: SandboxMode::AppContainerChildCapable,
+    })
+    .unwrap();
+
+    let mut stdin = sandbox.take_stdin().expect("stdin available once");
+    assert!(sandbox.take_stdin().is_none());
+    let stdout = sandbox.take_stdout().expect("stdout available once");
+    assert!(sandbox.take_stdout().is_none());
+    let mut reader = BufReader::new(stdout);
+
+    let mut roundtrip = |msg: &str| -> String {
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).unwrap();
+        assert!(n > 0, "unexpected EOF while waiting for reply to {msg}");
+        line.trim_end_matches(['\r', '\n']).to_owned()
+    };
+
+    assert_eq!(roundtrip("ping"), "pong:ok-token");
+    assert_eq!(
+        roundtrip("fs_probe"),
+        "fs:READONLY_CONTENT|roBlocked=True|secretBlocked=True"
+    );
+    assert_eq!(roundtrip("net_probe"), "net:connected=False");
+    let spawned = roundtrip("spawn_child");
+    assert!(spawned.starts_with("spawned:"), "spawned={spawned:?}");
+
+    drop(stdin);
+    let active = sandbox.shutdown().unwrap();
+    assert_eq!(
+        active, 0,
+        "Job tree must drain all grandchildren on shutdown"
+    );
+    assert!(
+        sandbox.cleanup_warnings().is_empty(),
+        "cleanup warnings: {:?}",
+        sandbox.cleanup_warnings()
+    );
+    // Idempotent second shutdown must succeed with 0.
+    assert_eq!(sandbox.shutdown().unwrap(), 0);
+
+    // Parent must observe clean EOF once the child tree is terminated (no leaked write end).
+    let mut eof_line = String::new();
+    assert_eq!(reader.read_line(&mut eof_line).unwrap(), 0);
+    drop(reader);
+
+    stop_listener.store(true, Ordering::SeqCst);
+    accept_thread.join().unwrap();
+
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fs::read_to_string(rw_dir.join("ok.txt")).unwrap(),
+        "written"
+    );
+    assert!(!ro_dir.join("escaped.txt").exists());
+    assert_eq!(fs::read_to_string(&host_secret).unwrap(), "HOST_W3_SECRET");
+
+    fs::remove_dir_all(&stage).unwrap();
 }

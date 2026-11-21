@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -201,54 +201,96 @@ fn spawn(
     env: &BTreeMap<String, String>,
     haoshe: Option<&Haoshe>,
 ) -> Result<Transport, BoxError> {
+    #[cfg(windows)]
+    if let Some(cell) = haoshe
+        && crate::haoshe::Mode::from_env()? != crate::haoshe::Mode::Off
+    {
+        let mut merged_env = Vec::new();
+        for key in SERVER_ENV {
+            if let Ok(value) = std::env::var(key) {
+                merged_env.push(((*key).to_owned(), value));
+            }
+        }
+        for (key, value) in env {
+            merged_env.push((key.clone(), expand(value)));
+        }
+        let operation = format!("外藩 {name}");
+        let mut child = crate::haoshe::spawn_stdio_windows(&crate::haoshe::StdioRunSpec {
+            operation: &operation,
+            program,
+            args,
+            root,
+            network: &cell.network,
+            extra_write: &cell.write,
+            env: &merged_env,
+        })?;
+        let stdin = child.take_stdin().expect("Windows 号舍已设 stdin 管道");
+        let stdout = child.take_stdout().expect("Windows 号舍已设 stdout 管道");
+        let (tx, lines) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        return Ok(Transport::Stdio {
+            child: StdioChild::WindowsHaoshe(Box::new(child)),
+            stdin: Some(Box::new(stdin)),
+            lines,
+            scratch: None,
+            _door: None,
+        });
+    }
+
+    #[cfg(not(windows))]
     let (mut command, scratch, door) = match haoshe {
         Some(cell) if crate::haoshe::Mode::from_env()? != crate::haoshe::Mode::Off => {
-            #[cfg(windows)]
-            {
-                let _ = cell;
-                return Err(crate::haoshe::SandboxUnavailable::new(
-                    format!("外藩 {name}"),
-                    "Windows 原生号舍 W2 首批仅覆盖一次性断网命令（run_tests），长连接 stdio 外藩（双向管道与按需联网）仍保持失败关闭，待 W3 另行实现",
-                )
-                .into());
-            }
-            #[cfg(not(windows))]
-            {
-                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let dir = std::env::temp_dir().join(format!(
-                    "ziyuan-mcp-{name}-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                std::fs::create_dir_all(&dir)?;
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-                let mut writable = vec![dir.clone()];
-                writable.extend(
-                    cell.write
-                        .iter()
-                        .filter_map(|w| match w.strip_prefix("~/") {
-                            Some(rest) => home.as_ref().map(|h| h.join(rest)),
-                            None => Some(root.join(w)),
-                        }),
-                );
-                let rules = crate::haoshe::Rules {
-                    readable: vec![root.to_path_buf()],
-                    writable,
-                    hidden: vec![root.join(".ziyuan")],
-                    network: cell.network.clone(),
-                };
-                let confined = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
-                    let _ = std::fs::remove_dir_all(&dir);
-                    crate::haoshe::SandboxUnavailable::new(format!("外藩 {name}"), reason)
-                })?;
-                (confined.command, Some(dir), confined.proxy)
-            }
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "ziyuan-mcp-{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir)?;
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let mut writable = vec![dir.clone()];
+            writable.extend(
+                cell.write
+                    .iter()
+                    .filter_map(|w| match w.strip_prefix("~/") {
+                        Some(rest) => home.as_ref().map(|h| h.join(rest)),
+                        None => Some(root.join(w)),
+                    }),
+            );
+            let rules = crate::haoshe::Rules {
+                readable: vec![root.to_path_buf()],
+                writable,
+                hidden: vec![root.join(".ziyuan")],
+                network: cell.network.clone(),
+            };
+            let confined = crate::haoshe::confine(program, args, &rules).map_err(|reason| {
+                let _ = std::fs::remove_dir_all(&dir);
+                crate::haoshe::SandboxUnavailable::new(format!("外藩 {name}"), reason)
+            })?;
+            (confined.command, Some(dir), confined.proxy)
         }
         _ => {
             let mut command = Command::new(program);
             command.args(args);
             (command, None, None)
         }
+    };
+    #[cfg(windows)]
+    let (mut command, scratch, door) = {
+        let mut command = Command::new(program);
+        command.args(args);
+        (
+            command,
+            None::<std::path::PathBuf>,
+            None::<crate::haoshe::Proxy>,
+        )
     };
     command
         .current_dir(root)
@@ -282,8 +324,8 @@ fn spawn(
         }
     });
     Ok(Transport::Stdio {
-        child,
-        stdin,
+        child: StdioChild::Plain(child),
+        stdin: Some(Box::new(stdin)),
         lines,
         scratch,
         _door: door,
@@ -305,12 +347,18 @@ pub struct Server {
     next_id: u64,
 }
 
+enum StdioChild {
+    Plain(Child),
+    #[cfg(windows)]
+    WindowsHaoshe(Box<crate::haoshe::WindowsStdioChild>),
+}
+
 enum Transport {
     Stdio {
-        child: Child,
-        stdin: ChildStdin,
+        child: StdioChild,
+        stdin: Option<Box<dyn Write + Send>>,
         lines: Receiver<String>,
-        /// 号舍里可写的临时目录，服务停后删去。
+        /// 号舍里可写的临时目录，服务停后删去（Windows 原生号舍由 `WindowsStdioChild` 自管）。
         scratch: Option<std::path::PathBuf>,
         /// 按域名放行时的门吏，随服务一同撤下。
         _door: Option<crate::haoshe::Proxy>,
@@ -363,9 +411,23 @@ fn refusal(their_id: Value) -> Value {
 impl Drop for Server {
     fn drop(&mut self) {
         match &mut self.transport {
-            Transport::Stdio { child, scratch, .. } => {
-                let _ = child.kill();
-                let _ = child.wait();
+            Transport::Stdio {
+                child,
+                stdin,
+                scratch,
+                ..
+            } => {
+                drop(stdin.take());
+                match child {
+                    StdioChild::Plain(c) => {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                    #[cfg(windows)]
+                    StdioChild::WindowsHaoshe(w) => {
+                        w.shutdown();
+                    }
+                }
                 if let Some(dir) = scratch {
                     let _ = std::fs::remove_dir_all(dir);
                 }
@@ -443,9 +505,14 @@ impl Server {
     /// 发一条不需回复的消息（通知，或对反向请求的回绝）。
     fn notify(&mut self, message: &Value) -> Result<(), BoxError> {
         match &mut self.transport {
-            Transport::Stdio { stdin, .. } => writeln!(stdin, "{message}")
+            Transport::Stdio {
+                stdin: Some(stdin), ..
+            } => writeln!(stdin, "{message}")
                 .and_then(|()| stdin.flush())
                 .map_err(|e| format!("外藩 {} 已断开：{e}", self.name).into()),
+            Transport::Stdio { stdin: None, .. } => {
+                Err(format!("外藩 {} 已断开", self.name).into())
+            }
             Transport::Http { .. } => {
                 let response = self.post(message)?;
                 let status = response.status().as_u16();
@@ -852,47 +919,273 @@ for line in sys.stdin:
         cleanup(root);
     }
 
+    #[cfg(windows)]
+    const FAKE_PS1: &str = r#"$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+function Send-Json($obj) {
+  [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 12))
+  [Console]::Out.Flush()
+}
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  if ([string]::IsNullOrWhiteSpace($line)) { continue }
+  $m = $line | ConvertFrom-Json
+  if ($null -eq $m.id -or $null -eq $m.method) { continue }
+  if ($m.method -eq 'initialize') {
+    Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ protocolVersion = '2025-06-18'; capabilities = @{}; serverInfo = @{ name = 'fake-ps' } } }
+  } elseif ($m.method -eq 'tools/list') {
+    $tools = @(
+      @{ name = 'probe'; description = 'probe'; inputSchema = @{ type = 'object' } },
+      @{ name = 'audit'; description = 'audit'; inputSchema = @{ type = 'object' } }
+    )
+    Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ tools = $tools } }
+  } elseif ($m.method -eq 'tools/call') {
+    $name = $m.params.name
+    $a = $m.params.arguments
+    if ($name -eq 'probe') {
+      $tmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { (Get-Location).Path }
+      $out = ''
+      foreach ($p in @([string]$a.outside, [System.IO.Path]::Combine($tmpBase, 'ok'))) {
+        try {
+          [System.IO.File]::WriteAllText($p, 'x', $utf8)
+          $out += 'w'
+        } catch {
+          $out += '-'
+        }
+      }
+      Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ content = @(@{ type = 'text'; text = $out }) } }
+    } elseif ($name -eq 'audit') {
+      $readme = [System.IO.File]::ReadAllText([System.IO.Path]::Combine($PSScriptRoot, 'readme.txt'), $utf8)
+      $snapWriteBlocked = $false
+      try { [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'mutated.txt'), 'x', $utf8) } catch { $snapWriteBlocked = $true }
+      $ziyuanHidden = -not [System.IO.File]::Exists([System.IO.Path]::Combine($PSScriptRoot, '.ziyuan', 'mcp.json'))
+      $envHidden = -not [System.IO.File]::Exists([System.IO.Path]::Combine($PSScriptRoot, '.env'))
+      $hostSecretBlocked = $false
+      try { $null = [System.IO.File]::ReadAllText([string]$a.secret, $utf8) } catch { $hostSecretBlocked = $true }
+      $client = [System.Net.Sockets.TcpClient]::new()
+      $ar = $client.BeginConnect('127.0.0.1', [int]$a.port, $null, $null)
+      $connected = $false
+      if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {
+        try { $client.EndConnect($ar); $connected = $client.Connected } catch { $connected = $false }
+      }
+      $client.Close()
+      $tok = if ($env:CUSTOM_TOKEN) { $env:CUSTOM_TOKEN } else { '-' }
+      $llm = if ($env:ZIYUAN_LLM_API_KEY) { $env:ZIYUAN_LLM_API_KEY } else { '-' }
+      $summary = "$readme|snapRo=$snapWriteBlocked|ziyuanHidden=$ziyuanHidden|envHidden=$envHidden|secretBlocked=$hostSecretBlocked|net=$connected|tok=$tok|llm=$llm"
+      Send-Json @{ jsonrpc = '2.0'; id = $m.id; result = @{ content = @(@{ type = 'text'; text = $summary }) } }
+    }
+  }
+}
+"#;
+
     #[test]
     fn servers_in_haoshe_write_only_their_scratch_dir() {
-        let Some(root) = project("haoshe") else {
-            return;
-        };
-        let config = json!({ "servers": {
-            "cell": { "command": "python3", "args": ["-I", "fake.py"], "haoshe": { "network": false } },
-            "free": { "command": "python3", "args": ["-I", "fake.py"] },
-        }});
-        std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
-        let outside = root.join("escaped");
-        let args = json!({ "outside": outside }).to_string();
-        let confined = crate::haoshe::confine("true", &[], &crate::haoshe::Rules::default());
-        if confined.is_err() {
-            // 本机没有号舍：名册要求入号舍的服务拒绝启动，而不是照常运行。
-            let error = sealed_tools(&root, &grants(&["cell"])).err().unwrap();
-            assert!(error.to_string().contains("号舍不可用"), "{error}");
-            assert!(error.to_string().contains("外藩 cell"), "{error}");
-        } else {
+        #[cfg(not(windows))]
+        {
+            let Some(root) = project("haoshe") else {
+                return;
+            };
+            let config = json!({ "servers": {
+                "cell": { "command": "python3", "args": ["-I", "fake.py"], "haoshe": { "network": false } },
+                "free": { "command": "python3", "args": ["-I", "fake.py"] },
+            }});
+            std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
+            let outside = root.join("escaped");
+            let args = json!({ "outside": outside }).to_string();
+            let confined = crate::haoshe::confine("true", &[], &crate::haoshe::Rules::default());
+            if confined.is_err() {
+                // 本机没有号舍：名册要求入号舍的服务拒绝启动，而不是照常运行。
+                let error = sealed_tools(&root, &grants(&["cell"])).err().unwrap();
+                assert!(error.to_string().contains("号舍不可用"), "{error}");
+                assert!(error.to_string().contains("外藩 cell"), "{error}");
+            } else {
+                let tools = sealed_tools(&root, &grants(&["cell/probe"])).unwrap();
+                // 项目里写不进去，自己的临时目录写得了。
+                assert_eq!(tools[0].execute(&args).unwrap(), "-w");
+                assert!(!outside.exists());
+                drop(tools);
+            }
+            // 对照：不入号舍的服务两处都写得了，可见探测本身有效。
+            let tools = sealed_tools(&root, &grants(&["free/probe"])).unwrap();
+            assert_eq!(tools[0].execute(&args).unwrap(), "ww");
+            drop(tools);
+            std::fs::write(
+                root.join(CONFIG),
+                r#"{"servers":{"x":{"command":"a","haoshe":1}}}"#,
+            )
+            .unwrap();
+            assert!(
+                load_config(&root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("haoshe")
+            );
+            cleanup(root);
+        }
+        #[cfg(windows)]
+        {
+            let root =
+                std::env::temp_dir().join(format!("ziyuan-mcp-haoshe-win-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join(".ziyuan")).unwrap();
+            std::fs::write(root.join("fake.ps1"), FAKE_PS1).unwrap();
+            let root = root.canonicalize().unwrap();
+            let ps_args = [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "fake.ps1",
+            ];
+            let config = json!({ "servers": {
+                "cell": { "command": "powershell.exe", "args": ps_args, "haoshe": { "network": false } },
+                "free": { "command": "powershell.exe", "args": ps_args },
+            }});
+            std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
+            let outside = root.join("escaped");
+            let outside_str = outside
+                .to_str()
+                .and_then(|s| s.strip_prefix(r"\\?\"))
+                .unwrap_or_else(|| outside.to_str().unwrap());
+            let args = json!({ "outside": outside_str }).to_string();
             let tools = sealed_tools(&root, &grants(&["cell/probe"])).unwrap();
-            // 项目里写不进去，自己的临时目录写得了。
             assert_eq!(tools[0].execute(&args).unwrap(), "-w");
             assert!(!outside.exists());
             drop(tools);
+
+            // 对照：不入号舍的服务两处都写得了，可见探测本身有效。
+            let tools = sealed_tools(&root, &grants(&["free/probe"])).unwrap();
+            assert_eq!(tools[0].execute(&args).unwrap(), "ww");
+            drop(tools);
+
+            std::fs::write(
+                root.join(CONFIG),
+                r#"{"servers":{"x":{"command":"a","haoshe":1}}}"#,
+            )
+            .unwrap();
+            assert!(
+                load_config(&root)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("haoshe")
+            );
+            cleanup(root);
         }
-        // 对照：不入号舍的服务两处都写得了，可见探测本身有效。
-        let tools = sealed_tools(&root, &grants(&["free/probe"])).unwrap();
-        assert_eq!(tools[0].execute(&args).unwrap(), "ww");
-        drop(tools);
-        std::fs::write(
-            root.join(CONFIG),
-            r#"{"servers":{"x":{"command":"a","haoshe":1}}}"#,
-        )
-        .unwrap();
-        assert!(
-            load_config(&root)
-                .unwrap_err()
-                .to_string()
-                .contains("haoshe")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_w3_stdio_mcp_isolates_fs_network_and_rejects_unsupported_policies() {
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let base = std::env::temp_dir().join(format!("ziyuan-mcp-w3-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("project");
+        let host_secret_dir = base.join("host_secret");
+        std::fs::create_dir_all(root.join(".ziyuan")).unwrap();
+        std::fs::create_dir_all(&host_secret_dir).unwrap();
+        std::fs::write(root.join("readme.txt"), "PROJECT_SNAPSHOT_OK").unwrap();
+        std::fs::write(root.join(".env"), "TOP_SECRET_ENV=1").unwrap();
+        std::fs::write(root.join("fake.ps1"), FAKE_PS1).unwrap();
+        let host_secret = host_secret_dir.join("secret.txt");
+        std::fs::write(&host_secret, "HOST_OUTSIDE_SECRET").unwrap();
+
+        let strip_prefix = |p: &Path| -> String {
+            let c = p.canonicalize().unwrap();
+            c.to_str()
+                .and_then(|s| s.strip_prefix(r"\\?\"))
+                .unwrap_or_else(|| c.to_str().unwrap())
+                .to_owned()
+        };
+        let secret_str = strip_prefix(&host_secret);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop_bg = Arc::clone(&stop);
+        let hits_bg = Arc::clone(&hits);
+        let accept_thread = std::thread::spawn(move || {
+            while !stop_bg.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok(_) => {
+                        hits_bg.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let host_conn = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).unwrap();
+        drop(host_conn);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(hits.swap(0, Ordering::SeqCst) >= 1);
+
+        let ps_args = [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "fake.ps1",
+        ];
+        let config = json!({ "servers": {
+            "offline": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "env": { "CUSTOM_TOKEN": "w3-ok" },
+                "haoshe": { "network": false }
+            },
+            "open_net": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": true
+            },
+            "allowlist_net": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": { "network": ["example.com"] }
+            },
+            "host_write": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": { "network": false, "write": ["out"] }
+            }
+        }});
+        std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
+
+        // 1. Offline W3 stdio MCP server succeeds and enforces strict FS + secret + network isolation.
+        let tools = sealed_tools(&root, &grants(&["offline/audit"])).unwrap();
+        let reply = tools[0]
+            .execute(&json!({ "secret": secret_str, "port": addr.port() }).to_string())
+            .unwrap();
+        assert_eq!(
+            reply,
+            "PROJECT_SNAPSHOT_OK|snapRo=True|ziyuanHidden=True|envHidden=True|secretBlocked=True|net=False|tok=w3-ok|llm=-"
         );
-        cleanup(root);
+        drop(tools);
+
+        // 2. Unsupported policies fail closed with SandboxUnavailable.
+        for server in ["open_net", "allowlist_net", "host_write"] {
+            let err = sealed_tools(&root, &grants(&[server])).err().unwrap();
+            let unavailable = err
+                .downcast_ref::<crate::haoshe::SandboxUnavailable>()
+                .unwrap_or_else(|| panic!("{server} expected SandboxUnavailable, got: {err}"));
+            assert_eq!(unavailable.platform, "windows");
+            assert_eq!(unavailable.operation, format!("外藩 {server}"));
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        accept_thread.join().unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(!root.join("mutated.txt").exists());
+        cleanup(base);
     }
 
     #[test]

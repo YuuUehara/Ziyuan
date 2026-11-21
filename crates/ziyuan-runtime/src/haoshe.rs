@@ -3,7 +3,7 @@
 //! 取贡院号舍之意：考生锁入单间，与外界隔绝。测试命令可能运行模型写入的代码，入号舍后
 //! 不能联网，只能写测试副本所在的临时目录，读不到家目录下常见的凭据（`.ssh`、`.aws` 等）
 //! 与项目的 `.ziyuan`。Linux 用 bubblewrap（`bwrap`），macOS 用系统自带的 Seatbelt
-//! （`sandbox-exec`）；Windows `run_tests` 用原生 AppContainer＋Job Object（`ziyuan-sandbox-windows`，默认全断网，见 `docs/adr/0001-windows-sandbox.md`）。
+//! （`sandbox-exec`）；Windows `run_tests`（W2）与断网 stdio 外藩（W3）用原生 AppContainer＋Job Object（`ziyuan-sandbox-windows`，默认全断网，见 `docs/adr/0001-windows-sandbox.md`）。
 //!
 //! 由 `ZIYUAN_SANDBOX` 决定：`auto`（默认）与 `require` 都是有则用、无则拒绝运行
 //! （[`SandboxUnavailable`]），绝不悄悄退化为未入号舍执行；`off` 为皇帝确认风险后不入号舍，
@@ -390,24 +390,26 @@ pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
     })
 }
 
+/// 这些系统与用户目录变量由 `ziyuan-sandbox-windows` 统一注入为 `SystemRoot` 派生值与任务私有路径，
+/// 禁止沿用宿主值，以免覆盖容器私有环境或触发保留变量拒绝。
+#[cfg(windows)]
+const WINDOWS_RESERVED_ENV: &[&str] = &[
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "SYSTEMDRIVE",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOME",
+    "APPDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+];
+
 #[cfg(windows)]
 fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
-    // 这些系统与用户目录变量由 ziyuan-sandbox-windows 统一注入为 SystemRoot 派生值与任务私有路径，
-    // 禁止沿用宿主值，以免覆盖容器私有环境或触发保留变量拒绝。
-    const WINDOWS_RESERVED_ENV: &[&str] = &[
-        "SYSTEMROOT",
-        "WINDIR",
-        "COMSPEC",
-        "SYSTEMDRIVE",
-        "LOCALAPPDATA",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
-        "HOME",
-        "APPDATA",
-        "HOMEDRIVE",
-        "HOMEPATH",
-    ];
     if spec.network != Network::Off {
         return Err(SandboxUnavailable::new(
             "run_tests",
@@ -502,6 +504,271 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
         tail_truncated: result.total_output_bytes > spec.max_output,
         failure_scan,
     })
+}
+
+/// Windows 原生号舍 W3（长连接断网 stdio 外藩）启动规格。
+#[cfg(windows)]
+pub struct StdioRunSpec<'a> {
+    /// 操作名称，供失败关闭错误消息使用（如 `外藩 docs`）。
+    pub operation: &'a str,
+    pub program: &'a str,
+    pub args: &'a [String],
+    /// 宿主项目根目录：只复制进任务私有只读快照（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与构建产物），绝不修改宿主 ACL。
+    pub root: &'a Path,
+    pub network: &'a Network,
+    /// 名册中请求的额外可写路径（W3 首批保持失败关闭）。
+    pub extra_write: &'a [String],
+    /// 已合并白名单与名册展开值的环境变量。
+    pub env: &'a [(String, String)],
+}
+
+/// Windows 原生号舍 W3 守护的双向 stdio 子进程句柄；停服或 `Drop` 时先排空整棵 Job 进程树，再清理任务私有目录。
+#[cfg(windows)]
+pub struct WindowsStdioChild {
+    sandbox: ziyuan_sandbox_windows::SandboxedStdio,
+    base_dir: PathBuf,
+}
+
+#[cfg(windows)]
+impl WindowsStdioChild {
+    pub fn take_stdin(&mut self) -> Option<fs::File> {
+        self.sandbox.take_stdin()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<fs::File> {
+        self.sandbox.take_stdout()
+    }
+
+    pub fn shutdown(&mut self) {
+        let _ = self.sandbox.shutdown();
+        let _ = fs::remove_dir_all(&self.base_dir);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsStdioChild {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn normalize_windows_long_path(path: &Path) -> io::Result<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    if let Some(raw) = canonical.to_str()
+        && let Some(stripped) = raw.strip_prefix(r"\\?\")
+    {
+        let bytes = stripped.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn resolve_windows_program(
+    operation: &str,
+    program: &str,
+    snapshot_dir: &Path,
+) -> Result<PathBuf, BoxError> {
+    let trimmed = program.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{operation} 启动失败：command 不能为空").into());
+    }
+    let raw = Path::new(trimmed);
+    let check_candidate = |candidate: PathBuf| -> Option<Result<PathBuf, String>> {
+        if !candidate.exists() {
+            return None;
+        }
+        if is_windows_reparse_point(&candidate) {
+            return Some(Err(format!(
+                "可执行文件是重解析点／应用别名（{}），Windows AppContainer 拒绝直接启动",
+                candidate.display()
+            )));
+        }
+        if candidate.is_file() {
+            Some(Ok(candidate))
+        } else {
+            None
+        }
+    };
+
+    if raw.is_absolute() {
+        let mut attempts = vec![raw.to_path_buf()];
+        if raw.extension().is_none() {
+            attempts.push(raw.with_extension("exe"));
+        }
+        let mut reparse_err = None;
+        for candidate in attempts {
+            match check_candidate(candidate) {
+                Some(Ok(found)) => return Ok(found),
+                Some(Err(reason)) => reparse_err = Some(reason),
+                None => {}
+            }
+        }
+        if let Some(reason) = reparse_err {
+            return Err(SandboxUnavailable::new(operation, reason).into());
+        }
+        return Err(format!("{operation} 启动失败（{program}）：找不到可执行文件").into());
+    }
+
+    if trimmed.contains(['\\', '/']) {
+        let joined = snapshot_dir.join(raw);
+        let mut attempts = vec![joined.clone()];
+        if joined.extension().is_none() {
+            attempts.push(joined.with_extension("exe"));
+        }
+        for candidate in attempts {
+            if let Some(res) = check_candidate(candidate) {
+                let found = res.map_err(|reason| SandboxUnavailable::new(operation, reason))?;
+                let norm_snap = normalize_windows_long_path(snapshot_dir)?;
+                let norm_found = normalize_windows_long_path(&found)?;
+                if !norm_found.starts_with(&norm_snap) {
+                    return Err(SandboxUnavailable::new(
+                        operation,
+                        format!("相对路径 {program} 越出项目快照目录"),
+                    )
+                    .into());
+                }
+                return Ok(norm_found);
+            }
+        }
+        return Err(
+            format!("{operation} 启动失败（{program}）：项目快照中找不到该可执行文件").into(),
+        );
+    }
+
+    let has_ext = raw.extension().is_some();
+    let mut names = Vec::new();
+    if has_ext {
+        names.push(trimmed.to_owned());
+    } else {
+        names.push(format!("{trimmed}.exe"));
+        names.push(format!("{trimmed}.com"));
+        names.push(trimmed.to_owned());
+    }
+    let mut reparse_err = None;
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for name in &names {
+                let candidate = dir.join(name);
+                match check_candidate(candidate) {
+                    Some(Ok(found)) => return Ok(found),
+                    Some(Err(reason)) if reparse_err.is_none() => {
+                        reparse_err = Some(reason);
+                    }
+                    Some(Err(_)) | None => {}
+                }
+            }
+        }
+    }
+    if let Some(reason) = reparse_err {
+        return Err(SandboxUnavailable::new(operation, reason).into());
+    }
+    Err(format!("{operation} 启动失败（{program}）：在 PATH 中找不到可执行文件").into())
+}
+
+/// 在 Windows 原生号舍 W3（零网络能力 AppContainer ＋ `KILL_ON_JOB_CLOSE` Job Object）中启动长连接 stdio 外藩。
+///
+/// 严格遵循 ADR-0001：
+/// - 仅支持全断网（`Network::Off`）且不把宿主目录准入可写（`extra_write` 为空），其余策略失败关闭；
+/// - 宿主项目根只复制到任务私有只读快照（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与构建产物），绝不改写宿主 ACL；
+/// - 仅任务私有 `scratch`（同步写入 `TMPDIR`）与容器私有 `TEMP`/`TMP`/`HOME` 可写。
+#[cfg(windows)]
+pub fn spawn_stdio_windows(spec: &StdioRunSpec<'_>) -> Result<WindowsStdioChild, BoxError> {
+    if *spec.network != Network::Off {
+        return Err(SandboxUnavailable::new(
+            spec.operation,
+            "Windows 原生号舍 W3 首批仅支持全断网（haoshe.network: false），暂不支持开放联网或按域名放行",
+        )
+        .into());
+    }
+    if !spec.extra_write.is_empty() {
+        return Err(SandboxUnavailable::new(
+            spec.operation,
+            "Windows 原生号舍 W3 首批不支持把宿主项目目录或家目录准入可写（haoshe.write），仅允许任务私有临时目录",
+        )
+        .into());
+    }
+    if let Err(reason) = windows_sandbox_available() {
+        return Err(SandboxUnavailable::new(spec.operation, reason.clone()).into());
+    }
+
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let base_dir = std::env::temp_dir().join(format!(
+        "ziyuan-mcp-win-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let workspace_dir = base_dir.join("workspace");
+    let scratch_dir = base_dir.join("scratch");
+
+    let launch = (|| -> Result<WindowsStdioChild, BoxError> {
+        fs::create_dir_all(&scratch_dir)?;
+        crate::tools::copy_project_tree(spec.root, &workspace_dir)?;
+        let scratch_long = normalize_windows_long_path(&scratch_dir)?;
+        let program = resolve_windows_program(spec.operation, spec.program, &workspace_dir)?;
+
+        let mut env: Vec<(String, String)> = spec
+            .env
+            .iter()
+            .filter(|(k, _)| {
+                let upper = k.to_ascii_uppercase();
+                !WINDOWS_RESERVED_ENV.contains(&upper.as_str()) && upper != "TMPDIR"
+            })
+            .cloned()
+            .collect();
+        env.push(("TMPDIR".into(), scratch_long.to_string_lossy().into_owned()));
+
+        let sandbox = ziyuan_sandbox_windows::spawn_stdio_sandboxed(
+            &ziyuan_sandbox_windows::StdioSpec {
+                program,
+                args: spec.args.to_vec(),
+                cwd: Some(workspace_dir),
+                writable_dirs: vec![scratch_dir],
+                readonly_dirs: vec![base_dir.join("workspace")],
+                env,
+                mode: ziyuan_sandbox_windows::SandboxMode::AppContainerChildCapable,
+            },
+        )
+        .map_err(|err| -> BoxError {
+            if err.kind() == io::ErrorKind::InvalidInput {
+                err.into()
+            } else {
+                SandboxUnavailable::new(
+                    spec.operation,
+                    format!(
+                        "Windows 原生号舍 W3 启动失败：{err}（若程序安装在当前用户目录如 AppData，AppContainer 默认无读取权限，请改用系统目录安装的可执行文件）"
+                    ),
+                )
+                .into()
+            }
+        })?;
+
+        Ok(WindowsStdioChild {
+            sandbox,
+            base_dir: base_dir.clone(),
+        })
+    })();
+
+    if launch.is_err() {
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+    launch
 }
 
 fn read_lossy_from(file: &mut fs::File, start: u64) -> io::Result<String> {
