@@ -1894,3 +1894,59 @@ async fn revert_endpoint_allows_viewer_preview_forbids_viewer_post_and_reverts_c
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sse_forward_emits_live_tool_progress_events() {
+    let root = std::env::temp_dir().join(format!("ziyuan-web-tool-sse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let app = app_state(
+        Config {
+            root: root.clone(),
+            backend: Arc::new(ziyuan_runtime::DemoBackend),
+            limits: Limits {
+                max_concurrent: 2,
+                timeout: Duration::from_secs(10),
+            },
+            token: TOKEN.into(),
+            viewer_token: None,
+            github: None,
+        },
+        crate::subscriptions::Service::new(root.clone()),
+    );
+    let mut rx = app.0.events.subscribe();
+    crate::run::forward(
+        &app,
+        ziyuan_app::RunUpdate::ToolStarted {
+            task: TaskId(7),
+            step: 2,
+            tool: "run_tests",
+            summary: "unit",
+        },
+    );
+    crate::run::forward(
+        &app,
+        ziyuan_app::RunUpdate::ToolFinished {
+            task: TaskId(7),
+            step: 2,
+            tool: "run_tests",
+            ok: true,
+            duration_ms: 850,
+        },
+    );
+    let (ev1, data1) = rx.try_recv().unwrap();
+    assert_eq!(ev1, "tool");
+    let v1: Value = serde_json::from_str(&data1).unwrap();
+    assert_eq!(
+        v1,
+        json!({ "task": 7, "phase": "started", "step": 2, "tool": "run_tests", "summary": "unit" })
+    );
+    let (ev2, data2) = rx.try_recv().unwrap();
+    assert_eq!(ev2, "tool");
+    let v2: Value = serde_json::from_str(&data2).unwrap();
+    assert_eq!(
+        v2,
+        json!({ "task": 7, "phase": "finished", "step": 2, "tool": "run_tests", "ok": true, "duration_ms": 850 })
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

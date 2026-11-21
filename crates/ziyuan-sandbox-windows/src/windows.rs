@@ -804,7 +804,7 @@ fn admit_tree(root: &Path, app_sid: PSID, writable: bool) -> io::Result<()> {
         }
         for entry in fs::read_dir(&dir)? {
             visited += 1;
-            if visited > 2048 {
+            if visited > 8192 {
                 return Err(io::Error::other(
                     "admitted directory tree exceeds max entry count",
                 ));

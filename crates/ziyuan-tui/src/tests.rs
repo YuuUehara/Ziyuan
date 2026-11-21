@@ -1270,3 +1270,54 @@ fn tui_safe_revert_preview_confirm_idempotent_conflict_and_header_cache_rate() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn live_tool_progress_renders_in_detail_and_clears_on_finish() {
+    let (mut app, _rx, root) = temp_app("tool_progress");
+    let edict = app
+        .session
+        .issue(Department::Works, "查代码并跑测试".into(), Seal::default())
+        .unwrap();
+    app.selected_task = Some(edict.id);
+    app.run = Some(ziyuan_runtime::CancelToken::new());
+
+    app.handle(Message::ToolStarted {
+        task: edict.id,
+        step: 1,
+        tool: "read_file".into(),
+        summary: "src/lib.rs:1-30".into(),
+    });
+    let running = screen_at(&app, 140, 30);
+    assert!(running.contains("当前工具"), "{running}");
+    assert!(
+        running.contains("[第 1 步] read_file src/lib.rs:1-30"),
+        "{running}"
+    );
+    assert!(
+        running.contains("[第 1 步] > read_file src/lib.rs:1-30~"),
+        "{running}"
+    );
+
+    app.handle(Message::ToolFinished {
+        task: edict.id,
+        step: 1,
+        tool: "read_file".into(),
+        ok: true,
+        duration_ms: 1_250,
+    });
+    let after_tool = screen_at(&app, 140, 30);
+    assert!(!after_tool.contains("当前工具"), "{after_tool}");
+    assert!(
+        after_tool.contains("[第 1 步] ✓ read_file (1.2s)"),
+        "{after_tool}"
+    );
+
+    app.handle(Message::Finished {
+        task: edict.id,
+        outcome: ziyuan_runtime::Outcome::Completed("已查清".into()),
+    });
+    assert!(!app.live.contains_key(&edict.id));
+    assert!(!app.active_tool.contains_key(&edict.id));
+
+    let _ = std::fs::remove_dir_all(root);
+}

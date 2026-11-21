@@ -71,6 +71,42 @@ pub(crate) fn forward(app: &AppState, update: RunUpdate<'_>) {
         RunUpdate::Text { task, text } => {
             app.emit("text", json!({ "task": task.0, "text": text }));
         }
+        RunUpdate::ToolStarted {
+            task,
+            step,
+            tool,
+            summary,
+        } => {
+            app.emit(
+                "tool",
+                json!({
+                    "task": task.0,
+                    "phase": "started",
+                    "step": step,
+                    "tool": tool,
+                    "summary": summary,
+                }),
+            );
+        }
+        RunUpdate::ToolFinished {
+            task,
+            step,
+            tool,
+            ok,
+            duration_ms,
+        } => {
+            app.emit(
+                "tool",
+                json!({
+                    "task": task.0,
+                    "phase": "finished",
+                    "step": step,
+                    "tool": tool,
+                    "ok": ok,
+                    "duration_ms": duration_ms,
+                }),
+            );
+        }
         RunUpdate::Finished(report) => {
             app.emit("finished", report_json(report));
             app.emit("changed", json!({}));

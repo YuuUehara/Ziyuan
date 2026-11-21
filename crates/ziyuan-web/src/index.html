@@ -1294,6 +1294,7 @@ const fmt = (n) => Number(n).toLocaleString("zh-CN");
 
 let state = null;
 const streams = {};   // 诏令 ID → 执行中流式文本
+const activeTools = {}; // 诏令 ID → 当前正在执行的工具描述
 let palaceLive = null;  // 殿试进行中已推送的答卷
 const debating = {};  // 诏令 ID → 廷议进行中已推送的发言
 // 改动的视图（统一/左右）与渲染（内置/git-delta），记在本机。
@@ -1506,8 +1507,11 @@ function taskHtml(t) {
     t.usage.input + t.usage.output ? `用量 ${fmt(t.usage.input)} / ${fmt(t.usage.output)}${t.usage.cache_read ? `（缓存命中 ${fmt(t.usage.cache_read)}${t.usage.input ? ` [${Math.round((Math.min(t.usage.cache_read, t.usage.input) / t.usage.input) * 100)}%]` : ""}）` : ""}${t.model ? ` · ${esc(t.model)}` : ""}${cost(t.cost)}` : "",
   ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
   let body = "";
-  if (streams[t.id] !== undefined && open) {
-    body = `<div class="reply stream" id="stream-${t.id}">${esc(streams[t.id])}</div>`;
+  if ((streams[t.id] !== undefined || activeTools[t.id]) && open) {
+    const activeBadge = activeTools[t.id]
+      ? `<div class="hint" id="tool-live-${t.id}">当前工具：${esc(activeTools[t.id])}</div>`
+      : `<div class="hint" id="tool-live-${t.id}" hidden></div>`;
+    body = `${activeBadge}<div class="reply stream" id="stream-${t.id}">${esc(streams[t.id] || "")}</div>`;
   } else if (t.status === "completed") {
     body = `<div class="reply">${esc(t.detail)}</div>`;
   } else if (t.status === "failed") {
@@ -4924,6 +4928,18 @@ function connect() {
   const scheduleRefresh = () => { clearTimeout(pending); pending = setTimeout(refresh, 120); };
   source.addEventListener("changed", scheduleRefresh);
   source.addEventListener("run", scheduleRefresh);
+  const fmtDuration = (ms) => {
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    const mins = Math.floor(ms / 60000);
+    const secs = ((ms % 60000) / 1000).toFixed(1);
+    return `${mins}m${secs}s`;
+  };
+  const appendLiveLine = (task, line) => {
+    const prev = streams[task] || "";
+    const sep = prev && !prev.endsWith("\n") ? "\n" : "";
+    streams[task] = prev + sep + line + "\n";
+  };
   source.addEventListener("text", (event) => {
     const { task, text } = JSON.parse(event.data);
     streams[task] = (streams[task] || "") + text;
@@ -4931,9 +4947,30 @@ function connect() {
     // 只有正看着的诏令需要整页刷新来显出流式文本；其余的状态变化另有 changed 推送。
     if (el) { el.textContent = streams[task]; el.scrollTop = el.scrollHeight; } else if (String(task) === String(selected)) scheduleRefresh();
   });
+  source.addEventListener("tool", (event) => {
+    const d = JSON.parse(event.data);
+    const task = d.task;
+    if (d.phase === "started") {
+      const label = d.summary ? `[第 ${d.step} 步] ${d.tool} ${d.summary}` : `[第 ${d.step} 步] ${d.tool}`;
+      activeTools[task] = label;
+      appendLiveLine(task, `[第 ${d.step} 步] ▸ ${d.tool}${d.summary ? " " + d.summary : ""}…`);
+    } else if (d.phase === "finished") {
+      delete activeTools[task];
+      appendLiveLine(task, `[第 ${d.step} 步] ${d.ok ? "✓" : "✗"} ${d.tool} (${fmtDuration(d.duration_ms || 0)})`);
+    }
+    const el = $("stream-" + task);
+    const badge = $("tool-live-" + task);
+    if (badge) {
+      if (activeTools[task]) { badge.textContent = "当前工具：" + activeTools[task]; badge.hidden = false; }
+      else { badge.textContent = ""; badge.hidden = true; }
+    }
+    if (el) { el.textContent = streams[task] || ""; el.scrollTop = el.scrollHeight; }
+    else if (String(task) === String(selected)) scheduleRefresh();
+  });
   source.addEventListener("finished", (event) => {
     const { task } = JSON.parse(event.data);
     delete streams[task];
+    delete activeTools[task];
     scheduleRefresh();
   });
   source.addEventListener("speech", (event) => {

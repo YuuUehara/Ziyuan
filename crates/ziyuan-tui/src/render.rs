@@ -221,10 +221,15 @@ impl App {
             spans.push(Span::styled(format!("  度支余 {left}/{limit}"), style));
         }
         if self.run.is_some() {
-            spans.push(Span::styled(
-                "  ● 执行中",
-                Style::new().fg(Color::Yellow).bold(),
-            ));
+            let active = self
+                .selected_task
+                .and_then(|id| self.active_tool.get(&id))
+                .or_else(|| self.active_tool.values().next());
+            let badge = match active {
+                Some(tool) => format!("  ● 执行中 · {tool}"),
+                None => "  ● 执行中".to_owned(),
+            };
+            spans.push(Span::styled(badge, Style::new().fg(Color::Yellow).bold()));
         }
         frame.render_widget(Line::from(spans), area);
     }
@@ -705,7 +710,14 @@ impl App {
                 lines.push(Line::from(format!("失败：{reason}")).fg(Color::Red));
             }
             TaskStatus::Pending | TaskStatus::Assigned(_) => {
+                let active = self.active_tool.get(&task.edict.id);
                 if let Some(live) = self.live.get(&task.edict.id) {
+                    if let Some(tool) = active {
+                        lines.push(Line::from(vec![
+                            Span::styled("当前工具　", Style::new().fg(Color::Yellow).bold()),
+                            Span::styled(tool.clone(), Style::new().fg(Color::Yellow)),
+                        ]));
+                    }
                     lines.push(Line::from("实时输出").fg(GOLD).bold());
                     lines.extend(live.lines().map(|l| Line::from(l.to_owned())));
                     following = true;

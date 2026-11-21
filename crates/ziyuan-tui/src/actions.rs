@@ -192,6 +192,30 @@ impl App {
                         let _ = sender.send(match update {
                             RunUpdate::Assigned(task) => Message::Assigned(task),
                             RunUpdate::Text { task, text } => Message::Text(task, text.to_owned()),
+                            RunUpdate::ToolStarted {
+                                task,
+                                step,
+                                tool,
+                                summary,
+                            } => Message::ToolStarted {
+                                task,
+                                step,
+                                tool: tool.to_owned(),
+                                summary: summary.to_owned(),
+                            },
+                            RunUpdate::ToolFinished {
+                                task,
+                                step,
+                                tool,
+                                ok,
+                                duration_ms,
+                            } => Message::ToolFinished {
+                                task,
+                                step,
+                                tool: tool.to_owned(),
+                                ok,
+                                duration_ms,
+                            },
                             RunUpdate::Finished(report) => Message::Finished {
                                 task: report.edict.id,
                                 outcome: report.outcome.clone(),

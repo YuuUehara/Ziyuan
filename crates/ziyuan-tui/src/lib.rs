@@ -105,6 +105,8 @@ pub struct App {
     run: Option<CancelToken>,
     /// 执行中诏令的流式输出（不入事件簿）。
     live: HashMap<TaskId, String>,
+    /// 执行中诏令当前正在运行的工具（不入事件簿）。
+    active_tool: HashMap<TaskId, String>,
     /// 廷议进行中已收到的发言（议毕后以事件簿为准）。
     debating: HashMap<TaskId, Vec<String>>,
     /// 改动怎样显示（z 轮换）。

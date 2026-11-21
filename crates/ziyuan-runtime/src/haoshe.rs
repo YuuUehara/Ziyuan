@@ -269,6 +269,9 @@ pub struct ShellRunSpec<'a> {
     pub sandbox_base: &'a Path,
     /// 额外可写目录（如 `CARGO_TARGET_DIR`；Windows 原生号舍首批按 ADR-0001 显式拒绝）。
     pub extra_writable: &'a [PathBuf],
+    /// 显式准入的只读工具链目录（由 `ZIYUAN_SANDBOX_TOOLCHAIN` 传入）。
+    /// Windows 原生号舍通过任务私有只读快照复制准入并置入容器 `PATH` 头部，绝不改写宿主目录 ACL。
+    pub readonly_toolchains: &'a [PathBuf],
     /// 号舍内不可读的目录（如项目 `.ziyuan`）。
     pub hidden: &'a [PathBuf],
     /// 允许继承的环境变量白名单。
@@ -390,6 +393,19 @@ pub fn run_shell(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
     })
 }
 
+/// 显式只读工具链准入环境变量名（Windows 用 `;` 分隔，Unix 用 `:` 分隔）。
+pub const TOOLCHAIN_ENV: &str = "ZIYUAN_SANDBOX_TOOLCHAIN";
+
+/// 从 `ZIYUAN_SANDBOX_TOOLCHAIN` 读取用户显式声明的只读工具链目录列表（跳过空项）。
+pub fn toolchain_dirs_from_env() -> Vec<PathBuf> {
+    let Some(raw) = std::env::var_os(TOOLCHAIN_ENV) else {
+        return Vec::new();
+    };
+    std::env::split_paths(&raw)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
+}
+
 /// 这些系统与用户目录变量由 `ziyuan-sandbox-windows` 统一注入为 `SystemRoot` 派生值与任务私有路径，
 /// 禁止沿用宿主值，以免覆盖容器私有环境或触发保留变量拒绝。
 #[cfg(windows)]
@@ -407,6 +423,310 @@ const WINDOWS_RESERVED_ENV: &[&str] = &[
     "HOMEDRIVE",
     "HOMEPATH",
 ];
+
+#[cfg(windows)]
+const MAX_TOOLCHAIN_DIRS: usize = 8;
+#[cfg(windows)]
+const MAX_TOOLCHAIN_FILES: usize = 4096;
+#[cfg(windows)]
+const MAX_TOOLCHAIN_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(windows)]
+const MAX_TOOLCHAIN_DEPTH: usize = 16;
+
+#[cfg(windows)]
+const FORBIDDEN_TOOLCHAIN_COMPONENTS: &[&str] = &[
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".ziyuan", ".git", ".jj", ".azure", ".gcloud",
+    ".config", ".netrc",
+];
+
+#[cfg(windows)]
+struct TempDirGuard(PathBuf);
+
+#[cfg(windows)]
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(windows)]
+fn windows_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
+#[cfg(windows)]
+fn windows_paths_overlap(a: &Path, b: &Path) -> bool {
+    let a = windows_path_key(a);
+    let b = windows_path_key(b);
+    a == b
+        || a.strip_prefix(&b)
+            .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
+        || b.strip_prefix(&a)
+            .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
+}
+
+#[cfg(windows)]
+fn is_forbidden_toolchain_name(name: &std::ffi::OsStr) -> bool {
+    let lower = name.to_string_lossy().to_ascii_lowercase();
+    lower.starts_with(".env") || FORBIDDEN_TOOLCHAIN_COMPONENTS.contains(&lower.as_str())
+}
+
+#[cfg(windows)]
+fn validate_windows_toolchain_dir(
+    raw: &Path,
+    work_dir: &Path,
+    sandbox_base: &Path,
+    hidden: &[PathBuf],
+) -> Result<PathBuf, BoxError> {
+    let reject = |reason: String| -> BoxError {
+        SandboxUnavailable::new(
+            "run_tests",
+            format!("只读工具链准入被拒（{}）：{reason}", raw.display()),
+        )
+        .into()
+    };
+    if !raw.is_absolute() {
+        return Err(reject("必须是绝对路径".into()));
+    }
+    let meta =
+        fs::symlink_metadata(raw).map_err(|e| reject(format!("目录不存在或无法访问：{e}")))?;
+    if is_windows_reparse_point(raw) {
+        return Err(reject("拒绝准入重解析点／符号链接／目录联接".into()));
+    }
+    if !meta.is_dir() {
+        return Err(reject("目标不是目录".into()));
+    }
+    let norm =
+        normalize_windows_long_path(raw).map_err(|e| reject(format!("无法规范化目录路径：{e}")))?;
+    if norm.parent().is_none() {
+        return Err(reject("禁止准入磁盘根目录".into()));
+    }
+    for comp in norm.components() {
+        if let std::path::Component::Normal(part) = comp
+            && is_forbidden_toolchain_name(part)
+        {
+            return Err(reject(format!(
+                "路径包含敏感或受控目录段 `{}`",
+                part.to_string_lossy()
+            )));
+        }
+    }
+    for var in [
+        "USERPROFILE",
+        "HOME",
+        "WINDIR",
+        "SYSTEMROOT",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+    ] {
+        if let Some(val) = std::env::var_os(var)
+            && !val.is_empty()
+            && let Ok(sensitive) = normalize_windows_long_path(Path::new(&val))
+        {
+            let norm_key = windows_path_key(&norm);
+            let sens_key = windows_path_key(&sensitive);
+            let norm_contains_sens = norm_key == sens_key
+                || sens_key
+                    .strip_prefix(&norm_key)
+                    .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'));
+            if norm_contains_sens {
+                return Err(reject(format!(
+                    "禁止准入系统或用户根目录（与 %{var}% 重叠），请改为指定具体工具链子目录"
+                )));
+            }
+        }
+    }
+    let mut blocked_roots = Vec::with_capacity(hidden.len() + 2);
+    if let Ok(p) = normalize_windows_long_path(work_dir) {
+        blocked_roots.push(p);
+    }
+    if let Ok(p) = normalize_windows_long_path(sandbox_base) {
+        blocked_roots.push(p);
+    }
+    for h in hidden {
+        if let Ok(p) = normalize_windows_long_path(h) {
+            blocked_roots.push(p);
+        } else {
+            blocked_roots.push(h.clone());
+        }
+    }
+    if blocked_roots
+        .iter()
+        .any(|b| windows_paths_overlap(&norm, b))
+    {
+        return Err(reject("不能与测试副本、沙箱工作区或隐藏目录重叠".into()));
+    }
+    Ok(norm)
+}
+
+#[cfg(windows)]
+fn copy_toolchain_bounded(
+    src: &Path,
+    dst: &Path,
+    depth: usize,
+    files: &mut usize,
+    bytes: &mut u64,
+) -> Result<(), BoxError> {
+    if depth > MAX_TOOLCHAIN_DEPTH {
+        return Err(SandboxUnavailable::new(
+            "run_tests",
+            format!(
+                "只读工具链目录嵌套超过上限（{MAX_TOOLCHAIN_DEPTH} 层）：{}",
+                src.display()
+            ),
+        )
+        .into());
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if is_windows_reparse_point(&path) {
+            return Err(SandboxUnavailable::new(
+                "run_tests",
+                format!(
+                    "只读工具链内包含重解析点／符号链接，失败关闭：{}",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+        if is_forbidden_toolchain_name(&name) {
+            return Err(SandboxUnavailable::new(
+                "run_tests",
+                format!(
+                    "只读工具链内包含敏感目录或文件 `{}`，失败关闭",
+                    name.to_string_lossy()
+                ),
+            )
+            .into());
+        }
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            copy_toolchain_bounded(&path, &dst.join(&name), depth + 1, files, bytes)?;
+        } else if meta.is_file() {
+            *files += 1;
+            if *files > MAX_TOOLCHAIN_FILES {
+                return Err(SandboxUnavailable::new(
+                    "run_tests",
+                    format!("只读工具链文件数超过上限（{MAX_TOOLCHAIN_FILES}）"),
+                )
+                .into());
+            }
+            *bytes = bytes.saturating_add(meta.len());
+            if *bytes > MAX_TOOLCHAIN_BYTES {
+                return Err(SandboxUnavailable::new(
+                    "run_tests",
+                    format!(
+                        "只读工具链总大小超过上限（{} MiB）",
+                        MAX_TOOLCHAIN_BYTES / (1024 * 1024)
+                    ),
+                )
+                .into());
+            }
+            fs::copy(&path, dst.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+struct StagedToolchains {
+    _guard: Option<TempDirGuard>,
+    readonly_dirs: Vec<PathBuf>,
+    path_entries: Vec<PathBuf>,
+}
+
+/// 将经校验的宿主工具链目录复制到独立的任务私有只读快照（位于 `sandbox_base` 之外，绝不修改宿主 ACL）。
+#[cfg(windows)]
+fn stage_windows_toolchains(spec: &ShellRunSpec<'_>) -> Result<StagedToolchains, BoxError> {
+    if spec.readonly_toolchains.is_empty() {
+        return Ok(StagedToolchains {
+            _guard: None,
+            readonly_dirs: Vec::new(),
+            path_entries: Vec::new(),
+        });
+    }
+    if spec.readonly_toolchains.len() > MAX_TOOLCHAIN_DIRS {
+        return Err(SandboxUnavailable::new(
+            "run_tests",
+            format!("只读工具链目录数超过上限（最多 {MAX_TOOLCHAIN_DIRS} 个）"),
+        )
+        .into());
+    }
+    let mut validated = Vec::with_capacity(spec.readonly_toolchains.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for raw in spec.readonly_toolchains {
+        let norm =
+            validate_windows_toolchain_dir(raw, spec.work_dir, spec.sandbox_base, spec.hidden)?;
+        if seen.insert(windows_path_key(&norm)) {
+            validated.push(norm);
+        }
+    }
+    static NEXT_TC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tc_root = std::env::temp_dir().join(format!(
+        "ziyuan-tc-{}-{}",
+        std::process::id(),
+        NEXT_TC.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&tc_root)?;
+    let guard = TempDirGuard(tc_root.clone());
+    let mut readonly_dirs = Vec::with_capacity(validated.len());
+    let mut path_entries = Vec::new();
+    let mut total_files = 0usize;
+    let mut total_bytes = 0u64;
+    for (idx, src) in validated.iter().enumerate() {
+        let dst = tc_root.join(format!("t{idx}"));
+        copy_toolchain_bounded(src, &dst, 0, &mut total_files, &mut total_bytes)?;
+        let dst_norm = normalize_windows_long_path(&dst)?;
+        let bin = dst_norm.join("bin");
+        if bin.is_dir() {
+            path_entries.push(bin);
+        }
+        path_entries.push(dst_norm.clone());
+        readonly_dirs.push(dst_norm);
+    }
+    Ok(StagedToolchains {
+        _guard: Some(guard),
+        readonly_dirs,
+        path_entries,
+    })
+}
+
+#[cfg(windows)]
+fn prepend_windows_path(env: &mut Vec<(String, String)>, prefixes: &[PathBuf]) {
+    if prefixes.is_empty() {
+        return;
+    }
+    let prefix_str = prefixes
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(";");
+    if let Some((_, existing)) = env.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("PATH")) {
+        if existing.is_empty() {
+            *existing = prefix_str;
+        } else {
+            *existing = format!("{prefix_str};{existing}");
+        }
+    } else {
+        let sys_default = std::env::var_os("SystemRoot")
+            .filter(|v| !v.is_empty())
+            .map(|root| {
+                let r = root.to_string_lossy();
+                format!("{r}\\System32;{r}")
+            });
+        let value = match sys_default {
+            Some(sys) => format!("{prefix_str};{sys}"),
+            None => prefix_str,
+        };
+        env.push(("PATH".into(), value));
+    }
+}
 
 #[cfg(windows)]
 fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
@@ -428,11 +748,14 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
         return Err(SandboxUnavailable::new("run_tests", reason.clone()).into());
     }
 
+    let staged = stage_windows_toolchains(spec)?;
+    let toolchain_count = staged.readonly_dirs.len();
+
     let mut writable_dirs = vec![spec.sandbox_base.to_path_buf()];
     if spec.work_dir != spec.sandbox_base && !spec.work_dir.starts_with(spec.sandbox_base) {
         writable_dirs.push(spec.work_dir.to_path_buf());
     }
-    let env: Vec<(String, String)> = spec
+    let mut env: Vec<(String, String)> = spec
         .env
         .iter()
         .filter(|(k, _)| {
@@ -441,13 +764,14 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
         })
         .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned()))
         .collect();
+    prepend_windows_path(&mut env, &staged.path_entries);
     let capture_limit = spec.max_output.max(spec.max_failure_scan);
     let result = ziyuan_sandbox_windows::run_shell_sandboxed(
         &ziyuan_sandbox_windows::ShellSpec {
             command: spec.command.to_owned(),
             cwd: spec.work_dir.to_path_buf(),
             writable_dirs,
-            readonly_dirs: Vec::new(),
+            readonly_dirs: staged.readonly_dirs,
             env,
             timeout: spec.timeout,
             max_output_bytes: Some(capture_limit),
@@ -490,6 +814,9 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
     };
     let mut haoshe_note =
         "号舍（Windows AppContainer＋Job）：不可联网，只可写测试副本与任务私有目录".to_owned();
+    if toolchain_count > 0 {
+        haoshe_note.push_str(&format!("；准入只读工具链 {toolchain_count} 处"));
+    }
     if !result.cleanup_warnings.is_empty() {
         haoshe_note.push_str(&format!(
             "；清理提示：{}",
@@ -1119,6 +1446,7 @@ mod tests {
             work_dir: &base,
             sandbox_base: &base,
             extra_writable: &[],
+            readonly_toolchains: &[],
             hidden: &[],
             env: &env,
             timeout: Duration::from_secs(10),
@@ -1155,6 +1483,7 @@ mod tests {
             work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
+            readonly_toolchains: &[],
             hidden: &[],
             env: &[],
             timeout: Duration::from_secs(5),
@@ -1181,6 +1510,7 @@ mod tests {
             work_dir: &work,
             sandbox_base: &base,
             extra_writable: &extra,
+            readonly_toolchains: &[],
             hidden: &[],
             env: &[],
             timeout: Duration::from_secs(5),
@@ -1216,6 +1546,7 @@ mod tests {
             work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
+            readonly_toolchains: &[],
             hidden: std::slice::from_ref(&host),
             env: &host_env,
             timeout: Duration::from_secs(15),
@@ -1251,6 +1582,7 @@ mod tests {
             work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
+            readonly_toolchains: &[],
             hidden: &[],
             env: &host_env,
             timeout: Duration::from_secs(10),
@@ -1274,6 +1606,7 @@ mod tests {
             work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
+            readonly_toolchains: &[],
             hidden: &[],
             env: &host_env,
             timeout: Duration::from_secs(15),
@@ -1312,6 +1645,7 @@ mod tests {
             work_dir: &base,
             sandbox_base: &base,
             extra_writable: &[],
+            readonly_toolchains: &[],
             hidden: &[],
             env: &[],
             timeout: Duration::from_secs(10),
@@ -1323,5 +1657,132 @@ mod tests {
         assert!(!out.passed, "{out:?}");
         assert!(out.verdict.contains("已取消"), "{out:?}");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_shell_windows_admits_readonly_toolchain_snapshot_and_rejects_sensitive_dirs() {
+        let root = std::env::temp_dir().join(format!("ziyuan-win-tc-{}", std::process::id()));
+        let base = root.join("sandbox");
+        let work = base.join("project");
+        let tc = root.join("portable-tc");
+        let tc_bin = tc.join("bin");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&tc_bin).unwrap();
+        fs::write(
+            tc_bin.join("mytool.cmd"),
+            "@echo off\r\necho PORTABLE_TOOL_OK_135\r\n(echo TAMPER>>\"%~dp0ro.txt\") 2>NUL\r\ntype \"%~dp0ro.txt\"\r\n",
+        )
+        .unwrap();
+        fs::write(tc_bin.join("ro.txt"), "ORIGINAL_RO").unwrap();
+
+        let host_env: Vec<(String, OsString)> = ["PATH", "SystemRoot"]
+            .iter()
+            .filter_map(|k| std::env::var_os(k).map(|v| ((*k).to_owned(), v)))
+            .collect();
+
+        // 1. Without explicit admission, mytool is not found / inaccessible.
+        let un_admitted = run_shell(&ShellRunSpec {
+            command: "mytool",
+            mode: Mode::Require,
+            network: Network::Off,
+            work_dir: &work,
+            sandbox_base: &base,
+            extra_writable: &[],
+            readonly_toolchains: &[],
+            hidden: &[],
+            env: &host_env,
+            timeout: Duration::from_secs(15),
+            max_output: 4096,
+            max_failure_scan: 4096,
+            cancel: None,
+        })
+        .unwrap();
+        assert!(
+            !un_admitted.passed,
+            "unadmitted tool must fail: {un_admitted:?}"
+        );
+
+        // 2. With explicit admission, mytool runs cleanly from private read-only snapshot,
+        //    cannot overwrite files in the snapshot, and leaves host dir untouched.
+        let admitted = run_shell(&ShellRunSpec {
+            command: "mytool",
+            mode: Mode::Require,
+            network: Network::Off,
+            work_dir: &work,
+            sandbox_base: &base,
+            extra_writable: &[],
+            readonly_toolchains: std::slice::from_ref(&tc),
+            hidden: &[],
+            env: &host_env,
+            timeout: Duration::from_secs(15),
+            max_output: 4096,
+            max_failure_scan: 4096,
+            cancel: None,
+        })
+        .unwrap();
+        assert!(admitted.passed, "{admitted:?}");
+        assert!(
+            admitted.tail.contains("PORTABLE_TOOL_OK_135"),
+            "{admitted:?}"
+        );
+        assert!(admitted.tail.contains("ORIGINAL_RO"), "{admitted:?}");
+        assert!(
+            !admitted.tail.contains("TAMPER"),
+            "read-only snapshot must reject write: {admitted:?}"
+        );
+        assert!(
+            admitted.haoshe_note.contains("准入只读工具链 1 处"),
+            "{admitted:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(tc_bin.join("ro.txt")).unwrap(),
+            "ORIGINAL_RO"
+        );
+
+        // 3. Fail-closed rejections: relative path, missing path, sensitive roots, secret components.
+        let mut bad_paths = vec![
+            PathBuf::from("relative/tc"),
+            root.join("does-not-exist"),
+            PathBuf::from(r"C:\"),
+        ];
+        if let Some(up) = std::env::var_os("USERPROFILE") {
+            bad_paths.push(PathBuf::from(up));
+        }
+        let ssh_dir = root.join(".ssh");
+        fs::create_dir_all(&ssh_dir).unwrap();
+        bad_paths.push(ssh_dir);
+
+        let nested_env_tc = root.join("bad-tc-env");
+        fs::create_dir_all(&nested_env_tc).unwrap();
+        fs::write(nested_env_tc.join(".env.local"), "SECRET=1").unwrap();
+        bad_paths.push(nested_env_tc);
+
+        for bad in &bad_paths {
+            let err = run_shell(&ShellRunSpec {
+                command: "echo hi",
+                mode: Mode::Require,
+                network: Network::Off,
+                work_dir: &work,
+                sandbox_base: &base,
+                extra_writable: &[],
+                readonly_toolchains: std::slice::from_ref(bad),
+                hidden: &[],
+                env: &host_env,
+                timeout: Duration::from_secs(5),
+                max_output: 1024,
+                max_failure_scan: 1024,
+                cancel: None,
+            })
+            .unwrap_err();
+            assert!(
+                err.downcast_ref::<SandboxUnavailable>().is_some(),
+                "expected SandboxUnavailable for {}: {err}",
+                bad.display()
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

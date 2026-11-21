@@ -102,6 +102,21 @@ pub struct Job {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Progress {
+    /// 工具即将开始执行（仅用于实时进度展示，不写入事件簿）。
+    ToolStarted {
+        task: TaskId,
+        step: usize,
+        tool: String,
+        summary: String,
+    },
+    /// 工具刚执行完毕（仅用于实时进度展示，不写入事件簿）。
+    ToolFinished {
+        task: TaskId,
+        step: usize,
+        tool: String,
+        ok: bool,
+        duration_ms: u64,
+    },
     ToolInvoked {
         task: TaskId,
         tool: String,
@@ -408,6 +423,25 @@ impl ExecutionHooks for TaskHooks {
             source: source.into(),
             threat,
             excerpt: excerpt.into(),
+        });
+    }
+
+    fn tool_started(&self, step: usize, tool: &str, summary: &str) {
+        let _ = self.progress.send(Progress::ToolStarted {
+            task: self.task,
+            step,
+            tool: tool.into(),
+            summary: summary.into(),
+        });
+    }
+
+    fn tool_finished(&self, step: usize, tool: &str, ok: bool, duration_ms: u64) {
+        let _ = self.progress.send(Progress::ToolFinished {
+            task: self.task,
+            step,
+            tool: tool.into(),
+            ok,
+            duration_ms,
         });
     }
 

@@ -153,6 +153,11 @@ pub trait ExecutionHooks {
     fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
         None
     }
+    /// 工具即将开始执行（仅用于实时进度展示，不写入事件簿）。
+    /// `step` 为当前模型回合序号（从 1 起），`summary` 为不含正文内容的简短参数摘要。
+    fn tool_started(&self, _step: usize, _tool: &str, _summary: &str) {}
+    /// 工具刚执行完毕（仅用于实时进度展示，不写入事件簿）。
+    fn tool_finished(&self, _step: usize, _tool: &str, _ok: bool, _duration_ms: u64) {}
     fn tool_invoked(&self, _tool: &str, _args_json: &str, _ok: bool) {}
     /// 模型生成的一段文本（流式）。只用于实时显示，不写入事件簿。
     fn text_delta(&self, _text: &str) {}

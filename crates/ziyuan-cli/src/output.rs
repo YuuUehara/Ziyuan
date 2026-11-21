@@ -203,11 +203,52 @@ impl<W: Write> StreamPrinter<W> {
         let _ = self.out.flush();
     }
 
+    pub(crate) fn tool_started(&mut self, task: TaskId, step: usize, tool: &str, summary: &str) {
+        self.break_line(None);
+        if summary.is_empty() {
+            let _ = writeln!(self.out, "#{}│ [第 {step} 步] ▸ {tool}…", task.0);
+        } else {
+            let _ = writeln!(self.out, "#{}│ [第 {step} 步] ▸ {tool} {summary}…", task.0);
+        }
+        let _ = self.out.flush();
+    }
+
+    pub(crate) fn tool_finished(
+        &mut self,
+        task: TaskId,
+        step: usize,
+        tool: &str,
+        ok: bool,
+        duration_ms: u64,
+    ) {
+        self.break_line(None);
+        let mark = if ok { "✓" } else { "✗" };
+        let dur = format_duration_ms(duration_ms);
+        let _ = writeln!(
+            self.out,
+            "#{}│ [第 {step} 步] {mark} {tool} ({dur})",
+            task.0
+        );
+        let _ = self.out.flush();
+    }
+
     /// `task` 已结束：在打印回奏前结束任何未完成的行。
     pub(crate) fn finish(&mut self, task: TaskId) {
         self.break_line(Some(task));
         self.interrupted.remove(&task);
         let _ = self.out.flush();
+    }
+}
+
+pub(crate) fn format_duration_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) as f64 / 1_000.0;
+        format!("{mins}m{secs:.1}s")
     }
 }
 
@@ -232,5 +273,22 @@ mod tests {
             String::from_utf8(p.out).unwrap(),
             "#1│ 甲一\n#1│ 甲\n#2│ 乙\n#1│ 甲三\n#1│ \n#2│ 乙二\n#2│ 尾\n"
         );
+    }
+
+    #[test]
+    fn stream_printer_formats_tool_progress_and_duration() {
+        let mut p = StreamPrinter::new(Vec::new());
+        let task = TaskId(3);
+        p.text(task, "先查看");
+        p.tool_started(task, 1, "read_file", "src/lib.rs:1-40");
+        p.tool_finished(task, 1, "read_file", true, 42);
+        p.tool_started(task, 2, "run_tests", "");
+        p.tool_finished(task, 2, "run_tests", false, 1_450);
+        p.finish(task);
+        assert_eq!(
+            String::from_utf8(p.out).unwrap(),
+            "#3│ 先查看\n#3│ [第 1 步] ▸ read_file src/lib.rs:1-40…\n#3│ [第 1 步] ✓ read_file (42ms)\n#3│ [第 2 步] ▸ run_tests…\n#3│ [第 2 步] ✗ run_tests (1.4s)\n"
+        );
+        assert_eq!(format_duration_ms(65_200), "1m5.2s");
     }
 }

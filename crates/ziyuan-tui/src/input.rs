@@ -35,6 +35,26 @@ pub(crate) fn apply_note(message: String, problems: &[Problem]) -> String {
     format!("{message}{}", cleanup_note(problems))
 }
 
+fn format_duration_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) as f64 / 1_000.0;
+        format!("{mins}m{secs:.1}s")
+    }
+}
+
+fn append_live_line(buf: &mut String, line: &str) {
+    if !buf.is_empty() && !buf.ends_with('\n') {
+        buf.push('\n');
+    }
+    buf.push_str(line);
+    buf.push('\n');
+}
+
 impl App {
     pub fn handle(&mut self, message: Message) {
         match message {
@@ -42,8 +62,41 @@ impl App {
             Message::Input(_) => {}
             Message::Assigned(_) => self.reload(),
             Message::Text(task, text) => self.live.entry(task).or_default().push_str(&text),
+            Message::ToolStarted {
+                task,
+                step,
+                tool,
+                summary,
+            } => {
+                let label = if summary.is_empty() {
+                    format!("[第 {step} 步] {tool}")
+                } else {
+                    format!("[第 {step} 步] {tool} {summary}")
+                };
+                let line = if summary.is_empty() {
+                    format!("[第 {step} 步] ▸ {tool}…")
+                } else {
+                    format!("[第 {step} 步] ▸ {tool} {summary}…")
+                };
+                append_live_line(self.live.entry(task).or_default(), &line);
+                self.active_tool.insert(task, label);
+            }
+            Message::ToolFinished {
+                task,
+                step,
+                tool,
+                ok,
+                duration_ms,
+            } => {
+                let mark = if ok { "✓" } else { "✗" };
+                let dur = format_duration_ms(duration_ms);
+                let line = format!("[第 {step} 步] {mark} {tool} ({dur})");
+                append_live_line(self.live.entry(task).or_default(), &line);
+                self.active_tool.remove(&task);
+            }
             Message::Finished { task, outcome } => {
                 self.live.remove(&task);
+                self.active_tool.remove(&task);
                 self.reload();
                 match outcome {
                     Outcome::Completed(_) => self.info(format!("诏令 #{} 已回奏", task.0)),
@@ -126,6 +179,7 @@ impl App {
             Message::RunDone(error) => {
                 self.run = None;
                 self.live.clear();
+                self.active_tool.clear();
                 self.reload();
                 match error {
                     Some(e) => self.error(format!("执行出错：{e}")),

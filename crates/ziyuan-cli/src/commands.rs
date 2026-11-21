@@ -1348,6 +1348,19 @@ pub(crate) fn run_tasks(
         let on_update = |update: RunUpdate<'_>| match update {
             RunUpdate::Assigned(_) => {}
             RunUpdate::Text { task, text } => stream.text(task, text),
+            RunUpdate::ToolStarted {
+                task,
+                step,
+                tool,
+                summary,
+            } => stream.tool_started(task, step, tool, summary),
+            RunUpdate::ToolFinished {
+                task,
+                step,
+                tool,
+                ok,
+                duration_ms,
+            } => stream.tool_finished(task, step, tool, ok, duration_ms),
             RunUpdate::Finished(report) => {
                 stream.finish(report.edict.id);
                 if !matches!(report.outcome, Outcome::Completed(_)) {
@@ -1414,6 +1427,19 @@ pub(crate) fn hold_court(
         let on_update = |update: WatchUpdate<'_>| match update {
             WatchUpdate::Run(RunUpdate::Assigned(_)) => {}
             WatchUpdate::Run(RunUpdate::Text { task, text }) => stream.text(task, text),
+            WatchUpdate::Run(RunUpdate::ToolStarted {
+                task,
+                step,
+                tool,
+                summary,
+            }) => stream.tool_started(task, step, tool, summary),
+            WatchUpdate::Run(RunUpdate::ToolFinished {
+                task,
+                step,
+                tool,
+                ok,
+                duration_ms,
+            }) => stream.tool_finished(task, step, tool, ok, duration_ms),
             WatchUpdate::Run(RunUpdate::Finished(report)) => {
                 stream.finish(report.edict.id);
                 print_report(report);

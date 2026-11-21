@@ -118,7 +118,7 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 4. **仍保持失败关闭的边界（后续按需扩展）**：
    - `ZIYUAN_SANDBOX_ALLOW`（`Network::Only`）、`Network::Open`（含 MCP `"haoshe": true` 与域名白名单）显式拒绝（`SandboxUnavailable`）；
    - 外部 `CARGO_TARGET_DIR` 与 MCP `haoshe.write` 等宿主额外可写目录显式拒绝（`SandboxUnavailable`）；
-   - 宿主 `%USERPROFILE%` 下程序／工具链（如默认 `cargo.exe` 或安装于 `AppData` 的解释器）未经准入仍被内核拒绝，绝不放宽宿主用户目录或系统 ACL。
+   - 宿主 `%USERPROFILE%` 下程序／工具链（如默认 `cargo.exe` 或安装于 `AppData` 的解释器）未经准入仍被内核拒绝，绝不放宽宿主用户目录或系统 ACL；用户可通过 `ZIYUAN_SANDBOX_TOOLCHAIN` 为 `run_tests` 显式声明只读工具链目录（经路径与敏感段严格校验、拒绝重解析点与 `%USERPROFILE%`/系统根目录、按文件数与总字节有界复制到独立任务私有只读快照并前置到容器 `PATH`，结束即毁、零宿主 ACL 变更）。
 
 ## 参考
 

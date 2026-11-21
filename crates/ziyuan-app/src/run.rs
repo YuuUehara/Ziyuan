@@ -35,6 +35,21 @@ pub enum RunUpdate<'a> {
     Assigned(TaskId),
     /// 承办官员（模型）流式生成的文本片段；只用于显示，不写入事件簿。
     Text { task: TaskId, text: &'a str },
+    /// 承办官员正在调用工具；只用于实时显示，不写入事件簿。
+    ToolStarted {
+        task: TaskId,
+        step: usize,
+        tool: &'a str,
+        summary: &'a str,
+    },
+    /// 承办官员的工具调用已完成；只用于实时显示，不写入事件簿。
+    ToolFinished {
+        task: TaskId,
+        step: usize,
+        tool: &'a str,
+        ok: bool,
+        duration_ms: u64,
+    },
     /// 一件诏令在本次运行中的结局（每件恰好一次）。
     Finished(&'a TaskReport),
 }
@@ -377,6 +392,38 @@ impl<S: EventStore> Session<S> {
                     // 超时/撤销后仍在收尾的线程可能继续输出；只转发仍在执行的诏令。
                     if running.iter().any(|(e, _)| e.id == task) {
                         on_update(RunUpdate::Text { task, text: &text });
+                    }
+                }
+                Progress::ToolStarted {
+                    task,
+                    step,
+                    tool,
+                    summary,
+                } => {
+                    if running.iter().any(|(e, _)| e.id == task) {
+                        on_update(RunUpdate::ToolStarted {
+                            task,
+                            step,
+                            tool: &tool,
+                            summary: &summary,
+                        });
+                    }
+                }
+                Progress::ToolFinished {
+                    task,
+                    step,
+                    tool,
+                    ok,
+                    duration_ms,
+                } => {
+                    if running.iter().any(|(e, _)| e.id == task) {
+                        on_update(RunUpdate::ToolFinished {
+                            task,
+                            step,
+                            tool: &tool,
+                            ok,
+                            duration_ms,
+                        });
                     }
                 }
                 Progress::ToolInvoked {

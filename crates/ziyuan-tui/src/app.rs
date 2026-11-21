@@ -16,6 +16,19 @@ pub enum Message {
     Input(Event),
     Assigned(TaskId),
     Text(TaskId, String),
+    ToolStarted {
+        task: TaskId,
+        step: usize,
+        tool: String,
+        summary: String,
+    },
+    ToolFinished {
+        task: TaskId,
+        step: usize,
+        tool: String,
+        ok: bool,
+        duration_ms: u64,
+    },
     Finished {
         task: TaskId,
         outcome: Outcome,
@@ -198,6 +211,7 @@ impl App {
             status: chronicle.map(|note| (note, false)),
             run: None,
             live: HashMap::new(),
+            active_tool: HashMap::new(),
             debating: HashMap::new(),
             diff_view: DiffView::Builtin,
             detail_width: Default::default(),

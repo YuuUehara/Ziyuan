@@ -2376,6 +2376,7 @@ impl RunTests {
             .filter_map(|key| std::env::var_os(key).map(|v| ((*key).to_owned(), v)))
             .collect();
         let hidden = [self.0.root.join(".ziyuan")];
+        let toolchains = crate::haoshe::toolchain_dirs_from_env();
         let run = crate::haoshe::run_shell(&crate::haoshe::ShellRunSpec {
             command,
             mode,
@@ -2383,6 +2384,7 @@ impl RunTests {
             work_dir: copy,
             sandbox_base: base,
             extra_writable: &target_dir,
+            readonly_toolchains: &toolchains,
             hidden: &hidden,
             env: &env,
             timeout: TEST_TIMEOUT,

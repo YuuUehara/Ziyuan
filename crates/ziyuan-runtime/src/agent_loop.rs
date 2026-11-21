@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::cell::Cell;
 use std::fmt;
 use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Instant;
 use ziyuan_core::{FileChange, Threat, TokenUsage};
 
 /// 对话估算超过此数（tokens）时节略较早的工具输出。
@@ -584,6 +585,12 @@ impl ExecutionHooks for Metered<'_> {
     fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
         self.inner.cancel_flag()
     }
+    fn tool_started(&self, step: usize, tool: &str, summary: &str) {
+        self.inner.tool_started(step, tool, summary);
+    }
+    fn tool_finished(&self, step: usize, tool: &str, ok: bool, duration_ms: u64) {
+        self.inner.tool_finished(step, tool, ok, duration_ms);
+    }
     fn tool_invoked(&self, tool: &str, args_json: &str, ok: bool) {
         self.inner.tool_invoked(tool, args_json, ok);
     }
@@ -790,7 +797,8 @@ pub fn run_with_context(
             .iter()
             .any(|m| matches!(m, Message::ToolOutput { .. }));
     let mut successful_reads = Vec::new();
-    for _ in 0..max_steps {
+    for step_idx in 0..max_steps {
+        let step = step_idx + 1;
         abridge(&mut messages, &specs, context_tokens, nonce);
         if compact_turns_inner(
             &mut messages,
@@ -858,7 +866,11 @@ pub fn run_with_context(
                                 }
                                 let chunk_end = (chunk_start + MAX_PARALLEL_READS).min(end);
                                 let chunk = &resolved[chunk_start..chunk_end];
-                                let results: Vec<Result<String, BoxError>> =
+                                for (_, call) in chunk {
+                                    let summary = summarize_tool_args(&call.name, &call.args_json);
+                                    hooks.tool_started(step, &call.name, &summary);
+                                }
+                                let results: Vec<(Result<String, BoxError>, std::time::Duration)> =
                                     std::thread::scope(|scope| {
                                         let handles: Vec<_> = chunk
                                             .iter()
@@ -866,13 +878,16 @@ pub fn run_with_context(
                                                 let tool = *tool;
                                                 let cancel = cancel_flag.as_deref();
                                                 scope.spawn(move || {
-                                                    check_args(&tool.spec(), &call.args_json)
-                                                        .and_then(|()| {
-                                                            tool.execute_with_cancel(
-                                                                &call.args_json,
-                                                                cancel,
-                                                            )
-                                                        })
+                                                    let started = Instant::now();
+                                                    let res =
+                                                        check_args(&tool.spec(), &call.args_json)
+                                                            .and_then(|()| {
+                                                                tool.execute_with_cancel(
+                                                                    &call.args_json,
+                                                                    cancel,
+                                                                )
+                                                            });
+                                                    (res, started.elapsed())
                                                 })
                                             })
                                             .collect();
@@ -880,12 +895,23 @@ pub fn run_with_context(
                                             .into_iter()
                                             .map(|h| {
                                                 h.join().unwrap_or_else(|_| {
-                                                    Err("工具执行异常终止".into())
+                                                    (
+                                                        Err("工具执行异常终止".into()),
+                                                        std::time::Duration::ZERO,
+                                                    )
                                                 })
                                             })
                                             .collect()
                                     });
-                                for ((_, call), result) in chunk.iter().zip(results) {
+                                for ((_, call), (result, elapsed)) in chunk.iter().zip(results) {
+                                    let duration_ms =
+                                        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                                    hooks.tool_finished(
+                                        step,
+                                        &call.name,
+                                        result.is_ok(),
+                                        duration_ms,
+                                    );
                                     record_tool_result(
                                         call,
                                         result,
@@ -902,9 +928,15 @@ pub fn run_with_context(
                         }
                     }
                     let (tool, call) = &resolved[idx];
+                    let summary = summarize_tool_args(&call.name, &call.args_json);
+                    hooks.tool_started(step, &call.name, &summary);
+                    let started = Instant::now();
                     let result = check_args(&tool.spec(), &call.args_json).and_then(|()| {
                         tool.execute_with_cancel(&call.args_json, cancel_flag.as_deref())
                     });
+                    let duration_ms =
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    hooks.tool_finished(step, &call.name, result.is_ok(), duration_ms);
                     record_tool_result(
                         call,
                         result,
@@ -941,6 +973,64 @@ pub fn run_with_context(
         )),
         Err(e @ (LoopError::Cancelled | LoopError::Budget { .. })) => Err(e),
         _ => Err(LoopError::StepLimit(max_steps)),
+    }
+}
+
+/// 从工具参数 JSON 中提取用于实时进度展示的简短定位摘要。
+/// 绝不暴露文件内容或大段替换文本（`content`/`new_text`/`old_text`/`body` 等），长度截断至 60 字符内。
+pub(crate) fn summarize_tool_args(tool: &str, args_json: &str) -> String {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(args_json) else {
+        return String::new();
+    };
+    let get_str = |key: &str| {
+        map.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let raw = if let (Some(from), Some(to)) = (get_str("from"), get_str("to")) {
+        format!("{from} → {to}")
+    } else if let Some(pattern) = get_str("pattern") {
+        if let Some(path) = get_str("path") {
+            format!("{pattern} @ {path}")
+        } else {
+            pattern.to_owned()
+        }
+    } else if let Some(path) = get_str("path") {
+        let start = map.get("start_line").and_then(Value::as_i64);
+        let end = map.get("end_line").and_then(Value::as_i64);
+        match (start, end) {
+            (Some(s), Some(e)) => format!("{path}:{s}-{e}"),
+            (Some(s), None) => format!("{path}:{s}+"),
+            _ => path.to_owned(),
+        }
+    } else if let Some(preset) = get_str("preset") {
+        preset.to_owned()
+    } else if tool == "run_tests"
+        && let Some(command) = get_str("command")
+    {
+        command.to_owned()
+    } else if let Some(symbol) = get_str("symbol") {
+        symbol.to_owned()
+    } else if let Some(query) = get_str("query") {
+        query.to_owned()
+    } else if let Some(rev) = get_str("rev").or_else(|| get_str("commit")) {
+        rev.to_owned()
+    } else if let Some(target) = get_str("dir")
+        .or_else(|| get_str("file"))
+        .or_else(|| get_str("name"))
+    {
+        target.to_owned()
+    } else {
+        return String::new();
+    };
+    let normalized: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 60;
+    if normalized.chars().count() <= MAX_CHARS {
+        normalized
+    } else {
+        let head: String = normalized.chars().take(MAX_CHARS - 1).collect();
+        format!("{head}…")
     }
 }
 
@@ -1999,5 +2089,149 @@ mod tests {
             })
             .expect("c5 属于最近 4 轮应保留");
         assert!(c5.contains("重复读取") && c5.contains("c6"), "{c5}");
+    }
+
+    #[test]
+    fn summarize_tool_args_extracts_safe_locators_and_hides_content() {
+        assert_eq!(
+            summarize_tool_args(
+                "read_file",
+                r#"{"path":"src/lib.rs","start_line":10,"end_line":40}"#
+            ),
+            "src/lib.rs:10-40"
+        );
+        assert_eq!(
+            summarize_tool_args(
+                "write_file",
+                r#"{"path":"src/a.rs","content":"TOP_SECRET_BODY"}"#
+            ),
+            "src/a.rs"
+        );
+        assert_eq!(
+            summarize_tool_args(
+                "replace_text",
+                r#"{"path":"src/a.rs","old_text":"SECRET_OLD","new_text":"SECRET_NEW"}"#
+            ),
+            "src/a.rs"
+        );
+        assert_eq!(
+            summarize_tool_args("search_code", r#"{"pattern":"fn main","path":"crates"}"#),
+            "fn main @ crates"
+        );
+        assert_eq!(
+            summarize_tool_args("run_tests", r#"{"preset":"unit"}"#),
+            "unit"
+        );
+        assert_eq!(
+            summarize_tool_args("unknown_tool", r#"{"content":"TOP_SECRET"}"#),
+            ""
+        );
+        let long_path = "a/".repeat(40) + "file.rs";
+        let truncated = summarize_tool_args("read_file", &format!(r#"{{"path":"{long_path}"}}"#));
+        assert!(truncated.chars().count() <= 60);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn tool_started_and_finished_hooks_fire_for_serial_and_parallel_calls() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct ProgressRecorder(Mutex<Vec<String>>);
+        impl ExecutionHooks for ProgressRecorder {
+            fn tool_started(&self, step: usize, tool: &str, summary: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("start:{step}:{tool}:{summary}"));
+            }
+            fn tool_finished(&self, step: usize, tool: &str, ok: bool, _duration_ms: u64) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("finish:{step}:{tool}:{ok}"));
+            }
+        }
+        struct ReadEcho;
+        impl Tool for ReadEcho {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "read_file".into(),
+                    description: String::new(),
+                    input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#.into(),
+                }
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+            fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+                Ok(args_json.to_owned())
+            }
+        }
+        struct WriteFail;
+        impl Tool for WriteFail {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "write_file".into(),
+                    description: String::new(),
+                    input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#.into(),
+                }
+            }
+            fn execute(&self, _args_json: &str) -> Result<String, BoxError> {
+                Err("denied".into())
+            }
+        }
+
+        let model = Script::new(vec![
+            ModelTurn::Calls {
+                calls: vec![
+                    ToolRequest {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"a.rs"}"#.into(),
+                    },
+                    ToolRequest {
+                        id: "c2".into(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"b.rs"}"#.into(),
+                    },
+                ],
+                text: String::new(),
+                reasoning: String::new(),
+            },
+            ModelTurn::Calls {
+                calls: vec![ToolRequest {
+                    id: "c3".into(),
+                    name: "write_file".into(),
+                    args_json: r#"{"path":"c.rs","content":"NEVER_LEAK"}"#.into(),
+                }],
+                text: String::new(),
+                reasoning: String::new(),
+            },
+            ModelTurn::Final("done".into()),
+        ]);
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(ReadEcho), Box::new(WriteFail)];
+        let rec = ProgressRecorder::default();
+        let ans = run(
+            &model,
+            &tools,
+            vec![Message::System("s".into()), Message::User("u".into())],
+            5,
+            "n",
+            &rec,
+        )
+        .unwrap();
+        assert_eq!(ans, "done");
+        let events = rec.0.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                "start:1:read_file:a.rs",
+                "start:1:read_file:b.rs",
+                "finish:1:read_file:true",
+                "finish:1:read_file:true",
+                "start:2:write_file:c.rs",
+                "finish:2:write_file:false",
+            ]
+        );
     }
 }

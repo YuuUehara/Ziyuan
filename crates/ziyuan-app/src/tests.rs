@@ -382,6 +382,8 @@ async fn concurrent_run_balances_clerks_and_replays() {
 struct Streaming;
 impl WorkerBackend for Streaming {
     fn execute(&self, _job: &Job, hooks: &dyn ExecutionHooks) -> Result<String, BoxError> {
+        hooks.tool_started(1, "read_file", "src/lib.rs");
+        hooks.tool_finished(1, "read_file", true, 12);
         hooks.text_delta("先");
         hooks.model_usage(TokenUsage {
             input: 10,
@@ -418,6 +420,19 @@ async fn streamed_text_arrives_before_finish_and_is_not_persisted() {
                 seen.push(match u {
                     RunUpdate::Assigned(task) => format!("{}:assigned", task.0),
                     RunUpdate::Text { task, text } => format!("{}:{text}", task.0),
+                    RunUpdate::ToolStarted {
+                        task,
+                        step,
+                        tool,
+                        summary,
+                    } => format!("{}:start:{step}:{tool}:{summary}", task.0),
+                    RunUpdate::ToolFinished {
+                        task,
+                        step,
+                        tool,
+                        ok,
+                        duration_ms,
+                    } => format!("{}:finish:{step}:{tool}:{ok}:{duration_ms}", task.0),
                     RunUpdate::Finished(r) => {
                         format!("{}:done {}", r.edict.id.0, r.usage.total())
                     }
@@ -426,7 +441,17 @@ async fn streamed_text_arrives_before_finish_and_is_not_persisted() {
         )
         .await
         .unwrap();
-    assert_eq!(seen, ["1:assigned", "1:先", "1:后", "1:done 33"]);
+    assert_eq!(
+        seen,
+        [
+            "1:assigned",
+            "1:start:1:read_file:src/lib.rs",
+            "1:finish:1:read_file:true:12",
+            "1:先",
+            "1:后",
+            "1:done 33"
+        ]
+    );
     // 指派、两次用量与完成；流式片段不入事件簿。
     assert_eq!(session.history().unwrap().len(), before + 4);
     drop(session);

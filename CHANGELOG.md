@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **实时工具执行进度与耗时透明（CLI + TUI + Web，零新事件类型）**：
+  - `ziyuan-runtime::ExecutionHooks` 新增向后兼容默认方法 `tool_started(step, tool, summary)` 与 `tool_finished(step, tool, ok, duration_ms)`；`agent_loop` 为串行与并发只读工具调用记录步序、耗时与安全定位摘要（仅提取 `path`、`start_line`/`end_line`、`pattern`、`preset`、`symbol`、`query` 等短定位，绝不泄露文件内容或替换正文）。
+  - `Progress` / `RunUpdate` 新增瞬时进度变体（不写入 `court.log`）；CLI `StreamPrinter` 在 stderr 按 `#ID│ [第 N 步] ▸ tool …` 与 `✓/✗ tool (耗时)` 实时输出；TUI 在页头与详情面板展示当前执行工具及实时进度流；Web 通过 SSE `"tool"` 事件在任务流式输出区与当前工具提示栏实时刷新。
+- **Windows 原生号舍显式只读工具链快照准入（`ZIYUAN_SANDBOX_TOOLCHAIN`，零宿主 ACL 变更）**：
+  - `ziyuan-runtime::haoshe` 新增 `TOOLCHAIN_ENV`（`ZIYUAN_SANDBOX_TOOLCHAIN`）、`toolchain_dirs_from_env()` 与 `ShellRunSpec::readonly_toolchains`；`run_tests` 在 Windows AppContainer 沙箱启用时对用户显式声明的工具链目录执行严格 fail-closed 校验（拒绝相对路径、重解析点／符号链接、磁盘与系统／`%USERPROFILE%` 根目录及 `.ssh`/`.aws`/`.git`/`.env*` 等敏感目录段），按文件数与字节上限有界复制到位于 `sandbox_base` 之外的任务私有只读快照，以 `FRFX` 保护 DACL＋低完整性标签准入并前置到容器 `PATH`，绝不修改宿主目录 ACL，任务结束后自动清理。
+
 ## 1.34.0 — 2026-11-21
 
 - **Windows 原生号舍 W3 断网长连接 stdio 外藩沙箱（`ziyuan-sandbox-windows` + `ziyuan-runtime`）**：
