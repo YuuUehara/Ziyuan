@@ -339,10 +339,11 @@ impl App {
             let mut stale = 0usize;
             let mut not_started = 0usize;
             let mut other = 0usize;
-            if let Ok(statuses) = self
+            let statuses = self
                 .session
                 .translation_status(&self.config.root, &project.id)
-            {
+                .ok();
+            if let Some(statuses) = statuses.as_deref() {
                 for item in statuses {
                     match item.state {
                         BlockState::Finalized { .. } | BlockState::HumanFinalized { .. } => {
@@ -372,6 +373,32 @@ impl App {
             ));
             if other > 0 {
                 out.push_str(&format!(" · 失败/撤销 {other}"));
+            }
+            if let Ok(qa) = translations.project_qa_report(&project.id, statuses.as_deref()) {
+                if qa.summary.translated_blocks == 0 {
+                    out.push_str("\n  质检：尚无已译块");
+                } else if qa.summary.total_issues == 0 {
+                    out.push_str(&format!(
+                        "\n  质检：已核对 {} 块，未发现确定性问题（不代表语义正确）",
+                        qa.summary.checked_blocks
+                    ));
+                } else {
+                    let mut top_codes: Vec<(&String, &usize)> = qa.by_code.iter().collect();
+                    top_codes.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                    let breakdown = top_codes
+                        .into_iter()
+                        .take(3)
+                        .map(|(code, count)| format!("{} {count}", qa_code_label(code)))
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    out.push_str(&format!(
+                        "\n  质检：已核对 {} 块，发现 {} 处问题（{} 块：{}）",
+                        qa.summary.checked_blocks,
+                        qa.summary.total_issues,
+                        qa.summary.blocks_with_issues,
+                        breakdown
+                    ));
+                }
             }
             out.push('\n');
         }
@@ -429,4 +456,21 @@ fn fresh_save_id() -> Result<String, String> {
         id.push_str(&format!("{byte:02x}"));
     }
     Ok(id)
+}
+
+fn qa_code_label(code: &str) -> &str {
+    match code {
+        "missing_paragraph" => "缺段",
+        "paragraph_id_mismatch" => "段号不符",
+        "duplicate_paragraph" => "重复段号",
+        "empty_translation" => "空译文",
+        "untranslated" => "疑似未译",
+        "number_mismatch" => "数字不一致",
+        "extra_paragraph" => "多余段落",
+        "duplicate_text" => "重复译文",
+        "term_inconsistent" => "术语不一致",
+        "source_script_leak" => "源语残留",
+        "punctuation_mismatch" => "标点异常",
+        other => other,
+    }
 }

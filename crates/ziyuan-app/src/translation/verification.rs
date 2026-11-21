@@ -548,29 +548,48 @@ impl Translations {
         })
     }
 
-    /// Deterministic, local QA. No model call, no writes, no approval.
-    pub fn qa(&self, project: &str, block: &str) -> Result<QaReport> {
-        let material = self.verification_materials(None, project, block)?;
+    /// 复用已加载的 `Project` 与上下文执行单块确定性 QA，同时返回已通过结构校验的译稿，
+    /// 避免整书批量扫描时重复读取 `project.json`、`context.json`、朱批与 `zh.json`。
+    fn qa_block(
+        &self,
+        p: &crate::text_project::Project,
+        source_block: &PromptBlock,
+        context: Option<&super::ContextSnapshot>,
+        allowed_terms: &[String],
+    ) -> Result<(QaReport, Option<PromptBlock>)> {
+        let project = p.id.as_str();
+        let block = source_block.block_id.as_str();
+        let bytes = self.read_translation(project, block)?;
+        let structure = bytes
+            .as_ref()
+            .map(|b| self.texts().check_in(p, block, b))
+            .transpose()?;
+        let translation = if structure.as_ref().is_some_and(|s| s.valid) {
+            Some(serde_json::from_slice::<PromptBlock>(
+                bytes.as_deref().expect("checked bytes"),
+            )?)
+        } else {
+            None
+        };
         let mut issues = Vec::new();
-        let Some(translation) = &material.translation else {
+        let Some(translation) = translation else {
             issues.push(QaIssue {
                 paragraph: String::new(),
                 code: "no_translation",
                 message: "没有结构有效的译稿；请先完成初译或人工译稿。".into(),
             });
-            return Ok(QaReport {
-                project: project.into(),
-                block: block.into(),
-                paragraphs: material.source.paragraphs.len(),
-                issues,
-            });
+            return Ok((
+                QaReport {
+                    project: project.into(),
+                    block: block.into(),
+                    paragraphs: source_block.paragraphs.len(),
+                    issues,
+                },
+                None,
+            ));
         };
-        let source_language = self
-            .project(project)
-            .map(|p| p.metadata.source_language)
-            .unwrap_or_default();
-        let allowed_terms = collect_allowed_glossary_terms(material.context.as_ref());
-        let source = &material.source.paragraphs;
+        let source_language = p.metadata.source_language.as_str();
+        let source = &source_block.paragraphs;
         let target = &translation.paragraphs;
         let mut seen_ids = std::collections::HashSet::new();
         for (index, source_para) in source.iter().enumerate() {
@@ -630,10 +649,10 @@ impl Translations {
                 && target_para.text.trim() != source_para.text.trim()
             {
                 if let Some(message) = detect_source_script_leak(
-                    &source_language,
+                    source_language,
                     &source_para.text,
                     &target_para.text,
-                    &allowed_terms,
+                    allowed_terms,
                 ) {
                     issues.push(QaIssue {
                         paragraph: source_para.id.clone(),
@@ -675,7 +694,7 @@ impl Translations {
                 });
             }
         }
-        if let Some(context) = &material.context {
+        if let Some(context) = context {
             match &context.glossary {
                 crate::translation::Glossary::Legacy(entries) => {
                     for entry in entries {
@@ -696,10 +715,10 @@ impl Translations {
                     // QA has no explicit person/speaker associations. The shared
                     // evaluator therefore yields standalone term hints only.
                     for hint in hints::glossary_hints(
-                        &self.project(project)?,
+                        p,
                         &context.glossary,
-                        &material.source,
-                        translation,
+                        source_block,
+                        &translation,
                         &[],
                     )? {
                         issues.push(QaIssue {
@@ -714,15 +733,29 @@ impl Translations {
                 }
             }
         }
-        Ok(QaReport {
-            project: project.into(),
-            block: block.into(),
-            paragraphs: source.len(),
-            issues,
-        })
+        Ok((
+            QaReport {
+                project: project.into(),
+                block: block.into(),
+                paragraphs: source.len(),
+                issues,
+            },
+            Some(translation),
+        ))
     }
 
-    /// 整书级批量确定性 QA 汇总（纯只读）：逐块执行 [`Self::qa`]，汇总问题分布并附带段级短摘录。
+    /// Deterministic, local QA. No model call, no writes, no approval.
+    pub fn qa(&self, project: &str, block: &str) -> Result<QaReport> {
+        let p = self.project(project)?;
+        let (_, _, source) = find_block(&p, block)?;
+        let context = self.current_context(project)?;
+        let allowed_terms = collect_allowed_glossary_terms(context.as_ref());
+        let (report, _) = self.qa_block(&p, source, context.as_ref(), &allowed_terms)?;
+        Ok(report)
+    }
+
+    /// 整书级批量确定性 QA 汇总（纯只读）：单次加载项目与上下文，逐块执行确定性核对，
+    /// 汇总问题分布并复用已解析译稿生成段级短摘录。
     ///
     /// 未译块仅计入 `summary.untranslated_blocks` 与 `blocks[].has_translation = false`，
     /// 不把 `no_translation` 混入已译块的问题明细，避免半译书籍被大量未译提示淹没。
@@ -732,6 +765,8 @@ impl Translations {
         statuses: Option<&[super::BlockStatus]>,
     ) -> Result<ProjectQaReport> {
         let p = self.project(project)?;
+        let context = self.current_context(project)?;
+        let allowed_terms = collect_allowed_glossary_terms(context.as_ref());
         let status_map: BTreeMap<&str, &super::BlockStatus> = statuses
             .into_iter()
             .flatten()
@@ -769,9 +804,9 @@ impl Translations {
                     }
                     None => (None, None),
                 };
-                let report = self.qa(project, &prompt.block_id)?;
-                let has_translation = !report.issues.iter().any(|i| i.code == "no_translation");
-                if !has_translation {
+                let (report, translation) =
+                    self.qa_block(&p, prompt, context.as_ref(), &allowed_terms)?;
+                let Some(translation) = translation else {
                     summary.untranslated_blocks += 1;
                     blocks.push(ProjectQaBlockSummary {
                         block: prompt.block_id.clone(),
@@ -784,7 +819,7 @@ impl Translations {
                         issue_count: 0,
                     });
                     continue;
-                }
+                };
                 summary.translated_blocks += 1;
                 summary.checked_blocks += 1;
                 if report.issues.is_empty() {
@@ -792,24 +827,11 @@ impl Translations {
                 } else {
                     summary.blocks_with_issues += 1;
                     summary.total_issues += report.issues.len();
-                    let target_paras: BTreeMap<String, String> = self
-                        .read_translation(project, &prompt.block_id)?
-                        .and_then(|bytes| {
-                            super::read_approved_target(&bytes, &prompt.block_id).ok()
-                        })
-                        .map(|approved| match approved {
-                            super::ApprovedTarget::Plain(b) => b
-                                .paragraphs
-                                .into_iter()
-                                .map(|para| (para.id, para.text))
-                                .collect(),
-                            super::ApprovedTarget::Marked(b) => b
-                                .paragraphs
-                                .into_iter()
-                                .map(|para| (para.id, para.text))
-                                .collect(),
-                        })
-                        .unwrap_or_default();
+                    let target_paras: BTreeMap<&str, &str> = translation
+                        .paragraphs
+                        .iter()
+                        .map(|para| (para.id.as_str(), para.text.as_str()))
+                        .collect();
                     let source_paras: BTreeMap<&str, &str> = prompt
                         .paragraphs
                         .iter()
@@ -829,7 +851,7 @@ impl Translations {
                             String::new()
                         } else {
                             target_paras
-                                .get(&issue.paragraph)
+                                .get(issue.paragraph.as_str())
                                 .map(|t| compact_excerpt(t, 80))
                                 .unwrap_or_default()
                         };
@@ -1445,6 +1467,20 @@ mod tests {
         assert_eq!(report.issues[0].source_excerpt, "雨の夜だった。");
         assert_eq!(report.issues[0].target_excerpt, "那是一个雨の夜?");
         assert!(!report.blocks[2].has_translation);
+
+        // Verify O(N) project_qa_report matches single-block qa() identically.
+        let single_b1 = t.qa(&meta.id, &b1.block_id).unwrap();
+        assert_eq!(single_b1.issues.len(), report.issues.len());
+        for (single, batch) in single_b1.issues.iter().zip(&report.issues) {
+            assert_eq!(single.paragraph, batch.paragraph);
+            assert_eq!(single.code, batch.code);
+            assert_eq!(single.message, batch.message);
+        }
+        assert!(t.qa(&meta.id, &b2.block_id).unwrap().issues.is_empty());
+        assert_eq!(
+            t.qa(&meta.id, &b3.block_id).unwrap().issues[0].code,
+            "no_translation"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

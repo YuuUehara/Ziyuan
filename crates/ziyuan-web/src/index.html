@@ -2397,143 +2397,43 @@ $("materials-qa-ignore")?.addEventListener("click", () => {
   for (const box of host.querySelectorAll('input[type="checkbox"]:checked')) box.closest("label")?.remove();
   $("materials-status").textContent = "已在本次查看中忽略选中问题；未修改译稿或记录。";
 });
-const QA_CODE_LABELS = {
-  no_translation: "没有有效译稿",
-  missing_paragraph: "缺段",
-  paragraph_id_mismatch: "段号不一致",
-  extra_paragraph: "多段",
-  duplicate_paragraph: "段号重复",
-  empty_translation: "空译",
-  untranslated: "疑似未翻译",
-  number_mismatch: "数字不一致",
-  duplicate_text: "重复译文",
-  term_inconsistent: "术语不一致",
-  source_script_leak: "源语字符残留",
-  punctuation_mismatch: "标点异常",
-};
-let projectQaState = { project: null, report: null, filter: "", request: 0 };
+let projectQaCtrl = null;
+let projectQaCtrlPromise = null;
+function ensureProjectQaController() {
+  if (projectQaCtrl) return Promise.resolve(projectQaCtrl);
+  if (!projectQaCtrlPromise) {
+    projectQaCtrlPromise = import("/assets/project-qa.mjs").then(({ createProjectQaController }) => {
+      projectQaCtrl = createProjectQaController({
+        doc: document,
+        getProjectId: () => textProjectId,
+        fetchReport: (project) => api("/text/" + encodeURIComponent(project) + "/qa-report"),
+        formatLocation: (id, isParagraph) => textLocation(id, isParagraph),
+        formatError: (e) => materialAdvice(e?.body?.error || e?.message),
+        onNavigate: (target) => navigateToParagraph(target),
+        statusEl: $("project-qa-status"),
+        summaryHost: $("project-qa-summary"),
+        filtersHost: $("project-qa-filters"),
+        issuesHost: $("project-qa-issues"),
+      });
+      return projectQaCtrl;
+    });
+  }
+  return projectQaCtrlPromise;
+}
 function resetProjectQa(projectId) {
-  if (projectQaState.project === projectId) return;
-  projectQaState = { project: projectId, report: null, filter: "", request: projectQaState.request + 1 };
+  if (projectQaCtrl) {
+    projectQaCtrl.reset(projectId);
+    return;
+  }
   const status = $("project-qa-status");
   if (status) status.textContent = projectId ? "点「运行整书质检」查看当前项目的全书质量总览。" : "选择项目后，点「运行整书质检」查看全书质量总览。";
   $("project-qa-summary")?.replaceChildren();
   $("project-qa-filters")?.replaceChildren();
   $("project-qa-issues")?.replaceChildren();
 }
-function renderProjectQaReport() {
-  const report = projectQaState.report;
-  const summaryHost = $("project-qa-summary");
-  const filtersHost = $("project-qa-filters");
-  const issuesHost = $("project-qa-issues");
-  if (!summaryHost || !filtersHost || !issuesHost) return;
-  summaryHost.replaceChildren();
-  filtersHost.replaceChildren();
-  issuesHost.replaceChildren();
-  if (!report) return;
-  const s = report.summary || {};
-  const chips = [
-    [`总块数 ${s.total_blocks ?? 0}`, false],
-    [`已译 ${s.translated_blocks ?? 0}`, false],
-    [`未译 ${s.untranslated_blocks ?? 0}`, false],
-    ...(report.founded ? [[`已定稿 ${s.finalized_blocks ?? 0}`, false]] : []),
-    [`无问题 ${s.clean_blocks ?? 0}`, false],
-    [`有问题块 ${s.blocks_with_issues ?? 0}`, (s.blocks_with_issues ?? 0) > 0],
-    [`问题总数 ${s.total_issues ?? 0}`, (s.total_issues ?? 0) > 0],
-  ];
-  for (const [label, warn] of chips) {
-    const chip = document.createElement("span");
-    chip.className = warn ? "qa-chip warn" : "qa-chip";
-    chip.textContent = label;
-    summaryHost.append(chip);
-  }
-  const byCode = report.by_code || {};
-  const codeEntries = Object.entries(byCode);
-  if (codeEntries.length) {
-    const addFilterBtn = (code, label) => {
-      const btn = document.createElement("button");
-      btn.type = "button"; btn.className = "small"; btn.dataset.view = "";
-      btn.setAttribute("aria-pressed", String(projectQaState.filter === code));
-      btn.textContent = label;
-      btn.addEventListener("click", () => {
-        projectQaState.filter = code;
-        renderProjectQaReport();
-      });
-      filtersHost.append(btn);
-    };
-    addFilterBtn("", `全部 (${s.total_issues ?? 0})`);
-    for (const [code, count] of codeEntries) {
-      addFilterBtn(code, `${QA_CODE_LABELS[code] || code} (${count})`);
-    }
-  }
-  const list = (report.issues || []).filter((i) => !projectQaState.filter || i.code === projectQaState.filter);
-  if (!list.length) {
-    const p = document.createElement("p");
-    p.className = "hint";
-    p.textContent = (s.translated_blocks ?? 0) === 0
-      ? "当前项目尚无已译块，无需核对问题。"
-      : "当前筛选条件下未发现确定性检查问题（不代表语义正确）。";
-    issuesHost.append(p);
-    return;
-  }
-  const ul = document.createElement("ul");
-  ul.className = "qa-issue-list";
-  for (const issue of list) {
-    const li = document.createElement("li");
-    li.className = "qa-issue-item";
-    const head = document.createElement("div");
-    head.className = "qa-issue-head";
-    const title = document.createElement("span");
-    const loc = issue.paragraph ? `${textLocation(issue.block)} · ${textLocation(issue.paragraph, true)}` : textLocation(issue.block);
-    title.textContent = `[${QA_CODE_LABELS[issue.code] || issue.code}] ${loc} — ${issue.message}`;
-    const go = document.createElement("button");
-    go.type = "button"; go.className = "small"; go.dataset.view = "";
-    go.textContent = "定位编辑";
-    go.addEventListener("click", () => {
-      navigateToParagraph({ block: issue.block, paragraph: issue.paragraph || null, kind: "draft" });
-    });
-    head.append(title, go);
-    li.append(head);
-    if (issue.source_excerpt || issue.target_excerpt) {
-      const ex = document.createElement("div");
-      ex.className = "qa-issue-excerpts";
-      if (issue.source_excerpt) {
-        const sEl = document.createElement("div");
-        sEl.textContent = "原：" + issue.source_excerpt;
-        ex.append(sEl);
-      }
-      if (issue.target_excerpt) {
-        const tEl = document.createElement("div");
-        tEl.textContent = "译：" + issue.target_excerpt;
-        ex.append(tEl);
-      }
-      li.append(ex);
-    }
-    ul.append(li);
-  }
-  issuesHost.append(ul);
-}
 async function runProjectQaReport() {
-  if (!textProjectId) {
-    if ($("project-qa-status")) $("project-qa-status").textContent = "请先选择项目。";
-    return;
-  }
-  const project = textProjectId;
-  const req = ++projectQaState.request;
-  if ($("project-qa-status")) $("project-qa-status").textContent = "正在汇总全书确定性检查…";
-  try {
-    const report = await api("/text/" + encodeURIComponent(project) + "/qa-report");
-    if (req !== projectQaState.request || project !== textProjectId) return;
-    projectQaState = { project, report, filter: "", request: req };
-    if ($("project-qa-status")) {
-      const s = report.summary || {};
-      $("project-qa-status").textContent = `已完成整书扫描（共 ${s.total_blocks ?? 0} 块，已核对 ${s.checked_blocks ?? 0} 块，未译 ${s.untranslated_blocks ?? 0} 块；不代表语义正确）。`;
-    }
-    renderProjectQaReport();
-  } catch (e) {
-    if (req !== projectQaState.request) return;
-    if ($("project-qa-status")) $("project-qa-status").textContent = "整书质检失败：" + materialAdvice(e.body?.error || e.message);
-  }
+  const ctrl = await ensureProjectQaController();
+  await ctrl.run();
 }
 $("project-qa-run")?.addEventListener("click", runProjectQaReport);
 $("materials-project-qa-jump")?.addEventListener("click", () => {

@@ -127,6 +127,8 @@ pub(crate) enum InputKind {
     Skip(TaskId),
     /// 检索翰林院实录（空为最近各件）。
     Records,
+    /// 诏令页关键词筛选（空为清除）。
+    FilterEdicts,
     /// 易名：预填「姓名 字 号」，改哪项就改哪项。
     Rename(AgentId),
     /// 人工译稿的当前段。原文不改，标记在文字变化后清除。
@@ -208,6 +210,7 @@ impl App {
             sender,
             tab: Tab::Edicts,
             selected_task,
+            edict_filter: String::new(),
             selected_official: 0,
             selected_event: None,
             detail_scroll: 0,
@@ -286,9 +289,39 @@ impl App {
         }
     }
 
-    /// 新到旧排列的诏令。
+    /// 新到旧排列的诏令（启用 `/` 筛选时按编号、部门、状态、正文多词匹配）。
     pub(crate) fn task_order(&self) -> Vec<&Task> {
-        self.court().tasks().rev().collect()
+        let query = self.edict_filter.trim().to_lowercase();
+        if query.is_empty() {
+            return self.court().tasks().rev().collect();
+        }
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        let court = self.court();
+        court
+            .tasks()
+            .rev()
+            .filter(|task| {
+                let (status_label, _) = crate::render::status_badge(court, task);
+                let hay = format!(
+                    "#{} {} {} {}",
+                    task.edict.id.0,
+                    task.edict.department.label(),
+                    status_label,
+                    task.edict.text
+                )
+                .to_lowercase();
+                terms.iter().all(|term| hay.contains(term))
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_edict_filter(&mut self, query: String) {
+        self.edict_filter = query.trim().to_owned();
+        let visible: Vec<TaskId> = self.task_order().iter().map(|t| t.edict.id).collect();
+        if self.selected_task.is_none_or(|id| !visible.contains(&id)) {
+            self.selected_task = visible.first().copied();
+            self.detail_scroll = 0;
+        }
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {

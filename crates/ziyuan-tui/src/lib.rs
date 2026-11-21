@@ -93,6 +93,8 @@ pub struct App {
     tab: Tab,
     /// 选中的诏令；列表按新到旧排列。
     selected_task: Option<TaskId>,
+    /// 诏令页关键词筛选（空为不筛选，纯视图态不入事件簿）。
+    edict_filter: String,
     selected_official: usize,
     /// `None` 表示跟随最新事件。
     selected_event: Option<usize>,

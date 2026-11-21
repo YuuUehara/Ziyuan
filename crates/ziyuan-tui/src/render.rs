@@ -272,16 +272,31 @@ impl App {
                 .position(|t| Some(t.edict.id) == self.selected_task),
         );
         let empty = items.is_empty();
+        let list_title = if self.edict_filter.is_empty() {
+            format!("诏令（{}）", order.len())
+        } else {
+            format!(
+                "诏令（{}/{} · 筛：{}）",
+                order.len(),
+                self.court().tasks().count(),
+                self.edict_filter
+            )
+        };
         frame.render_stateful_widget(
             List::new(items)
-                .block(panel(format!("诏令（{}）", order.len())))
+                .block(panel(list_title))
                 .highlight_style(Style::new().bg(Color::DarkGray).bold())
                 .highlight_symbol("▌"),
             list_area,
             &mut state,
         );
         if empty {
-            let hint = Paragraph::new("尚无诏令。按 n 下诏。").dim();
+            let empty_text = if self.edict_filter.is_empty() {
+                "尚无诏令。按 n 下诏。"
+            } else {
+                "无相符的诏令。按 / 修改或按 Esc 清除筛选。"
+            };
+            let hint = Paragraph::new(empty_text).dim();
             frame.render_widget(hint, list_area.inner(ratatui::layout::Margin::new(2, 1)));
         }
 
@@ -1059,6 +1074,7 @@ impl App {
                 ("v", "廷议"),
                 ("i", "复核"),
                 ("x/X", "复勘/平反"),
+                ("/", "筛选"),
                 ("R", "实录"),
                 ("U", "加急"),
                 ("K", "考成"),
@@ -1143,6 +1159,11 @@ impl App {
                     ),
                     InputKind::Skip(_) => ("逐段准奏", "驳回第几段（如 1,3）：", false),
                     InputKind::Records => ("翰林院实录", "检索词（留空看最近）：", false),
+                    InputKind::FilterEdicts => (
+                        "筛选诏令",
+                        "关键词（编号/部门/状态/正文，留空清除）：",
+                        false,
+                    ),
                     InputKind::Rename(_) => ("易名", "姓名 字 号：", false),
                     InputKind::HumanEdit => ("人工译文", "这一段的译文：", false),
                     InputKind::DagAdd(_) => ("运行中追加子诏令", "子诏令内容：", false),

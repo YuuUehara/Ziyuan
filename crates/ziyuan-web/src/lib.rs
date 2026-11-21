@@ -104,7 +104,7 @@ async fn font(axum::extract::Path(name): axum::extract::Path<String>) -> axum::r
 
 /// 前端静态资源：`/assets/{name}`。
 ///
-/// 只有两份脚本模块，未知资源一律 404。缓存用 `no-cache`（不是 `no-store`）：界面与模块
+/// 仅服务内置白名单脚本模块，未知资源一律 404。缓存用 `no-cache`（不是 `no-store`）：界面与模块
 /// 必须同版本，浏览器可以存副本但每次都要回来核对，免得拿旧模块去跑新界面。
 async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::response::Response {
     use axum::http::{StatusCode, header};
@@ -124,6 +124,7 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "continuity-document.mjs" => include_str!("continuity-document.mjs"),
         "import-decoder.mjs" => include_str!("import-decoder.mjs"),
         "command-palette.mjs" => include_str!("command-palette.mjs"),
+        "project-qa.mjs" => include_str!("project-qa.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (

@@ -253,6 +253,17 @@ impl App {
             KeyCode::Char('R') => {
                 self.modal = Some(text_input(InputKind::Records, String::new(), 0));
             }
+            KeyCode::Char('/') if self.tab == Tab::Edicts => {
+                self.modal = Some(text_input(
+                    InputKind::FilterEdicts,
+                    self.edict_filter.clone(),
+                    0,
+                ));
+            }
+            KeyCode::Esc if self.tab == Tab::Edicts && !self.edict_filter.is_empty() => {
+                self.set_edict_filter(String::new());
+                self.info("已清除诏令筛选");
+            }
             KeyCode::Char('T') if self.tab == Tab::Edicts => {
                 self.modal = Some(Modal::Choose {
                     kind: ChooseKind::Template,
@@ -1053,6 +1064,18 @@ impl App {
                     |s| s.review(task, verdict, text),
                     |_| format!("诏令 #{} 评定为{}", task.0, verdict.label()),
                 );
+            }
+            InputKind::FilterEdicts => {
+                let trimmed = text.trim().to_owned();
+                self.set_edict_filter(trimmed.clone());
+                if trimmed.is_empty() {
+                    self.info("已清除诏令筛选");
+                } else {
+                    let count = self.task_order().len();
+                    self.info(format!(
+                        "诏令筛选「{trimmed}」：匹配 {count} 条（按 Esc 清除）"
+                    ));
+                }
             }
             InputKind::Records => {
                 let records = self.court().records();

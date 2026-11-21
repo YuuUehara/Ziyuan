@@ -1462,3 +1462,80 @@ fn resume_failed_modal_key_c_reissues_failed_task_in_tui() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn edict_filter_slash_and_esc_filter_and_restore_list() {
+    let (mut app, _rx, root) = temp_app("edict_filter_tui");
+    let seal = Seal {
+        scope: vec![".".into()],
+        capabilities: [Capability::ReadFile].into_iter().collect(),
+        mcp: Default::default(),
+    };
+    app.session
+        .issue(Department::Works, "修复配置解析".into(), seal.clone())
+        .unwrap();
+    app.session
+        .issue(Department::Rites, "审校第一章译文".into(), seal)
+        .unwrap();
+    app.reload();
+
+    press(&mut app, "/");
+    let modal_screen = screen_at(&app, 120, 30);
+    assert!(modal_screen.contains("筛选诏令"), "{modal_screen}");
+    press(&mut app, "礼部 译文\n");
+    assert!(app.modal.is_none());
+    let filtered = app.task_order();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].edict.id, TaskId(2));
+    let filtered_screen = screen_at(&app, 120, 30);
+    assert!(filtered_screen.contains("1/2"), "{filtered_screen}");
+
+    app.key(KeyEvent::new(
+        KeyCode::Esc,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.task_order().len(), 2);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn book_overview_b_includes_deterministic_qa_summary() {
+    let (mut app, _rx, root) = temp_app("book_overview_qa_tui");
+    let tp = ziyuan_app::text_project::TextProjects::new(&root);
+    let meta = tp
+        .create(ziyuan_app::text_project::NewProject {
+            title: "雨夜录".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: ziyuan_app::text_project::Provenance {
+                source: "local".into(),
+                rights: "owned".into(),
+                author: String::new(),
+                version: String::new(),
+                date: String::new(),
+                scope: String::new(),
+            },
+        })
+        .unwrap();
+    let ch1 = root.join("ch1.txt");
+    std::fs::write(&ch1, "雨の夜だった。").unwrap();
+    let project = tp.import(&meta.id, &[ch1]).unwrap();
+    let b1 = &project.chapters[0].blocks[0];
+    let out_rel = ziyuan_app::translation::output_rel(&meta.id, &b1.block_id);
+    let out_path = root.join(out_rel);
+    std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
+    let zh = format!(
+        r#"{{"schema_version":{},"block_id":"{}","paragraphs":[{{"id":"{}","text":"那是一个雨の夜。"}}]}}"#,
+        b1.schema_version, b1.block_id, b1.paragraphs[0].id
+    );
+    std::fs::write(&out_path, zh).unwrap();
+
+    press(&mut app, "B");
+    let overview = screen_at(&app, 120, 30);
+    assert!(overview.contains("雨夜录"), "{overview}");
+    assert!(overview.contains("发现 1 处问题"), "{overview}");
+    assert!(overview.contains("源语残留 1"), "{overview}");
+
+    let _ = std::fs::remove_dir_all(root);
+}
