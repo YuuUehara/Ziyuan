@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.43.0 — 2026-11-22
+
+- **整书 QA 引擎 O(N) 化、`tools.rs` 模块化拆分、Web 质检模块抽出与 TUI 交互补齐（零新增事件与玉玺代码）**：
+  - **整书质检引擎 O(N) 化**：`ziyuan-app::translation::verification` 抽出内部 `Translations::qa_block`，单块 `qa()` 仅加载一次项目上下文、术语允许集与译块（消除 3 次重复读 `project.json`、无用 `zhupi` 读取与 4 次无用 SHA-256 哈希）；整书 `project_qa_report()` 全书仅加载一次上下文与术语集并复用已解析译块生成 `target_excerpt`，将磁盘读写与 JSON 解析收敛为 O(N)，单测校验与逐块 `qa()` 结果完全一致。
+  - **`ziyuan-runtime::tools` 模块化拆分**：将原 4863 行 `tools.rs` 拆分为入口编排 `tools.rs`（915 行）与 5 个高内聚子模块 `tools/{read,code_nav,edit,exec,tests}.rs`，零公开 API 变更、零行为变更，工作区维持 `unsafe_code = "forbid"`。
+  - **Web 质检前端模块抽出与 CI 单测全覆盖**：从 `ziyuan-web/src/index.html` 抽出独立 ES 模块 `project-qa.mjs`（配 3 条 Node 单测覆盖摘要徽章、筛选、纯 `textContent` 防 XSS、定位编辑回调与切项目丢弃过期响应），经鉴权 `/assets/project-qa.mjs` 懒加载；`.github/workflows/ci.yml` 切换为 `node --test crates/ziyuan-web/src/*.test.mjs`，把 `import-decoder`、`command-palette` 与 `project-qa` 等全部 140 条前端单测纳入 CI。
+  - **TUI 诏令筛选与译书概览 QA 汇总**：`ziyuan-tui` 诏令页新增纯视图层 `/` 实时多词筛选（匹配 `#ID`、部门、状态标签与诏令正文，`Esc` 清空）；`B` 译书项目概览接入 O(N) `project_qa_report` 展示每本书的确定性 QA 问题总数、涉及块数与前 3 类高频问题中文标签。
+- 登记次版本 `1.43.0`（序号 79，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [体系结构](docs/architecture.md)、[使用指南](docs/guide.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.43.0 验收记录](docs/acceptance/1.43.0.md)。
+
 ## 1.42.0 — 2026-11-22
 
 - **翰林院整书级批量 QA 仪表盘与段旁实时译文记忆推荐（纯只读，零新增事件与玉玺代码）**：
