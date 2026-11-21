@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.33.0 — 2026-11-21
+
+- **符号起止行号与 `read_file` 可选 `end_line`**：
+  - `file_outline` 与 `find_symbols` 为 Rust、JS/TS、Python、Go、C/C++、Markdown 全部 6 类语言符号计算 1 起始含首尾的结束行号（单行显示 `42`，跨行显示 `42-98`），覆盖跨行签名、原始字符串常量、Python docstring、C/C++ 续行宏、Allman 风格与 Markdown 父子标题范围。
+  - `read_file` 新增可选 `end_line`（1 起始含首尾，与 `lines` 互斥并严格校验边界），可直接复用 `file_outline` / `find_symbols` 返回的起止行号并与 `replace_text(start_line, end_line)` 无缝衔接。
+- **已落盘诏令安全回滚（CLI + Web，零新事件类型）**：
+  - `ziyuan-app` 新增 `Session::preview_revert` / `Session::revert_changes`（及 `RevertReport` 等结构化预览类型）：仅针对当时实际落盘的文件（尊重 `--skip` 逐段驳回）构造逆向 `FileChange`，在工作区写锁下经 `base_state` 逐字节核验——一致则还原（改写→写回原文、新建→删除、删除→重建），已恢复则幂等跳过，任一文件落盘后已被别处修改则 fail-closed 拒绝且一处不改。
+  - CLI 新增 `ziyuan revert <诏令ID> [--dry-run] [--json]` 及 shell 补全；Web 新增 `GET`/`POST /api/tasks/{id}/changes/revert`（观政只读可预览、执行仅限皇帝、支持 `version` 乐观校验）与已落盘奏本「安全回滚」按钮。
+- 登记次版本 `1.33.0`（序号 69，零新增事件与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [使用指南](docs/guide.md)、[体系结构](docs/architecture.md) 与 [路线图](docs/roadmap.md)；验收见 [1.33.0 验收记录](docs/acceptance/1.33.0.md)。
+
 ## 1.32.0 — 2026-11-21
 
 - **`run_tests` 主动取消传播（撤销 / 超时 / 度支停支）**：
