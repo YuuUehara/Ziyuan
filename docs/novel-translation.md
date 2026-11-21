@@ -153,7 +153,7 @@ ziyuan text human apply <项目ID> <块ID> [--json]   # 只读核对，准奏时
    - `translations/<项目>/context/style.md`：文体要求（语气、人称、用字）。
    - `translations/<项目>/context/summaries/<章ID>.md`：各章前情摘要（下诏时只导出当前块**之前**各章摘要，避免剧透后续章节）。
 3. **检查、交换与段旁提示**：
-   - 「资料」工具栏提供「**对比草稿与生产**」「**预览当前块**」「**确定性检查**」（`ziyuan text qa <项目ID>`，核对没有有效译稿、缺段、段号不一致或重复、多段、空译、疑似未翻译、数字不一致、重复译文和适用术语。未关联人物时不单列人物名，人物仍看段旁提示）、「**导出／导入术语表 CSV／TBX**」（导入支持 UTF-8 及上述旧编码，如 Excel 导出的 Shift_JIS／EUC-KR／Windows-1252 CSV；只合入本地草稿，不会自动批准）以及「**导出备份文件／复制恢复 JSON**」。
+   - 「资料」工具栏提供「**对比草稿与生产**」「**预览当前块**」「**确定性检查**」（`ziyuan text qa <项目ID>`，核对没有有效译稿、缺段、段号不一致或重复、多段、空译、疑似未翻译、数字不一致、重复译文、原文文字残留（`source_script_leak`）、中英标点失配（`punctuation_mismatch`）和适用术语。未关联人物时不单列人物名，人物仍看段旁提示）、「**导出／导入术语表 CSV／TBX**」（支持导出带 UTF-8 BOM 的 Excel 兼容 CSV：`termbase export --bom`；导入支持 UTF-8 及上述旧编码；只合入本地草稿，不会自动批准）、「**提取本块候选术语**」（`termbase propose <项目> <块> [--write]`，仅写入该块 `proposals/term-candidates.json`，绝不自动改写上下文或译稿）以及「**导出备份文件／复制恢复 JSON**」。
    - 在「临时关联」填写本段人物、称呼对象与说话人并点「刷新段旁提示」，可在「译稿」页上方只读预览本段适用词条与规则（未过块首可见门槛的条目会标明「仅供本地回顾」，不表示已外发）。
 4. **快照版本**：每次 `ziyuan text context approve <项目ID>` 生成不可变快照 `v1`、`v2`…；改动草稿未批准前不会带入新任务。更新上下文后，先前用旧版翻译的块会提示「版本失效」。
 
@@ -271,13 +271,13 @@ ziyuan text verification record "$project" "$block" --file checks.json --json
 
 ```bash
 ziyuan text export-originals <项目ID> [--chapter <章ID>]... [--output originals.tar] [--json]
-ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html] [--layout chapters|book] [--output finished.tar] [--json]
+ziyuan text export-finished <项目ID> [--chapter <章ID>]... [--format txt|md|html] [--layout chapters|book] [--bilingual] [--output finished.tar] [--json]
 ```
 
 - **格式选择**：
   - `txt`：纯文本；若有效定稿含注音、着重号或粗斜体则整批拒绝并提示改用兼容格式。
   - `md`：以原件字节为模板保留非翻译代码块与分隔线，支持单层互不重叠的注音/粗体/斜体；遇**原段含行内代码**、**着重号**或**同范围叠加标记**时整批拒绝。
-  - `html`：生成可离线打开的正文 HTML，完整保留译文注音、着重号、粗斜体与同一范围叠加样式。
+  - `html`：生成可离线打开的正文 HTML，完整保留译文注音、着重号、粗斜体与同一范围叠加样式；`html` 与 `md` 均支持 `--bilingual`（Web 勾选「双语对照导出」）输出原文与定稿并列对照版（`txt` 不支持双语对照）。
 - **资格与原子发布**：`export-finished` 只导出当前仍有效的 `Finalized` 定稿；缺块、失效、结构错误或有未收尾写入时整批拒绝。命令行省略 `--output` 只读预览；指定 `--output` 时父目录须存在、不得包含 `..` 或指向工作区控制目录及已有文件，并以硬链接原子发布。另外 `export-originals` 若选择了多章合一的 Markdown 源文件，会取回该完整归档原件。
 
 ### 完整备份与迁机恢复

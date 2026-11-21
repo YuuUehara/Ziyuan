@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.36.0 — 2026-11-21
+
+- **多语种确定性 QA 升级（`source_script_leak` 与 `punctuation_mismatch`）**：
+  - `ziyuan-app` 确定性检查新增 `source_script_leak`（按项目原文语种检出中文译文残留日文假名、韩文谚文与法／德文变音原词，屏蔽已批准术语白名单与独立 `・`/`ー`）与 `punctuation_mismatch`（检出 `「」`/`『』`/`“”`/`《》`/`（）`/`【】` 成对标点失配及汉字后紧跟半角 ASCII 标点，自动忽略 URL）；Web 筛选下拉框与 CLI 帮助同步补齐。
+- **双语对照成稿导出（HTML + Markdown）**：
+  - `ExportOptions` 新增向后兼容 `bilingual` 选项，支持 `html`（响应式双栏对照离线文档，沿用无脚本 CSP）与 `md`（逐段原文＋译文对照）导出，单语成稿保持逐字节不变，`txt` 启用双语显式拒绝；打通 CLI `ziyuan text export-finished --bilingual`、Web `?bilingual=true` 与成稿导出界面勾选框。
+- **术语表 Excel UTF-8 BOM 导出与按块确定性候选术语提案**：
+  - 新增 `export_termbase_csv_with_bom`（CLI `termbase export --bom`、Web `?bom=1` 与「导出 Excel UTF-8 CSV」按钮），避免 Windows Excel 打开中文 CSV 乱码。
+  - 新增 `propose_block_terms`（CLI `termbase propose <项目> <块> [--write]`、Web `POST /text/{project}/blocks/{block}/term-proposals` 与「提取本块候选术语」按钮），按语种确定性提取新词候选并跳过现有术语表／草稿词条，仅写入 `translations/<项目>/<块>/proposals/term-candidates.json`，绝不触碰 `context/` 或 `zh.json`。
+- **追更来源扩展（Kakuyomu 与通用 HTTPS RSS/Atom Feed，只查元数据不抓正文）**：
+  - `ziyuan follow add` 与 Web 武英殿作品关注新增支持 Kakuyomu（`kakuyomu:<数字ID>` 或 `https://kakuyomu.jp/works/<ID>`）与显式前缀 `feed:https://<公网域名>/<路径>`；Atom 1.0／RSS 2.0 仅提取标题、作者、条目数与更新时间并直接丢弃正文节点，校验公网 DNS/IP 防 SSRF，拒绝私有／保留地址、端口、凭据与查询串；兵部驿站自动入队按来源使用 `syosetu:<code>#<N>`、`kakuyomu:<id>#<N>`、`feed:<sha256前16位>#<N>`。
+- 登记次版本 `1.36.0`（序号 72，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [翰林院译书指南](docs/novel-translation.md)、[作品更新提醒](docs/subscriptions.md)、[路线图](docs/roadmap.md) 与 [发布指南](docs/releasing.md)；验收见 [1.36.0 验收记录](docs/acceptance/1.36.0.md)。
+
 ## 1.35.0 — 2026-11-21
 
 - **实时工具执行进度与耗时透明（CLI + TUI + Web，零新事件类型）**：
