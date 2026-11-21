@@ -14,7 +14,9 @@ pub(crate) mod update;
 mod validate;
 
 pub use document::*;
-pub use encoding::{TextEncoding, UNSUPPORTED_TEXT_ENCODING, decode_text_bytes};
+pub use encoding::{
+    TextEncoding, UNSUPPORTED_TEXT_ENCODING, decode_text_bytes, decode_text_bytes_for_language,
+};
 pub use import::{ImportOptions, ImportPreview, ImportSource};
 pub use model::*;
 pub use split::{chunk_paragraphs, split_paragraphs};

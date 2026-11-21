@@ -1,6 +1,14 @@
 use super::{ImportWarning, Inline, ParseOptions, Result, SourceFormat};
 use serde::{Deserialize, Serialize};
 
+/// Supported source languages for translation projects (target is fixed to `zh-CN`).
+pub const SUPPORTED_SOURCE_LANGUAGES: &[&str] = &["ja", "en", "ko", "fr", "de"];
+
+/// Whether `lang` is a supported translation project source language.
+pub fn is_supported_source_language(lang: &str) -> bool {
+    SUPPORTED_SOURCE_LANGUAGES.contains(&lang)
+}
+
 /// User statements, not a license verification or a grant of rights.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {

@@ -44,6 +44,35 @@ test('source update and decodeTextBytes support Shift_JIS, ISO-2022-JP, EUC-JP a
  assert.throws(()=>sourceUpdateRequest('broken.txt',Uint8Array.from([0xff,0xfe]),null),/UTF-8.*JIS/);
  assert.throws(()=>decodeTextBytes(Uint8Array.from([0xef,0xbb,0xbf,0x82,0xa0]),'bom.txt'),/UTF-8.*JIS/);
 });
+test('decodeTextBytes and sourceUpdateRequest support EUC-KR/CP949 and Windows-1252 with strict rejection',()=>{
+ // EUC-KR: "안녕하세요." (BE C8 B3 E7 C7 CF BC BC BF E4 2E)
+ const koBytes=Uint8Array.from([0xbe,0xc8,0xb3,0xe7,0xc7,0xcf,0xbc,0xbc,0xbf,0xe4,0x2e]);
+ const ko=decodeTextBytes(koBytes,'ko.txt','ko');
+ assert.equal(ko.encoding,'EUC-KR');
+ assert.equal(ko.text,'안녕하세요.');
+ assert.equal(decodeTextBytes(koBytes,'ko.txt').encoding,'EUC-KR');
+ // Standard EUC-KR multi-word Korean sentence under Korean language hint
+ const ko2=decodeTextBytes(Uint8Array.from([0xbc,0xad,0xbf,0xef,0xc0,0xc7,0x20,0xb9,0xe3,0x2e]),'seoul.txt','ko');
+ assert.equal(ko2.encoding,'EUC-KR');
+ assert.equal(ko2.text,'서울의 밤.');
+ assert.throws(()=>decodeTextBytes(Uint8Array.from([0xbe]),'trunc-ko.txt','ko'),/UTF-8/);
+ // Windows-1252 French: "Café, œuvre, 10 €"
+ const frBytes=Uint8Array.from([0x43,0x61,0x66,0xe9,0x2c,0x20,0x9c,0x75,0x76,0x72,0x65,0x2c,0x20,0x31,0x30,0x20,0x80]);
+ const fr=decodeTextBytes(frBytes,'fr.txt','fr');
+ assert.equal(fr.encoding,'Windows-1252');
+ assert.equal(fr.text,'Café, œuvre, 10 €');
+ assert.equal(sourceUpdateRequest('fr.txt',frBytes,null,'fr').text,'Café, œuvre, 10 €');
+ // Windows-1252 German: "Über Straße"
+ const deBytes=Uint8Array.from([0xdc,0x62,0x65,0x72,0x20,0x53,0x74,0x72,0x61,0xdf,0x65]);
+ const de=decodeTextBytes(deBytes,'de.txt','de');
+ assert.equal(de.encoding,'Windows-1252');
+ assert.equal(de.text,'Über Straße');
+ assert.equal(decodeTextBytes(deBytes,'de.txt').encoding,'Windows-1252');
+ // Reject undefined Windows-1252 C1 byte, single high byte, NUL, and UTF-16 BOM
+ assert.throws(()=>decodeTextBytes(Uint8Array.from([0x43,0x61,0x66,0x81]),'bad-c1.txt','fr'),/UTF-8/);
+ assert.throws(()=>decodeTextBytes(Uint8Array.from([0xff]),'single.txt','fr'),/UTF-8/);
+ assert.throws(()=>decodeTextBytes(Uint8Array.from([0xfe,0xff,0x00,0x61]),'utf16be.txt','de'),/UTF-8/);
+});
 test("pressing Enter (form submit) runs search without navigating", async () => {
   const previous = globalThis.document;
   globalThis.document = { createElement: (tag) => new Element(tag) };

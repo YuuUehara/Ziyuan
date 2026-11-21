@@ -83,7 +83,8 @@ impl Translations {
 
     pub fn import_srt(&self, project: &str, path: &std::path::Path) -> Result<usize> {
         let _guard = self.lock_local_translation(project)?;
-        if !self.project(project)?.chapters.is_empty() {
+        let meta = self.project(project)?;
+        if !meta.chapters.is_empty() {
             return Err(invalid("已有原文，拒绝覆盖SRT"));
         }
         let bytes = self
@@ -92,8 +93,11 @@ impl Translations {
         if bytes.len() > 8 * 1024 * 1024 {
             return Err(invalid("SRT 超过8 MiB"));
         }
-        let (text, _) = crate::text_project::decode_text_bytes(&bytes)
-            .map_err(|msg| invalid(format!("SRT {msg}")))?;
+        let (text, _) = crate::text_project::decode_text_bytes_for_language(
+            &bytes,
+            Some(&meta.metadata.source_language),
+        )
+        .map_err(|msg| invalid(format!("SRT {msg}")))?;
         let cues = parse_srt(&text)?;
         let body = cues
             .iter()

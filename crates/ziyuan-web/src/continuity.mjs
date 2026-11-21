@@ -33,7 +33,7 @@ export function mount({ api, getSelection, getChapters, refresh, navigate }) {
   el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
   el("restore").onclick = () => run(async () => { if (!checked) throw new Error("请先校验备份"); show(await send(`?destination=${encodeURIComponent(el("destination").value)}&fingerprint=${encodeURIComponent(checked.fingerprint)}`)); el("restore").disabled = true; });
   const updates=document.createElement("details");updates.className="continuity-tools";updates.dataset.workspaceTool="source-update";
-  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown（支持 UTF-8 与日文 JIS：Shift_JIS／ISO-2022-JP／EUC-JP）、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown（支持 UTF-8 与常见旧编码：日文 JIS／韩文 EUC-KR／西欧 Windows-1252）、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
   const reading=mountReading(issues,{api,getSelection,getChapters,navigate});
@@ -46,13 +46,13 @@ export function mount({ api, getSelection, getChapters, refresh, navigate }) {
   const change=async(task)=>{try{u("status").textContent="处理中…";await task();u("status").textContent="完成";}catch(e){u("status").textContent=e.message;u("apply").disabled=true;}};
   u("source").onchange=u("revise").onchange=()=>{proposed=null;u("apply").disabled=true;};
   u("preview").onclick=()=>change(async()=>{
-    const {project,block}=getSelection(); if(!project)throw new Error("请先选择项目");
+    const {project,block,sourceLanguage}=getSelection(); if(!project)throw new Error("请先选择项目");
     const file=u("source").files[0];if(!file)throw new Error("请选择 TXT、Markdown、DOCX 或 EPUB 文件");
     const binary=/\.(docx|epub)$/i.test(file.name);
     if(file.size>(binary?16:8)*1024*1024)throw new Error(binary?"原件超过 16 MiB":"原文超过 8 MiB");
     if(u("revise").checked&&!block)throw new Error("请选择要修订章节中的一个块");
     const bytes=new Uint8Array(await file.arrayBuffer());
-    const input=sourceUpdateRequest(file.name,bytes,u("revise").checked?block.split("-")[0]:null);
+    const input=sourceUpdateRequest(file.name,bytes,u("revise").checked?block.split("-")[0]:null,sourceLanguage||null);
     proposed=null;u("apply").disabled=true;
     const preview=await api(`/text/${encodeURIComponent(project)}/source-update`,input);if(project!==getSelection().project||u("source").files[0]!==file||u("revise").checked!==!!input.chapter)throw new Error("项目或原文选项已变，请重新预览");proposed={project,input,preview};renderChanges(u("result"),preview);u("apply").disabled=preview.blockers.length>0;
   });
@@ -65,6 +65,102 @@ function hasIso2022JpEscape(bytes) {
     if (i + 3 < bytes.length && bytes[i + 2] === 0x28 && bytes[i + 3] === 0x44) return true;
   }
   return false;
+}
+function hasDisallowedControlByte(bytes) {
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if ((b <= 0x08) || b === 0x0b || b === 0x0c || (b >= 0x0e && b <= 0x1f) || b === 0x7f) return true;
+  }
+  return false;
+}
+function isUndefinedWindows1252(b) {
+  return b === 0x81 || b === 0x8d || b === 0x8f || b === 0x90 || b === 0x9d;
+}
+function isCommonWestern1252Letter(b) {
+  return b === 0x8c || b === 0x9c || b === 0x9f
+    || (b >= 0xc0 && b <= 0xcf) || (b >= 0xd1 && b <= 0xd6) || (b >= 0xd9 && b <= 0xdc)
+    || (b >= 0xdf && b <= 0xef) || (b >= 0xf1 && b <= 0xf6) || (b >= 0xf9 && b <= 0xfc) || b === 0xff;
+}
+function isCommonWestern1252Punct(b) {
+  return b === 0x80 || b === 0x82 || b === 0x84 || b === 0x85 || b === 0x8b
+    || (b >= 0x91 && b <= 0x97) || b === 0x9b || b === 0xa0 || b === 0xa3 || b === 0xa7
+    || b === 0xa9 || b === 0xab || b === 0xad || b === 0xae || b === 0xb0 || b === 0xb2
+    || b === 0xb3 || b === 0xb4 || b === 0xb7 || b === 0xba || b === 0xbb;
+}
+function isPlausibleWindows1252(bytes) {
+  if (!bytes.length || hasDisallowedControlByte(bytes)) return false;
+  let nonAscii = 0, commonWestern = 0, hasAsciiAlnum = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (isUndefinedWindows1252(b)) return false;
+    if ((b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a)) hasAsciiAlnum = true;
+    else if (b >= 0x80) {
+      nonAscii++;
+      if (isCommonWestern1252Letter(b) || isCommonWestern1252Punct(b)) commonWestern++;
+    }
+  }
+  return nonAscii > 0 && hasAsciiAlnum && nonAscii * 3 <= bytes.length * 2 && commonWestern * 4 >= nonAscii * 3;
+}
+const WIN1252_HIGH = [
+  0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+  0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0,
+  0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+  0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178,
+];
+function decodeWindows1252Strict(bytes) {
+  if (!isPlausibleWindows1252(bytes)) return null;
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b >= 0x80 && b <= 0x9f) {
+      const cp = WIN1252_HIGH[b - 0x80];
+      if (!cp) return null;
+      out += String.fromCharCode(cp);
+    } else {
+      out += String.fromCharCode(b);
+    }
+  }
+  return out;
+}
+function westernPlausibility(bytes) {
+  let score = 0, prevHighNonPunct = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b < 0x80) {
+      score += (b === 0x09 || b === 0x0a || b === 0x0d || (b >= 0x20 && b <= 0x7e)) ? 1 : -8;
+      prevHighNonPunct = false;
+    } else if (isCommonWestern1252Letter(b)) {
+      score += prevHighNonPunct ? 1 : 2;
+      prevHighNonPunct = true;
+    } else if (isCommonWestern1252Punct(b)) {
+      score += 1;
+      prevHighNonPunct = false;
+    } else {
+      score += prevHighNonPunct ? -5 : -4;
+      prevHighNonPunct = true;
+    }
+  }
+  return score;
+}
+function koreanPlausibility(bytes) {
+  let score = 0;
+  for (let i = 0; i < bytes.length;) {
+    const b = bytes[i];
+    if (b < 0x80) {
+      score += (b === 0x09 || b === 0x0a || b === 0x0d || (b >= 0x20 && b <= 0x7e)) ? 1 : -8;
+      i++;
+      continue;
+    }
+    if (i + 1 >= bytes.length) return -1e9;
+    const t = bytes[i + 1];
+    if (b >= 0xb0 && b <= 0xc8 && t >= 0xa1 && t <= 0xfe) score += 3;
+    else if (b >= 0xa1 && b <= 0xa3 && t >= 0xa1 && t <= 0xfe) score += 2;
+    else if (b >= 0xca && b <= 0xfd && t >= 0xa1 && t <= 0xfe) score += 1;
+    else if (b >= 0xa4 && b <= 0xac && t >= 0xa1 && t <= 0xfe) score += 0;
+    else score -= 1;
+    i += 2;
+  }
+  return score;
 }
 function japanesePlausibility(text) {
   let score = 0;
@@ -79,34 +175,61 @@ function japanesePlausibility(text) {
   }
   return score;
 }
-export function decodeTextBytes(buffer, label = "文件") {
+export function decodeTextBytes(buffer, label = "文件", sourceLanguage = null) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或日文 JIS（Shift_JIS／ISO-2022-JP／EUC-JP）文本`);
+  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或受支持旧编码（JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩文 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本`);
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
     try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; }
     catch { throw bad(); }
   }
-  if (hasIso2022JpEscape(bytes)) {
+  if (bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
+    throw bad();
+  }
+  if ((!sourceLanguage || sourceLanguage === "ja") && hasIso2022JpEscape(bytes)) {
     try { return { text: new TextDecoder("iso-2022-jp", { fatal: true }).decode(bytes), encoding: "ISO-2022-JP" }; }
     catch { throw bad(); }
   }
   try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; } catch {}
-  let sjis = null, euc = null;
-  try { sjis = new TextDecoder("shift_jis", { fatal: true }).decode(bytes); } catch {}
-  try { euc = new TextDecoder("euc-jp", { fatal: true }).decode(bytes); } catch {}
-  if (sjis !== null && euc === null) return { text: sjis, encoding: "Shift_JIS" };
-  if (euc !== null && sjis === null) return { text: euc, encoding: "EUC-JP" };
-  if (sjis !== null && euc !== null) {
-    return japanesePlausibility(euc) > japanesePlausibility(sjis)
-      ? { text: euc, encoding: "EUC-JP" }
-      : { text: sjis, encoding: "Shift_JIS" };
+  if (hasDisallowedControlByte(bytes)) throw bad();
+  const tryDecode = (name) => { try { const out = new TextDecoder(name, { fatal: true }).decode(bytes); return /[\u007f-\u009f]/.test(out) ? null : out; } catch { return null; } };
+  if (sourceLanguage === "ja") {
+    const sjis = tryDecode("shift_jis"), euc = tryDecode("euc-jp");
+    if (sjis !== null && euc === null) return { text: sjis, encoding: "Shift_JIS" };
+    if (euc !== null && sjis === null) return { text: euc, encoding: "EUC-JP" };
+    if (sjis !== null && euc !== null) {
+      return japanesePlausibility(euc) > japanesePlausibility(sjis)
+        ? { text: euc, encoding: "EUC-JP" }
+        : { text: sjis, encoding: "Shift_JIS" };
+    }
+    throw bad();
   }
+  if (sourceLanguage === "ko") {
+    const ko = tryDecode("euc-kr");
+    if (ko !== null) return { text: ko, encoding: "EUC-KR" };
+    throw bad();
+  }
+  if (sourceLanguage === "en" || sourceLanguage === "fr" || sourceLanguage === "de") {
+    const w = decodeWindows1252Strict(bytes);
+    if (w !== null) return { text: w, encoding: "Windows-1252" };
+    throw bad();
+  }
+  let best = null;
+  const consider = (score, text, encoding) => { if (!best || score > best.score) best = { score, text, encoding }; };
+  const sjis = tryDecode("shift_jis");
+  if (sjis !== null) consider(japanesePlausibility(sjis), sjis, "Shift_JIS");
+  const euc = tryDecode("euc-jp");
+  if (euc !== null) consider(japanesePlausibility(euc), euc, "EUC-JP");
+  const ko = tryDecode("euc-kr");
+  if (ko !== null) consider(koreanPlausibility(bytes), ko, "EUC-KR");
+  const w = decodeWindows1252Strict(bytes);
+  if (w !== null) consider(westernPlausibility(bytes), w, "Windows-1252");
+  if (best) return { text: best.text, encoding: best.encoding };
   throw bad();
 }
-export function sourceUpdateRequest(name, bytes, chapter) {
+export function sourceUpdateRequest(name, bytes, chapter, sourceLanguage = null) {
   const binary = /\.(docx|epub)$/i.test(name);
   if (!binary) {
-    const { text } = decodeTextBytes(bytes, name || "文件");
+    const { text } = decodeTextBytes(bytes, name || "文件", sourceLanguage);
     return { chapter, name, text };
   }
   let binaryText = "";

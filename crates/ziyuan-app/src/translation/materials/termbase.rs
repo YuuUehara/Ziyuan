@@ -373,8 +373,13 @@ impl Translations {
 
     /// 合并 CSV 到当前草稿。旧八列表头仍可读，缺的字段取安全默认值。
     pub fn import_termbase_csv(&self, project: &str, bytes: &[u8]) -> Result<MaterialReceipt> {
-        let (text, _) = crate::text_project::decode_text_bytes(bytes)
-            .map_err(|msg| invalid(format!("术语表{msg}")))?;
+        let source_language = self
+            .project(project)
+            .ok()
+            .map(|p| p.metadata.source_language);
+        let (text, _) =
+            crate::text_project::decode_text_bytes_for_language(bytes, source_language.as_deref())
+                .map_err(|msg| invalid(format!("术语表{msg}")))?;
         let records = parse_csv(&text)?;
         let mut rows = records
             .into_iter()
@@ -667,8 +672,13 @@ impl Translations {
 
     /// 合并 TBX 到本地草稿；与 CSV 共用同一套字段校验与合并规则。
     pub fn import_termbase_tbx(&self, project: &str, bytes: &[u8]) -> Result<MaterialReceipt> {
-        let (text, _) = crate::text_project::decode_text_bytes(bytes)
-            .map_err(|msg| invalid(format!("TBX {msg}")))?;
+        let source_language = self
+            .project(project)
+            .ok()
+            .map(|p| p.metadata.source_language);
+        let (text, _) =
+            crate::text_project::decode_text_bytes_for_language(bytes, source_language.as_deref())
+                .map_err(|msg| invalid(format!("TBX {msg}")))?;
         let mut terms = Vec::new();
         let mut persons = Vec::new();
         let mut imported = 0usize;

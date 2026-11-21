@@ -495,8 +495,8 @@ pub(crate) async fn create_project(
     if body.title.is_empty() {
         return Err(ApiError::bad("项目标题不能为空。"));
     }
-    if !matches!(body.source_language.as_str(), "ja" | "en") {
-        return Err(ApiError::bad("原文语言只支持 ja 或 en。"));
+    if !ziyuan_app::text_project::is_supported_source_language(&body.source_language) {
+        return Err(ApiError::bad("原文语言只支持 ja、en、ko、fr 或 de。"));
     }
     if body.provenance.source.is_empty() || body.provenance.rights.is_empty() {
         return Err(ApiError::bad(

@@ -111,7 +111,7 @@ pub(crate) const HELP: &str = concat!(
                                        查看起居注（事件记录）；时间如 30m、2h、3d、2026-10-25、2026-10-25 14:30，
                                        按 ZIYUAN_TZ（如 +08:00，默认 UTC）
   ziyuan records [检索词]              翰林院实录：已结诏令的诏令、回奏与评定（只增不改）；给检索词则查前例
-  ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明> [--author …] [--version …] [--date …] [--scope …]
+  ziyuan text init --title <标题> --language <ja|en|ko|fr|de> --source <来源> --rights <权利声明> [--author …] [--version …] [--date …] [--scope …]
   ziyuan text import <项目ID> <章节.txt>...
   ziyuan text show <项目ID>
   ziyuan text check <项目ID> --candidate <译稿.json> [--block <提示块ID>]

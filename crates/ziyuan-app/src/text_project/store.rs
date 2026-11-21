@@ -119,8 +119,11 @@ impl TextProjects {
                 for (i, path) in sources.iter().enumerate() {
                     let chapter_id = format!("c{:04}", i + 1);
                     let source = Source::read(path)?;
-                    let (decoded_str, _) = super::decode_text_bytes(&source.bytes)
-                        .map_err(|msg| invalid(format!("{chapter_id}: {msg}")))?;
+                    let (decoded_str, _) = super::decode_text_bytes_for_language(
+                        &source.bytes,
+                        Some(&project.metadata.source_language),
+                    )
+                    .map_err(|msg| invalid(format!("{chapter_id}: {msg}")))?;
                     let decoded = match decoded_str {
                         std::borrow::Cow::Borrowed(_) => None,
                         std::borrow::Cow::Owned(s) => Some(s.into_bytes()),
@@ -368,8 +371,8 @@ fn validate_metadata(m: &NewProject) -> Result<()> {
     if m.title.trim().is_empty() {
         return Err(invalid("标题不能为空"));
     }
-    if !matches!(m.source_language.as_str(), "ja" | "en") {
-        return Err(invalid("原文语言仅支持 ja/en"));
+    if !super::is_supported_source_language(&m.source_language) {
+        return Err(invalid("原文语言仅支持 ja/en/ko/fr/de"));
     }
     if m.target_language != "zh-CN" {
         return Err(invalid("目标语言仅支持 zh-CN"));

@@ -1947,7 +1947,7 @@ fn selected_references_preview_is_stable_strict_and_bounded() {
     assert!(serde_json::from_value::<ReferenceRequest>(supplied_prose).is_err());
 
     // Authorization is a concrete project set, not inherited from an index.
-    for language in ["ja", "en"] {
+    for language in ["ja", "en", "ko", "fr", "de"] {
         let target = fx
             .t()
             .texts()

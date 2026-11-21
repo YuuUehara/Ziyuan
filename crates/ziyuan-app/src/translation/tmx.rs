@@ -191,7 +191,7 @@ fn parse(bytes: &[u8], source: &str, target: &str) -> Result<Parsed> {
     if bytes.len() > BYTES {
         return Err(invalid("TMX超过8 MiB"));
     }
-    let (text, _) = crate::text_project::decode_text_bytes(bytes)
+    let (text, _) = crate::text_project::decode_text_bytes_for_language(bytes, Some(source))
         .map_err(|msg| invalid(format!("TMX {msg}")))?;
     if text.len() > BYTES {
         return Err(invalid("TMX超过8 MiB"));
@@ -286,11 +286,21 @@ fn parse(bytes: &[u8], source: &str, target: &str) -> Result<Parsed> {
                         b"WINDOWS-31J".as_slice(),
                         b"ISO-2022-JP".as_slice(),
                         b"EUC-JP".as_slice(),
+                        b"EUC-KR".as_slice(),
+                        b"EUC_KR".as_slice(),
+                        b"CP949".as_slice(),
+                        b"MS949".as_slice(),
+                        b"KS_C_5601-1987".as_slice(),
+                        b"WINDOWS-1252".as_slice(),
+                        b"CP1252".as_slice(),
+                        b"ISO-8859-1".as_slice(),
+                        b"LATIN1".as_slice(),
+                        b"LATIN-1".as_slice(),
                     ]
                     .iter()
                     .any(|allowed| encoding.eq_ignore_ascii_case(allowed));
                     if !supported {
-                        return Err(invalid("TMX仅接受UTF-8或日文JIS编码声明"));
+                        return Err(invalid("TMX仅接受UTF-8或受支持语种的旧编码声明"));
                     }
                 }
             }

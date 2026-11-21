@@ -444,7 +444,7 @@ fn rejects_invalid_registration_ids_and_sources_without_partial_visibility() {
     let f = Fixture::new();
     let mut spec = NewProject {
         title: "x".into(),
-        source_language: "fr".into(),
+        source_language: "xx".into(),
         target_language: "zh-CN".into(),
         provenance: Provenance::default(),
     };
@@ -1310,5 +1310,114 @@ fn jis_encodings_import_preview_and_reverify_cleanly() {
     assert_eq!(
         f.service().show(&p_srt.id).unwrap().chapters[0].paragraphs[0].text,
         "東京の夜。"
+    );
+}
+#[test]
+fn korean_french_and_german_projects_import_legacy_encodings_cleanly() {
+    let f = Fixture::new();
+    let translations = ziyuan_app::translation::Translations::new(&f.0);
+
+    // 1) 韩文项目：EUC-KR / CP949 TXT、原文更新、SRT 与 TMX。
+    let p_ko = f.create("ko");
+    let ko_text = "제1장\r\n\r\n안녕하세요. 한국어 소설입니다. 뷁\r\n";
+    let (ko_bytes, _, err) = encoding_rs::EUC_KR.encode(ko_text);
+    assert!(!err);
+    let ko_file = f.file("ko.txt", &ko_bytes);
+    let opts = ImportOptions::default();
+    let ko_sources = [ImportSource::File(ko_file.clone())];
+    let ko_preview = f
+        .service()
+        .preview_import(&p_ko.id, &ko_sources, &opts)
+        .unwrap();
+    assert_eq!(ko_preview.chapters[0].paragraphs[0].text, "제1장");
+    assert_eq!(
+        ko_preview.chapters[0].paragraphs[1].text,
+        "안녕하세요. 한국어 소설입니다. 뷁"
+    );
+    let ko_imported = f
+        .service()
+        .import_prepared(&p_ko.id, &ko_sources, &opts, &ko_preview.fingerprint)
+        .unwrap();
+    assert_eq!(f.service().show(&p_ko.id).unwrap(), ko_imported);
+
+    let (ko_rev, _, err) = encoding_rs::EUC_KR.encode("수정된 문단입니다.\n");
+    assert!(!err);
+    let ko_update = ziyuan_app::translation::Translations::source_update_from_bytes_for_language(
+        Some("c0001".into()),
+        "rev.txt".into(),
+        &ko_rev,
+        Some("ko"),
+    )
+    .unwrap();
+    assert_eq!(ko_update.text, "수정된 문단입니다.\n");
+
+    let (ko_tmx, _, err) = encoding_rs::EUC_KR.encode(
+        "<?xml version=\"1.0\" encoding=\"EUC-KR\"?><tmx version=\"1.4\"><header srclang=\"ko\"/><body><tu><tuv xml:lang=\"ko\"><seg>서울</seg></tuv><tuv xml:lang=\"zh-CN\"><seg>&#x9996;&#x5C14;</seg></tuv></tu></body></tmx>",
+    );
+    assert!(!err);
+    assert_eq!(
+        translations.preview_tmx(&p_ko.id, &ko_tmx).unwrap().entries,
+        1
+    );
+
+    let p_ko_srt = f.create("ko");
+    let (ko_srt, _, err) =
+        encoding_rs::EUC_KR.encode("1\r\n00:00:01,000 --> 00:00:02,000\r\n서울의 밤.\r\n");
+    assert!(!err);
+    let ko_srt_file = f.file("ko.srt", &ko_srt);
+    assert_eq!(
+        translations.import_srt(&p_ko_srt.id, &ko_srt_file).unwrap(),
+        1
+    );
+    assert_eq!(
+        f.service().show(&p_ko_srt.id).unwrap().chapters[0].paragraphs[0].text,
+        "서울의 밤."
+    );
+
+    // 2) 法文项目：Windows-1252 / ISO-8859-1 TXT 与 TMX。
+    let p_fr = f.create("fr");
+    let fr_text = "Chapitre 1\r\n\r\n« L’œuvre naïve au café : 10 €. »\r\n";
+    let (fr_bytes, _, err) = encoding_rs::WINDOWS_1252.encode(fr_text);
+    assert!(!err);
+    let fr_file = f.file("fr.txt", &fr_bytes);
+    let fr_imported = f.service().import(&p_fr.id, &[fr_file]).unwrap();
+    assert_eq!(
+        fr_imported.chapters[0].paragraphs[1].text,
+        "« L’œuvre naïve au café : 10 €. »"
+    );
+
+    let (fr_tmx, _, err) = encoding_rs::WINDOWS_1252.encode(
+        "<?xml version=\"1.0\" encoding=\"Windows-1252\"?><tmx version=\"1.4\"><header srclang=\"fr\"/><body><tu><tuv xml:lang=\"fr\"><seg>Café</seg></tuv><tuv xml:lang=\"zh-CN\"><seg>&#x5496;&#x5561;</seg></tuv></tu></body></tmx>",
+    );
+    assert!(!err);
+    assert_eq!(
+        translations.preview_tmx(&p_fr.id, &fr_tmx).unwrap().entries,
+        1
+    );
+
+    // 3) 德文项目：Windows-1252 TXT 与 SRT。
+    let p_de = f.create("de");
+    let de_text = "Kapitel 1\r\n\r\nÜber die Straße: „Grüße aus München!“\r\n";
+    let (de_bytes, _, err) = encoding_rs::WINDOWS_1252.encode(de_text);
+    assert!(!err);
+    let de_file = f.file("de.txt", &de_bytes);
+    let de_imported = f.service().import(&p_de.id, &[de_file]).unwrap();
+    assert_eq!(
+        de_imported.chapters[0].paragraphs[1].text,
+        "Über die Straße: „Grüße aus München!“"
+    );
+
+    let p_de_srt = f.create("de");
+    let (de_srt, _, err) =
+        encoding_rs::WINDOWS_1252.encode("1\r\n00:00:01,000 --> 00:00:02,000\r\nÄpfel und Öl.\r\n");
+    assert!(!err);
+    let de_srt_file = f.file("de.srt", &de_srt);
+    assert_eq!(
+        translations.import_srt(&p_de_srt.id, &de_srt_file).unwrap(),
+        1
+    );
+    assert_eq!(
+        f.service().show(&p_de_srt.id).unwrap().chapters[0].paragraphs[0].text,
+        "Äpfel und Öl."
     );
 }

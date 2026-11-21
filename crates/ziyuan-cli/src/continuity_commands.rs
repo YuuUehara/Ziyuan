@@ -221,10 +221,15 @@ pub(crate) fn run(action: Action, json: bool) -> Result<(), Box<dyn Error>> {
                 .and_then(|s| s.to_str())
                 .ok_or("文件名不是UTF-8")?
                 .to_owned();
-            let input = ziyuan_app::translation::Translations::source_update_from_bytes(
-                chapter, name, &bytes,
-            )?;
             let t = Translations::new(&root);
+            let source_language = t.project(&project).ok().map(|p| p.metadata.source_language);
+            let input =
+                ziyuan_app::translation::Translations::source_update_from_bytes_for_language(
+                    chapter,
+                    name,
+                    &bytes,
+                    source_language.as_deref(),
+                )?;
             if let Some(confirm) = confirm {
                 let project = t.apply_source_update(&project, &input, &confirm)?;
                 let prose = format!(

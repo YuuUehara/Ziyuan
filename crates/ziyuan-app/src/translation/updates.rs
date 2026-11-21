@@ -14,6 +14,14 @@ impl Translations {
         name: String,
         bytes: &[u8],
     ) -> Result<SourceUpdate> {
+        Self::source_update_from_bytes_for_language(chapter, name, bytes, None)
+    }
+    pub fn source_update_from_bytes_for_language(
+        chapter: Option<String>,
+        name: String,
+        bytes: &[u8],
+        source_language: Option<&str>,
+    ) -> Result<SourceUpdate> {
         if name.len() > 255 || name.chars().any(|c| c.is_control() || "/\\:".contains(c)) {
             return Err(invalid("原文文件名须为不含路径的普通文件名"));
         }
@@ -26,8 +34,9 @@ impl Translations {
                 if bytes.len() > 8 * 1024 * 1024 {
                     return Err(invalid("原文正文超过 8 MiB"));
                 }
-                let (decoded, _) = crate::text_project::decode_text_bytes(bytes)
-                    .map_err(|msg| invalid(format!("原文更新{msg}")))?;
+                let (decoded, _) =
+                    crate::text_project::decode_text_bytes_for_language(bytes, source_language)
+                        .map_err(|msg| invalid(format!("原文更新{msg}")))?;
                 if decoded.len() > 8 * 1024 * 1024 {
                     return Err(invalid("原文正文超过 8 MiB"));
                 }

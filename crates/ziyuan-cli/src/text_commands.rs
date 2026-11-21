@@ -26,11 +26,11 @@ impl std::fmt::Display for RecoveryPending {
 impl Error for RecoveryPending {}
 
 pub(crate) const TEXT_HELP: &str = r#"文本项目（离线；不需要 ziyuan init，不调用模型或网络）：
-  ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明>
+  ziyuan text init --title <标题> --language <ja|en|ko|fr|de> --source <来源> --rights <权利声明>
                    [--author <作者>] [--version <版本>] [--date <取得日期>] [--scope <使用范围>]
                                        建立项目（译入 zh-CN），打印项目 ID；来源与权利为用户自述，不作核验
   ziyuan text import <项目ID> <章节.txt>...
-                                       按给出的顺序一次性导入 TXT（支持 UTF-8 及日文 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；每项目只导入一次）
+                                       按给出的顺序一次性导入 TXT（支持 UTF-8 及受支持旧编码：JIS／EUC-KR／Windows-1252；每项目只导入一次）
   ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>]
                      [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs]
                      [--chapter-title <章名>]...
@@ -154,7 +154,7 @@ pub(crate) enum TextAction {
     },
 }
 
-const INIT_USAGE: &str = "用法: ziyuan text init --title <标题> --language <ja|en> --source <来源> --rights <权利声明> [--author <作者>] [--version <版本>] [--date <取得日期>] [--scope <使用范围>]";
+const INIT_USAGE: &str = "用法: ziyuan text init --title <标题> --language <ja|en|ko|fr|de> --source <来源> --rights <权利声明> [--author <作者>] [--version <版本>] [--date <取得日期>] [--scope <使用范围>]";
 const IMPORT_USAGE: &str = "用法: ziyuan text import <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs] [--chapter-title <章名>]... [--confirm <预览指纹>]；MD 或解析选项须先 text preview 再 --confirm";
 const PREVIEW_USAGE: &str = "用法: ziyuan text preview <项目ID> <文件>... [--ruby] [--heading-level <1|2>] [--text-paragraphs <blank_lines|lines>] [--split-long-paragraphs] [--chapter-title <章名>]...";
 const SHOW_USAGE: &str = "用法: ziyuan text show <项目ID>";
@@ -502,8 +502,8 @@ fn parse_init(args: &[String]) -> Result<TextAction, Box<dyn Error>> {
         }
     }
     let language = language.ok_or(INIT_USAGE)?;
-    if !matches!(language.as_str(), "ja" | "en") {
-        return Err(format!("原文语言仅支持 ja 或 en：{language}").into());
+    if !ziyuan_app::text_project::is_supported_source_language(&language) {
+        return Err(format!("原文语言仅支持 ja/en/ko/fr/de：{language}").into());
     }
     let (Some(title), true, true) = (title, source, rights) else {
         return Err(INIT_USAGE.into());

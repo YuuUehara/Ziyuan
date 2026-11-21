@@ -643,7 +643,7 @@ fn usage_errors_exit_two_and_runtime_errors_exit_one() {
             "--title",
             "T",
             "--language",
-            "fr",
+            "xx",
             "--source",
             "s",
             "--rights",
@@ -1871,5 +1871,20 @@ fn cli_preview_and_import_supports_txt_lines_and_split_long_paragraphs() {
         ],
     );
     assert_import_matches_preview(&imported, &preview);
+    no_court(root);
+}
+#[test]
+fn cli_supports_korean_french_and_german_projects_and_rejects_unknown_language() {
+    let dir = TempDir::new("langs");
+    let root = dir.path();
+    for (lang, title) in [("ko", "한국어"), ("fr", "Français"), ("de", "Deutsch")] {
+        let mut args = init_args(title, lang);
+        args.push("--json");
+        let project = ok_json(root, &args);
+        assert_eq!(project["metadata"]["source_language"], lang);
+        assert_eq!(project["metadata"]["target_language"], "zh-CN");
+    }
+    let bad = ziyuan(root, &init_args("Unknown", "xx"));
+    assert_eq!(bad.status.code(), Some(2));
     no_court(root);
 }

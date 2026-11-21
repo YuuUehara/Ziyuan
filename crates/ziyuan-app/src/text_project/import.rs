@@ -71,7 +71,7 @@ impl TextProjects {
     ) -> Result<ImportPreview> {
         let project = self.show(id)?;
         require_empty(&project)?;
-        let mut snapshots = snapshots(sources)?;
+        let mut snapshots = snapshots(sources, Some(&project.metadata.source_language))?;
         let preview = preview(&project, &snapshots, options)?;
         self.check_import_size(&project, &preview.chapters)?;
         for snapshot in &mut snapshots {
@@ -89,7 +89,8 @@ impl TextProjects {
         options: &ImportOptions,
         expected: &str,
     ) -> Result<Project> {
-        let mut snapshots = snapshots(sources)?;
+        let source_language = self.show(id).ok().map(|p| p.metadata.source_language);
+        let mut snapshots = snapshots(sources, source_language.as_deref())?;
         let dir = self.project_dir(id)?;
         let (stored, ()) = self
             .manifest(id, 2)?
@@ -157,7 +158,7 @@ fn require_empty(project: &Project) -> Result<()> {
     Ok(())
 }
 
-fn snapshots(sources: &[ImportSource]) -> Result<Vec<Snapshot>> {
+fn snapshots(sources: &[ImportSource], source_language: Option<&str>) -> Result<Vec<Snapshot>> {
     if sources.is_empty() {
         return Err(invalid("至少指定一个 TXT 或 Markdown 文件"));
     }
@@ -187,8 +188,9 @@ fn snapshots(sources: &[ImportSource]) -> Result<Vec<Snapshot>> {
         let contents = match input {
             ImportSource::File(path) => {
                 let source = Source::read_limited(path, remaining)?;
-                let (decoded_str, _) = super::decode_text_bytes(&source.bytes)
-                    .map_err(|msg| invalid(format!("{}: {msg}", fallback_title(&name))))?;
+                let (decoded_str, _) =
+                    super::decode_text_bytes_for_language(&source.bytes, source_language)
+                        .map_err(|msg| invalid(format!("{}: {msg}", fallback_title(&name))))?;
                 if decoded_str.len() > remaining {
                     return Err(invalid("导入原文合计超过 8 MiB，请拆成多个项目"));
                 }
@@ -202,8 +204,9 @@ fn snapshots(sources: &[ImportSource]) -> Result<Vec<Snapshot>> {
                 }
             }
             ImportSource::Text { text, .. } => {
-                let (decoded_str, _) = super::decode_text_bytes(text.as_bytes())
-                    .map_err(|msg| invalid(format!("{}: {msg}", fallback_title(&name))))?;
+                let (decoded_str, _) =
+                    super::decode_text_bytes_for_language(text.as_bytes(), source_language)
+                        .map_err(|msg| invalid(format!("{}: {msg}", fallback_title(&name))))?;
                 if decoded_str.len() > remaining {
                     return Err(invalid("导入原文合计超过 8 MiB，请拆成多个项目"));
                 }
@@ -230,7 +233,7 @@ pub(super) fn format_for_name(name: &str) -> Result<SourceFormat> {
         Some("txt") => Ok(SourceFormat::Text),
         Some("md" | "markdown") => Ok(SourceFormat::Markdown),
         _ => Err(invalid(
-            "仅支持 UTF-8 或日文 JIS 编码的 .txt、.md 或 .markdown 原文",
+            "仅支持 UTF-8 或受支持旧编码的 .txt、.md 或 .markdown 原文",
         )),
     }
 }
