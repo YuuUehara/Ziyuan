@@ -252,6 +252,50 @@ pub(crate) async fn discard_changes(
     .await
 }
 
+/// 预览安全回滚已落盘诏令的逐文件核验结果（只读，观政令牌可用）。
+pub(crate) async fn preview_revert(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let report = app
+        .with_session(move |s| s.preview_revert(TaskId(id), &root))
+        .await?;
+    Ok(Json(
+        serde_json::to_value(report).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+/// 安全回滚已落盘诏令所写入的文件（仅皇帝可用；可选 `{ version }` 校验预览版本）。
+pub(crate) async fn revert_changes(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    body: Option<Json<Value>>,
+) -> Result<Json<Value>, ApiError> {
+    let body = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let version = match body.get("version") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| ApiError::bad("version 须为字符串"))?
+                .to_owned(),
+        ),
+    };
+    let root = app.0.config.root.clone();
+    app.mutate(move |s| {
+        let report = s.revert_changes(TaskId(id), &root, version.as_deref())?;
+        for problem in &report.problems {
+            eprintln!(
+                "警告：未能清理临时文件或其租约 {}：{}",
+                problem.path.display(),
+                problem.message
+            );
+        }
+        Ok(serde_json::to_value(report).expect("RevertReport 可序列化"))
+    })
+    .await
+}
+
 pub(crate) async fn review(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<u64>,

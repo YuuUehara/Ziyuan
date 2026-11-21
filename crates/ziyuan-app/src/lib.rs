@@ -41,8 +41,9 @@ pub use delta::{
     unified_hunks,
 };
 pub use edicts::{
-    CHANGELOG_NOTE, PROXY_REVIEW_NOTE, base_hash, changelog_text, changes_version, render_diffs,
-    reply_text, seal_note, selected_files, skipped_note, stale_files,
+    CHANGELOG_NOTE, PROXY_REVIEW_NOTE, RevertAction, RevertFilePreview, RevertReport, RevertStatus,
+    base_hash, changelog_text, changes_version, preview_revert_for, render_diffs, reply_text,
+    seal_note, selected_files, skipped_note, stale_files,
 };
 pub use exam::{ExamPaper, exam_papers};
 pub use follow::{

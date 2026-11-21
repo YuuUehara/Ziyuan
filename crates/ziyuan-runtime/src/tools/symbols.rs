@@ -9,8 +9,10 @@ use std::path::Path;
 /// 识别出的代码符号。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Symbol {
-    /// 1-based 行号。
+    /// 1-based 起始行号。
     pub line: usize,
+    /// 1-based 结束行号（含，恒有 `end_line >= line`）。
+    pub end_line: usize,
     /// 规范类别名（如 `fn`、`struct`、`enum`、`trait`、`impl`、`class`、`interface`、`type`、`const`、`mod`、`macro`、`heading`）。
     pub kind: &'static str,
     /// 符号短名（如 `parse_hunk_reviews`、`Config`）。
@@ -29,6 +31,15 @@ impl Symbol {
         match &self.parent {
             Some(parent) => format!("{parent} > {}", self.name),
             None => self.name.clone(),
+        }
+    }
+
+    /// 行号范围展示：单行符号返回 `"42"`，跨行符号返回 `"42-98"`。
+    pub(super) fn line_span(&self) -> String {
+        if self.end_line > self.line {
+            format!("{}-{}", self.line, self.end_line)
+        } else {
+            self.line.to_string()
         }
     }
 }
@@ -429,6 +440,105 @@ fn count_braces(code: &str) -> (usize, usize) {
     (open, close)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanExpect {
+    SingleLine,
+    BlockOrSemi,
+    SemiOnly,
+}
+
+#[derive(Default)]
+struct BraceSpanTracker {
+    open: Vec<(usize, usize)>,
+    pending: Option<(usize, usize, bool)>,
+}
+
+impl BraceSpanTracker {
+    fn close_leading(&mut self, symbols: &mut [Symbol], effective_depth: usize, line_no: usize) {
+        while let Some(&(idx, target)) = self.open.last() {
+            if target >= effective_depth {
+                symbols[idx].end_line = line_no;
+                self.open.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some((_, target, _)) = self.pending
+            && target > effective_depth
+        {
+            self.pending = None;
+        }
+    }
+
+    fn register(&mut self, sym_idx: usize, effective_depth: usize, expect: SpanExpect) {
+        self.pending = match expect {
+            SpanExpect::SingleLine => None,
+            SpanExpect::BlockOrSemi => Some((sym_idx, effective_depth, false)),
+            SpanExpect::SemiOnly => Some((sym_idx, effective_depth, true)),
+        };
+    }
+
+    fn advance(
+        &mut self,
+        symbols: &mut [Symbol],
+        rest: &str,
+        mut cur_depth: usize,
+        line_no: usize,
+    ) -> usize {
+        for b in rest.bytes() {
+            match b {
+                b'{' => {
+                    if let Some((idx, target, false)) = self.pending
+                        && cur_depth == target
+                    {
+                        self.open.push((idx, target));
+                        self.pending = None;
+                    }
+                    cur_depth += 1;
+                }
+                b'}' => {
+                    cur_depth = cur_depth.saturating_sub(1);
+                    while let Some(&(idx, target)) = self.open.last() {
+                        if target >= cur_depth {
+                            symbols[idx].end_line = line_no;
+                            self.open.pop();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some((_, target, _)) = self.pending
+                        && target > cur_depth
+                    {
+                        self.pending = None;
+                    }
+                }
+                b';' => {
+                    if let Some((idx, target, _)) = self.pending
+                        && cur_depth == target
+                    {
+                        symbols[idx].end_line = line_no;
+                        self.pending = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        cur_depth
+    }
+}
+
+fn has_unclosed_paren(code: &str) -> bool {
+    let mut depth = 0isize;
+    for b in code.bytes() {
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+        }
+    }
+    depth > 0
+}
+
 fn strip_leading_vis_and_attrs(mut s: &str) -> &str {
     loop {
         s = s.trim_start();
@@ -493,10 +603,9 @@ fn skip_generics(s: &str) -> &str {
 fn extract_rust(text: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     let mut lex = BraceLexState::default();
+    let mut spans = BraceSpanTracker::default();
     let mut depth: usize = 0;
-    // (容器展示名, 进入容器时的花括号深度)
     let mut containers: Vec<(String, usize)> = Vec::new();
-    // 跨行 impl/trait/mod 头部尚未遇到 `{` 时暂存容器名。
     let mut pending_container: Option<String> = None;
 
     for (idx, raw_line) in text.lines().enumerate() {
@@ -505,9 +614,9 @@ fn extract_rust(text: &str) -> Vec<Symbol> {
         let trimmed = code.trim();
         let (opens, closes) = count_braces(&code);
 
-        // 先处理行首的 `}` 使容器出栈，防止 `}` 后同行又写了新项。
         let leading_closes = trimmed.bytes().take_while(|&b| b == b'}').count();
         let effective_depth = depth.saturating_sub(leading_closes);
+        spans.close_leading(&mut symbols, effective_depth, line_no);
         while containers
             .last()
             .is_some_and(|(_, enter)| *enter > effective_depth)
@@ -515,7 +624,6 @@ fn extract_rust(text: &str) -> Vec<Symbol> {
             containers.pop();
         }
 
-        // 若前一行是未见 `{` 的 `impl`/`trait`/`mod`，在本行见到 `{` 时入栈；见到 `;` 则放弃。
         if let Some(name) = pending_container.as_ref() {
             if opens > 0 {
                 containers.push((name.clone(), effective_depth + 1));
@@ -525,20 +633,26 @@ fn extract_rust(text: &str) -> Vec<Symbol> {
             }
         }
 
-        // 只提取顶层或模块／impl／trait 内的声明（不抓取函数体内部的局部辅助项，减少噪音）。
         let in_container = containers.len() == effective_depth;
         if in_container && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let parent = containers.last().map(|(name, _)| name.clone());
             let sym_depth = containers.len();
             if let Some((kind, name, container_label)) = parse_rust_item(trimmed) {
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind,
                     name,
                     parent,
                     signature: clip_sig(trimmed),
                     depth: sym_depth,
                 });
+                let expect = match kind {
+                    "const" | "static" | "type" => SpanExpect::SemiOnly,
+                    _ => SpanExpect::BlockOrSemi,
+                };
+                spans.register(sym_idx, effective_depth, expect);
                 if let Some(label) = container_label {
                     if opens > closes {
                         containers.push((label, effective_depth + 1));
@@ -549,7 +663,12 @@ fn extract_rust(text: &str) -> Vec<Symbol> {
             }
         }
 
-        depth = depth.saturating_add(opens).saturating_sub(closes);
+        depth = spans.advance(
+            &mut symbols,
+            &trimmed[leading_closes..],
+            effective_depth,
+            line_no,
+        );
         while containers.last().is_some_and(|(_, enter)| *enter > depth) {
             containers.pop();
         }
@@ -667,6 +786,7 @@ fn parse_rust_impl_name(rest: &str) -> Option<String> {
 fn extract_jsts(text: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     let mut lex = BraceLexState::default();
+    let mut spans = BraceSpanTracker::default();
     let mut depth: usize = 0;
     let mut containers: Vec<(String, usize)> = Vec::new();
 
@@ -678,6 +798,7 @@ fn extract_jsts(text: &str) -> Vec<Symbol> {
 
         let leading_closes = trimmed.bytes().take_while(|&b| b == b'}').count();
         let effective_depth = depth.saturating_sub(leading_closes);
+        spans.close_leading(&mut symbols, effective_depth, line_no);
         while containers
             .last()
             .is_some_and(|(_, enter)| *enter > effective_depth)
@@ -692,14 +813,39 @@ fn extract_jsts(text: &str) -> Vec<Symbol> {
             if let Some((kind, name, container_label)) =
                 parse_jsts_item(trimmed, !containers.is_empty())
             {
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind,
                     name,
                     parent,
                     signature: clip_sig(trimmed),
                     depth: sym_depth,
                 });
+                let expect = if opens > 0 {
+                    SpanExpect::BlockOrSemi
+                } else if matches!(kind, "const" | "type") {
+                    if trimmed.ends_with('=')
+                        || trimmed.ends_with('|')
+                        || trimmed.ends_with('&')
+                        || trimmed.ends_with('(')
+                        || trimmed.ends_with(',')
+                    {
+                        SpanExpect::BlockOrSemi
+                    } else {
+                        SpanExpect::SingleLine
+                    }
+                } else if kind == "fn"
+                    && trimmed.contains("=>")
+                    && !trimmed.ends_with("=>")
+                    && !has_unclosed_paren(trimmed)
+                {
+                    SpanExpect::SingleLine
+                } else {
+                    SpanExpect::BlockOrSemi
+                };
+                spans.register(sym_idx, effective_depth, expect);
                 if let Some(label) = container_label
                     && opens > closes
                 {
@@ -708,7 +854,12 @@ fn extract_jsts(text: &str) -> Vec<Symbol> {
             }
         }
 
-        depth = depth.saturating_add(opens).saturating_sub(closes);
+        depth = spans.advance(
+            &mut symbols,
+            &trimmed[leading_closes..],
+            effective_depth,
+            line_no,
+        );
         while containers.last().is_some_and(|(_, enter)| *enter > depth) {
             containers.pop();
         }
@@ -809,26 +960,46 @@ fn parse_jsts_item(
 // ---------- Python ----------
 
 fn extract_python(text: &str) -> Vec<Symbol> {
-    let mut symbols = Vec::new();
+    let mut symbols: Vec<Symbol> = Vec::new();
     let mut triple_quote: Option<&'static str> = None;
-    // (容器名, 缩进空格数)
     let mut classes: Vec<(String, usize)> = Vec::new();
-    // 正在函数体内的缩进栈，用于跳过嵌套局部 def。
     let mut fn_indents: Vec<usize> = Vec::new();
+    let mut open_spans: Vec<(usize, usize, usize)> = Vec::new();
 
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
-        // 处理三引号多行字符串／docstring
+        let was_in_triple = triple_quote.is_some();
         let code = strip_python_line(raw_line, &mut triple_quote);
         let trimmed = code.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let indent = raw_line
+        let raw_indent = raw_line
             .bytes()
             .take_while(|b| *b == b' ' || *b == b'\t')
             .map(|b| if b == b'\t' { 4 } else { 1 })
             .sum::<usize>();
+
+        if trimmed.is_empty() {
+            if !raw_line.trim().is_empty() {
+                for &mut (_, sym_indent, ref mut last_line) in &mut open_spans {
+                    if was_in_triple || raw_indent > sym_indent {
+                        *last_line = line_no;
+                    }
+                }
+            }
+            continue;
+        }
+        let indent = raw_indent;
+
+        while let Some(&(sym_idx, sym_indent, last_line)) = open_spans.last() {
+            if indent <= sym_indent {
+                symbols[sym_idx].end_line = last_line;
+                open_spans.pop();
+            } else {
+                break;
+            }
+        }
+        for &mut (_, _, ref mut last_line) in &mut open_spans {
+            *last_line = line_no;
+        }
 
         while classes.last().is_some_and(|(_, ci)| indent <= *ci) {
             classes.pop();
@@ -843,14 +1014,17 @@ fn extract_python(text: &str) -> Vec<Symbol> {
             && let Some((name, _)) = take_ident(rest)
         {
             if fn_indents.is_empty() {
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind: "class",
                     name: name.to_owned(),
                     parent,
                     signature: clip_sig(trimmed.trim_end_matches(':')),
                     depth: sym_depth,
                 });
+                open_spans.push((sym_idx, indent, line_no));
                 classes.push((format!("class {name}"), indent));
             }
             continue;
@@ -861,20 +1035,25 @@ fn extract_python(text: &str) -> Vec<Symbol> {
         if let Some(rest) = fn_rest
             && let Some((name, _)) = take_ident(rest)
         {
-            // 仅收顶层函数与类直接方法，跳过嵌套局部 def。
             let expected_member = classes.last().is_some_and(|(_, ci)| indent > *ci);
             if fn_indents.is_empty() && (indent == 0 || expected_member) {
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind: "fn",
                     name: name.to_owned(),
                     parent,
                     signature: clip_sig(trimmed.trim_end_matches(':')),
                     depth: sym_depth,
                 });
+                open_spans.push((sym_idx, indent, line_no));
                 fn_indents.push(indent);
             }
         }
+    }
+    for (sym_idx, _, last_line) in open_spans {
+        symbols[sym_idx].end_line = last_line;
     }
     symbols
 }
@@ -949,15 +1128,21 @@ fn strip_python_line_with_pad(line: &str, triple: &mut Option<&'static str>, pad
 fn extract_go(text: &str) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     let mut lex = BraceLexState::default();
+    let mut spans = BraceSpanTracker::default();
     let mut depth: usize = 0;
 
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
         let code = lex.strip_line(raw_line, false, true);
         let trimmed = code.trim();
-        let (opens, closes) = count_braces(&code);
+        let (opens, _) = count_braces(&code);
 
-        if depth == 0 && !trimmed.is_empty() {
+        let leading_closes = trimmed.bytes().take_while(|&b| b == b'}').count();
+        let effective_depth = depth.saturating_sub(leading_closes);
+        spans.close_leading(&mut symbols, effective_depth, line_no);
+
+        if effective_depth == 0 && !trimmed.is_empty() {
+            let mut added = None;
             if let Some(rest) = strip_word(trimmed, "func") {
                 if let Some(after_recv) = rest.strip_prefix('(') {
                     if let Some((recv, tail)) = after_recv.split_once(')')
@@ -969,24 +1154,30 @@ fn extract_go(text: &str) -> Vec<Symbol> {
                             .unwrap_or("")
                             .trim_start_matches('*');
                         let parent = (!recv_type.is_empty()).then(|| recv_type.to_owned());
+                        let sym_idx = symbols.len();
                         symbols.push(Symbol {
                             line: line_no,
+                            end_line: line_no,
                             kind: "fn",
                             name: name.to_owned(),
                             parent,
                             signature: clip_sig(trimmed),
                             depth: 0,
                         });
+                        added = Some((sym_idx, opens > 0 || has_unclosed_paren(trimmed)));
                     }
                 } else if let Some((name, _)) = take_ident(rest) {
+                    let sym_idx = symbols.len();
                     symbols.push(Symbol {
                         line: line_no,
+                        end_line: line_no,
                         kind: "fn",
                         name: name.to_owned(),
                         parent: None,
                         signature: clip_sig(trimmed),
                         depth: 0,
                     });
+                    added = Some((sym_idx, opens > 0 || has_unclosed_paren(trimmed)));
                 }
             } else if let Some(rest) = strip_word(trimmed, "type")
                 && let Some((name, after)) = take_ident(rest)
@@ -999,29 +1190,51 @@ fn extract_go(text: &str) -> Vec<Symbol> {
                 } else {
                     "type"
                 };
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind,
                     name: name.to_owned(),
                     parent: None,
                     signature: clip_sig(trimmed),
                     depth: 0,
                 });
+                added = Some((sym_idx, opens > 0));
             } else if let Some(rest) = strip_word(trimmed, "const")
                 && let Some((name, _)) = take_ident(rest)
             {
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind: "const",
                     name: name.to_owned(),
                     parent: None,
                     signature: clip_sig(trimmed),
                     depth: 0,
                 });
+                added = Some((sym_idx, opens > 0));
+            }
+            if let Some((sym_idx, track_block)) = added {
+                spans.register(
+                    sym_idx,
+                    effective_depth,
+                    if track_block {
+                        SpanExpect::BlockOrSemi
+                    } else {
+                        SpanExpect::SingleLine
+                    },
+                );
             }
         }
 
-        depth = depth.saturating_add(opens).saturating_sub(closes);
+        depth = spans.advance(
+            &mut symbols,
+            &trimmed[leading_closes..],
+            effective_depth,
+            line_no,
+        );
     }
     symbols
 }
@@ -1029,19 +1242,29 @@ fn extract_go(text: &str) -> Vec<Symbol> {
 // ---------- C / C++ ----------
 
 fn extract_ccpp(text: &str) -> Vec<Symbol> {
-    let mut symbols = Vec::new();
+    let mut symbols: Vec<Symbol> = Vec::new();
     let mut lex = BraceLexState::default();
+    let mut spans = BraceSpanTracker::default();
     let mut depth: usize = 0;
     let mut containers: Vec<(String, usize)> = Vec::new();
+    let mut macro_cont: Option<usize> = None;
 
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
+        if let Some(sym_idx) = macro_cont {
+            symbols[sym_idx].end_line = line_no;
+            if !raw_line.trim_end().ends_with('\\') {
+                macro_cont = None;
+            }
+            continue;
+        }
         let code = lex.strip_line(raw_line, false, false);
         let trimmed = code.trim();
         let (opens, closes) = count_braces(&code);
 
         let leading_closes = trimmed.bytes().take_while(|&b| b == b'}').count();
         let effective_depth = depth.saturating_sub(leading_closes);
+        spans.close_leading(&mut symbols, effective_depth, line_no);
         while containers
             .last()
             .is_some_and(|(_, enter)| *enter > effective_depth)
@@ -1052,14 +1275,19 @@ fn extract_ccpp(text: &str) -> Vec<Symbol> {
         if let Some(rest) = trimmed.strip_prefix("#define")
             && let Some((name, _)) = take_ident(rest.trim_start())
         {
+            let sym_idx = symbols.len();
             symbols.push(Symbol {
                 line: line_no,
+                end_line: line_no,
                 kind: "macro",
                 name: name.to_owned(),
                 parent: None,
                 signature: clip_sig(trimmed),
                 depth: 0,
             });
+            if raw_line.trim_end().ends_with('\\') {
+                macro_cont = Some(sym_idx);
+            }
             continue;
         }
 
@@ -1068,14 +1296,17 @@ fn extract_ccpp(text: &str) -> Vec<Symbol> {
             let parent = containers.last().map(|(n, _)| n.clone());
             let sym_depth = containers.len();
             if let Some((kind, name, container_label)) = parse_ccpp_item(trimmed) {
+                let sym_idx = symbols.len();
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind,
                     name,
                     parent,
                     signature: clip_sig(trimmed),
                     depth: sym_depth,
                 });
+                spans.register(sym_idx, effective_depth, SpanExpect::BlockOrSemi);
                 if let Some(label) = container_label
                     && opens > closes
                 {
@@ -1084,7 +1315,12 @@ fn extract_ccpp(text: &str) -> Vec<Symbol> {
             }
         }
 
-        depth = depth.saturating_add(opens).saturating_sub(closes);
+        depth = spans.advance(
+            &mut symbols,
+            &trimmed[leading_closes..],
+            effective_depth,
+            line_no,
+        );
         while containers.last().is_some_and(|(_, enter)| *enter > depth) {
             containers.pop();
         }
@@ -1144,10 +1380,11 @@ fn parse_ccpp_item(trimmed: &str) -> Option<(&'static str, String, Option<String
 // ---------- Markdown ----------
 
 fn extract_markdown(text: &str) -> Vec<Symbol> {
+    let lines: Vec<&str> = text.lines().collect();
     let mut symbols = Vec::new();
     let mut fence: Option<(u8, usize)> = None;
 
-    for (idx, raw_line) in text.lines().enumerate() {
+    for (idx, raw_line) in lines.iter().enumerate() {
         let line_no = idx + 1;
         let trimmed = raw_line.trim_start();
         if let Some((ch, len)) = fence {
@@ -1173,6 +1410,7 @@ fn extract_markdown(text: &str) -> Vec<Symbol> {
             if !title.is_empty() {
                 symbols.push(Symbol {
                     line: line_no,
+                    end_line: line_no,
                     kind: "heading",
                     name: title.to_owned(),
                     parent: None,
@@ -1181,6 +1419,18 @@ fn extract_markdown(text: &str) -> Vec<Symbol> {
                 });
             }
         }
+    }
+    let total = lines.len();
+    for i in 0..symbols.len() {
+        let depth_i = symbols[i].depth;
+        let mut end = symbols[i + 1..]
+            .iter()
+            .find(|next| next.depth <= depth_i)
+            .map_or(total, |next| next.line.saturating_sub(1));
+        while end > symbols[i].line && lines[end - 1].trim().is_empty() {
+            end -= 1;
+        }
+        symbols[i].end_line = end.max(symbols[i].line);
     }
     symbols
 }
@@ -1324,6 +1574,159 @@ func New() *Server { return nil }
             vec![
                 ("heading", "Title".into(), 0),
                 ("heading", "Section".into(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn symbol_end_lines_cover_all_supported_languages() {
+        let rs = r####"pub const SAMPLE: &str = r#"
+line 2
+"#;
+
+pub mod m {
+    pub struct Cfg {
+        pub limit: usize,
+    }
+
+    pub fn multi(
+        a: i32,
+    ) -> i32 {
+        a + 1
+    }
+}
+
+macro_rules! quick {
+    () => {};
+}
+"####;
+        let rs_spans: Vec<_> = extract(Language::Rust, rs)
+            .into_iter()
+            .map(|s| (s.name, s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            rs_spans,
+            vec![
+                ("SAMPLE".into(), 1, 3),
+                ("m".into(), 5, 15),
+                ("Cfg".into(), 6, 8),
+                ("multi".into(), 10, 14),
+                ("quick".into(), 17, 19),
+            ]
+        );
+
+        let js = "\
+export class Editor {
+    async save(doc) {
+        return doc;
+    }
+}
+export const renderView = (x) => x;
+export function helper(a) {
+    return a;
+}
+";
+        let js_spans: Vec<_> = extract(Language::JsTs, js)
+            .into_iter()
+            .map(|s| (s.name, s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            js_spans,
+            vec![
+                ("Editor".into(), 1, 5),
+                ("save".into(), 2, 4),
+                ("renderView".into(), 6, 6),
+                ("helper".into(), 7, 9),
+            ]
+        );
+
+        let py = "\
+class Service:
+    \"\"\"doc\"\"\"
+    async def fetch(self):
+        def inner():
+            pass
+        return 1
+
+# next function
+def top_level():
+    \"\"\"only doc\"\"\"
+";
+        let py_spans: Vec<_> = extract(Language::Python, py)
+            .into_iter()
+            .map(|s| (s.name, s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            py_spans,
+            vec![
+                ("Service".into(), 1, 6),
+                ("fetch".into(), 3, 6),
+                ("top_level".into(), 9, 10),
+            ]
+        );
+
+        let go = "\
+package demo
+type Server struct {
+    port int
+}
+func (s *Server) Start(
+    ctx int,
+) error {
+    return nil
+}
+const Max = 10
+";
+        let go_spans: Vec<_> = extract(Language::Go, go)
+            .into_iter()
+            .map(|s| (s.name, s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            go_spans,
+            vec![
+                ("Server".into(), 2, 4),
+                ("Start".into(), 5, 9),
+                ("Max".into(), 10, 10),
+            ]
+        );
+
+        let cpp = "\
+#define ADD(a, b) \\
+    ((a) + (b))
+int compute(int x)
+{
+    return ADD(x, 1);
+}
+";
+        let cpp_spans: Vec<_> = extract(Language::CCpp, cpp)
+            .into_iter()
+            .map(|s| (s.name, s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            cpp_spans,
+            vec![("ADD".into(), 1, 2), ("compute".into(), 3, 6)]
+        );
+
+        let md = "\
+# Title
+intro
+
+## First
+body 1
+
+## Second
+body 2
+";
+        let md_spans: Vec<_> = extract(Language::Markdown, md)
+            .into_iter()
+            .map(|s| (s.name, s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            md_spans,
+            vec![
+                ("Title".into(), 1, 8),
+                ("First".into(), 4, 5),
+                ("Second".into(), 7, 8),
             ]
         );
     }

@@ -36,8 +36,9 @@ use ziyuan_runtime::{Limits, WorkerBackend};
 use crate::auth::{index, login, require_token};
 use crate::edicts::{
     acquit, apply_changes, approve, cancel, censor, changelog, courier, dag_add, dag_deps, debate,
-    discard_changes, draft, from_plan, github_pr, github_pull, github_reply, issue, recheck,
-    redraft, remove_template, review, revise_edict, save_template, split, urgent,
+    discard_changes, draft, from_plan, github_pr, github_pull, github_reply, issue, preview_revert,
+    recheck, redraft, remove_template, revert_changes, review, revise_edict, save_template, split,
+    urgent,
 };
 use crate::personnel::{
     abolish, appoint, budget, cane, crown, dismiss, exam, nominate, office_ceiling, office_model,
@@ -234,6 +235,10 @@ fn router_for(app: AppState) -> Router {
         .route("/tasks/{id}/changes/delta", get(changes_delta))
         .route("/tasks/{id}/changes/apply", post(apply_changes))
         .route("/tasks/{id}/changes/discard", post(discard_changes))
+        .route(
+            "/tasks/{id}/changes/revert",
+            get(preview_revert).post(revert_changes),
+        )
         .route("/reform", post(reform))
         .route("/retreat", post(retreat))
         .route("/offices/model", post(office_model))

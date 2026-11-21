@@ -566,6 +566,96 @@ impl<S: EventStore> Session<S> {
         Ok(())
     }
 
+    /// 预览安全回滚已落盘诏令 `task` 的结果（只读，不修改任何文件）。
+    pub fn preview_revert(&mut self, task: TaskId, root: &Path) -> Result<RevertReport, AppError> {
+        self.reload()?;
+        preview_revert_for(&self.court, task, root)
+    }
+
+    /// 安全回滚已落盘诏令 `task` 所写入的文件（仅回滚当时实际落盘、未被 `--skip` 驳回的部分）。
+    ///
+    /// 逐文件按字节核验磁盘现状：
+    /// - 仍与落盘后字节一致：写回准奏前原文（新建文件则删除，删除文件则重建）；
+    /// - 已与准奏前原文一致：幂等跳过；
+    /// - 任一文件在落盘后已被别处修改：fail-closed 拒绝，一处也不改。
+    ///
+    /// 在工作区写锁下执行并遵循受保护清理规则；不追加新事件类型，保持事件簿版本零变更。
+    pub fn revert_changes(
+        &mut self,
+        task: TaskId,
+        root: &Path,
+        version: Option<&str>,
+    ) -> Result<RevertReport, AppError> {
+        self.reload()?;
+        let plan = build_revert_plan(&self.court, task, version)?;
+        let workspace = Workspace::open(root).map_err(workspace_error)?;
+        let unusable = |e: WorkspaceError| AppError::Apply(blocked(e.to_string()));
+        workspace.ensure_writable().map_err(unusable)?;
+        let _guard = workspace
+            .lock(LockScope::Workspace)
+            .map_err(workspace_error)?;
+        workspace.ensure_writable().map_err(unusable)?;
+
+        let mut files = Vec::with_capacity(plan.entries.len());
+        let mut to_apply = Vec::new();
+        let mut diverged = Vec::new();
+        let mut skipped = 0usize;
+        for (action, inv) in plan.entries {
+            let status = match ziyuan_runtime::tools::base_state(root, &inv)
+                .map_err(|e| AppError::Apply(e.to_string()))?
+            {
+                ziyuan_runtime::tools::BaseState::Original => {
+                    to_apply.push(inv.clone());
+                    RevertStatus::Ready
+                }
+                ziyuan_runtime::tools::BaseState::Written => {
+                    skipped += 1;
+                    RevertStatus::AlreadyReverted
+                }
+                ziyuan_runtime::tools::BaseState::Changed => {
+                    diverged.push(inv.path.clone());
+                    RevertStatus::Diverged
+                }
+            };
+            files.push(RevertFilePreview {
+                path: inv.path,
+                action,
+                status,
+            });
+        }
+        if !diverged.is_empty() {
+            return Err(AppError::Apply(format!(
+                "以下文件在落盘后已被修改，拒绝回滚（未改动任何文件）：{}",
+                diverged.join("、")
+            )));
+        }
+        let reverted = to_apply.len();
+        let mut problems = Vec::new();
+        if !to_apply.is_empty() {
+            let protected = workspace.protected_targets();
+            let mut applied = match sweep_protection(&protected) {
+                Some(protected) => {
+                    ziyuan_runtime::tools::apply_changes_protected(root, &to_apply, protected)
+                }
+                None => ziyuan_runtime::tools::apply_changes(root, &to_apply),
+            }
+            .map_err(|e| AppError::Apply(e.to_string()))?;
+            if let Err(error) = protected {
+                applied.problems.push(unprotected_problem(&error));
+            }
+            problems = applied.problems;
+        }
+        Ok(RevertReport {
+            task: task.0,
+            version: plan.version,
+            files,
+            reverted,
+            skipped,
+            safe: true,
+            problems,
+        })
+    }
+
     /// 撤销尚未结束的诏令。
     ///
     /// 若该诏令正由另一进程执行，执行不会被打断，但其结果会被作废、不再记录。
@@ -938,6 +1028,208 @@ impl<S: EventStore> Session<S> {
     }
 }
 
+/// 回滚已落盘诏令时，对单个文件计划执行的逆向操作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertAction {
+    /// 写回准奏前的原文内容。
+    Restore,
+    /// 删除当时由本诏令新建的文件。
+    DeleteCreated,
+    /// 恢复当时由本诏令删除的文件。
+    RecreateDeleted,
+}
+
+impl RevertAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Restore => "写回原文",
+            Self::DeleteCreated => "删除新建文件",
+            Self::RecreateDeleted => "恢复已删文件",
+        }
+    }
+}
+
+/// 单个文件在回滚前的磁盘核验结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertStatus {
+    /// 磁盘与本诏令落盘后的内容一致，可安全回滚。
+    Ready,
+    /// 磁盘已与准奏前原文一致（已回滚过或已手工恢复），幂等跳过。
+    AlreadyReverted,
+    /// 磁盘内容在落盘后已被别处修改，拒绝回滚（fail-closed）。
+    Diverged,
+}
+
+impl RevertStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "可回滚",
+            Self::AlreadyReverted => "已恢复，将跳过",
+            Self::Diverged => "落盘后已被改动（阻断）",
+        }
+    }
+}
+
+/// 单个文件的回滚预览项。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RevertFilePreview {
+    pub path: String,
+    pub action: RevertAction,
+    pub status: RevertStatus,
+}
+
+/// 一次安全回滚预览或实际执行的汇总报告。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RevertReport {
+    pub task: u64,
+    pub version: String,
+    pub files: Vec<RevertFilePreview>,
+    /// 本次实际写回或删除的文件数（预览模式恒为 0）。
+    pub reverted: usize,
+    /// 因磁盘已与准奏前一致而幂等跳过的文件数。
+    pub skipped: usize,
+    /// 全部文件均处于 Ready / AlreadyReverted（无 Diverged）时为 true。
+    pub safe: bool,
+    /// 回滚后临时文件清理产生的诊断（非致命，调用方决定去处）。
+    #[serde(skip_serializing)]
+    pub problems: Vec<Problem>,
+}
+
+struct RevertPlan {
+    version: String,
+    entries: Vec<(RevertAction, FileChange)>,
+}
+
+fn build_revert_plan(
+    court: &Court,
+    task: TaskId,
+    version: Option<&str>,
+) -> Result<RevertPlan, AppError> {
+    let entry = court
+        .task(task)
+        .ok_or(GovernanceError::UnknownEdict(task))?;
+    let changes = entry
+        .changes
+        .as_ref()
+        .ok_or_else(|| AppError::Apply(format!("诏令 #{} 没有文件改动，无需回滚", task.0)))?;
+    match changes.state {
+        ChangeState::Applied => {}
+        ChangeState::Proposed => {
+            return Err(AppError::Apply(format!(
+                "诏令 #{} 的改动尚未落盘，可直接 `ziyuan discard {}` 驳回",
+                task.0, task.0
+            )));
+        }
+        ChangeState::Discarded => {
+            return Err(AppError::Apply(format!(
+                "诏令 #{} 的改动已驳回、从未落盘，无需回滚",
+                task.0
+            )));
+        }
+    }
+    let current_version = changes_version(&changes.files);
+    if let Some(seen) = version
+        && current_version != seen
+    {
+        return Err(AppError::Apply(format!(
+            "诏令 #{} 的改动版本与预览时所见不符，请刷新后重试",
+            task.0
+        )));
+    }
+    let applied = selected_files(&changes.files, &changes.skipped);
+    if applied.is_empty() {
+        return Err(AppError::Apply(format!(
+            "诏令 #{} 的全部改动均已驳回、未写入文件，无需回滚",
+            task.0
+        )));
+    }
+    let mut entries = Vec::with_capacity(applied.len());
+    for change in applied {
+        let (action, inverse) = if change.deleted {
+            let orig = change.before.ok_or_else(|| {
+                AppError::Apply(format!("{} 缺少准奏前原文，无法安全回滚", change.path))
+            })?;
+            (
+                RevertAction::RecreateDeleted,
+                FileChange {
+                    path: change.path,
+                    before: None,
+                    after: orig,
+                    deleted: false,
+                },
+            )
+        } else if let Some(orig) = change.before {
+            (
+                RevertAction::Restore,
+                FileChange {
+                    path: change.path,
+                    before: Some(change.after),
+                    after: orig,
+                    deleted: false,
+                },
+            )
+        } else {
+            (
+                RevertAction::DeleteCreated,
+                FileChange {
+                    path: change.path,
+                    before: Some(change.after),
+                    after: String::new(),
+                    deleted: true,
+                },
+            )
+        };
+        entries.push((action, inverse));
+    }
+    Ok(RevertPlan {
+        version: current_version,
+        entries,
+    })
+}
+
+/// 在不修改磁盘的前提下，逐文件核验回滚 `task` 的可行性（供 `--dry-run` 与 Web GET 预览复用）。
+pub fn preview_revert_for(
+    court: &Court,
+    task: TaskId,
+    root: &Path,
+) -> Result<RevertReport, AppError> {
+    let plan = build_revert_plan(court, task, None)?;
+    let mut files = Vec::with_capacity(plan.entries.len());
+    let mut skipped = 0usize;
+    let mut safe = true;
+    for (action, inv) in &plan.entries {
+        let status = match ziyuan_runtime::tools::base_state(root, inv)
+            .map_err(|e| AppError::Apply(e.to_string()))?
+        {
+            ziyuan_runtime::tools::BaseState::Original => RevertStatus::Ready,
+            ziyuan_runtime::tools::BaseState::Written => {
+                skipped += 1;
+                RevertStatus::AlreadyReverted
+            }
+            ziyuan_runtime::tools::BaseState::Changed => {
+                safe = false;
+                RevertStatus::Diverged
+            }
+        };
+        files.push(RevertFilePreview {
+            path: inv.path.clone(),
+            action: *action,
+            status,
+        });
+    }
+    Ok(RevertReport {
+        task: task.0,
+        version: plan.version,
+        files,
+        reverted: 0,
+        skipped,
+        safe,
+        problems: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,5 +1267,271 @@ mod tests {
             problem.message
         );
         assert!(!problem.message.contains(r"\\?\"), "{}", problem.message);
+    }
+    fn temp_court(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ziyuan-revert-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn setup_applied_edict(
+        root: &Path,
+        changes: Vec<FileChange>,
+        skipped: Vec<u32>,
+    ) -> (Session<ziyuan_storage::EventLog>, TaskId) {
+        let mut session = Session::found(ziyuan_storage::EventLog::new(root)).unwrap();
+        let mut seal = Seal::default();
+        seal.capabilities.insert(Capability::WriteFile);
+        let edict = session
+            .issue(Department::Works, "改动测试".into(), seal)
+            .unwrap();
+        let worker = session.court().route(&edict).unwrap().worker;
+        let task = edict.id;
+        let mut log = ziyuan_storage::EventLog::new(root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed { task, changes },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker,
+                    summary: "完成".into(),
+                },
+            ],
+        )
+        .unwrap();
+        session.apply_changes(task, root, skipped).unwrap();
+        (session, task)
+    }
+
+    #[test]
+    fn revert_restores_modified_deletes_created_recreates_deleted_and_is_idempotent() {
+        let root = temp_court("full");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/mod.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(root.join("src/gone.rs"), "// removed\n").unwrap();
+
+        let (mut session, task) = setup_applied_edict(
+            &root,
+            vec![
+                FileChange {
+                    path: "src/mod.rs".into(),
+                    before: Some("fn old() {}\n".into()),
+                    after: "fn new() {}\n".into(),
+                    deleted: false,
+                },
+                FileChange {
+                    path: "src/added.rs".into(),
+                    before: None,
+                    after: "pub const ADDED: i32 = 1;\n".into(),
+                    deleted: false,
+                },
+                FileChange {
+                    path: "src/gone.rs".into(),
+                    before: Some("// removed\n".into()),
+                    after: String::new(),
+                    deleted: true,
+                },
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/mod.rs")).unwrap(),
+            "fn new() {}\n"
+        );
+        assert!(root.join("src/added.rs").exists());
+        assert!(!root.join("src/gone.rs").exists());
+
+        let events_before = ziyuan_storage::EventLog::new(&root).load().unwrap().len();
+        let preview = session.preview_revert(task, &root).unwrap();
+        assert!(preview.safe);
+        assert_eq!(preview.reverted, 0);
+        assert_eq!(preview.skipped, 0);
+        assert_eq!(
+            preview.files,
+            vec![
+                RevertFilePreview {
+                    path: "src/mod.rs".into(),
+                    action: RevertAction::Restore,
+                    status: RevertStatus::Ready,
+                },
+                RevertFilePreview {
+                    path: "src/added.rs".into(),
+                    action: RevertAction::DeleteCreated,
+                    status: RevertStatus::Ready,
+                },
+                RevertFilePreview {
+                    path: "src/gone.rs".into(),
+                    action: RevertAction::RecreateDeleted,
+                    status: RevertStatus::Ready,
+                },
+            ]
+        );
+
+        // 版本号不符即拒绝且不动盘
+        let bad_ver = session.revert_changes(task, &root, Some("sha256:wrong"));
+        assert!(matches!(bad_ver, Err(AppError::Apply(_))));
+        assert!(root.join("src/added.rs").exists());
+
+        // 正确版本号执行回滚
+        let done = session
+            .revert_changes(task, &root, Some(&preview.version))
+            .unwrap();
+        assert!(done.safe);
+        assert_eq!(done.reverted, 3);
+        assert_eq!(done.skipped, 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/mod.rs")).unwrap(),
+            "fn old() {}\n"
+        );
+        assert!(!root.join("src/added.rs").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/gone.rs")).unwrap(),
+            "// removed\n"
+        );
+
+        // 不追加新事件类型（零日志兼容变动）
+        let events_after = ziyuan_storage::EventLog::new(&root).load().unwrap().len();
+        assert_eq!(events_before, events_after);
+
+        // 二次回滚幂等跳过全部文件
+        let second = session.revert_changes(task, &root, None).unwrap();
+        assert!(second.safe);
+        assert_eq!(second.reverted, 0);
+        assert_eq!(second.skipped, 3);
+        assert!(
+            second
+                .files
+                .iter()
+                .all(|f| f.status == RevertStatus::AlreadyReverted)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn revert_fails_closed_on_diverged_file_and_respects_skipped_hunks() {
+        let root = temp_court("diverged");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "a1\n").unwrap();
+        std::fs::write(root.join("src/b.rs"), "b1\n").unwrap();
+        std::fs::write(root.join("src/c.rs"), "c1\n").unwrap();
+
+        // 第 3 段（src/c.rs）在准奏时被跳过，因此只有 a.rs 与 b.rs 落盘。
+        let (mut session, task) = setup_applied_edict(
+            &root,
+            vec![
+                FileChange {
+                    path: "src/a.rs".into(),
+                    before: Some("a1\n".into()),
+                    after: "a2\n".into(),
+                    deleted: false,
+                },
+                FileChange {
+                    path: "src/b.rs".into(),
+                    before: Some("b1\n".into()),
+                    after: "b2\n".into(),
+                    deleted: false,
+                },
+                FileChange {
+                    path: "src/c.rs".into(),
+                    before: Some("c1\n".into()),
+                    after: "c2\n".into(),
+                    deleted: false,
+                },
+            ],
+            vec![3],
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/c.rs")).unwrap(),
+            "c1\n"
+        );
+
+        // 后续有人修改了 src/b.rs，src/a.rs 仍为 a2。
+        std::fs::write(root.join("src/b.rs"), "b3-manual\n").unwrap();
+
+        let preview = session.preview_revert(task, &root).unwrap();
+        assert!(!preview.safe);
+        assert_eq!(preview.files.len(), 2); // c.rs 未落盘，不入回滚清单
+        assert_eq!(preview.files[0].status, RevertStatus::Ready);
+        assert_eq!(preview.files[1].status, RevertStatus::Diverged);
+
+        // fail-closed：拒绝回滚且 src/a.rs 也保持原样未被改写！
+        let err = session.revert_changes(task, &root, None).unwrap_err();
+        assert!(err.to_string().contains("src/b.rs"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+            "a2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/b.rs")).unwrap(),
+            "b3-manual\n"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn revert_rejects_proposed_and_discarded_edicts() {
+        let root = temp_court("states");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "old\n").unwrap();
+        let mut session = Session::found(ziyuan_storage::EventLog::new(&root)).unwrap();
+        let mut seal = Seal::default();
+        seal.capabilities.insert(Capability::WriteFile);
+        let edict = session
+            .issue(Department::Works, "待决".into(), seal)
+            .unwrap();
+        let worker = session.court().route(&edict).unwrap().worker;
+        let task = edict.id;
+        let mut log = ziyuan_storage::EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task,
+                    changes: vec![FileChange {
+                        path: "src/a.rs".into(),
+                        before: Some("old\n".into()),
+                        after: "new\n".into(),
+                        deleted: false,
+                    }],
+                },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker,
+                    summary: "完".into(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let err = session.preview_revert(task, &root).unwrap_err();
+        assert!(err.to_string().contains("尚未落盘"), "{err}");
+
+        session.discard_changes(task).unwrap();
+        let err = session.preview_revert(task, &root).unwrap_err();
+        assert!(err.to_string().contains("已驳回"), "{err}");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -106,6 +106,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         return Ok(());
     }
+    if let Command::Revert { task, dry_run } = command {
+        let mut session = Session::open(log)?;
+        let result = commands::execute_revert(&mut session, task, dry_run, json);
+        chronicle(&mut session);
+        return result;
+    }
     if json {
         let mut session = Session::open(log)?;
         println!(

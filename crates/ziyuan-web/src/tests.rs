@@ -1788,3 +1788,109 @@ async fn runtime_dag_add_and_deps_endpoints_enforce_auth_and_update_state() {
     assert!(t3["blocked_by"].is_null());
     assert_eq!(t4["blocked_by"], 3);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revert_endpoint_allows_viewer_preview_forbids_viewer_post_and_reverts_cleanly() {
+    let (base, root) = start("revert").await;
+    let t = Some(TOKEN);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn old() {}\n").unwrap();
+
+    // 下诏、准奏落盘 src/a.rs -> fn new() {}
+    {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let mut seal = Seal::default();
+        seal.capabilities.insert(ziyuan_core::Capability::WriteFile);
+        let edict = s.issue(Department::Works, "改 a.rs".into(), seal).unwrap();
+        let worker = s.court().route(&edict).unwrap().worker;
+        let task = edict.id;
+        let mut log = EventLog::new(&root);
+        let expected = log.load().unwrap().len();
+        log.append(
+            expected,
+            &[
+                CourtEvent::TaskAssigned {
+                    task,
+                    worker,
+                    model: None,
+                },
+                CourtEvent::ChangesProposed {
+                    task,
+                    changes: vec![FileChange {
+                        path: "src/a.rs".into(),
+                        before: Some("fn old() {}\n".into()),
+                        after: "fn new() {}\n".into(),
+                        deleted: false,
+                    }],
+                },
+                CourtEvent::TaskCompleted {
+                    task,
+                    worker,
+                    summary: "完成".into(),
+                },
+            ],
+        )
+        .unwrap();
+        s.apply_changes(task, &root, Vec::new()).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+        "fn new() {}\n"
+    );
+
+    // 观政令牌可 GET 预览，但 POST 执行返回 403
+    let (status, preview) = call(&base, "/tasks/1/changes/revert", Some(VIEWER), None).await;
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["safe"], true);
+    assert_eq!(preview["files"][0]["path"], "src/a.rs");
+    assert_eq!(preview["files"][0]["action"], "restore");
+    assert_eq!(preview["files"][0]["status"], "ready");
+    let version = preview["version"].as_str().unwrap().to_owned();
+
+    let (status, _) = call(
+        &base,
+        "/tasks/1/changes/revert",
+        Some(VIEWER),
+        Some(json!({ "version": version })),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    // 错误 version 返回 409 且不改磁盘
+    let (status, _) = call(
+        &base,
+        "/tasks/1/changes/revert",
+        t,
+        Some(json!({ "version": "sha256:stale" })),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+        "fn new() {}\n"
+    );
+
+    // 皇帝令牌带正确 version 安全回滚
+    let (status, done) = call(
+        &base,
+        "/tasks/1/changes/revert",
+        t,
+        Some(json!({ "version": version })),
+    )
+    .await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["reverted"], 1);
+    assert_eq!(done["skipped"], 0);
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/a.rs")).unwrap(),
+        "fn old() {}\n"
+    );
+
+    // 再次回滚幂等跳过
+    let (status, again) = call(&base, "/tasks/1/changes/revert", t, Some(json!({}))).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["reverted"], 0);
+    assert_eq!(again["skipped"], 1);
+
+    std::fs::remove_dir_all(root).unwrap();
+}

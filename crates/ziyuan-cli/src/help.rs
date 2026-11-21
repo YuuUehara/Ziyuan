@@ -69,6 +69,9 @@ pub(crate) const HELP: &str = concat!(
                                        --skip 逐段驳回 diff 中所列段号，其余落盘；
                                        --commit 落盘后只把这些文件记为一个 jj（或 git）提交
   ziyuan discard <诏令ID>              驳回呈报的改动，不写入
+  ziyuan revert <诏令ID> [--dry-run] [--json]
+                                       安全回滚已落盘的改动（逐字节核验：文件此后被改过则拒绝且一处不改；
+                                       已恢复的文件幂等跳过；--dry-run 只预览不写盘）
   ziyuan review <诏令ID> <accept|reject> [备注]
                                        评定已完成的诏令（吏部考绩只采信评定）
   ziyuan censor <诏令ID|all>           都察院复核回奏：核验引用与测试，御史背书或弹劾，有改动时逐段点评 diff
@@ -257,6 +260,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "censor",
     "apply",
     "discard",
+    "revert",
     "review",
     "recommend",
     "completions",
@@ -278,6 +282,7 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "text",
     "follow",
     "note",
+    "revert",
 ];
 
 /// `ziyuan text` 后可补的子命令，与 `ziyuan text help` 的第一层命令及常用下一词一致。

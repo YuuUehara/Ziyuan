@@ -169,6 +169,11 @@ pub(crate) enum Command {
     /// 准奏：逐段驳回的段号；`true` 落盘后记为一个 jj/git 提交。
     Apply(TaskId, Vec<u32>, bool),
     Discard(TaskId),
+    /// 安全回滚已落盘的改动（`dry_run` 仅预览不写盘）。
+    Revert {
+        task: TaskId,
+        dry_run: bool,
+    },
     Recommend(Office),
     History(HistoryFilter),
     /// 翰林院实录：检索词为空则列出全部。
@@ -677,6 +682,15 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
             }
         }
         "discard" => Command::Discard(task_id(&args, "ziyuan discard <诏令ID>")?),
+        "revert" => {
+            const USAGE: &str = "用法: ziyuan revert <诏令ID> [--dry-run] [--json]";
+            let dry_run = args.iter().any(|a| a == "--dry-run");
+            args.retain(|a| a != "--dry-run");
+            Command::Revert {
+                task: task_id(&args, USAGE)?,
+                dry_run,
+            }
+        }
         "review" => {
             if args.len() < 2 {
                 return Err("用法: ziyuan review <诏令ID> <accept|reject> [备注]".into());
@@ -1348,5 +1362,33 @@ mod scheduled_tests {
         assert!(command(&["edict", "--revise", "7", "--dept", "rites"]).is_err());
         assert!(command(&["edict", "--revise", "7", "--plan"]).is_err());
         assert!(command(&["edict", "--note", "只有说明", "普通诏令"]).is_err());
+    }
+
+    #[test]
+    fn revert_command_parses_id_and_dry_run() {
+        assert!(matches!(
+            command(&["revert", "7"]).unwrap(),
+            Command::Revert {
+                task: TaskId(7),
+                dry_run: false,
+            }
+        ));
+        assert!(matches!(
+            command(&["revert", "7", "--dry-run"]).unwrap(),
+            Command::Revert {
+                task: TaskId(7),
+                dry_run: true,
+            }
+        ));
+        assert!(matches!(
+            command(&["revert", "--dry-run", "7"]).unwrap(),
+            Command::Revert {
+                task: TaskId(7),
+                dry_run: true,
+            }
+        ));
+        assert!(command(&["revert"]).is_err());
+        assert!(command(&["revert", "abc"]).is_err());
+        assert!(command(&["revert", "7", "--force"]).is_err());
     }
 }

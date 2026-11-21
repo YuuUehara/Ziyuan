@@ -202,9 +202,9 @@ ziyuan edict --tools none "只凭诏令文本回答"
 - 绝对路径、`..` 与不存在的路径在下诏时拒绝；运行时按 canonical 路径检查，符号链接也无法越界。
 - 无论玉玺如何，`.ziyuan`（事件簿）、`.git`、`.jj` 与 `.env*` 均不可读写。
 - 运行时按玉玺构造工具：模型看不到未授予的工具，越界的读取记为失败的 `ToolInvoked`。
-- 授了 `read_file` 即同时有 `list_files`（递归列出范围内的文件与大小，含本次暂存的新文件，跳过 `target`、`node_modules`）、`file_outline`（列出单个 Rust / JS / TS / Python / Go / C / C++ / Markdown 文件的符号大纲与行号，支持 `kind` 过滤与 `offset`/`limit` 翻页，暂存改动优先于磁盘）以及只读版本库工具 `vcs_status` / `vcs_diff` / `vcs_log`（支持 `jj` 与 `git`，按玉玺范围与禁区二次过滤、严防参数注入、输出上限 32 KiB），均不另设权限，玉玺写法不变。
+- 授了 `read_file` 即同时有 `list_files`（递归列出范围内的文件与大小，含本次暂存的新文件，跳过 `target`、`node_modules`）、`file_outline`（列出单个 Rust / JS / TS / Python / Go / C / C++ / Markdown 文件的符号大纲与起止行号如 `42-98`，支持 `kind` 过滤与 `offset`/`limit` 翻页，暂存改动优先于磁盘）以及只读版本库工具 `vcs_status` / `vcs_diff` / `vcs_log`（支持 `jj` 与 `git`，按玉玺范围与禁区二次过滤、严防参数注入、输出上限 32 KiB），均不另设权限，玉玺写法不变。
 - 授了 `write_file` 即同时有 `replace_text`、`delete_file` 与 `rename_file`，均不另设权限。`replace_text` 支持单处 `{old, new, start_line?, end_line?}` 或原子批量 `edits: [{old, new, start_line?, end_line?}]`（最多 50 处），可用 1 起始含首尾的可选行范围消除多处匹配歧义，每处仅做精确唯一替换、不做模糊替换；匹配多处时报错附带具体行号，找不到时附带范围外完全匹配行号或最接近的候选行摘录；`delete_file` 暂存删除单个文件，`rename_file` 暂存改名／移动（等价于原路径删去、新路径新建，两路径皆须在玉玺范围内且避开禁区）。全部改动只暂存，走同一份奏本、原文核验和逐段准奏。
-- `read_file` 不带行号时，仍从文件开头读，超过 64 KiB 截断。带 `offset`（从第 1 行起）或 `lines` 时按行窗口读，并写明总行数、后面还有没有。
+- `read_file` 不带行号时，仍从文件开头读，超过 64 KiB 截断。带 `offset`（从第 1 行起）、`lines` 或 `end_line`（结束行号，含，与 `lines` 互斥，可直接复用 `file_outline` / `find_symbols` 返回的起止行号）时按行窗口读，并写明总行数、后面还有没有。
 - `search_code` 不带额外参数时，仍是区分大小写的字面搜索，最多 50 条。可以加 `path` 只查目录或文件、`glob` 过滤路径（如 `*.rs`、`crates/**/*.rs`）、`regex` 启用线性时间正则、`ignore_case` 忽略大小写、`context_lines`（0–5）附带上下邻行、`offset` 与 `limit` 翻页（一页 1–50 条），并同时覆盖暂存新建／改动文件（`list_files` 同样支持 `glob`）。授了 `search_code` 同时有 `find_symbols`（跨文件查符号定义）与 `find_references`（按整词边界跨文件查调用点与引用，跳过注释与字符串，区分 `[定义]` 与 `[引用]`，支持 `path`、`glob`、`include_definitions`、`offset`、`limit`）。三者均先按玉玺范围和禁区过滤，不搜 `target`、`node_modules` 与 Python 缓存目录。
 - **只读并发与仓库约定注入**：同一模型回合内连续发出多条纯只读工具调用（`read_file`、`list_files`、`search_code`、`file_outline`、`find_symbols`、`find_references`、`search_records`、`vcs_*`）时，运行时通过受限线程池（上限 8 线程）自动并发执行并严格按原顺序回传与记审计；写文件、测试与外部 MCP 工具仍串行。玉玺授予 `read_file` 且范围覆盖仓库根目录时，运行时自动读取首份非空常规 UTF-8 的 `AGENTS.md`（优先）或 `CLAUDE.md`（不跟随符号链接、4 KiB 截断），经锦衣卫扫描与外来文书围栏包裹后注入系统提示。
 
@@ -231,11 +231,13 @@ ziyuan apply 3      # 准奏：写入项目
 ziyuan apply 3 --skip 2,4   # 逐段准奏：驳回 diff 中第 2、4 段，其余写入
 ziyuan apply 3 --commit     # 落盘后把这些文件记为一个 jj（或 git）提交
 ziyuan discard 3    # 或驳回
+ziyuan revert 3 --dry-run   # 预览安全回滚已落盘的改动（不写盘；支持 --json）
+ziyuan revert 3             # 安全回滚已落盘的改动（文件此后被改过则拒绝且一处不改）
 ziyuan edict --revise 3 --note "保留旧签名并补单测"   # 打回再改一轮（携带上轮 diff、御史意见与批语）
 ```
 
 - **只暂存，不落盘**：`write_file` 整篇改写或新建，`replace_text` 支持单处或原子批量唯一旧文本替换，`delete_file` / `rename_file` 暂存文件删除与移动。改动都留在内存里，同一诏令内 `read_file` / `list_files` / `search_code` 均看到暂存后的状态；诏令完成时作为奏本（`ChangesProposed`）记入事件簿，项目文件不变。
-- **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。核对逐字节进行：只改了行尾（CRLF/LF）、改成非 UTF-8 或二进制内容都算改动。原文已变的文件在 Web 与 TUI 的奏本中标「原文已变」（`--json` 中为 `stale: true`），Web 不给准奏按钮，只能驳回后重下诏令。Web 准奏时回传预览所示的改动版本（`changes.version`），与服务端记下的不符即拒绝，以免照着别的项目或旧页面准奏。工部可新建、改写、删除与改名 UTF-8 文本文件（仍不能写二进制文件；删除单文件记为 1 段，可 `--skip` 保留原文件）；符号链接按其指向判断，指向项目之外或禁区的一律拒绝。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。
+- **皇帝准奏才写入**：`ziyuan apply`、Web 的「准奏落盘」、TUI 的 `w`。写入前逐一核对文件自呈报以来未被改动（新建的文件仍不存在），有一处不符就一处也不写。核对逐字节进行：只改了行尾（CRLF/LF）、改成非 UTF-8 或二进制内容都算改动。原文已变的文件在 Web 与 TUI 的奏本中标「原文已变」（`--json` 中为 `stale: true`），Web 不给准奏按钮，只能驳回后重下诏令。Web 准奏时回传预览所示的改动版本（`changes.version`），与服务端记下的不符即拒绝，以免照着别的项目或旧页面准奏。工部可新建、改写、删除与改名 UTF-8 文本文件（仍不能写二进制文件；删除单文件记为 1 段，可 `--skip` 保留原文件）；符号链接按其指向判断，指向项目之外或禁区的一律拒绝。驳回是 `ziyuan discard`、Web 的「驳回改动」、TUI 的 `u`。已落盘的改动可通过 `ziyuan revert <诏令ID> [--dry-run] [--json]` 或 Web 的「安全回滚」（`GET`/`POST /api/tasks/{id}/changes/revert`）安全回滚：仅还原当时实际落盘的文件（跳过已 `--skip` 的段），逐字节核验磁盘内容仍与落盘后一致才写回原文／删除新建文件／恢复已删文件，已恢复的文件幂等跳过，任一文件此后已被别处改动则 fail-closed 拒绝且一处不改。
 - **测试在副本里跑**：`run_tests` 把项目复制到临时目录（跳过 `.ziyuan`、`.git`、`.jj`、`.env*`、`target`、`node_modules` 与常见 Python 缓存目录），叠加暂存改动，运行 `ZIYUAN_TEST_COMMAND`（或通过 `preset` 选用 `ZIYUAN_TEST_COMMANDS` 中的命名预设）。子进程只继承 `PATH` 等白名单环境变量，API Key 不会传进去；时限 10 分钟，且诏令被撤销、超时或度支停支时会立即主动终止在途测试子进程与沙箱进程树；返回退出码与输出末尾（最多 8 KiB）。模型不能改命令本身。
 - **多框架测试失败摘录**：命令输出能认出 `cargo test`（兼容 Rust 1.89+ 线程 ID 格式）、`pytest`、`node --test`、`go test` 或 `jest`/`vitest` 的失败名单，或 `rustc`/`tsc`/`mypy` 结构化编译／类型诊断时，结果里另外列出失败测试名／诊断定位和对应摘录（从日志末尾最多回看 1 MiB，每条摘录有上限）。认不出时仍只给输出末尾。测试是否通过仍只看退出码；都察院仍按这次 `run_tests` 成功还是失败来核验，不解析摘录文字。
 - **号舍**：测试命令关进操作系统的沙箱：Linux 用 bubblewrap（`apt install bubblewrap`），macOS 用自带的 Seatbelt，Windows 用内置原生 AppContainer＋独立隐藏桌面（`PrivateDesktop`）＋Job Object（`ziyuan-sandbox-windows`）。号舍里默认不能联网，只能写测试副本与任务私有目录，读不到 `~/.ssh`、`~/.aws` 等凭据目录与宿主 `.ziyuan`。结果中注明是否入了号舍。`ZIYUAN_SANDBOX`：`auto`（默认）与 `require` 相同，本机号舍不可用（如 Linux 未装 bubblewrap）或所请求策略不受支持（如 Windows 启用 `ZIYUAN_SANDBOX_ALLOW` 或外部 `CARGO_TARGET_DIR`）时拒绝运行，报「号舍不可用」；`off` 不入号舍照常运行，结果中注明，须皇帝自担风险（Windows 原生号舍边界与工具链 ACL 说明见 [ADR-0001](adr/0001-windows-sandbox.md)）。号舍默认全断网，Rust 项目的依赖须事先下载好，可设 `ZIYUAN_TEST_COMMAND="cargo test --offline"`；在 Linux／macOS 上可用 `ZIYUAN_SANDBOX_ALLOW` 按域名放行，如 `ZIYUAN_SANDBOX_ALLOW="index.crates.io,static.crates.io"`（放行时号舍仍断网，经本机门吏代理只转递名单域名 HTTP(S)，其余回 403 并记入结果；`example.com` 只放行其本身，`*.example.com` 只放行其子域；Linux 另须装 `socat`）。

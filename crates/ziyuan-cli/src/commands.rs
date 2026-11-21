@@ -557,6 +557,7 @@ pub(crate) fn execute(
             session.discard_changes(task)?;
             println!("诏令已颁：驳回诏令 #{} 的改动，未写入。", task.0);
         }
+        Command::Revert { .. } => unreachable!("已在 main 分派"),
         Command::Cancel(task) => {
             session.cancel(task)?;
             println!("诏令 #{} 已撤销。", task.0);
@@ -1444,4 +1445,76 @@ fn print_annotated_diffs(diff: &str, reviews: &std::collections::BTreeMap<u32, H
             println!("  [御史·{}] {}", review.verdict.label(), review.note);
         }
     }
+}
+
+pub(crate) fn execute_revert(
+    session: &mut Session<EventLog>,
+    task: TaskId,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), Box<dyn Error>> {
+    let root = env::current_dir()?;
+    let report = if dry_run {
+        session.preview_revert(task, &root)?
+    } else {
+        session.revert_changes(task, &root, None)?
+    };
+    for problem in &report.problems {
+        eprintln!(
+            "警告：未能清理临时文件或其租约 {}：{}",
+            problem.path.display(),
+            problem.message
+        );
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if dry_run {
+        println!("诏令 #{} 回滚预览（未修改任何文件）：", report.task);
+        for f in &report.files {
+            println!("  {} — {} [{}]", f.path, f.action.label(), f.status.label());
+        }
+        if report.safe {
+            let ready = report
+                .files
+                .iter()
+                .filter(|f| f.status == ziyuan_app::RevertStatus::Ready)
+                .count();
+            if ready == 0 {
+                println!(
+                    "全部 {} 个文件已与准奏前一致，无需回滚。",
+                    report.files.len()
+                );
+            } else {
+                println!(
+                    "可安全回滚：将还原 {ready} 个文件（跳过 {} 个已恢复文件）；执行 `ziyuan revert {}` 落盘。",
+                    report.skipped, report.task
+                );
+            }
+        } else {
+            println!("存在落盘后已被改动的文件，实际执行 `ziyuan revert` 将被拒绝且一处不改。");
+        }
+    } else if report.reverted == 0 {
+        println!(
+            "诏令 #{} 的 {} 个文件已与准奏前一致，无需写盘。",
+            report.task, report.skipped
+        );
+    } else {
+        let skipped_note = if report.skipped > 0 {
+            format!("（另跳过 {} 个已恢复文件）", report.skipped)
+        } else {
+            String::new()
+        };
+        println!(
+            "已安全回滚诏令 #{}：还原 {} 个文件{skipped_note}。",
+            report.task, report.reverted
+        );
+        for f in &report.files {
+            if f.status == ziyuan_app::RevertStatus::Ready {
+                println!("  {} — {}", f.path, f.action.label());
+            }
+        }
+    }
+    Ok(())
 }

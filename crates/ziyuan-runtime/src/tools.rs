@@ -896,24 +896,46 @@ impl Tool for ReadFile {
         ToolSpec {
             name: Capability::ReadFile.code().into(),
             description: format!(
-                "读取项目内的文本文件（相对项目根目录的路径）。只能读取授权范围：{}。不给 offset 与 lines 时从开头读，超过 {MAX_READ_BYTES} 字节截断。给出 offset（从 1 起的行号）或 lines（行数）时按行窗口读取，并说明总行数和后面是否还有。",
+                "读取项目内的文本文件（相对项目根目录的路径）。只能读取授权范围：{}。不给 offset、lines 与 end_line 时从开头读，超过 {MAX_READ_BYTES} 字节截断。给出 offset（从 1 起的行号）、lines（行数）或 end_line（结束行号，含，与 lines 互斥）时按行窗口读取，并说明总行数和后面是否还有。",
                 self.0.scope_label()
             ),
-            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"offset":{"type":"integer","description":"从第几行开始读，从 1 起"},"lines":{"type":"integer","description":"最多读几行"}},"required":["path"],"additionalProperties":false}"#.into(),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"offset":{"type":"integer","description":"从第几行开始读，从 1 起"},"lines":{"type":"integer","description":"最多读几行（与 end_line 互斥）"},"end_line":{"type":"integer","description":"读到第几行（含，从 1 起，与 lines 互斥；可直接使用 file_outline / find_symbols 返回的行号范围）"}},"required":["path"],"additionalProperties":false}"#.into(),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let args = object_args(args_json, &["path", "offset", "lines"])?;
+        let args = object_args(args_json, &["path", "offset", "lines", "end_line"])?;
         let relative = required_string(&args, "path")?;
         let offset = optional_i64(&args, "offset")?;
         let lines = optional_i64(&args, "lines")?;
+        let end_line = optional_i64(&args, "end_line")?;
+        if lines.is_some() && end_line.is_some() {
+            return Err("lines 与 end_line 不能同时指定".into());
+        }
+        let effective_lines = match end_line {
+            None => lines,
+            Some(e) if e < 1 => return Err("end_line 从 1 起".into()),
+            Some(e) => {
+                let start = offset.unwrap_or(1);
+                if start < 1 {
+                    return Err("offset 从 1 起".into());
+                }
+                if e < start {
+                    return Err(format!("end_line ({e}) 不能小于 offset ({start})").into());
+                }
+                let span = e
+                    .checked_sub(start)
+                    .and_then(|d| d.checked_add(1))
+                    .ok_or("行号范围过大")?;
+                Some(span)
+            }
+        };
         let bytes = match self.0.staged_entry(&relative) {
             Some(StagedEntry::Deleted) => return Err(format!("{relative} 已被暂存删除").into()),
             Some(StagedEntry::Content(text)) => text.into_bytes(),
             None => fs::read(self.0.resolve(&relative)?)?,
         };
-        if offset.is_none() && lines.is_none() {
+        if offset.is_none() && effective_lines.is_none() {
             let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_READ_BYTES)]);
             return if bytes.len() > MAX_READ_BYTES {
                 Ok(format!("{text}\n[已截断：文件共 {} 字节]", bytes.len()))
@@ -922,7 +944,7 @@ impl Tool for ReadFile {
             };
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| "不是文本文件，不能按行读取")?;
-        read_window(text, offset, lines)
+        read_window(text, offset, effective_lines)
     }
 }
 
@@ -1162,7 +1184,7 @@ impl Tool for FileOutline {
         ToolSpec {
             name: "file_outline".into(),
             description: format!(
-                "列出授权范围（{}）内单个代码或 Markdown 文件的符号大纲（函数、结构体、枚举、trait、impl、类、接口、常量、标题及行号）。支持 Rust、JS/TS、Python、Go、C/C++、Markdown；暂存改动优先于磁盘。可用 kind 按类别过滤，offset 与 limit 翻页（默认 {DEFAULT_OUTLINE_SYMBOLS} 条，最多 {MAX_OUTLINE_SYMBOLS} 条）。",
+                "列出授权范围（{}）内单个代码或 Markdown 文件的符号大纲（函数、结构体、枚举、trait、impl、类、接口、常量、标题及起止行号，如 `42-98`）。支持 Rust、JS/TS、Python、Go、C/C++、Markdown；暂存改动优先于磁盘。可用 kind 按类别过滤，offset 与 limit 翻页（默认 {DEFAULT_OUTLINE_SYMBOLS} 条，最多 {MAX_OUTLINE_SYMBOLS} 条）。",
                 self.0.scope_label()
             ),
             input_schema_json: format!(
@@ -1249,7 +1271,10 @@ impl Tool for FileOutline {
             out.push_str(&format!(
                 "{}: {indent}[{}] {} — {}
 ",
-                sym.line, sym.kind, sym.name, sym.signature
+                sym.line_span(),
+                sym.kind,
+                sym.name,
+                sym.signature
             ));
         }
         if start + slice.len() < total {
@@ -1276,7 +1301,7 @@ impl Tool for FindSymbols {
         ToolSpec {
             name: "find_symbols".into(),
             description: format!(
-                "在授权范围（{}）内的代码与 Markdown 文件中按符号名查找定义（函数、结构体、枚举、trait、impl、类、接口、常量、标题），返回 `路径:行号: [类别] 限定名 — 签名`。只匹配符号定义而非注释或普通引用；暂存改动优先于磁盘。可用 path 限目录或文件、kind 限类别、exact 精确匹配、ignore_case 忽略大小写、offset 与 limit 翻页（一页最多 {MAX_SYMBOL_MATCHES} 条）。先按授权范围和禁区过滤，跳过 target 与 node_modules。",
+                "在授权范围（{}）内的代码与 Markdown 文件中按符号名查找定义（函数、结构体、枚举、trait、impl、类、接口、常量、标题），返回 `路径:起止行号: [类别] 限定名 — 签名`（单行只写行号，跨行写 `起-止`）。只匹配符号定义而非注释或普通引用；暂存改动优先于磁盘。可用 path 限目录或文件、kind 限类别、exact 精确匹配、ignore_case 忽略大小写、offset 与 limit 翻页（一页最多 {MAX_SYMBOL_MATCHES} 条）。先按授权范围和禁区过滤，跳过 target 与 node_modules。",
                 self.0.scope_label()
             ),
             input_schema_json: format!(
@@ -1416,7 +1441,10 @@ impl Tool for FindSymbols {
                 if matched {
                     page.consider(format!(
                         "{rel}:{}: [{}] {} — {}",
-                        sym.line, sym.kind, qualified, sym.signature
+                        sym.line_span(),
+                        sym.kind,
+                        qualified,
+                        sym.signature
                     ));
                 }
             }
@@ -3606,8 +3634,46 @@ export function bootUi() {}
             .execute(r#"{"query":"staged_boot","path":"src"}"#)
             .unwrap();
         assert!(
-            staged_found.contains("src/extra.py:1: [fn] staged_boot"),
+            staged_found.contains("src/extra.py:1-2: [fn] staged_boot"),
             "{staged_found}"
+        );
+        assert!(outline.contains("3-5: [impl] Engine"), "{outline}");
+        assert!(
+            staged_outline.contains("1-2: [fn] staged_boot"),
+            "{staged_outline}"
+        );
+
+        // 3b. read_file 支持 end_line 直接复用符号行号范围，且与 lines 互斥、校验边界。
+        let impl_body = get("read_file")
+            .execute(r#"{"path":"src/lib.rs","offset":3,"end_line":5}"#)
+            .unwrap();
+        assert!(
+            impl_body.contains("〔第 3–5 行，共 6 行；后面还有〕"),
+            "{impl_body}"
+        );
+        assert!(
+            impl_body.contains("impl Engine") && impl_body.contains("pub fn boot"),
+            "{impl_body}"
+        );
+        assert!(!impl_body.contains("pub fn helper"), "{impl_body}");
+        let head = get("read_file")
+            .execute(r#"{"path":"src/lib.rs","end_line":2}"#)
+            .unwrap();
+        assert!(head.contains("〔第 1–2 行，共 6 行；后面还有〕"), "{head}");
+        assert!(
+            get("read_file")
+                .execute(r#"{"path":"src/lib.rs","offset":2,"lines":2,"end_line":4}"#)
+                .is_err()
+        );
+        assert!(
+            get("read_file")
+                .execute(r#"{"path":"src/lib.rs","offset":5,"end_line":3}"#)
+                .is_err()
+        );
+        assert!(
+            get("read_file")
+                .execute(r#"{"path":"src/lib.rs","end_line":0}"#)
+                .is_err()
         );
 
         // 4. 越界与禁区拒绝。

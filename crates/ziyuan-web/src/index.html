@@ -1668,6 +1668,9 @@ function taskHtml(t) {
         <button class="small gold" data-apply="${t.id}" data-version="${c.version}"${blocked}>准奏落盘</button>
         <button class="small" data-apply="${t.id}" data-version="${c.version}" data-commit="1" title="落盘后只把这些文件记为一个 jj（或 git）提交"${blocked}>准奏并提交</button>
         <button class="small reject" data-discard="${t.id}">驳回改动</button></div>`;
+    } else if (c.state === "applied") {
+      body += `<div class="review-row"><span class="hint">改动已落盘；仅当文件未被后续修改时允许安全回滚</span><span style="flex:1"></span>
+        <button class="small reject" data-revert="${t.id}" data-version="${c.version}" title="逐字节核验磁盘后安全回滚本诏令落盘的文件；若文件此后已被改动则拒绝且一处不改">安全回滚</button></div>`;
     }
   }
   if (t.revise_draft) {
@@ -4833,6 +4836,32 @@ document.addEventListener("click", (event) => {
     }
   } else if (d.discard) {
     act(api(`/tasks/${d.discard}/changes/discard`, {}), "已驳回改动");
+  } else if (d.revert) {
+    const id = d.revert;
+    const version = d.version;
+    el.disabled = true;
+    act(api(`/tasks/${id}/changes/revert`)).then((j) => {
+      el.disabled = false;
+      if (!j) return;
+      if (!j.safe) {
+        const bad = j.files.filter((f) => f.status === "diverged").map((f) => f.path).join("、");
+        toast(`拒绝回滚：以下文件在落盘后已被修改：${bad}`, true);
+        return;
+      }
+      const ready = j.files.filter((f) => f.status === "ready");
+      if (!ready.length) {
+        toast(`诏令 #${id} 的改动均已与准奏前一致，无需回滚`);
+        return;
+      }
+      const actLabel = { restore: "写回原文", delete_created: "删除新建", recreate_deleted: "恢复已删" };
+      const lines = ready.map((f) => `- ${f.path}（${actLabel[f.action] || f.action}）`).join("\n");
+      if (confirm(`确认安全回滚诏令 #${id} 的以下 ${ready.length} 个文件？\n${lines}`)) {
+        act(api(`/tasks/${id}/changes/revert`, { version })).then((res) => {
+          if (!res) return;
+          toast(`已安全回滚诏令 #${id}：还原 ${res.reverted} 个文件` + (res.skipped ? `（跳过 ${res.skipped} 个已恢复文件）` : ""));
+        });
+      }
+    });
   } else if (d.approve) {
     act(api(`/tasks/${d.approve}/approve`, {}), `诏令 #${d.approve} 已批红`);
   } else if (d.exam) {
