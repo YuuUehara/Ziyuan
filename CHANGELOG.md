@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.40.0 — 2026-11-22
+
+- **原生 Anthropic Messages API 与 Google Gemini API 适配（实验性）**：
+  - `ziyuan-llm` 新增 `anthropic.rs`（原生 `/v1/messages`、`x-api-key` + `anthropic-version: 2023-06-01`、SSE `text_delta` / `thinking_delta` / `input_json_delta`、`tool_use` / `tool_result`、最多 3 处 `cache_control: {"type":"ephemeral"}` 断点与 `cache_read_input_tokens` / `cache_creation_input_tokens` 精确计账）与 `gemini.rs`（原生 `models/{model}:streamGenerateContent?alt=sse`、`x-goog-api-key` 请求头鉴权不入 URL、`systemInstruction`、`functionDeclarations` / `functionCall` / `functionResponse`、`thought` 推理捕获与 `cachedContentTokenCount`），支持 `ZIYUAN_LLM_PROVIDER=anthropic|gemini`。两项原生接口均经本地模拟 HTTP 服务单测覆盖，尚未以真实付费账号实测，在 [stability.md](docs/stability.md#实验性) 标为实验性。
+- **异构多模型路由表（`.ziyuan/models.json`）与按部／按官职分派**：
+  - `ziyuan-llm` 新增 `config.rs`（256 KiB／64 项上限、拒绝符号链接、严格禁止明文 `api_key`/`token`/`secret` 字段，仅存 `api_key_env` 环境变量名）与 `resolve_backend`；`Catalog` 按配置名将不同官职／部门异构路由至 OpenAI 兼容、Anthropic、Gemini 或 ChatGPT 订阅，缺环境变量时仅对调用该配置的官职报错而不波及其他官职。
+  - `ziyuan-app` 新增 `Session::set_department_model`（单次提交原子设置整部尚书、侍郎、郎中）并修复 `estimate_cost` / `duzhi_report` / `duzhi_export` 多币种成本混算，按币种分别累计（如 `约 3.0000 USD + 9.0000 元`）；内置主流 Claude / GPT / Gemini 美元参考价与 `.ziyuan/models.json` 单项自定义单价。
+  - CLI 新增 `ziyuan model list [--json]` 与 `ziyuan model --dept <部门> <模型|配置名|default>`；Web `POST /api/offices/model` 支持 `{ department, model }` 按部批量分派（观政只读 403），`/api/state` 暴露非机密 `model_profiles` 摘要供前端自动补全与「同部」一键设置。
+- 登记次版本 `1.40.0`（序号 76，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [使用指南](docs/guide.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.40.0 验收记录](docs/acceptance/1.40.0.md)。
+
 ## 1.39.0 — 2026-11-22
 
 - **巨型单文件模块化拆分与工程还债（零行为变更、零新增事件与玉玺代码）**：
