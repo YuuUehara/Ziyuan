@@ -14,9 +14,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use ziyuan_sandbox_windows::{
-    ExitOutcome, LaunchSpec, SandboxCapability, SandboxMode, SandboxedStdio, ShellSpec, StdioSpec,
-    probe_capability, run_sandboxed, run_sandboxed_with_mode, run_shell_sandboxed,
-    spawn_stdio_sandboxed,
+    DoorSpec, ExitOutcome, LaunchSpec, PipeDoorStream, SandboxCapability, SandboxMode,
+    SandboxedStdio, ShellSpec, StdioSpec, probe_capability, run_sandboxed, run_sandboxed_with_mode,
+    run_shell_sandboxed, run_shell_sandboxed_with_door, spawn_stdio_sandboxed,
+    spawn_stdio_sandboxed_with_door,
 };
 
 static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -1062,5 +1063,600 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {{
     assert!(!ro_dir.join("escaped.txt").exists());
     assert_eq!(fs::read_to_string(&host_secret).unwrap(), "HOST_W3_SECRET");
 
+    fs::remove_dir_all(&stage).unwrap();
+}
+
+#[test]
+fn nested_writable_subdir_inside_readonly_parent_keeps_parent_and_siblings_readonly() {
+    let stage = unique_temp_dir("nested-rw");
+    let workspace = stage.join("workspace");
+    let src_dir = workspace.join("src");
+    let out_dir = workspace.join("out");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
+    fs::write(out_dir.join("existing.txt"), "old").unwrap();
+
+    // Passing the same dir as both readonly and writable must fail closed.
+    let dup_err = run_shell_sandboxed(
+        &ShellSpec {
+            command: "echo hi".into(),
+            cwd: workspace.clone(),
+            writable_dirs: vec![workspace.clone()],
+            readonly_dirs: vec![workspace.clone()],
+            env: Vec::new(),
+            timeout: Duration::from_secs(10),
+            max_output_bytes: None,
+        },
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(dup_err.kind(), io::ErrorKind::InvalidInput);
+
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    let powershell_exe = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+
+    let script = workspace.join("probe.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+$srcText = [System.IO.File]::ReadAllText([System.IO.Path]::Combine($PSScriptRoot, 'src', 'main.rs'), $utf8).Trim()
+$outFile = [System.IO.Path]::Combine($PSScriptRoot, 'out', 'created.txt')
+[System.IO.File]::WriteAllText($outFile, 'child-ok', $utf8)
+[System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'out', 'existing.txt'), 'updated', $utf8)
+$parentBlocked = $false
+try {
+  [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'escape.txt'), 'no', $utf8)
+} catch { $parentBlocked = $true }
+$siblingBlocked = $false
+try {
+  [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'src', 'escape.txt'), 'no', $utf8)
+} catch { $siblingBlocked = $true }
+[Console]::Out.WriteLine("SRC=$srcText|PARENT_BLOCKED=$parentBlocked|SIBLING_BLOCKED=$siblingBlocked")
+"#,
+    )
+    .unwrap();
+
+    let result = run_sandboxed_with_mode(
+        &LaunchSpec {
+            program: powershell_exe,
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "probe.ps1".into(),
+            ],
+            cwd: Some(workspace.clone()),
+            writable_dirs: vec![out_dir.clone()],
+            readonly_dirs: vec![workspace.clone()],
+            env: Vec::new(),
+            timeout: Duration::from_secs(20),
+            max_output_bytes: None,
+        },
+        SandboxMode::AppContainerChildCapable,
+        None,
+    )
+    .unwrap();
+
+    let out = String::from_utf8_lossy(&result.output);
+    assert_eq!(result.outcome, ExitOutcome::Exited(0), "output: {out}");
+    assert!(
+        out.contains("SRC=fn main() {}|PARENT_BLOCKED=True|SIBLING_BLOCKED=True"),
+        "output: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("created.txt")).unwrap(),
+        "child-ok"
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("existing.txt")).unwrap(),
+        "updated"
+    );
+    assert!(!workspace.join("escape.txt").exists());
+    assert!(!src_dir.join("escape.txt").exists());
+
+    fs::remove_dir_all(&stage).unwrap();
+}
+
+#[test]
+fn named_pipe_door_works_for_owner_appcontainer_and_denies_peer_appcontainer() {
+    use std::io::Read;
+
+    let stage = unique_temp_dir("pipe-door");
+    let work = stage.join("work");
+    fs::create_dir_all(&work).unwrap();
+
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    let powershell_exe = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+
+    let script = work.join("door_client.ps1");
+    fs::write(
+        &script,
+        r#"$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  if ($line -eq 'pipe_name') {
+    [Console]::Out.WriteLine($env:ZIYUAN_TEST_DOOR)
+    [Console]::Out.Flush()
+  } elseif ($line -eq 'call_door') {
+    $raw = $env:ZIYUAN_TEST_DOOR
+    $short = $raw.Substring('\\.\pipe\'.Length)
+    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $short, [System.IO.Pipes.PipeDirection]::InOut)
+    try {
+      $pipe.Connect(3000)
+      $req = $utf8.GetBytes("hello-from-appcontainer`n")
+      $pipe.Write($req, 0, $req.Length)
+      $pipe.Flush()
+      $reader = [System.IO.StreamReader]::new($pipe, $utf8, $false, 1024, $true)
+      $resp = $reader.ReadToEnd().Trim()
+      [Console]::Out.WriteLine("DOOR_OK:$resp")
+    } finally {
+      $pipe.Dispose()
+    }
+    [Console]::Out.Flush()
+  } elseif ($line -eq 'self_loopback') {
+    $bound = $false
+    $connected = $false
+    $errMsg = ''
+    try {
+      $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+      $l.Start()
+      $bound = $true
+      $ep = [System.Net.IPEndPoint]$l.LocalEndpoint
+      $c = [System.Net.Sockets.TcpClient]::new()
+      $ar = $c.BeginConnect('127.0.0.1', $ep.Port, $null, $null)
+      if ($ar.AsyncWaitHandle.WaitOne(500, $false)) {
+        $c.EndConnect($ar)
+        $connected = $c.Connected
+      }
+      $c.Close()
+      $l.Stop()
+    } catch {
+      $errMsg = $_.Exception.GetType().Name
+    }
+    [Console]::Out.WriteLine("SELF_LOOPBACK:bound=$bound|connected=$connected|err=$errMsg")
+    [Console]::Out.Flush()
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_cb = Arc::clone(&hits);
+    let door = DoorSpec {
+        env_var: "ZIYUAN_TEST_DOOR".into(),
+        http_proxy_bridge: false,
+        on_connect: Arc::new(move |mut stream: PipeDoorStream| {
+            hits_cb.fetch_add(1, Ordering::SeqCst);
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let reply = format!("ECHO:{}", line.trim());
+            let _ = stream.write_all(reply.as_bytes());
+            stream.close_write();
+        }),
+    };
+
+    let mut sandbox = spawn_stdio_sandboxed_with_door(
+        &StdioSpec {
+            program: powershell_exe.clone(),
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "door_client.ps1".into(),
+            ],
+            cwd: Some(work.clone()),
+            writable_dirs: Vec::new(),
+            readonly_dirs: vec![work.clone()],
+            env: Vec::new(),
+            mode: SandboxMode::AppContainerChildCapable,
+        },
+        Some(door),
+    )
+    .unwrap();
+
+    let mut stdin = sandbox.take_stdin().unwrap();
+    let stdout = sandbox.take_stdout().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut roundtrip = |cmd: &str| -> String {
+        writeln!(stdin, "{cmd}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).unwrap();
+        assert!(n > 0, "unexpected EOF on {cmd}");
+        line.trim_end_matches(['\r', '\n']).to_owned()
+    };
+
+    let pipe_path = roundtrip("pipe_name");
+    assert!(
+        pipe_path.starts_with(r"\\.\pipe\ziyuan-door-"),
+        "unexpected pipe path: {pipe_path}"
+    );
+    // Call twice sequentially to verify multiple pipe instances work smoothly.
+    assert_eq!(
+        roundtrip("call_door"),
+        "DOOR_OK:ECHO:hello-from-appcontainer"
+    );
+    assert_eq!(
+        roundtrip("call_door"),
+        "DOOR_OK:ECHO:hello-from-appcontainer"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+    // Empirically observe 0-cap AppContainer intra-SID self-loopback behavior.
+    let loopback_probe = roundtrip("self_loopback");
+    println!("EMPIRICAL {loopback_probe}");
+
+    // Spawn a PEER AppContainer (distinct SID!) and verify it gets ACCESS_DENIED trying to open
+    // the first AppContainer's Named Pipe door!
+    let peer_work = stage.join("peer");
+    fs::create_dir_all(&peer_work).unwrap();
+    let peer_script = peer_work.join("peer_probe.ps1");
+    let short_name = pipe_path.strip_prefix(r"\\.\pipe\").unwrap();
+    fs::write(
+        &peer_script,
+        format!(
+            r#"$ErrorActionPreference = 'Stop'
+$denied = $false
+$exc = ''
+try {{
+  $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', '{short}', [System.IO.Pipes.PipeDirection]::InOut)
+  $pipe.Connect(1000)
+  $pipe.Dispose()
+}} catch [System.UnauthorizedAccessException] {{
+  $denied = $true
+  $exc = 'UnauthorizedAccessException'
+}} catch {{
+  $exc = $_.Exception.GetType().FullName + ':' + $_.Exception.Message
+}}
+[Console]::Out.WriteLine("PEER_DENIED=$denied|EXC=$exc")
+"#,
+            short = short_name.replace('\'', "''"),
+        ),
+    )
+    .unwrap();
+
+    let peer_res = run_sandboxed_with_mode(
+        &LaunchSpec {
+            program: powershell_exe.clone(),
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "peer_probe.ps1".into(),
+            ],
+            cwd: Some(peer_work.clone()),
+            writable_dirs: Vec::new(),
+            readonly_dirs: vec![peer_work.clone()],
+            env: Vec::new(),
+            timeout: Duration::from_secs(20),
+            max_output_bytes: None,
+        },
+        SandboxMode::AppContainerChildCapable,
+        None,
+    )
+    .unwrap();
+    let peer_out = String::from_utf8_lossy(&peer_res.output);
+    assert_eq!(
+        peer_res.outcome,
+        ExitOutcome::Exited(0),
+        "peer out: {peer_out}"
+    );
+    assert!(
+        peer_out.contains("PEER_DENIED=True"),
+        "peer AppContainer MUST be denied access to another container's Named Pipe door: {peer_out}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "peer must never reach door handler"
+    );
+
+    // Also test one-shot run_shell_sandboxed_with_door.
+    let shell_hits = Arc::new(AtomicUsize::new(0));
+    let shell_hits_cb = Arc::clone(&shell_hits);
+    let shell_dir = stage.join("shell");
+    fs::create_dir_all(&shell_dir).unwrap();
+    let ps_str = powershell_exe.to_string_lossy().into_owned();
+    let shell_res = run_shell_sandboxed_with_door(
+        &ShellSpec {
+            command: format!(
+                r#""{ps_str}" -NoProfile -NonInteractive -Command "$n=$env:ZIYUAN_SHELL_DOOR.Substring(9); $p=[System.IO.Pipes.NamedPipeClientStream]::new('.',$n,[System.IO.Pipes.PipeDirection]::InOut); $p.Connect(3000); $b=[System.Text.Encoding]::UTF8.GetBytes('ping'); $p.Write($b,0,$b.Length); $p.Flush(); $r=[System.IO.StreamReader]::new($p); [Console]::Out.WriteLine('GOT:'+$r.ReadToEnd()); $p.Dispose()""#
+            ),
+            cwd: shell_dir.clone(),
+            writable_dirs: vec![shell_dir.clone()],
+            readonly_dirs: Vec::new(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(20),
+            max_output_bytes: None,
+        },
+        None,
+        Some(DoorSpec {
+            env_var: "ZIYUAN_SHELL_DOOR".into(),
+            http_proxy_bridge: false,
+            on_connect: Arc::new(move |mut stream: PipeDoorStream| {
+                shell_hits_cb.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4];
+                let _ = stream.read_exact(&mut buf);
+                let _ = stream.write_all(b"pong");
+                stream.close_write();
+            }),
+        }),
+    )
+    .unwrap();
+    let shell_out = String::from_utf8_lossy(&shell_res.output);
+    assert_eq!(
+        shell_res.outcome,
+        ExitOutcome::Exited(0),
+        "shell out: {shell_out}"
+    );
+    assert!(shell_out.contains("GOT:pong"), "shell out: {shell_out}");
+    assert_eq!(shell_hits.load(Ordering::SeqCst), 1);
+
+    drop(stdin);
+    assert_eq!(sandbox.shutdown().unwrap(), 0);
+    drop(reader);
+    fs::remove_dir_all(&stage).unwrap();
+}
+
+#[test]
+fn in_container_http_proxy_bridge_works_for_same_sid_children_and_blocks_direct_and_peer() {
+    let stage = unique_temp_dir("http-bridge");
+    let work = stage.join("work");
+    fs::create_dir_all(&work).unwrap();
+
+    // Direct host TCP listener that the 0-cap AppContainer MUST NOT be able to reach directly.
+    let direct_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let direct_port = direct_listener.local_addr().unwrap().port();
+    direct_listener.set_nonblocking(true).unwrap();
+    let direct_hits = Arc::new(AtomicUsize::new(0));
+    let direct_stop = Arc::new(AtomicBool::new(false));
+    let dh = Arc::clone(&direct_hits);
+    let ds = Arc::clone(&direct_stop);
+    let direct_thread = thread::spawn(move || {
+        while !ds.load(Ordering::Relaxed) {
+            match direct_listener.accept() {
+                Ok(_) => {
+                    dh.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Synthetic HTTP proxy handler on the host side of the Named Pipe door.
+    let door_hits = Arc::new(AtomicUsize::new(0));
+    let door_hits_cb = Arc::clone(&door_hits);
+    let door = DoorSpec {
+        env_var: "ZIYUAN_HAOSHE_DOOR_PIPE".into(),
+        http_proxy_bridge: true,
+        on_connect: Arc::new(move |mut stream: PipeDoorStream| {
+            door_hits_cb.fetch_add(1, Ordering::SeqCst);
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut req_line = String::new();
+            let _ = reader.read_line(&mut req_line);
+            let mut hdr = String::new();
+            loop {
+                hdr.clear();
+                match reader.read_line(&mut hdr) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if hdr == "\r\n" || hdr == "\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let body = if req_line.contains("allowed.test") {
+                "BRIDGE_ALLOWED_OK"
+            } else {
+                "BRIDGE_DENIED"
+            };
+            let status = if req_line.contains("allowed.test") {
+                "200 OK"
+            } else {
+                "403 Forbidden"
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            stream.close_write();
+        }),
+    };
+
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    let curl_exe = PathBuf::from(&system_root)
+        .join("System32")
+        .join("curl.exe");
+    let powershell_exe = PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    assert!(
+        curl_exe.is_file(),
+        "System32\\curl.exe must exist on Windows 11/Server 2025"
+    );
+
+    // 1. One-shot shell test using System32\curl.exe with automatic HTTP_PROXY from DoorSpec!
+    let curl_str = curl_exe.to_string_lossy().into_owned();
+    let cmd = format!(
+        r#""{curl_str}" -sS --max-time 5 http://allowed.test/hello && echo. && "{curl_str}" -sS -w " [CODE:%{{http_code}}]" --max-time 5 http://blocked.test/nope"#
+    );
+    let res = run_shell_sandboxed_with_door(
+        &ShellSpec {
+            command: cmd,
+            cwd: work.clone(),
+            writable_dirs: vec![work.clone()],
+            readonly_dirs: Vec::new(),
+            env: Vec::new(),
+            timeout: Duration::from_secs(20),
+            max_output_bytes: None,
+        },
+        None,
+        Some(door.clone()),
+    )
+    .unwrap();
+    let out = String::from_utf8_lossy(&res.output);
+    assert_eq!(res.outcome, ExitOutcome::Exited(0), "curl shell out: {out}");
+    assert_eq!(res.active_processes_after, 0, "bridge must drain with Job");
+    assert!(out.contains("BRIDGE_ALLOWED_OK"), "curl shell out: {out}");
+    assert!(
+        out.contains("BRIDGE_DENIED [CODE:403]"),
+        "curl shell out: {out}"
+    );
+    assert_eq!(door_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(direct_hits.load(Ordering::SeqCst), 0);
+
+    // 2. Long-lived stdio container with HTTP_PROXY bridge: verify sibling child reaches bridge,
+    //    direct host loopback is blocked (0 hits), AND a PEER AppContainer cannot reach the bridge!
+    let stdio_script = work.join("bridge_probe.ps1");
+    fs::write(
+        &stdio_script,
+        format!(
+            r#"$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+while ($null -ne ($line = [Console]::In.ReadLine())) {{
+  if ($line -eq 'proxy_url') {{
+    [Console]::Out.WriteLine($env:HTTP_PROXY)
+    [Console]::Out.Flush()
+  }} elseif ($line -eq 'direct_host') {{
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $ar = $client.BeginConnect('127.0.0.1', {direct_port}, $null, $null)
+    $ok = $false
+    if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {{
+      try {{ $client.EndConnect($ar); $ok = $client.Connected }} catch {{ $ok = $false }}
+    }}
+    $client.Close()
+    [Console]::Out.WriteLine("DIRECT=$ok")
+    [Console]::Out.Flush()
+  }}
+}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut stdio = spawn_stdio_sandboxed_with_door(
+        &StdioSpec {
+            program: powershell_exe.clone(),
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "bridge_probe.ps1".into(),
+            ],
+            cwd: Some(work.clone()),
+            writable_dirs: Vec::new(),
+            readonly_dirs: vec![work.clone()],
+            env: Vec::new(),
+            mode: SandboxMode::AppContainerChildCapable,
+        },
+        Some(door),
+    )
+    .unwrap();
+
+    let mut stdin = stdio.take_stdin().unwrap();
+    let stdout = stdio.take_stdout().unwrap();
+    let mut reader = BufReader::new(stdout);
+    let mut rt = |cmd: &str| -> String {
+        writeln!(stdin, "{cmd}").unwrap();
+        stdin.flush().unwrap();
+        let mut l = String::new();
+        assert!(reader.read_line(&mut l).unwrap() > 0);
+        l.trim_end_matches(['\r', '\n']).to_owned()
+    };
+
+    let proxy_url = rt("proxy_url");
+    let bridge_port: u16 = proxy_url
+        .strip_prefix("http://127.0.0.1:")
+        .expect("HTTP_PROXY must point to 127.0.0.1:<port>")
+        .parse()
+        .unwrap();
+    assert_eq!(rt("direct_host"), "DIRECT=False");
+    assert_eq!(direct_hits.load(Ordering::SeqCst), 0);
+
+    // Peer AppContainer (different SID) tries to connect to 127.0.0.1:<bridge_port> -> MUST FAIL!
+    let peer_dir = stage.join("peer");
+    fs::create_dir_all(&peer_dir).unwrap();
+    fs::write(
+        peer_dir.join("peer_tcp.ps1"),
+        format!(
+            r#"$client = [System.Net.Sockets.TcpClient]::new()
+$ar = $client.BeginConnect('127.0.0.1', {bridge_port}, $null, $null)
+$ok = $false
+if ($ar.AsyncWaitHandle.WaitOne(500, $false)) {{
+  try {{ $client.EndConnect($ar); $ok = $client.Connected }} catch {{ $ok = $false }}
+}}
+$client.Close()
+[Console]::Out.WriteLine("PEER_BRIDGE_CONNECTED=$ok")
+"#
+        ),
+    )
+    .unwrap();
+
+    let peer_res = run_sandboxed_with_mode(
+        &LaunchSpec {
+            program: powershell_exe,
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                "peer_tcp.ps1".into(),
+            ],
+            cwd: Some(peer_dir.clone()),
+            writable_dirs: Vec::new(),
+            readonly_dirs: vec![peer_dir.clone()],
+            env: Vec::new(),
+            timeout: Duration::from_secs(15),
+            max_output_bytes: None,
+        },
+        SandboxMode::AppContainerChildCapable,
+        None,
+    )
+    .unwrap();
+    let peer_out = String::from_utf8_lossy(&peer_res.output);
+    assert!(
+        peer_out.contains("PEER_BRIDGE_CONNECTED=False"),
+        "peer AppContainer MUST NOT connect to another container's loopback bridge: {peer_out}"
+    );
+    assert_eq!(
+        door_hits.load(Ordering::SeqCst),
+        2,
+        "peer must never reach host door"
+    );
+
+    drop(stdin);
+    assert_eq!(stdio.shutdown().unwrap(), 0);
+    drop(reader);
+    direct_stop.store(true, Ordering::SeqCst);
+    direct_thread.join().unwrap();
     fs::remove_dir_all(&stage).unwrap();
 }

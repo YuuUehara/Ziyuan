@@ -943,7 +943,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     } elseif ($method -eq 'tools/list') {
       $tools = @(
         @{ name = 'probe'; description = 'probe'; inputSchema = @{ type = 'object' } },
-        @{ name = 'audit'; description = 'audit'; inputSchema = @{ type = 'object' } }
+        @{ name = 'audit'; description = 'audit'; inputSchema = @{ type = 'object' } },
+        @{ name = 'write_probe'; description = 'write_probe'; inputSchema = @{ type = 'object' } },
+        @{ name = 'proxy_probe'; description = 'proxy_probe'; inputSchema = @{ type = 'object' } }
       )
       Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ tools = $tools } }
     } elseif ($method -eq 'tools/call') {
@@ -980,6 +982,57 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         $tok = if ($env:CUSTOM_TOKEN) { $env:CUSTOM_TOKEN } else { '-' }
         $llm = if ($env:ZIYUAN_LLM_API_KEY) { $env:ZIYUAN_LLM_API_KEY } else { '-' }
         $summary = "$readme|snapRo=$snapWriteBlocked|ziyuanHidden=$ziyuanHidden|envHidden=$envHidden|secretBlocked=$hostSecretBlocked|net=$connected|tok=$tok|llm=$llm"
+        Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ content = @(@{ type = 'text'; text = $summary }) } }
+      } elseif ($name -eq 'write_probe') {
+        $outOk = $false
+        $outRead = ''
+        try {
+          $pOut = [System.IO.Path]::Combine($PSScriptRoot, 'out', 'generated.txt')
+          [System.IO.File]::WriteAllText($pOut, 'W3_SNAP_WRITE_OK', $utf8)
+          $outRead = [System.IO.File]::ReadAllText($pOut, $utf8)
+          $outOk = ($outRead -eq 'W3_SNAP_WRITE_OK')
+        } catch { $outOk = $false }
+        $siblingRo = $false
+        try { [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'src', 'escape.txt'), 'x', $utf8) } catch { $siblingRo = $true }
+        $rootRo = $false
+        try { [System.IO.File]::WriteAllText([System.IO.Path]::Combine($PSScriptRoot, 'escape.txt'), 'x', $utf8) } catch { $rootRo = $true }
+        $summary = "outOk=$outOk|siblingRo=$siblingRo|rootRo=$rootRo"
+        Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ content = @(@{ type = 'text'; text = $summary }) } }
+      } elseif ($name -eq 'proxy_probe') {
+        $curl = [System.IO.Path]::Combine($env:SystemRoot, 'System32', 'curl.exe')
+        $hasPipe = [bool]$env:ZIYUAN_HAOSHE_DOOR_PIPE
+        $hasProxy = [bool]$env:HTTP_PROXY
+        $upUrl = 'http://127.0.0.1:' + [string]$a['up_port'] + '/mcp-door'
+        $directUrl = 'http://127.0.0.1:' + [string]$a['direct_port'] + '/direct'
+        $p1 = [System.Diagnostics.Process]::new()
+        $p1.StartInfo.FileName = $curl
+        $p1.StartInfo.Arguments = "-sS -m 5 -w ""|CODE=%{http_code}"" $upUrl"
+        $p1.StartInfo.UseShellExecute = $false
+        $p1.StartInfo.RedirectStandardOutput = $true
+        $p1.StartInfo.RedirectStandardError = $true
+        $null = $p1.Start()
+        $allowOut = $p1.StandardOutput.ReadToEnd().Trim()
+        $p1.WaitForExit()
+        $p2 = [System.Diagnostics.Process]::new()
+        $p2.StartInfo.FileName = $curl
+        $p2.StartInfo.Arguments = "-sS -m 5 -o NUL -w ""%{http_code}"" http://evil.invalid/"
+        $p2.StartInfo.UseShellExecute = $false
+        $p2.StartInfo.RedirectStandardOutput = $true
+        $p2.StartInfo.RedirectStandardError = $true
+        $null = $p2.Start()
+        $denyCode = $p2.StandardOutput.ReadToEnd().Trim()
+        $p2.WaitForExit()
+        $p3 = [System.Diagnostics.Process]::new()
+        $p3.StartInfo.FileName = $curl
+        $p3.StartInfo.Arguments = "-sS -m 2 --noproxy ""*"" $directUrl"
+        $p3.StartInfo.UseShellExecute = $false
+        $p3.StartInfo.RedirectStandardOutput = $true
+        $p3.StartInfo.RedirectStandardError = $true
+        $null = $p3.Start()
+        $null = $p3.StandardOutput.ReadToEnd()
+        $p3.WaitForExit()
+        $directBlocked = ($p3.ExitCode -ne 0)
+        $summary = "pipe=$hasPipe|proxy=$hasProxy|allow=$allowOut|deny=$denyCode|directBlocked=$directBlocked"
         Send-Json @{ jsonrpc = '2.0'; id = $reqId; result = @{ content = @(@{ type = 'text'; text = $summary }) } }
       }
     }
@@ -1103,6 +1156,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     #[cfg(windows)]
     #[test]
     fn windows_w3_stdio_mcp_isolates_fs_network_and_rejects_unsupported_policies() {
+        use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1111,8 +1165,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let root = base.join("project");
         let host_secret_dir = base.join("host_secret");
         std::fs::create_dir_all(root.join(".ziyuan")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("out")).unwrap();
         std::fs::create_dir_all(&host_secret_dir).unwrap();
         std::fs::write(root.join("readme.txt"), "PROJECT_SNAPSHOT_OK").unwrap();
+        std::fs::write(root.join("src").join("lib.rs"), "pub fn ok() {}\n").unwrap();
         std::fs::write(root.join(".env"), "TOP_SECRET_ENV=1").unwrap();
         std::fs::write(root.join("fake.ps1"), FAKE_PS1).unwrap();
         let host_secret = host_secret_dir.join("secret.txt");
@@ -1127,6 +1184,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
         let secret_str = strip_prefix(&host_secret);
 
+        // 1) 直连探测监听：任何未走门吏的直连都不应命中。
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1152,6 +1210,33 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         std::thread::sleep(Duration::from_millis(50));
         assert!(hits.swap(0, Ordering::SeqCst) >= 1);
 
+        // 2) 白名单上游 HTTP 服务：验证零网络能力命名管道门吏可放行白名单域名。
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let up_addr = upstream.local_addr().unwrap();
+        let up_hits = Arc::new(AtomicUsize::new(0));
+        let stop_up = Arc::clone(&stop);
+        let up_hits_bg = Arc::clone(&up_hits);
+        let up_thread = std::thread::spawn(move || {
+            while !stop_up.load(Ordering::Relaxed) {
+                match upstream.accept() {
+                    Ok((mut stream, _)) => {
+                        up_hits_bg.fetch_add(1, Ordering::SeqCst);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nMCP_DOOR_OK",
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
         let ps_args = [
             "-NoProfile".to_owned(),
             "-NonInteractive".to_owned(),
@@ -1167,20 +1252,40 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 "env": { "CUSTOM_TOKEN": "w3-ok" },
                 "haoshe": { "network": false }
             },
+            "snapshot_write": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": { "network": false, "write": ["out"] }
+            },
+            "allowlist_net": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": { "network": ["127.0.0.1"] }
+            },
             "open_net": {
                 "command": "powershell.exe",
                 "args": ps_args,
                 "haoshe": true
             },
-            "allowlist_net": {
+            "home_write": {
                 "command": "powershell.exe",
                 "args": ps_args,
-                "haoshe": { "network": ["example.com"] }
+                "haoshe": { "network": false, "write": ["~/cache"] }
             },
-            "host_write": {
+            "escape_write": {
                 "command": "powershell.exe",
                 "args": ps_args,
-                "haoshe": { "network": false, "write": ["out"] }
+                "haoshe": { "network": false, "write": ["../outside"] }
+            },
+            "sensitive_write": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": { "network": false, "write": [".ziyuan"] }
+            },
+            "abs_write": {
+                "command": "powershell.exe",
+                "args": ps_args,
+                "haoshe": { "network": false, "write": ["C:\\Windows"] }
             }
         }});
         std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
@@ -1196,8 +1301,38 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
         drop(tools);
 
-        // 2. Unsupported policies fail closed with SandboxUnavailable.
-        for server in ["open_net", "allowlist_net", "host_write"] {
+        // 2. Validated snapshot-local `haoshe.write` (`out`) is writable inside the task snapshot,
+        //    while sibling `src` and project root stay read-only and the host `root/out` is untouched.
+        let tools = sealed_tools(&root, &grants(&["snapshot_write/write_probe"])).unwrap();
+        let reply = tools[0].execute("{}").unwrap();
+        assert_eq!(reply, "outOk=True|siblingRo=True|rootRo=True");
+        drop(tools);
+        assert!(
+            !root.join("out").join("generated.txt").exists(),
+            "host root/out must never be written by sandboxed MCP"
+        );
+
+        // 3. Domain-allowlisted W3 stdio MCP reaches allowed upstream via 0-cap Named Pipe door,
+        //    blocks disallowed hostnames with 403, and blocks direct TCP connections.
+        let tools = sealed_tools(&root, &grants(&["allowlist_net/proxy_probe"])).unwrap();
+        let reply = tools[0]
+            .execute(&json!({ "up_port": up_addr.port(), "direct_port": addr.port() }).to_string())
+            .unwrap();
+        assert_eq!(
+            reply,
+            "pipe=True|proxy=True|allow=MCP_DOOR_OK|CODE=200|deny=403|directBlocked=True"
+        );
+        drop(tools);
+        assert!(up_hits.load(Ordering::SeqCst) >= 1);
+
+        // 4. Unsupported policies (`haoshe: true`, home/escape/sensitive/absolute `write`) fail closed.
+        for server in [
+            "open_net",
+            "home_write",
+            "escape_write",
+            "sensitive_write",
+            "abs_write",
+        ] {
             let err = sealed_tools(&root, &grants(&[server])).err().unwrap();
             let unavailable = err
                 .downcast_ref::<crate::haoshe::SandboxUnavailable>()
@@ -1208,6 +1343,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         stop.store(true, Ordering::SeqCst);
         accept_thread.join().unwrap();
+        up_thread.join().unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         assert!(!root.join("mutated.txt").exists());
         cleanup(base);

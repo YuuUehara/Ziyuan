@@ -5,12 +5,20 @@
 //! All production `unsafe` FFI stays confined inside the private `windows` module,
 //! separated from the standalone verification probe CLI in `probe`.
 //!
-//! Production `ziyuan-runtime` uses [`run_shell_sandboxed`] on Windows for offline
-//! one-shot `run_tests` execution (W2) and [`spawn_stdio_sandboxed`] for offline
-//! long-lived stdio MCP servers (W3). Network-open, domain-allowlist, and host-writable
-//! policies remain fail-closed.
+//! Production `ziyuan-runtime` uses [`run_shell_sandboxed`] / [`run_shell_sandboxed_with_door`]
+//! on Windows for one-shot `run_tests` execution (W2) and [`spawn_stdio_sandboxed`] /
+//! [`spawn_stdio_sandboxed_with_door`] for long-lived stdio MCP servers (W3), including
+//! task-private nested writable subdirectories and zero-network-capability per-task SID-restricted
+//! Win32 Named Pipe door channels. Open-network and host-ACL-mutating policies remain fail-closed.
 
-use std::{fs::File, io, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
+use std::{
+    fmt,
+    fs::File,
+    io::{self, Read, Write},
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 #[cfg(windows)]
 mod files;
@@ -117,6 +125,111 @@ pub struct StdioSpec {
     /// Isolation mode (use [`SandboxMode::AppContainerChildCapable`] for runtimes/interpreters
     /// that spawn helper processes, or [`SandboxMode::StrictLpac`] for single-process servers).
     pub mode: SandboxMode,
+}
+
+/// Connected full-duplex stream on a per-task AppContainer-SID-restricted Win32 Named Pipe door.
+///
+/// Backed by `FILE_FLAG_OVERLAPPED` I/O inside `windows.rs` so concurrent `read` and `write`
+/// across cloned handles never deadlock on Win32 synchronous pipe serialization.
+pub struct PipeDoorStream {
+    #[cfg(windows)]
+    inner: windows::PipeDoorStreamInner,
+    #[cfg(not(windows))]
+    _unsupported: (),
+}
+
+impl PipeDoorStream {
+    /// Clones this stream handle so one thread can read while another writes concurrently.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                inner: self.inner.try_clone(),
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows Named Pipe door is only available on Windows",
+            ))
+        }
+    }
+
+    /// Marks the write side closed and cancels any blocked pending read on this pipe handle so
+    /// half-close / proxy teardown completes cleanly without hanging.
+    pub fn close_write(&self) {
+        #[cfg(windows)]
+        {
+            self.inner.close_write();
+        }
+    }
+}
+
+impl Read for PipeDoorStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        {
+            self.inner.read(buf)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = buf;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows Named Pipe door is only available on Windows",
+            ))
+        }
+    }
+}
+
+impl Write for PipeDoorStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        {
+            self.inner.write(buf)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = buf;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows Named Pipe door is only available on Windows",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Optional per-task Win32 Named Pipe door exposed exclusively to this sandbox's AppContainer SID.
+///
+/// The container stays at zero network capabilities (`TokenCapabilities == 0`) with zero loopback
+/// exemptions. The host creates a local-only (`PIPE_REJECT_REMOTE_CLIENTS`) Named Pipe whose
+/// protected DACL grants `GENERIC_READ | GENERIC_WRITE` ONLY to this task's freshly generated
+/// AppContainer SID (plus host user / SYSTEM) with a Low Integrity SACL, and injects the pipe path
+/// into the child environment under `env_var`.
+#[derive(Clone)]
+pub struct DoorSpec {
+    /// Environment variable name injected into the sandboxed child (e.g. `ZIYUAN_HAOSHE_DOOR_PIPE`).
+    pub env_var: String,
+    /// When `true`, also launches an in-container 0-capability TCP→NamedPipe loopback bridge
+    /// inside the same AppContainer SID & Job Object and injects `HTTP_PROXY`/`HTTPS_PROXY`/
+    /// `ALL_PROXY` (upper and lower case) pointing at the bridge's `127.0.0.1:<port>`.
+    pub http_proxy_bridge: bool,
+    /// Callback invoked on a bounded worker thread for each accepted AppContainer client connection.
+    pub on_connect: Arc<dyn Fn(PipeDoorStream) + Send + Sync + 'static>,
+}
+
+impl fmt::Debug for DoorSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DoorSpec")
+            .field("env_var", &self.env_var)
+            .field("http_proxy_bridge", &self.http_proxy_bridge)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Running sandboxed process with bidirectional anonymous stdio pipes (W3).
@@ -266,13 +379,22 @@ pub fn run_sandboxed_with_mode(
 /// to task-private profile storage, and the entire descendant process tree is terminated and
 /// drained before cleanup.
 pub fn run_shell_sandboxed(spec: &ShellSpec, cancel: Option<&AtomicBool>) -> io::Result<RunResult> {
+    run_shell_sandboxed_with_door(spec, cancel, None)
+}
+
+/// Like [`run_shell_sandboxed`], with an optional per-task SID-restricted Named Pipe door channel.
+pub fn run_shell_sandboxed_with_door(
+    spec: &ShellSpec,
+    cancel: Option<&AtomicBool>,
+    door: Option<DoorSpec>,
+) -> io::Result<RunResult> {
     #[cfg(windows)]
     {
-        windows::run_shell_sandboxed(spec, cancel)
+        windows::run_shell_sandboxed_with_door(spec, cancel, door)
     }
     #[cfg(not(windows))]
     {
-        let _ = (spec, cancel);
+        let _ = (spec, cancel, door);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows AppContainer shell sandbox is only available on Windows",
@@ -289,13 +411,21 @@ pub fn run_shell_sandboxed(spec: &ShellSpec, cancel: Option<&AtomicBool>) -> io:
 /// directories are never admitted, and dropping the returned [`SandboxedStdio`] terminates and
 /// drains the entire Job tree before cleaning up the AppContainer profile.
 pub fn spawn_stdio_sandboxed(spec: &StdioSpec) -> io::Result<SandboxedStdio> {
+    spawn_stdio_sandboxed_with_door(spec, None)
+}
+
+/// Like [`spawn_stdio_sandboxed`], with an optional per-task SID-restricted Named Pipe door channel.
+pub fn spawn_stdio_sandboxed_with_door(
+    spec: &StdioSpec,
+    door: Option<DoorSpec>,
+) -> io::Result<SandboxedStdio> {
     #[cfg(windows)]
     {
-        windows::spawn_stdio_sandboxed(spec).map(|inner| SandboxedStdio { inner })
+        windows::spawn_stdio_sandboxed_with_door(spec, door).map(|inner| SandboxedStdio { inner })
     }
     #[cfg(not(windows))]
     {
-        let _ = spec;
+        let _ = (spec, door);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Windows AppContainer stdio sandbox is only available on Windows",

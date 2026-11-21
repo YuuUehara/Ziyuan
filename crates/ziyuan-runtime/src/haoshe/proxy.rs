@@ -152,6 +152,53 @@ impl Duplex for std::os::unix::net::UnixStream {
     }
 }
 
+#[cfg(windows)]
+impl Duplex for ziyuan_sandbox_windows::PipeDoorStream {
+    fn split(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+    fn close_write(&self) {
+        ziyuan_sandbox_windows::PipeDoorStream::close_write(self);
+    }
+}
+
+/// Windows 命名管道门吏的拦下域名审计句柄。
+#[cfg(windows)]
+pub(crate) struct PipeDoorAudit {
+    denied: Arc<Mutex<BTreeSet<String>>>,
+}
+
+#[cfg(windows)]
+impl PipeDoorAudit {
+    pub(crate) fn denied(&self) -> Vec<String> {
+        self.denied
+            .lock()
+            .expect("门吏记录锁未中毒")
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// 构造 Windows 零网络能力命名管道门吏（含容器内 `HTTP_PROXY` 桥接）与审计句柄。
+#[cfg(windows)]
+pub(crate) fn start_windows_door(
+    domains: Vec<String>,
+    env_var: &str,
+) -> (ziyuan_sandbox_windows::DoorSpec, PipeDoorAudit) {
+    let denied = Arc::new(Mutex::new(BTreeSet::new()));
+    let denied_cb = Arc::clone(&denied);
+    let domains = Arc::new(domains);
+    let door = ziyuan_sandbox_windows::DoorSpec {
+        env_var: env_var.to_owned(),
+        http_proxy_bridge: true,
+        on_connect: Arc::new(move |stream| {
+            let _ = serve(stream, &domains, &denied_cb);
+        }),
+    };
+    (door, PipeDoorAudit { denied })
+}
+
 fn serve<S: Duplex>(
     client: S,
     domains: &[String],
