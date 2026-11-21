@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.32.0 — 2026-11-21
+
+- **`run_tests` 主动取消传播（撤销 / 超时 / 度支停支）**：
+  - `ziyuan-runtime::ExecutionHooks` 新增向后兼容默认方法 `cancel_flag() -> Option<Arc<AtomicBool>>`，`scheduler::CancelToken` 同步维护 `Arc<AtomicBool>` 并提供 `flag()`，`TaskHooks::cancel_flag()` 将手动撤销、单任务超时与度支停支信号透传至执行层。
+  - `agent_loop::Tool` 新增默认方法 `execute_with_cancel`，`RunTests` 据此在启动前短路跳过复制、运行中经 `haoshe::ShellRunSpec::cancel` 立即终止在途子进程及 Windows AppContainer＋Job 进程树。
+- **`replace_text` 行范围锚定与失配／歧义诊断**：
+  - 单处替换与批量 `edits[]` 均新增可选 1 起始含首尾 `start_line` / `end_line` 参数，严格校验范围边界、保持精确唯一替换（不做模糊替换）。
+  - 匹配多处时报错附带具体行号与 `start_line`/`end_line` 消歧建议；找不到时若范围外有完全匹配则直接给出实际行号，否则给出最接近的 Top-3 候选行号与代码摘录。
+- **长对话二阶段可控历史压缩（`agent_loop::compact_turns`）**：
+  - 经单条 `abridge` 节略旧工具输出后，若估算 token 仍超 `context_tokens` 且积累不少于 6 轮完整对话，则确定性（不调用模型）将更早的完整轮次折叠为单条带外来文书围栏的结构化摘要（保留已修改文件、近期测试诊断与查阅足迹，完整保留最近 4 轮），严守 `CallPrelude`/`ToolCall`/`ToolOutput` 配对与角色交替协议，同步重映射 `read_file` 去重索引并重置 `Metered` 用量基线。
+- 登记次版本 `1.32.0`（序号 68，零新增事件与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [使用指南](docs/guide.md)、[体系结构](docs/architecture.md) 与 [路线图](docs/roadmap.md)；验收见 [1.32.0 验收记录](docs/acceptance/1.32.0.md)。
+
 ## 1.31.2 — 2026-11-21
 
 - **Windows 原生号舍 8.3 短路径生产修复（`ziyuan-sandbox-windows`）**：
