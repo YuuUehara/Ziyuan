@@ -1,6 +1,6 @@
 # ADR-0001：Windows 号舍支持政策
 
-- 状态：已切换（方案 B·W2 生产接入 `run_tests`；W3 长连接外藩与按域名放行仍失败关闭）
+- 状态：已切换（方案 B·W2 `run_tests` 与 W3 长连接 stdio 外藩、零网络能力命名管道门吏及快照内受控 `haoshe.write` 均已接入生产；开放联网、家目录写权与外部 `CARGO_TARGET_DIR` 维持显式失败关闭）
 - 日期：2026-10-29
 - 相关：[SECURITY.md](../../SECURITY.md)、[roadmap.md](../roadmap.md)「1.0 之后·号舍」
 
@@ -115,9 +115,12 @@ W1a 不得标为文件／网络隔离通过；W1b／W1c 未全通过时，不升
 3. **W3 首批落地（长连接断网 stdio 外藩）**：
    - `ziyuan-sandbox-windows` 新增 `StdioSpec`、`SandboxedStdio`（`Send`）与 `spawn_stdio_sandboxed`，通过 Win32 匿名双向管道（`CreatePipe`）仅把子端 `[child_stdin_read, child_stdout_write, stderr_nul]` 纳入 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`、父端保持非继承且恢复前核验父端不可见；复用 0 能力 `AppContainerChildCapable`＋`PrivateDesktop`＋`KILL_ON_JOB_CLOSE` Job Object，在 `shutdown()`/`Drop` 时先排空整棵 Job 进程树再回收目录与 profile；
    - `ziyuan-runtime::haoshe::spawn_stdio_windows` 与 `mcp.rs` 接入 Windows W3：对名册写了 `"haoshe": { "network": false }` 且 `write` 为空的本地 stdio 外藩，将项目复制到任务私有只读快照（`readonly_dirs`，保护 DACL＋低 IL，自动跳过 `.ziyuan`、`.git`、`.jj`、`.env*`、构建产物与重解析点；绝不改写宿主 ACL），仅准入任务私有 `scratch` 目录（同步注入 `TMPDIR`）与容器私有 `TEMP`/`TMP`/`HOME` 可写；解析 `PATH` 时自动跳过 `WindowsApps` 等重解析点／应用别名。
-4. **仍保持失败关闭的边界（后续按需扩展）**：
-   - `ZIYUAN_SANDBOX_ALLOW`（`Network::Only`）、`Network::Open`（含 MCP `"haoshe": true` 与域名白名单）显式拒绝（`SandboxUnavailable`）；
-   - 外部 `CARGO_TARGET_DIR` 与 MCP `haoshe.write` 等宿主额外可写目录显式拒绝（`SandboxUnavailable`）；
+4. **W3 后续收官（1.38.0，2026-11-22）：零网络能力命名管道门吏与受控快照子目录可写**：
+   - **按域名白名单出站（`ZIYUAN_SANDBOX_ALLOW` 与 MCP `haoshe.network: [...]`）**：实测证实零网络能力（`TokenCapabilities == 0`、零 loopback 豁免）AppContainer 可打开由宿主以保护 SDDL（仅授 `SY`、宿主用户与本任务容器 SID 读写权＋低 IL SACL）创建的命名管道（`\\.\pipe\ziyuan-door-…`），且同 SID 容器内进程间可通过本机回环互通，而 WFP 仍完全阻断容器直连宿主端口及不同 SID 的 peer AppContainer 访问该管道与回环端口。据此 `ziyuan-sandbox-windows` 新增 `PipeDoorStream`、`DoorSpec`、`run_shell_sandboxed_with_door` 与 `spawn_stdio_sandboxed_with_door`，在同 SID 容器与同 Job Object 内拉起纯 `.NET BCL` 异步 TCP↔NamedPipe 桥接并注入 `HTTP_PROXY`／`HTTPS_PROXY`／`ALL_PROXY` 与 `ZIYUAN_HAOSHE_DOOR_PIPE`，由宿主机 `haoshe::proxy` 门吏统一执行域名白名单与阻断审计，Job 排空时桥接原子退出。
+   - **受控快照内 `haoshe.write`**：`admit_directories` 按路径深度优先准入外层只读父目录再准入内层可写子目录，使 `haoshe.write` 经严格校验的项目相对子目录仅在任务私有快照内可写，快照父目录／兄弟目录保持 `FRFX` 只读，宿主项目目录零写入且零 ACL 变更。
+5. **永久或仍保持失败关闭的边界**：
+   - 开放联网 `Network::Open`（含 MCP `"haoshe": true`）显式拒绝（`SandboxUnavailable`），始终坚持零网络能力边界；
+   - 宿主外部 `CARGO_TARGET_DIR` 及指向绝对路径、盘符／UNC、家目录（`~`）、`..`、敏感目录（`.ziyuan`/`.git`/`.jj`/`.env*`/`target`/`node_modules`）或重解析点的 `haoshe.write` 显式拒绝（`SandboxUnavailable`）；
    - 宿主 `%USERPROFILE%` 下程序／工具链（如默认 `cargo.exe` 或安装于 `AppData` 的解释器）未经准入仍被内核拒绝，绝不放宽宿主用户目录或系统 ACL；用户可通过 `ZIYUAN_SANDBOX_TOOLCHAIN` 为 `run_tests` 显式声明只读工具链目录（经路径与敏感段严格校验、拒绝重解析点与 `%USERPROFILE%`/系统根目录、按文件数与总字节有界复制到独立任务私有只读快照并前置到容器 `PATH`，结束即毁、零宿主 ACL 变更）。
 
 ## 参考

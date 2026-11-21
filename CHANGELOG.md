@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.38.0 — 2026-11-22
+
+- **Windows 原生号舍 W3 零网络能力命名管道门吏（`ZIYUAN_SANDBOX_ALLOW` 与 MCP `haoshe.network: [...]`）**：
+  - `ziyuan-sandbox-windows` 新增 `PipeDoorStream`（全双工重叠 I/O＋`try_clone`/`close_write`）、`DoorSpec`、`run_shell_sandboxed_with_door` 与 `spawn_stdio_sandboxed_with_door`：在宿主机先于子进程恢复创建命名管道（`\\.\pipe\ziyuan-door-…`），以保护 SDDL（`D:P(A;;GA;;;SY)(A;;GA;;;{user})(A;;GRGW;;;{app})S:(ML;;NW;;;LW)`）仅授本任务 AppContainer SID 读写权，并在同一 0 能力 AppContainer SID、同一 `PrivateDesktop` 与同一 `KILL_ON_JOB_CLOSE` Job Object 内拉起纯 `.NET BCL` 异步 TCP↔NamedPipe 桥接（无 cmdlet、无 `Add-Type`、随 Job 排空原子退出），注入 `HTTP_PROXY`／`HTTPS_PROXY`／`ALL_PROXY` 与 `ZIYUAN_HAOSHE_DOOR_PIPE`。容器维持 `TokenCapabilities == 0`、零 loopback 豁免、零防火墙／注册表／宿主 ACL 修改，直连宿主端口继续由 WFP 阻断，其他 AppContainer（不同 SID）对命名管道与桥接端口的访问均被拒绝。
+  - `ziyuan-runtime::haoshe::proxy` 实现 `Duplex for PipeDoorStream` 与 `start_windows_door`，`haoshe::run_shell`（`run_tests`）与 `haoshe::spawn_stdio_windows`（长连接 stdio MCP）全面支持按域名白名单经门吏代理出站，并在结果注记中记录放行域名与门吏拦下的域名；`ziyuan --help` 同步更新 `ZIYUAN_SANDBOX_ALLOW` 说明。
+- **Windows 原生号舍受控快照子目录可写（MCP `haoshe.write`）**：
+  - `ziyuan-sandbox-windows` 的 `admit_directories` 按路径深度优先准入外层只读父目录再准入内层可写子目录，确保嵌套在只读项目快照内的可写子目录获得保护 `FA` DACL，而快照根目录与兄弟目录保持 `FRFX` 只读。
+  - `ziyuan-runtime::haoshe::spawn_stdio_windows` 对 `haoshe.write` 执行严格 fail-closed 校验（拒绝空项、绝对路径／盘符／UNC、`~`、`.`/`..`、`.ziyuan`/`.git`/`.jj`/`.env*`/`target`/`node_modules` 及宿主重解析点／非目录路径），仅映射到任务私有只读快照内对应子目录；宿主项目目录零写入、零 ACL 修改。
+  - 开放联网（`Network::Open`／MCP `"haoshe": true`）、宿主外部 `CARGO_TARGET_DIR` 与宿主家目录／越界 `haoshe.write` 继续显式返回 `SandboxUnavailable` 失败关闭。
+- 登记次版本 `1.38.0`（序号 74，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [ADR-0001](docs/adr/0001-windows-sandbox.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[路线图](docs/roadmap.md) 与 [发布指南](docs/releasing.md)；验收见 [1.38.0 验收记录](docs/acceptance/1.38.0.md)。
+
 ## 1.37.0 — 2026-11-22
 
 - **基于前件实录的只读「续问／追查」闭环（CLI + Web + TUI，零新事件类型）**：
