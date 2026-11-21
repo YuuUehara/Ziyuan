@@ -630,9 +630,10 @@ fn w2_real_toolchain_runs_tests_in_sandbox_while_blocking_host_and_user_profile(
         format!(
             r#"$ErrorActionPreference = 'Stop'
 if ((2 + 3) -ne 5) {{ throw 'math failed' }}
-$art = Join-Path $PSScriptRoot 'artifact.txt'
-Set-Content -Path $art -Value 'ok-in-copy' -NoNewline
-if ((Get-Content -Path $art -Raw) -ne 'ok-in-copy') {{ throw 'copy readback failed' }}
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+$art = [System.IO.Path]::Combine($PSScriptRoot, 'artifact.txt')
+[System.IO.File]::WriteAllText($art, 'ok-in-copy', $utf8)
+if ([System.IO.File]::ReadAllText($art, $utf8) -ne 'ok-in-copy') {{ throw 'copy readback failed' }}
 
 if ($env:USERPROFILE.ToLowerInvariant() -eq '{host_profile}'.ToLowerInvariant()) {{
   throw "USERPROFILE leaked host profile"
@@ -646,13 +647,13 @@ foreach ($k in @('LOCALAPPDATA','USERPROFILE','HOME','APPDATA','TEMP','TMP')) {{
 
 $secretDenied = $false
 try {{
-  $null = Get-Content -Path '{secret}' -Raw
+  $null = [System.IO.File]::ReadAllText('{secret}', $utf8)
 }} catch {{
   $secretDenied = $true
 }}
 if (-not $secretDenied) {{ throw 'host secret was unexpectedly readable' }}
 
-$client = New-Object System.Net.Sockets.TcpClient
+$client = [System.Net.Sockets.TcpClient]::new()
 $ar = $client.BeginConnect('127.0.0.1', {port}, $null, $null)
 $connected = $false
 if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {{
@@ -665,7 +666,7 @@ if ($ar.AsyncWaitHandle.WaitOne(400, $false)) {{
 }}
 $client.Close()
 if ($connected) {{ throw 'sandbox unexpectedly connected to host loopback' }}
-Write-Output 'REAL_TOOLCHAIN_PS_OK=1'
+[Console]::WriteLine('REAL_TOOLCHAIN_PS_OK=1')
 "#,
             host_profile = host_userprofile.replace('\'', "''"),
             secret = fs::canonicalize(&host_secret)
