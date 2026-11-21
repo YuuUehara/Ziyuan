@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.31.2 — 2026-11-21
+
+- **Windows 原生号舍 8.3 短路径生产修复（`ziyuan-sandbox-windows`）**：
+  - `run_sandboxed_inner` 在 `reject_reparse_point` 之后新增 `normalize_win32_long_path`，将 `program`、`cwd` 与 AppContainer profile 目录统一展开为无 `\\?\` 前缀的 Win32 长路径，修复 Windows 用户名超过 8 字符（8.3 短路径如 `RUNNER~1`）时 `.NET`／PowerShell 在 AppContainer 内触发 `GetLongPathNameW` 枚举父目录导致的 `UnauthorizedAccessException`。
+- **Windows Server 2025 CI 全绿闭环与测试稳定性修复**：
+  - 新增 `scripts/prepare-windows-null-device.ps1` 并接入 `.github/workflows/ci.yml`（在 Windows Server 2025 对齐 Windows 11 桌面默认 `\Device\Null` AppContainer 权限，桌面端自动跳过）；`startup.rs` PowerShell 验收脚本改用纯 .NET BCL 并拆分 `git --version` 与 `git hash-object` 断言；`tools.rs`／`haoshe.rs` 移除测试对 `>nul` 的非必要依赖。
+  - `crates/ziyuan-web/src/text_tests.rs` 补齐 `.header("Expect", "100-continue")`，消除 Windows Winsock 下提前返回 `403` 偶发 `WSAECONNABORTED (10053)` 竞态。
+- 登记补丁版本 `1.31.2`（序号 67，零新增事件与接口变更）；验证见 [1.31.2 验收记录](docs/acceptance/1.31.2.md)。
+
 ## 1.31.1 — 2026-11-21
 
 - **文档全量同步至 1.31.0 现行行为**：
