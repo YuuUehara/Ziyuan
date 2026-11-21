@@ -1888,3 +1888,52 @@ fn cli_supports_korean_french_and_german_projects_and_rejects_unknown_language()
     assert_eq!(bad.status.code(), Some(2));
     no_court(root);
 }
+
+#[test]
+fn project_qa_report_cli_aggregates_blocks_and_json() {
+    let dir = TempDir::new("qa-report");
+    let root = dir.path();
+    let id = init_json(root, "整书质检", "ja");
+    dir.write("ch1.txt", "雨の夜だった。\n\n静かな朝。\n");
+    dir.write("ch2.txt", "風の音。\n");
+    let project = ok_json(
+        root,
+        &["text", "import", &id, "ch1.txt", "ch2.txt", "--json"],
+    );
+    let b1 = &project["chapters"][0]["blocks"][0];
+    let b1_id = b1["block_id"].as_str().unwrap();
+    let p0 = b1["paragraphs"][0]["id"].as_str().unwrap();
+    let p1 = b1["paragraphs"][1]["id"].as_str().unwrap();
+    let zh_dir = root.join("translations").join(&id).join(b1_id);
+    std::fs::create_dir_all(&zh_dir).unwrap();
+    std::fs::write(
+        zh_dir.join("zh.json"),
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "block_id": b1_id,
+            "paragraphs": [
+                { "id": p0, "text": "那是一个雨の夜?" },
+                { "id": p1, "text": "宁静的清晨。" }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let text_out = stdout(&ok(root, &["text", "qa-report", &id]));
+    assert!(text_out.contains("整书质检总览"), "{text_out}");
+    assert!(text_out.contains("source_script_leak"), "{text_out}");
+    assert!(text_out.contains("punctuation_mismatch"), "{text_out}");
+
+    let report = ok_json(root, &["text", "qa-report", &id, "--json"]);
+    assert_eq!(report["founded"], false);
+    assert_eq!(report["summary"]["total_blocks"], 2);
+    assert_eq!(report["summary"]["translated_blocks"], 1);
+    assert_eq!(report["summary"]["untranslated_blocks"], 1);
+    assert_eq!(report["summary"]["blocks_with_issues"], 1);
+    assert_eq!(report["summary"]["total_issues"], 2);
+    assert_eq!(report["by_code"]["source_script_leak"], 1);
+    assert_eq!(report["by_code"]["punctuation_mismatch"], 1);
+    assert_eq!(report["issues"].as_array().unwrap().len(), 2);
+    no_court(root);
+}

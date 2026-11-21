@@ -4,7 +4,7 @@ mod hints;
 use super::{Result, Translations, find_block, invalid, sha256_hex};
 use crate::text_project::PromptBlock;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use ziyuan_governance::{ChangeState, Court, TaskStatus};
 use ziyuan_storage::JsonFile;
 
@@ -96,6 +96,56 @@ pub struct QaReport {
     pub block: String,
     pub paragraphs: usize,
     pub issues: Vec<QaIssue>,
+}
+
+/// 整书质检总览中的单块摘要（只读、确定性，不代表语义正确）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProjectQaBlockSummary {
+    pub block: String,
+    pub chapter_id: String,
+    pub chapter_title: String,
+    pub state: Option<String>,
+    pub state_label: Option<String>,
+    pub paragraphs: usize,
+    pub has_translation: bool,
+    pub issue_count: usize,
+}
+
+/// 整书质检总览中的单条确定性问题（含原文／译文短摘录与精确定位）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProjectQaIssue {
+    pub block: String,
+    pub chapter_id: String,
+    pub chapter_title: String,
+    pub paragraph: String,
+    pub code: &'static str,
+    pub message: String,
+    pub source_excerpt: String,
+    pub target_excerpt: String,
+}
+
+/// 整书质检总览的块级汇总统计。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ProjectQaSummary {
+    pub total_blocks: usize,
+    pub translated_blocks: usize,
+    pub untranslated_blocks: usize,
+    pub finalized_blocks: usize,
+    pub checked_blocks: usize,
+    pub clean_blocks: usize,
+    pub blocks_with_issues: usize,
+    pub total_issues: usize,
+}
+
+/// 整书级批量确定性 QA 报告（纯只读，零落盘，不调用模型）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProjectQaReport {
+    pub project: String,
+    pub founded: bool,
+    pub summary: ProjectQaSummary,
+    pub by_code: BTreeMap<String, usize>,
+    pub blocks: Vec<ProjectQaBlockSummary>,
+    pub issues: Vec<ProjectQaIssue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +722,152 @@ impl Translations {
         })
     }
 
+    /// 整书级批量确定性 QA 汇总（纯只读）：逐块执行 [`Self::qa`]，汇总问题分布并附带段级短摘录。
+    ///
+    /// 未译块仅计入 `summary.untranslated_blocks` 与 `blocks[].has_translation = false`，
+    /// 不把 `no_translation` 混入已译块的问题明细，避免半译书籍被大量未译提示淹没。
+    pub fn project_qa_report(
+        &self,
+        project: &str,
+        statuses: Option<&[super::BlockStatus]>,
+    ) -> Result<ProjectQaReport> {
+        let p = self.project(project)?;
+        let status_map: BTreeMap<&str, &super::BlockStatus> = statuses
+            .into_iter()
+            .flatten()
+            .map(|s| (s.block.as_str(), s))
+            .collect();
+        let mut summary = ProjectQaSummary::default();
+        let mut by_code: BTreeMap<String, usize> = BTreeMap::new();
+        let mut blocks = Vec::new();
+        let mut issues = Vec::new();
+
+        for chapter in &p.chapters {
+            let chapter_title = chapter
+                .parsing
+                .as_ref()
+                .map(|parsed| parsed.title.as_str())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(&chapter.source_name)
+                .to_owned();
+            for prompt in &chapter.blocks {
+                summary.total_blocks += 1;
+                let status = status_map.get(prompt.block_id.as_str()).copied();
+                let (state, state_label) = match status {
+                    Some(st) => {
+                        if matches!(
+                            st.state,
+                            super::BlockState::Finalized { .. }
+                                | super::BlockState::HumanFinalized { .. }
+                        ) {
+                            summary.finalized_blocks += 1;
+                        }
+                        (
+                            Some(block_state_code(&st.state).to_owned()),
+                            Some(st.state.label().to_owned()),
+                        )
+                    }
+                    None => (None, None),
+                };
+                let report = self.qa(project, &prompt.block_id)?;
+                let has_translation = !report.issues.iter().any(|i| i.code == "no_translation");
+                if !has_translation {
+                    summary.untranslated_blocks += 1;
+                    blocks.push(ProjectQaBlockSummary {
+                        block: prompt.block_id.clone(),
+                        chapter_id: chapter.id.clone(),
+                        chapter_title: chapter_title.clone(),
+                        state,
+                        state_label,
+                        paragraphs: report.paragraphs,
+                        has_translation: false,
+                        issue_count: 0,
+                    });
+                    continue;
+                }
+                summary.translated_blocks += 1;
+                summary.checked_blocks += 1;
+                if report.issues.is_empty() {
+                    summary.clean_blocks += 1;
+                } else {
+                    summary.blocks_with_issues += 1;
+                    summary.total_issues += report.issues.len();
+                    let target_paras: BTreeMap<String, String> = self
+                        .read_translation(project, &prompt.block_id)?
+                        .and_then(|bytes| {
+                            super::read_approved_target(&bytes, &prompt.block_id).ok()
+                        })
+                        .map(|approved| match approved {
+                            super::ApprovedTarget::Plain(b) => b
+                                .paragraphs
+                                .into_iter()
+                                .map(|para| (para.id, para.text))
+                                .collect(),
+                            super::ApprovedTarget::Marked(b) => b
+                                .paragraphs
+                                .into_iter()
+                                .map(|para| (para.id, para.text))
+                                .collect(),
+                        })
+                        .unwrap_or_default();
+                    let source_paras: BTreeMap<&str, &str> = prompt
+                        .paragraphs
+                        .iter()
+                        .map(|para| (para.id.as_str(), para.text.as_str()))
+                        .collect();
+                    for issue in &report.issues {
+                        *by_code.entry(issue.code.to_owned()).or_default() += 1;
+                        let source_excerpt = if issue.paragraph.is_empty() {
+                            String::new()
+                        } else {
+                            source_paras
+                                .get(issue.paragraph.as_str())
+                                .map(|t| compact_excerpt(t, 80))
+                                .unwrap_or_default()
+                        };
+                        let target_excerpt = if issue.paragraph.is_empty() {
+                            String::new()
+                        } else {
+                            target_paras
+                                .get(&issue.paragraph)
+                                .map(|t| compact_excerpt(t, 80))
+                                .unwrap_or_default()
+                        };
+                        issues.push(ProjectQaIssue {
+                            block: prompt.block_id.clone(),
+                            chapter_id: chapter.id.clone(),
+                            chapter_title: chapter_title.clone(),
+                            paragraph: issue.paragraph.clone(),
+                            code: issue.code,
+                            message: issue.message.clone(),
+                            source_excerpt,
+                            target_excerpt,
+                        });
+                    }
+                }
+                blocks.push(ProjectQaBlockSummary {
+                    block: prompt.block_id.clone(),
+                    chapter_id: chapter.id.clone(),
+                    chapter_title: chapter_title.clone(),
+                    state,
+                    state_label,
+                    paragraphs: report.paragraphs,
+                    has_translation: true,
+                    issue_count: report.issues.len(),
+                });
+            }
+        }
+
+        Ok(ProjectQaReport {
+            project: project.into(),
+            founded: statuses.is_some(),
+            summary,
+            by_code,
+            blocks,
+            issues,
+        })
+    }
+
     /// Save an explicit operator decision against the exact material preview; no model completion can call this implicitly.
     pub fn record_verification(
         &self,
@@ -790,6 +986,48 @@ impl Translations {
         })?;
         Ok(record)
     }
+}
+
+fn block_state_code(state: &super::BlockState) -> &'static str {
+    match state {
+        super::BlockState::NotStarted => "not_started",
+        super::BlockState::Running { .. } => "running",
+        super::BlockState::AwaitingApproval { .. } => "awaiting_approval",
+        super::BlockState::Applied { .. } => "applied",
+        super::BlockState::AwaitingYulan { .. } => "awaiting_yulan",
+        super::BlockState::Finalized { .. } => "finalized",
+        super::BlockState::Failed { .. } => "failed",
+        super::BlockState::Cancelled { .. } => "cancelled",
+        super::BlockState::Stale { .. } => "stale",
+        super::BlockState::HumanApproved { .. } => "human_approved",
+        super::BlockState::HumanFinalized { .. } => "human_finalized",
+        super::BlockState::HumanStale { .. } => "human_stale",
+        super::BlockState::Uncertain { .. } => "uncertain",
+    }
+}
+
+fn compact_excerpt(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut prev_ws = false;
+    let mut count = 0usize;
+    let mut truncated = false;
+    for ch in text.trim().chars() {
+        let mapped = if ch.is_whitespace() { ' ' } else { ch };
+        if mapped == ' ' && prev_ws {
+            continue;
+        }
+        prev_ws = mapped == ' ';
+        if count >= max_chars {
+            truncated = true;
+            break;
+        }
+        out.push(mapped);
+        count += 1;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
 }
 
 fn format_number_mismatch(source_digits: &str, target_digits: &str) -> String {
@@ -1109,5 +1347,105 @@ mod tests {
         assert!(half.contains("?") && half.contains("!"), "{half}");
         let both = detect_punctuation_mismatch("《长安记，你好,世界").unwrap();
         assert!(both.contains("《》未配对") && both.contains(","), "{both}");
+    }
+
+    #[test]
+    fn project_qa_report_summarizes_translated_untranslated_and_issues() {
+        let dir = std::env::temp_dir().join(format!(
+            "ziyuan-project-qa-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tp = crate::text_project::TextProjects::new(&dir);
+        let meta = tp
+            .create(crate::text_project::NewProject {
+                title: "整书质检示例".into(),
+                source_language: "ja".into(),
+                target_language: "zh-CN".into(),
+                provenance: crate::text_project::Provenance {
+                    source: "local".into(),
+                    rights: "owned".into(),
+                    author: String::new(),
+                    version: String::new(),
+                    date: String::new(),
+                    scope: String::new(),
+                },
+            })
+            .unwrap();
+        let ch1 = dir.join("ch1.txt");
+        let ch2 = dir.join("ch2.txt");
+        let ch3 = dir.join("ch3.txt");
+        std::fs::write(
+            &ch1,
+            "雨の夜だった。
+
+静かな朝。",
+        )
+        .unwrap();
+        std::fs::write(&ch2, "風の音。").unwrap();
+        std::fs::write(&ch3, "月の光。").unwrap();
+        let project = tp.import(&meta.id, &[ch1, ch2, ch3]).unwrap();
+        let b1 = &project.chapters[0].blocks[0];
+        let b2 = &project.chapters[1].blocks[0];
+        let b3 = &project.chapters[2].blocks[0];
+
+        // b1: translated with source script leak + punctuation mismatch
+        let b1_dir = dir.join(super::super::block_dir_rel(&meta.id, &b1.block_id));
+        std::fs::create_dir_all(&b1_dir).unwrap();
+        let zh1 = serde_json::json!({
+            "schema_version": b1.schema_version,
+            "block_id": b1.block_id,
+            "paragraphs": [
+                { "id": b1.paragraphs[0].id, "text": "那是一个雨の夜?" },
+                { "id": b1.paragraphs[1].id, "text": "宁静的清晨。" }
+            ]
+        });
+        std::fs::write(
+            dir.join(super::super::output_rel(&meta.id, &b1.block_id)),
+            serde_json::to_vec_pretty(&zh1).unwrap(),
+        )
+        .unwrap();
+
+        // b2: clean translation
+        let b2_dir = dir.join(super::super::block_dir_rel(&meta.id, &b2.block_id));
+        std::fs::create_dir_all(&b2_dir).unwrap();
+        let zh2 = serde_json::json!({
+            "schema_version": b2.schema_version,
+            "block_id": b2.block_id,
+            "paragraphs": [
+                { "id": b2.paragraphs[0].id, "text": "风声。" }
+            ]
+        });
+        std::fs::write(
+            dir.join(super::super::output_rel(&meta.id, &b2.block_id)),
+            serde_json::to_vec_pretty(&zh2).unwrap(),
+        )
+        .unwrap();
+
+        let _ = b3;
+        let t = super::Translations::new(&dir);
+        let report = t.project_qa_report(&meta.id, None).unwrap();
+        assert!(!report.founded);
+        assert_eq!(report.summary.total_blocks, 3);
+        assert_eq!(report.summary.translated_blocks, 2);
+        assert_eq!(report.summary.untranslated_blocks, 1);
+        assert_eq!(report.summary.checked_blocks, 2);
+        assert_eq!(report.summary.clean_blocks, 1);
+        assert_eq!(report.summary.blocks_with_issues, 1);
+        assert_eq!(report.summary.total_issues, 2);
+        assert_eq!(report.by_code.get("source_script_leak"), Some(&1));
+        assert_eq!(report.by_code.get("punctuation_mismatch"), Some(&1));
+        assert!(!report.by_code.contains_key("no_translation"));
+        assert_eq!(report.issues.len(), 2);
+        assert_eq!(report.issues[0].block, b1.block_id);
+        assert_eq!(report.issues[0].paragraph, b1.paragraphs[0].id);
+        assert_eq!(report.issues[0].source_excerpt, "雨の夜だった。");
+        assert_eq!(report.issues[0].target_excerpt, "那是一个雨の夜?");
+        assert!(!report.blocks[2].has_translation);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

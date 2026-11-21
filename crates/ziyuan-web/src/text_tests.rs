@@ -2819,3 +2819,112 @@ fn web_dialogs_and_materials_editor_use_theme_styles() {
     assert!(html.contains(".records-list li.hint { list-style: none;"));
     assert!(html.contains(".side .row + .row, #config-current + .row { margin-top: 8px; }"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_qa_report_and_tm_suggest_are_read_only_viewer_safe_and_scoped() {
+    let (base, root) = start("qa-tm-suggest", false).await;
+    let texts = TextProjects::new(&root);
+    let p = texts
+        .create(NewProject {
+            title: "整书质检与段旁记忆".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let ch1 = root.join("ch1.txt");
+    let ch2 = root.join("ch2.txt");
+    fs::write(&ch1, "雨の夜だった。\n\n王都の夜はとても静かだった。").unwrap();
+    fs::write(&ch2, "風の音。").unwrap();
+    let project = texts.import(&p.id, &[ch1, ch2]).unwrap();
+    let b1 = &project.chapters[0].blocks[0];
+    let p0 = &b1.paragraphs[0].id;
+    let p1 = &b1.paragraphs[1].id;
+
+    // Write translated block 1 with source leak & punctuation mismatch; leave block 2 untranslated.
+    fs::create_dir_all(root.join(block_dir_rel(&p.id, &b1.block_id))).unwrap();
+    fs::write(
+        root.join(output_rel(&p.id, &b1.block_id)),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "block_id": b1.block_id,
+            "paragraphs": [
+                { "id": p0, "text": "那是一个雨の夜?" },
+                { "id": p1, "text": "王都之夜非常安静。" }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Seed local TM entries (one exact match, one fuzzy match, one unrelated).
+    let t = ziyuan_app::translation::Translations::new(&root);
+    t.tm_add(
+        &p.id,
+        "王都の夜はとても静かだった。",
+        "王都的夜晚格外宁静。",
+    )
+    .unwrap();
+    t.tm_add(&p.id, "王都の夜は静かだった。", "王都之夜静悄悄。")
+        .unwrap();
+    t.tm_add(&p.id, "Unrelated English line.", "无关英文。")
+        .unwrap();
+
+    // Unauthenticated rejected with 401.
+    assert_eq!(
+        call(&base, &format!("/text/{}/qa-report", p.id), None, None)
+            .await
+            .0,
+        401
+    );
+
+    // Owner and Viewer both get 200 on qa-report even before court is founded.
+    for tok in [TOKEN, VIEWER] {
+        let (code, report) =
+            call(&base, &format!("/text/{}/qa-report", p.id), Some(tok), None).await;
+        assert_eq!(code, 200, "{report}");
+        assert_eq!(report["founded"], json!(false));
+        assert_eq!(report["summary"]["total_blocks"], json!(2));
+        assert_eq!(report["summary"]["translated_blocks"], json!(1));
+        assert_eq!(report["summary"]["untranslated_blocks"], json!(1));
+        assert_eq!(report["summary"]["blocks_with_issues"], json!(1));
+        assert_eq!(report["summary"]["total_issues"], json!(2));
+        assert_eq!(report["by_code"]["source_script_leak"], json!(1));
+        assert_eq!(report["by_code"]["punctuation_mismatch"], json!(1));
+        assert_eq!(report["issues"].as_array().unwrap().len(), 2);
+    }
+
+    // tm-suggest works for both Owner & Viewer, ranks exact match first, and rejects bad params.
+    let tm_route = format!("/text/{}/blocks/{}/tm-suggest", p.id, b1.block_id);
+    for tok in [TOKEN, VIEWER] {
+        let (code, body) = call(
+            &base,
+            &format!("{tm_route}?paragraph={p1}&limit=5"),
+            Some(tok),
+            None,
+        )
+        .await;
+        assert_eq!(code, 200, "{body}");
+        let suggestions = body["suggestions"].as_array().unwrap();
+        assert_eq!(suggestions.len(), 2, "{body}");
+        assert_eq!(suggestions[0]["score"], json!(100));
+        assert_eq!(suggestions[0]["target"], json!("王都的夜晚格外宁静。"));
+        assert_eq!(suggestions[0]["origin"], json!("tm"));
+    }
+
+    // Reject unknown query param (prevents cross-project scope expansion), missing paragraph, bad limit, unknown paragraph.
+    for bad in [
+        format!("{tm_route}?paragraph={p1}&projects=other"),
+        format!("{tm_route}?limit=5"),
+        format!("{tm_route}?paragraph={p1}&limit=0"),
+        format!("{tm_route}?paragraph={p1}&limit=11"),
+        format!("{tm_route}?paragraph=nonexistent-para"),
+    ] {
+        let (code, _) = call(&base, &bad, Some(VIEWER), None).await;
+        assert_eq!(code, 400, "expected 400 for {bad}");
+    }
+
+    // Strictly read-only: no court directory created.
+    assert!(!root.join(".ziyuan/court.log").exists());
+    fs::remove_dir_all(root).unwrap();
+}

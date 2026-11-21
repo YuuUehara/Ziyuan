@@ -236,6 +236,15 @@ ziyuan text verification record "$project" "$block" --file checks.json --json
 - **勘校意见处理与问题状态分开记**：`disposition`（`accepted|rejected|pending|not_applicable`）与 `resolution`（`unchecked|resolved|unresolved|not_applicable`）独立记录；禁止自相矛盾的组合（如 `accepted + not_applicable`、`pending + resolved`、`rejected/not_applicable + resolved/unresolved`）。非 `pending` 时须写非空 `note`。可关联本块已完成审校的任务号与真实短引 `advice`（最多 8 条）及本段词证数字 ID `evidence`（最多 16 条）。
 - **四种事实分开展示**：结构通过（`structure.valid`）、关联意见已处置（`opinions_handled`）、六事齐全且无待查/未解决（`operator_reviewed` 人工复核）、有效御览定稿各自独立，不新增定稿门槛；材料变化后旧复核会标为过期，网页须点击「已读最新材料，继续核对」后再保存。
 
+### 整书质检总览与段旁实时译文记忆推荐
+
+- **整书级批量确定性 QA（`ziyuan text qa-report <项目ID> [--json]` 与 Web「通读交稿 → 整书质检总览」）**：
+  - 一次性扫描全书各块并执行确定性检查（漏段、空译、数字不一致、源语字符残留、标点异常、术语不一致等），汇总总块数、已译／未译、已定稿、无问题／有问题块与按问题类型计数；未译块单独统计，不把 `no_translation` 混入问题明细。
+  - Web 页面支持按问题类型一键筛选，每条问题附带原文／译文短摘录与「**定位编辑**」按钮，点击后自动切回「译稿」页签并直达对应段落输入框；全程只读，观政令牌可用，不落盘且不代表语义正确。
+- **段旁实时译文记忆推荐（Web 手工编辑器与 `GET /api/text/{project}/blocks/{block}/tm-suggest`）**：
+  - 在「译稿 → 手工翻译」逐段聚焦输入框时，自动向后端只读查询当前项目内最相近的 Top-K 参考译文（融合本地 `tm.json` 字符双元组相似度与当前项目已建定稿 `ziyuan-memory` 命中，自动排除当前段自身并拒绝扩大跨项目范围）。
+  - 推荐区严格只读，**绝不自动覆盖译文或改动草稿脏状态**（仅提供手动「复制参考」）；切换段落或块时自动丢弃过期响应，观政模式同样可只读查阅。
+
 ### 翻译记忆、审校评论与跨章待查
 
 <a id="翻译记忆管理与评论"></a>

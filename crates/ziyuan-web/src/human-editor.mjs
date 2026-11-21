@@ -237,7 +237,7 @@ export class HumanDraft {
 }
 
 /** Persistent DOM per block: polling never replaces textareas, nor intercepts native undo/input. */
-export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,confirm=globalThis.confirm}) {
+export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,onSuggestTm,enableTmSuggest=false,storage,confirm=globalThis.confirm}) {
   if(storage===undefined) { try { storage=globalThis.sessionStorage; } catch { storage=null; } }
   const entries=new Map();
   let active=null, latestContext=null, deferred, progressRequest=0;
@@ -330,13 +330,70 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     const b=host.ownerDocument.createElement("button"); b.type="button"; b.className=variant?`small ${variant}`:"small";
     b.textContent=label; if(action) b.dataset.action=action; parent.append(b); return b;
   }
+  function renderTmBox(box,suggestions) {
+    if(!box) return;
+    box.replaceChildren();
+    if(!Array.isArray(suggestions) || !suggestions.length) { box.hidden=true; return; }
+    box.hidden=false;
+    const head=host.ownerDocument.createElement("div"); head.className="human-tm-head";
+    head.textContent="译文记忆参考（只读，不自动覆盖译文）";
+    const list=host.ownerDocument.createElement("ul"); list.className="human-tm-list";
+    for(const item of suggestions) {
+      const li=host.ownerDocument.createElement("li"); li.className="human-tm-item";
+      const meta=host.ownerDocument.createElement("div"); meta.className="human-tm-meta";
+      const badge=host.ownerDocument.createElement("span"); badge.className="human-tm-score";
+      const originLabel=item.origin==="memory" ? "定稿记忆" : "本地记忆";
+      const where=item.origin_paragraph ? ` · ${textLocation(item.origin_paragraph)}` : "";
+      badge.textContent=`${Number(item.score)||0}% · ${originLabel}${where}`;
+      meta.append(badge);
+      if(globalThis.navigator?.clipboard?.writeText) {
+        const copyBtn=host.ownerDocument.createElement("button");
+        copyBtn.type="button"; copyBtn.className="small"; copyBtn.dataset.view="";
+        copyBtn.textContent="复制参考";
+        copyBtn.addEventListener("click",()=>{
+          globalThis.navigator.clipboard.writeText(String(item.target||"")).then(()=>{
+            copyBtn.textContent="已复制";
+            setTimeout(()=>{ copyBtn.textContent="复制参考"; },1200);
+          }).catch(()=>{});
+        });
+        meta.append(copyBtn);
+      }
+      const srcEl=host.ownerDocument.createElement("div"); srcEl.className="human-tm-src";
+      srcEl.textContent=`原：${String(item.source||"")}`;
+      const tgtEl=host.ownerDocument.createElement("div"); tgtEl.className="human-tm-tgt";
+      tgtEl.textContent=`译：${String(item.target||"")}`;
+      li.append(meta,srcEl,tgtEl);
+      list.append(li);
+    }
+    box.append(head,list);
+  }
+  async function requestTmSuggestions(entry,row) {
+    if(!onSuggestTm && !enableTmSuggest) return;
+    if(!row?.tmBox) return;
+    const d=entry.draft;
+    const req=++entry.tmRequest;
+    entry.tmActivePara=row.id;
+    for(const other of entry.rows) {
+      if(other!==row && other.tmBox) { other.tmBox.hidden=true; }
+    }
+    try {
+      const res=onSuggestTm
+        ? await onSuggestTm(d.project,d.block,row.id)
+        : await api(`/text/${encodeURIComponent(d.project)}/blocks/${encodeURIComponent(d.block)}/tm-suggest?paragraph=${encodeURIComponent(row.id)}&limit=5`);
+      if(req!==entry.tmRequest || entry.tmActivePara!==row.id || active!==entry) return;
+      renderTmBox(row.tmBox,res?.suggestions||[]);
+    } catch {
+      if(req===entry.tmRequest && row.tmBox) { row.tmBox.hidden=true; row.tmBox.replaceChildren(); }
+    }
+  }
   function buildRows(entry) {
     entry.paras.replaceChildren(); entry.rows=[];
     for(const [i,p] of entry.draft.paragraphs.entries()) {
       const section=host.ownerDocument.createElement("section"); section.className="human-paragraph";
       section.dataset.humanPara=p.id;
-      section.innerHTML=`<h4 title="内部编号：${escape(p.id)}">${escape(textLocation(p.id))}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><div class="human-target-col"><label>人工译文<textarea aria-label="${escape(textLocation(p.id))} 人工译文"></textarea></label><div class="actions human-mark-tools"></div></div></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
+      section.innerHTML=`<h4 title="内部编号：${escape(p.id)}">${escape(textLocation(p.id))}</h4><div class="human-bilingual"><div><b>原文</b><p class="text-para">${escape(entry.draft.source.find(s=>s.id===p.id)?.text||"（原文已变，请核对段落）")}</p></div><div class="human-target-col"><label>人工译文<textarea aria-label="${escape(textLocation(p.id))} 人工译文"></textarea></label><div class="actions human-mark-tools"></div><div class="human-tm-suggest" aria-label="译文记忆参考（只读）" hidden></div></div></div><p class="human-preview text-para" aria-label="标记预览"></p><div class="table-wrap"><table aria-label="标记结构表"></table></div>`;
       const textarea=section.querySelector("textarea"), tools=section.querySelector(".human-mark-tools");
+      const tmBox=section.querySelector(".human-tm-suggest");
       for(const [kind,label] of Object.entries(KIND_LABELS)) {
         const b=button(label,null,tools); b.dataset.mark=kind;
         b.addEventListener("click",()=>{
@@ -368,7 +425,9 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
         const b=event.target.closest("[data-remove]"); if(!b) return;
         entry.draft.remove(i,Number(b.dataset.remove)); details(entry);
       });
-      entry.rows.push({id:p.id,section,textarea,source:section.querySelector(".text-para"),preview:section.querySelector(".human-preview"),tableWrap:section.querySelector(".table-wrap"),table:section.querySelector("table")});
+      const row={id:p.id,section,textarea,tmBox,source:section.querySelector(".text-para"),preview:section.querySelector(".human-preview"),tableWrap:section.querySelector(".table-wrap"),table:section.querySelector("table")};
+      textarea.addEventListener("focus",()=>{ requestTmSuggestions(entry,row); });
+      entry.rows.push(row);
       entry.paras.append(section);
     }
   }
@@ -376,7 +435,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
     root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段在右侧填写译文，按 Ctrl+S（macOS 为 Cmd+S）可快捷保存草稿；选中右侧译文文字可在栏下加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
-    const entry={draft:d,root,rows:[],buttons:new Map(),request:0,
+    const entry={draft:d,root,rows:[],buttons:new Map(),request:0,tmRequest:0,tmActivePara:null,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};
     button("恢复页面暂存（恢复后仍须保存）","restore",entry.recovery);
@@ -475,7 +534,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
   function update(context) {
     if(active?.draft.composing) { deferred=context; return; }
     latestContext=context;
-    if(!context?.project || !context?.block) { active=null; stage.replaceChildren(); progress.replaceChildren(); ++progressRequest; return; }
+    if(!context?.project || !context?.block) { if(active) ++active.tmRequest; active=null; stage.replaceChildren(); progress.replaceChildren(); ++progressRequest; return; }
     const key=JSON.stringify([context.project,context.block]);
     let entry=entries.get(key);
     if(!entry) { entry=create(context); entries.set(key,entry); }
@@ -485,8 +544,16 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,storage,con
       row.source.textContent=context.source.find(p=>p.id===row.id)?.text || "（原文段落已变，请重新载入并核对）";
     });
     // Retain the exact node (and textarea undo state) across polling and block navigation.
-    if(active!==entry) { active=entry; stage.replaceChildren(entry.root); }
+    if(active!==entry) { if(active) ++active.tmRequest; active=entry; stage.replaceChildren(entry.root); }
     notify(entry); pull(entry); loadProgress(context.project);
   }
-  return {update,hasDirty:()=>[...entries.values()].some(e=>e.draft.dirty||e.draft.composing)};
+  function focusParagraph(paragraphId) {
+    if(!active || !paragraphId) return false;
+    const row=active.rows.find(r=>r.id===paragraphId);
+    if(!row) return false;
+    row.section?.scrollIntoView?.({block:"center"});
+    row.textarea?.focus?.();
+    return true;
+  }
+  return {update,focusParagraph,hasDirty:()=>[...entries.values()].some(e=>e.draft.dirty||e.draft.composing)};
 }

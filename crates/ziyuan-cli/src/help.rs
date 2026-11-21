@@ -303,7 +303,7 @@ init import preview import-docx import-epub import-srt \
 export-finished export-originals export-docx export-epub export-srt \
 show usage check human recovery evidence verification \
 translate review revise references zhupi finalize reopen context status resume \
-qa termbase concordance tm comment compare version memory \
+qa qa-report termbase concordance tm comment compare version memory \
 backup restore source-update issue read preflight search draft-replace tmx help \
 save submit approve apply authorize build list add update delete adopt suggest \
 reply assign resolve record prepare diff export-tbx import-tbx compare-draft prune \

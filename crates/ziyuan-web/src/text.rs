@@ -18,8 +18,9 @@ use ziyuan_app::notes::{NewNote, NoteEdit, NoteFilter, NoteKind, Notes};
 use ziyuan_app::text_project::{ImportOptions, ImportSource, NewProject, Project, TextProjects};
 use ziyuan_app::translation::{
     BlockState, BlockStatus, DraftSave, DraftView, EvidenceInput, ExportFormat, ExportLayout,
-    ExportOptions, ReferenceRequest, ReferenceSubmission, TranslationError, Translations,
-    VerificationInput, human_submit_request_id,
+    ExportOptions, ReferenceRequest, ReferenceSubmission, TmSuggestion, TranslationError,
+    Translations, VerificationInput, human_submit_request_id, merge_tm_suggestions,
+    score_tm_similarity,
 };
 use ziyuan_app::{AppError, selected_files};
 use ziyuan_core::{CourtEvent, TranslationKind};
@@ -154,6 +155,132 @@ pub(crate) async fn qa(
     })
     .await?;
     Ok(Json(value))
+}
+
+/// 整书级批量确定性 QA 汇总（纯只读，观政可读，不调用模型、不落盘）。
+pub(crate) async fn qa_report(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let statuses = app
+        .session_result({
+            let root = root.clone();
+            let project = project.clone();
+            move |s| s.translation_status(&root, &project)
+        })
+        .await?;
+    let statuses = match statuses {
+        Ok(statuses) => Some(statuses),
+        Err(AppError::NotFounded) => None,
+        Err(e) => return Err(ApiError::from(e)),
+    };
+    let value = blocking(move || {
+        Translations::new(&root)
+            .project_qa_report(&project, statuses.as_deref())
+            .map(|v| json!(v))
+            .map_err(verification_error)
+    })
+    .await?;
+    Ok(Json(value))
+}
+
+/// 段旁实时译文记忆推荐（纯只读，观政可读，仅当前项目，不自动写入或覆盖译稿）。
+pub(crate) async fn tm_suggest(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    if query.keys().any(|k| k != "paragraph" && k != "limit") {
+        return Err(ApiError::bad(
+            "仅支持 paragraph 与 limit 参数，不能扩大检索范围。",
+        ));
+    }
+    let paragraph = query
+        .get("paragraph")
+        .map_or("", String::as_str)
+        .trim()
+        .to_owned();
+    if paragraph.is_empty() {
+        return Err(ApiError::bad("请指定段号（paragraph）。"));
+    }
+    let limit = match query.get("limit") {
+        None => 5usize,
+        Some(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if (1..=10).contains(&n) => n,
+            _ => return Err(ApiError::bad("limit 须为 1 至 10 的整数。")),
+        },
+    };
+    let root = app.0.config.root.clone();
+    let mut out = blocking({
+        let root = root.clone();
+        let project = project.clone();
+        let block = block.clone();
+        let paragraph = paragraph.clone();
+        move || {
+            Translations::new(&root)
+                .suggest_tm_for_paragraph(&project, &block, &paragraph, limit)
+                .map_err(material)
+        }
+    })
+    .await?;
+
+    if !out.source.trim().is_empty() {
+        let source = out.source.clone();
+        let memory_hits = app
+            .session_result({
+                let root = root.clone();
+                let project = project.clone();
+                let block = block.clone();
+                let paragraph = paragraph.clone();
+                move |s| {
+                    let Ok(provider) = memory_provider(&root, &project) else {
+                        return Ok(Vec::new());
+                    };
+                    let Ok(hits) = s.memory_search(
+                        &root,
+                        &BTreeSet::new(),
+                        &project,
+                        &source,
+                        limit,
+                        provider.as_ref(),
+                    ) else {
+                        return Ok(Vec::new());
+                    };
+                    let mut mapped = Vec::new();
+                    for hit in hits {
+                        if hit.record.identity.block == block
+                            && hit.record.identity.paragraph == paragraph
+                        {
+                            continue;
+                        }
+                        let text_score = score_tm_similarity(&source, &hit.record.source.text);
+                        let cos_score = (hit.cosine_score.clamp(0.0, 1.0) * 99.0).round() as u32;
+                        let score = text_score.max(cos_score).min(100);
+                        if score >= 25 {
+                            mapped.push(TmSuggestion {
+                                source: hit.record.source.text,
+                                target: hit.record.target.text,
+                                score,
+                                origin: "memory".into(),
+                                origin_block: Some(hit.record.identity.block),
+                                origin_paragraph: Some(hit.record.identity.paragraph),
+                                tm_id: None,
+                            });
+                        }
+                    }
+                    Ok(mapped)
+                }
+            })
+            .await;
+        if let Ok(Ok(extra)) = memory_hits
+            && !extra.is_empty()
+        {
+            out.suggestions = merge_tm_suggestions(out.suggestions, extra, limit);
+        }
+    }
+
+    Ok(Json(json!(out)))
 }
 
 pub(crate) async fn verification_record(

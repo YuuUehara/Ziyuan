@@ -40,6 +40,10 @@ test("page imports the actual editor, uses a persistent host and retains API con
   assert.match(html,/id="materials-approve-context"/);
   assert.match(html,/\.human-target-col\s*\{/);
   assert.match(html,/data-import-remove="/);
+  assert.match(html,/id="text-project-qa"/);
+  assert.match(html,/id="project-qa-run"/);
+  assert.match(html,/enableTmSuggest:\s*true/);
+  assert.match(html,/\.human-tm-suggest\s*\{/);
 });
 test("whole draft limits include readings and every paragraph", () => {
   const paragraphs = ["a", "b"].map((id) => ({ id, text: "字", marks: Array.from({ length: 2049 }, () => ({start:0,end:1,kind:"strong"})) }));
@@ -509,4 +513,131 @@ test("next-empty jump, selection guard before ruby prompt, Ctrl+S shortcut, and 
   } finally {
     globalThis.prompt = origPrompt;
   }
+});
+
+test("paragraph focus loads read-only TM suggestions with stale-response and XSS guards", async () => {
+  const makeEl = (tag, doc) => {
+    const classes = new Set();
+    const node = {
+      tagName: tag.toUpperCase(), className: "", hidden: false, disabled: false, readOnly: false,
+      value: "", textContent: "", _innerHTML: "", dataset: {}, attributes: {}, children: [],
+      listeners: new Map(), parentElement: null, ownerDocument: doc,
+      selectionStart: 0, selectionEnd: 0,
+      classList: {
+        toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
+        contains(name) { return classes.has(name); },
+      },
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) {
+        this._innerHTML = String(v);
+        if (this.className === "human-paragraph") {
+          const tx = makeEl("textarea", doc);
+          const src = makeEl("p", doc); src.className = "text-para";
+          const tools = makeEl("div", doc); tools.className = "actions human-mark-tools";
+          const tmBox = makeEl("div", doc); tmBox.className = "human-tm-suggest"; tmBox.hidden = true;
+          const preview = makeEl("p", doc); preview.className = "human-preview text-para";
+          const tableWrap = makeEl("div", doc); tableWrap.className = "table-wrap";
+          const table = makeEl("table", doc);
+          tableWrap.append(table);
+          this.children = [src, tx, tools, tmBox, preview, tableWrap];
+          this._map = { textarea: tx, ".human-mark-tools": tools, ".human-tm-suggest": tmBox, table, ".text-para": src, ".human-preview": preview, ".table-wrap": tableWrap };
+        } else if (this._innerHTML.includes("human-paragraphs")) {
+          const status = makeEl("p", doc); status.className = "human-status";
+          const msg = makeEl("p", doc); msg.className = "human-message hint";
+          const rec = makeEl("div", doc); rec.className = "human-recovery actions";
+          const conf = makeEl("div", doc); conf.className = "human-conflict actions";
+          const acts = makeEl("div", doc); acts.className = "human-actions actions";
+          const paras = makeEl("div", doc); paras.className = "human-paragraphs";
+          this.children = [status, msg, rec, conf, acts, paras];
+          this._map = { ".human-status": status, ".human-message": msg, ".human-recovery": rec, ".human-conflict": conf, ".human-actions": acts, ".human-paragraphs": paras };
+        }
+      },
+      setAttribute(k, v) { this.attributes[k] = v; },
+      append(...items) { items.forEach((i) => { i.parentElement = this; this.children.push(i); }); },
+      replaceChildren(...items) { this.children = []; this.append(...items); },
+      addEventListener(type, fn) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type).push(fn);
+      },
+      querySelector(sel) { return this._map?.[sel] || null; },
+      querySelectorAll(sel) {
+        const out = [];
+        const walk = (n) => {
+          for (const c of n.children || []) {
+            if (sel === "textarea" && c.tagName === "TEXTAREA") out.push(c);
+            if (sel.includes("[data-mark]") && (c.dataset.mark || c.dataset.remove !== undefined)) out.push(c);
+            walk(c);
+          }
+        };
+        walk(this);
+        return out;
+      },
+      closest() { return null; },
+      focus() {
+        doc.activeElement = this;
+        for (const fn of this.listeners.get("focus") || []) fn();
+      },
+    };
+    return node;
+  };
+  const doc = { activeElement: null };
+  doc.createElement = (tag) => makeEl(tag, doc);
+  const host = makeEl("div", doc);
+  const src = [{ id: "c0001-p0001", text: "原文一" }, { id: "c0001-p0002", text: "原文二" }];
+  const resolvers = new Map();
+  const api = async (path) => {
+    if (path.endsWith("/human/progress")) return null;
+    if (path.includes("/tm-suggest?")) {
+      const para = new URL("http://localhost" + path).searchParams.get("paragraph");
+      return new Promise((resolve) => { resolvers.set(para, resolve); });
+    }
+    return {
+      founded: true,
+      basis: { source_hash: "s", context_hash: "c" },
+      revision: "rev-1",
+      draft: { revision: "rev-1", paragraphs: [{ id: "c0001-p0001", text: "人工草稿一", marks: [] }, { id: "c0001-p0002", text: "人工草稿二", marks: [] }] },
+      human: { submitted: false, approved: false, finalized: false, stale: false },
+    };
+  };
+  const editor = mountHumanEditor(host, { api, isViewer: () => true, enableTmSuggest: true, storage: storage(), confirm: () => true });
+  editor.update({ project: "p", block: "c0001-b0001", source: src });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const paras = host.children[1].children[0].querySelector(".human-paragraphs").children;
+  const tx0 = paras[0].querySelector("textarea");
+  const tx1 = paras[1].querySelector("textarea");
+  const box0 = paras[0].querySelector(".human-tm-suggest");
+  const box1 = paras[1].querySelector(".human-tm-suggest");
+
+  // Focus paragraph 1, then quickly focus paragraph 2 before paragraph 1 resolves.
+  tx0.focus();
+  tx1.focus();
+  assert.ok(resolvers.has("c0001-p0001") && resolvers.has("c0001-p0002"));
+
+  // Resolve paragraph 2 first with XSS payload to verify textContent escaping.
+  resolvers.get("c0001-p0002")({
+    suggestions: [{ source: "<img onerror=alert(1)>", target: "<script>bad</script>", score: 92, origin: "memory", origin_paragraph: "c0001-p0009" }],
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(box1.hidden, false);
+  const collectText = (n) => [n.textContent, ...(n.children || []).flatMap(collectText)].filter(Boolean).join(" ");
+  const renderedText = collectText(box1);
+  assert.match(renderedText, /92% · 定稿记忆/);
+  assert.match(renderedText, /<img onerror=alert\(1\)>/);
+  assert.equal(box1._innerHTML, "", "suggestions must be built with DOM textContent, never innerHTML");
+
+  // Late response for paragraph 1 must be discarded (stale guard).
+  resolvers.get("c0001-p0001")({
+    suggestions: [{ source: "旧结果", target: "不应显示", score: 100, origin: "tm" }],
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(box0.hidden, true);
+  assert.equal(box0.children.length, 0);
+
+  // Strictly read-only: draft values and dirty state are completely untouched even in Viewer mode.
+  assert.equal(tx0.value, "人工草稿一");
+  assert.equal(tx1.value, "人工草稿二");
+  assert.equal(editor.hasDirty(), false);
+  assert.equal(editor.focusParagraph("c0001-p0001"), true);
+  assert.equal(editor.focusParagraph("nonexistent"), false);
 });

@@ -32,6 +32,7 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text context prepare <项目ID>                 把本地资料草稿准备为生产 glossary.json（尚未批准）
   ziyuan text context diff <项目ID>                    只读对比本地草稿与已批准资料
   ziyuan text qa <项目ID> <块ID>                       确定性检查（空译、数字、段号、源语残留、标点、术语）
+  ziyuan text qa-report <项目ID> [--json]              整书级批量确定性 QA 汇总（纯只读，汇总各块与问题分布）
   ziyuan text termbase export <项目ID> <术语表.csv> [--bom]
                                                     导出本地草稿术语/人物 CSV（--bom 加 UTF-8 BOM 适配 Excel）
   ziyuan text termbase propose <项目ID> <块ID> [--write]
@@ -89,6 +90,7 @@ pub(crate) enum TranslationAction {
     ContextPrepare(String),
     ContextDiff(String),
     Qa(String, String),
+    QaReport(String),
     TermbaseExport(String, PathBuf, bool),
     TermbasePropose(String, String, bool),
     TermbaseImport(String, PathBuf),
@@ -205,6 +207,10 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["context", "diff", p] if positional(p) => TranslationAction::ContextDiff((*p).into()),
         ["qa", p, b] if positional(p) && positional(b) => {
             TranslationAction::Qa((*p).into(), (*b).into())
+        }
+        ["qa-report", p] if positional(p) => TranslationAction::QaReport((*p).into()),
+        ["qa-report", ..] => {
+            return Err("用法: ziyuan text qa-report <项目ID> [--json]".into());
         }
         ["termbase", "export", p, f] if positional(p) && positional(f) => {
             TranslationAction::TermbaseExport((*p).into(), (*f).into(), false)
@@ -842,6 +848,51 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                 }
                 if report.issues.is_empty() {
                     println!("未发现确定性检查问题（不代表语义正确）。");
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::QaReport(project) => {
+            let root = std::env::current_dir()?;
+            let statuses = match ziyuan_app::Session::open(ziyuan_storage::EventLog::new(&root)) {
+                Ok(session) => Some(session.translation_status(&root, &project)?),
+                Err(ziyuan_app::AppError::NotFounded) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let report = translations.project_qa_report(&project, statuses.as_deref())?;
+            if json {
+                print_json(serde_json::to_value(&report)?)?;
+            } else {
+                let s = &report.summary;
+                println!(
+                    "项目 {project} 整书质检总览：共 {} 块（已译 {}、未译 {}、已定稿 {}）；无问题 {} 块，有问题 {} 块，共 {} 个问题",
+                    s.total_blocks,
+                    s.translated_blocks,
+                    s.untranslated_blocks,
+                    s.finalized_blocks,
+                    s.clean_blocks,
+                    s.blocks_with_issues,
+                    s.total_issues
+                );
+                if !report.by_code.is_empty() {
+                    let dist = report
+                        .by_code
+                        .iter()
+                        .map(|(code, count)| format!("{code}={count}"))
+                        .collect::<Vec<_>>()
+                        .join("，");
+                    println!("按类型分布：{dist}");
+                }
+                for issue in &report.issues {
+                    let loc = if issue.paragraph.is_empty() {
+                        issue.block.clone()
+                    } else {
+                        format!("{} {}", issue.block, issue.paragraph)
+                    };
+                    println!("{} [{}] {}", loc, issue.code, issue.message);
+                }
+                if report.issues.is_empty() {
+                    println!("已译块未发现确定性检查问题（不代表语义正确）。");
                 }
             }
             return Ok(());

@@ -88,6 +88,9 @@ pub use status::{
 };
 pub use target::{ApprovedTarget, TARGET_FORMAT_MARKED, TARGET_FORMAT_PLAIN, read_approved_target};
 pub use text_search::{DraftReplace, DraftReplacePreview, TextSearch, TextSearchHit};
+pub use tm::{
+    ParagraphTmSuggestions, TmEntry, TmSuggestion, merge_tm_suggestions, score_tm_similarity,
+};
 pub use tmx::TmxPreview;
 pub use usage::{
     StageUsage, TranslationTaskUsage, TranslationUsage, UsageCharge, UsageRate, UsageTotals,
@@ -95,7 +98,8 @@ pub use usage::{
 };
 pub use verification::{
     AdviceLink, Disposition, EvidenceInput, EvidenceStatus, GlossaryHint, LexicalEvidence,
-    ParagraphVerification, Resolution, ReviewAdvice, SemanticCategory, SemanticCheck,
+    ParagraphVerification, ProjectQaBlockSummary, ProjectQaIssue, ProjectQaReport,
+    ProjectQaSummary, QaIssue, QaReport, Resolution, ReviewAdvice, SemanticCategory, SemanticCheck,
     TranslationChange, VerificationInput, VerificationRecord, VerificationRecordView,
     VerificationSnapshot, VerificationView,
 };
