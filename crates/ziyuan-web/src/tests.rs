@@ -2261,3 +2261,115 @@ async fn office_model_supports_department_batch_and_exposes_model_profiles() {
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_failed_api_reissues_failed_task_blocks_viewer_and_rejects_completed() {
+    let (base, root) = start("resume-failed-api").await;
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn v() -> u32 { 1 }\n").unwrap();
+
+    let (status, issued) = call(
+        &base,
+        "/edicts",
+        Some(TOKEN),
+        Some(json!({
+            "department": "works",
+            "text": "修复边界解析",
+            "scope": ["src"],
+            "tools": ["read_file", "write_file"],
+            "run": false
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{issued}");
+    let id = issued["id"].as_u64().unwrap();
+
+    // 未失败前调用 resume-failed 应返回 400。
+    let (status, _) = call(
+        &base,
+        &format!("/tasks/{id}/resume-failed"),
+        Some(TOKEN),
+        Some(json!({ "note": "太早" })),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // 记一次工具足迹与失败结局。
+    let session = Session::open(EventLog::new(&root)).unwrap();
+    let worker = session.court().agents().next().unwrap().id;
+    let mut log = EventLog::new(&root);
+    let expected = log.load().unwrap().len();
+    log.append(
+        expected,
+        &[
+            CourtEvent::TaskAssigned {
+                task: TaskId(id),
+                worker,
+                model: None,
+            },
+            CourtEvent::ToolInvoked {
+                task: TaskId(id),
+                tool: "symbol_impact".into(),
+                args_json: r#"{"symbol":"v"}"#.into(),
+                ok: true,
+            },
+            CourtEvent::TaskFailed {
+                task: TaskId(id),
+                reason: "上游 503 抖动".into(),
+            },
+        ],
+    )
+    .unwrap();
+
+    let (status, state) = call(&base, "/state", Some(TOKEN), None).await;
+    assert_eq!(status, 200);
+    let prior = state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap();
+    assert!(prior["resume_failed_draft"].is_object(), "{prior}");
+    assert_eq!(
+        prior["resume_failed_draft"]["failure_reason"],
+        "上游 503 抖动"
+    );
+
+    // 观政令牌不得发起续办。
+    let (status, _) = call(
+        &base,
+        &format!("/tasks/{id}/resume-failed"),
+        Some(VIEWER),
+        Some(json!({ "note": "试图越权" })),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    // 皇帝令牌成功续办，保留写权限并携带失败原因与工具足迹。
+    let (status, created) = call(
+        &base,
+        &format!("/tasks/{id}/resume-failed"),
+        Some(TOKEN),
+        Some(json!({ "scope": ["src"], "note": "继续完成" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    assert_eq!(created["department"], "works");
+    assert_eq!(created["cancelled"], false);
+    let new_id = created["id"].as_u64().unwrap();
+
+    let session = Session::open(EventLog::new(&root)).unwrap();
+    let resumed = session.court().task(TaskId(new_id)).unwrap();
+    assert!(
+        resumed
+            .edict
+            .seal
+            .capabilities
+            .contains(&ziyuan_core::Capability::WriteFile)
+    );
+    assert!(resumed.edict.text.contains("上游 503 抖动"));
+    assert!(resumed.edict.text.contains("symbol_impact（成功）"));
+    assert!(resumed.edict.text.contains("继续完成"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}

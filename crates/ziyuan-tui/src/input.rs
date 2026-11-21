@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
     ABOLITION_NOTE, AddedSubtask, HunkVerdict, RevertStatus, draft_follow_up, draft_plan_execution,
-    draft_revision, duzhi_report, kaocheng_report, parse_hunk_reviews, skipped_note, total_hunks,
+    draft_resume_failed, draft_revision, duzhi_report, kaocheng_report, parse_hunk_reviews,
+    skipped_note, total_hunks,
 };
 use ziyuan_core::{AgentId, Capability, Department, GovernanceMode, Office, Seal, TaskId, Verdict};
 use ziyuan_governance::TaskStatus;
@@ -400,6 +401,29 @@ impl App {
                     Err(e) => self.error(e.to_string()),
                 }
             }
+            KeyCode::Char('C') => {
+                let Some(entry) = self.court().task(task) else {
+                    return;
+                };
+                match draft_resume_failed(entry, &self.config.root) {
+                    Ok(draft) => {
+                        let dept_idx = Department::ALL
+                            .iter()
+                            .position(|&d| d == draft.department)
+                            .unwrap_or(0);
+                        let caps: Vec<&str> = draft.capabilities.iter().map(|c| c.code()).collect();
+                        self.modal = Some(Modal::Input {
+                            kind: InputKind::ResumeFailed(task),
+                            text: String::new(),
+                            department: dept_idx,
+                            scope: draft.scope.join(","),
+                            tools: caps.join(","),
+                            field: 0,
+                        });
+                    }
+                    Err(e) => self.error(e.to_string()),
+                }
+            }
             KeyCode::Char('P') => {
                 let Some(entry) = self.court().task(task) else {
                     return;
@@ -712,7 +736,7 @@ impl App {
                 tools,
                 field,
             } => {
-                let follow_up = matches!(kind, InputKind::FollowUp(_));
+                let two_field = matches!(kind, InputKind::FollowUp(_) | InputKind::ResumeFailed(_));
                 let multi = matches!(
                     kind,
                     InputKind::Edict
@@ -720,15 +744,16 @@ impl App {
                         | InputKind::Revise(_)
                         | InputKind::DagAdd(_)
                         | InputKind::FollowUp(_)
+                        | InputKind::ResumeFailed(_)
                 );
                 let switch_dept = matches!(
                     kind,
                     InputKind::Edict | InputKind::Recruit | InputKind::FollowUp(_)
                 );
-                let field_count: u8 = if follow_up { 2 } else { 3 };
+                let field_count: u8 = if two_field { 2 } else { 3 };
                 let target = match (multi, *field) {
                     (true, 1) => scope,
-                    (true, 2) if !follow_up => tools,
+                    (true, 2) if !two_field => tools,
                     _ => text,
                 };
                 match key.code {
@@ -951,6 +976,39 @@ impl App {
                             "已依前件 #{} 下发{}只读续问诏令 #{}（按 r 执行）",
                             source_task.0,
                             department.label(),
+                            id.0
+                        )
+                    },
+                ) {
+                    self.selected_task = Some(id);
+                    self.detail_scroll = 0;
+                }
+            }
+            InputKind::ResumeFailed(source_task) => {
+                let scope_override: Option<Vec<String>> = {
+                    let parts: Vec<String> = scope
+                        .split([',', '，'])
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    (!parts.is_empty()).then_some(parts)
+                };
+                let root = self.config.root.clone();
+                if let Some((id, _)) = self.mutate(
+                    |s| {
+                        let (edict, draft) = s.issue_resume_failed(
+                            source_task,
+                            &root,
+                            scope_override.clone(),
+                            text.clone(),
+                        )?;
+                        Ok((edict.id, draft.department))
+                    },
+                    |(id, dept)| {
+                        format!(
+                            "已续办中断诏令 #{}，下发{}新诏令 #{}（按 r 执行）",
+                            source_task.0,
+                            dept.label(),
                             id.0
                         )
                     },

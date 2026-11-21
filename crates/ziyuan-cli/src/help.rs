@@ -24,6 +24,8 @@ pub(crate) const HELP: &str = concat!(
                                        打回已完成的工部诏令再改一轮：携带上轮 diff、都察院逐段意见与批语下发修订诏令
   ziyuan edict --follow-up <诏令ID> [--dept <部门>] [--scope <路径>]... [--queue] <追问内容>
                                        基于已完成前件实录发起只读续问／追查：自动带上前件回奏摘要并剥离写／测／外藩权限
+  ziyuan edict --resume-failed <诏令ID> [--scope <路径>]... [--queue] [--note <补充指示>] [补充指示]
+                                       一键续办失败／已撤销诏令：沿用原部门与玉玺并附前次失败原因与最近工具足迹
   ziyuan run [--jobs 4] [--timeout 300]
                                        并发执行全部未结束的诏令；Ctrl-C 撤销执行中的诏令
   ziyuan run --watch [--poll 5] [--no-censor]
@@ -358,7 +360,7 @@ pub(crate) fn completions(shell: Shell) -> String {
          recruit) words="{departments}" ;;
          reform) words="{modes}" ;;
          completions) words="bash zsh fish" ;;
-         edict) words="--plan --from-plan --revise --follow-up --note --no-tests --template --dept --scope --tools --mcp --queue" ;;
+         edict) words="--plan --from-plan --revise --follow-up --resume-failed --note --no-tests --template --dept --scope --tools --mcp --queue" ;;
          split) words="--plan --parallel-writes" ;;
          dag) words="add deps --deps --clear --artifact --attempts --budget --deadline --approval --key" ;;
          text) words="{text_words} {text_flags}" ;;
@@ -400,6 +402,8 @@ complete -F _ziyuan ziyuan
                 format!("{} -l plan", seen("edict")),
                 format!("{} -l from-plan -x", seen("edict")),
                 format!("{} -l revise -x", seen("edict")),
+                format!("{} -l follow-up -x", seen("edict")),
+                format!("{} -l resume-failed -x", seen("edict")),
                 format!("{} -l note -r", seen("edict")),
                 format!("{} -l no-tests", seen("edict")),
                 format!("{} -l plan -r", seen("split")),

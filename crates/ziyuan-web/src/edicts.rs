@@ -160,6 +160,33 @@ pub(crate) async fn follow_up_edict(
     .await
 }
 
+/// 一键续办失败或已撤销的诏令：`{ scope?, note? }`。
+pub(crate) async fn resume_failed_edict(
+    State(app): State<AppState>,
+    UrlPath(id): UrlPath<u64>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let scope = string_list(&body["scope"]);
+    let scope_override = (!scope.is_empty()).then_some(scope);
+    let note = body
+        .get("note")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    app.mutate(move |s| {
+        let (edict, draft) = s.issue_resume_failed(TaskId(id), &root, scope_override, note)?;
+        Ok(json!({
+            "id": edict.id.0,
+            "department": draft.department.code(),
+            "department_label": draft.department.label(),
+            "scope": draft.scope,
+            "cancelled": draft.cancelled,
+        }))
+    })
+    .await
+}
+
 /// 翰林院存模板：`{ name, department, text, tools?, scope?, criteria: [..] }`（同名覆盖）。
 pub(crate) async fn save_template(
     State(app): State<AppState>,

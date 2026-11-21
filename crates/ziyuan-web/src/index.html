@@ -1789,6 +1789,26 @@ function taskHtml(t) {
       </div>
     </details>`;
   }
+  if (t.resume_failed_draft) {
+    const r = t.resume_failed_draft;
+    const why = r.cancelled
+      ? "前次诏令已撤销；续办将沿用原部门与玉玺授权，并附上最近工具足迹。"
+      : "前次诏令执行失败；续办将沿用原部门与玉玺授权，并附上失败原因与最近工具足迹。";
+    const caps = (r.capabilities && r.capabilities.length) ? r.capabilities.join("、") : "无工具";
+    body += `<details class="plan-exec write" id="resume-exec-${t.id}">
+      <summary>一键续办中断诏令（沿用${esc(r.department_label)}原玉玺）</summary>
+      <div class="plan-form">
+        <div class="hint">${why} 授权工具：${esc(caps)}。</div>
+        <div class="plan-row">
+          <input type="text" id="resume-scope-${t.id}" data-keep value="${esc(r.scope.join(", "))}" placeholder="授权范围（留空沿用前件，逗号分隔）">
+        </div>
+        <div class="plan-row">
+          <input type="text" id="resume-note-${t.id}" data-keep placeholder="续办补充指示（可空，例如：先跑单测再改）">
+          <button type="button" class="small gold shrink" data-resume-failed="${t.id}">下发续办诏令</button>
+        </div>
+      </div>
+    </details>`;
+  }
   const hub = [
     t.replied ? `<a class="hint" href="${esc(t.replied)}" target="_blank" rel="noopener">已回报 GitHub</a>` : "",
     t.pull_request ? `<a class="hint" href="${esc(t.pull_request)}" target="_blank" rel="noopener">草稿 PR</a>` : "",
@@ -4991,6 +5011,21 @@ document.addEventListener("click", (event) => {
       if (!r) return;
       selected = r.id;
       toast(`已基于诏令 #${id} 发起只读续问 #${r.id}`);
+      refresh();
+    });
+  } else if (d.resumeFailed) {
+    const id = d.resumeFailed;
+    const note = (($("resume-note-" + id) || {}).value || "").trim();
+    const scope = (($("resume-scope-" + id) || {}).value || "")
+      .split(/[\n,，、]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    el.disabled = true;
+    act(api(`/tasks/${id}/resume-failed`, { scope, note })).then((r) => {
+      el.disabled = false;
+      if (!r) return;
+      selected = r.id;
+      toast(`已续办中断诏令 #${id}，下发新诏令 #${r.id}`);
       refresh();
     });
   } else if (d.apply) {

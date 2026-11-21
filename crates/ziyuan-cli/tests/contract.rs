@@ -634,3 +634,55 @@ fn model_list_and_department_batch_routing_work_and_reject_plaintext_keys() {
 
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn edict_resume_failed_reissues_cancelled_task_with_original_seal() {
+    let dir = temp_court("resume-failed-cli");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    ok(
+        &dir,
+        &[
+            "edict",
+            "--dept",
+            "works",
+            "--scope",
+            "src",
+            "--tools",
+            "read_file,write_file",
+            "--queue",
+            "实现命令行参数校验",
+        ],
+    );
+    ok(&dir, &["cancel", "1"]);
+
+    let out = ok(
+        &dir,
+        &[
+            "edict",
+            "--resume-failed",
+            "1",
+            "--queue",
+            "--note",
+            "补齐空参数分支",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("已续办中断诏令 #1"), "{stdout}");
+    assert!(stdout.contains("#2"), "{stdout}");
+
+    let tasks = ok(&dir, &["tasks", "--json"]);
+    let list: Value = serde_json::from_slice(&tasks.stdout).unwrap();
+    let resumed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == 2)
+        .unwrap();
+    assert_eq!(resumed["department"], "工部");
+    assert!(resumed["text"].as_str().unwrap().contains("<前次中断现场"));
+    assert!(resumed["text"].as_str().unwrap().contains("补齐空参数分支"));
+
+    std::fs::remove_dir_all(dir).unwrap();
+}

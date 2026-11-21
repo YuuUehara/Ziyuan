@@ -1,7 +1,7 @@
 //! 从常见测试框架的输出里抽出失败测试名和断言摘录。
 //!
 //! 目前识别 `cargo test`、`pytest`、`node --test`、`go test` 与 `jest`/`vitest` 测试失败，
-//! 以及 `rustc`/`cargo`、`tsc`、`mypy`/`pyright` 的结构化编译／类型诊断。
+//! 以及 `rustc`/`cargo`、`tsc`、`mypy`/`pyright`、`go build`/`go vet`、`ruff`/`flake8`、`eslint` 的结构化编译／静态检查诊断。
 //! 认不出时返回 `None`，调用方继续只给出输出末尾，绝不凭空猜测失败原因。
 
 /// 单次附在测试结果里的失败条数上限。
@@ -455,7 +455,7 @@ fn jest_vitest_failure_note(log: &str) -> Option<String> {
     format_failures(&items)
 }
 
-// ---------- 编译与类型诊断（rustc / tsc / mypy） ----------
+// ---------- 编译与静态检查诊断（rustc / tsc / mypy / go / ruff / eslint） ----------
 
 fn format_diagnostics(items: &[(String, Option<String>)]) -> Option<String> {
     if items.is_empty() {
@@ -481,6 +481,9 @@ fn compiler_diagnostic_note(log: &str) -> Option<String> {
     rustc_diagnostic_note(log)
         .or_else(|| tsc_diagnostic_note(log))
         .or_else(|| mypy_diagnostic_note(log))
+        .or_else(|| go_compiler_diagnostic_note(log))
+        .or_else(|| ruff_flake8_diagnostic_note(log))
+        .or_else(|| eslint_diagnostic_note(log))
 }
 
 /// 解析 `rustc` / `cargo check` / `cargo clippy` 诊断块：
@@ -617,6 +620,183 @@ fn mypy_diagnostic_note(log: &str) -> Option<String> {
         }
     }
     format_diagnostics(&items)
+}
+
+/// 解析 `go build` / `go vet` 诊断：
+/// 支持 `./pkg/foo.go:12:5: undefined: bar`、`main.go:8: syntax error: ...`；跳过 `# <pkg>` 头与缩进堆栈行。
+fn go_compiler_diagnostic_note(log: &str) -> Option<String> {
+    let mut items: Vec<(String, Option<String>)> = Vec::new();
+    for raw in log.lines() {
+        let line = raw.trim_end();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with(' ')
+            || line.starts_with('\t')
+        {
+            continue;
+        }
+        let Some((left, msg)) = line.split_once(": ") else {
+            continue;
+        };
+        let msg = msg.trim();
+        if msg.is_empty() {
+            continue;
+        }
+        // 从右向左剥离 `:<数字>`（列号可选、行号必有），剩余路径必须以 `.go` 结尾且不含空白。
+        let Some((before_last, last)) = left.rsplit_once(':') else {
+            continue;
+        };
+        if last.is_empty() || !last.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let path = match before_last.rsplit_once(':') {
+            Some((p, ln)) if !ln.is_empty() && ln.bytes().all(|b| b.is_ascii_digit()) => p,
+            _ => before_last,
+        };
+        if path.ends_with(".go") && path.len() > 3 && !path.bytes().any(|b| b.is_ascii_whitespace())
+        {
+            items.push((format!("{left}: {msg}"), None));
+        }
+    }
+    format_diagnostics(&items)
+}
+
+fn is_python_lint_code(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    if !(4..=8).contains(&bytes.len()) {
+        return false;
+    }
+    let letters = bytes.iter().take_while(|b| b.is_ascii_uppercase()).count();
+    let digits = bytes.len() - letters;
+    (1..=4).contains(&letters)
+        && (3..=4).contains(&digits)
+        && bytes[letters..].iter().all(|b| b.is_ascii_digit())
+}
+
+fn is_python_file_loc(left: &str) -> bool {
+    let Some((before_col, col)) = left.rsplit_once(':') else {
+        return false;
+    };
+    let Some((path, ln)) = before_col.rsplit_once(':') else {
+        return false;
+    };
+    !path.is_empty()
+        && !path.bytes().any(|b| b.is_ascii_whitespace())
+        && (path.ends_with(".py") || path.ends_with(".pyi"))
+        && !ln.is_empty()
+        && ln.bytes().all(|b| b.is_ascii_digit())
+        && !col.is_empty()
+        && col.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 解析 Python `ruff check` 与 `flake8` 诊断：
+/// 支持 concise／flake8 单行格式（`src/app.py:12:5: F401 ...`）以及 ruff 默认块格式（`F401 ...` + `--> src/app.py:12:5`）。
+fn ruff_flake8_diagnostic_note(log: &str) -> Option<String> {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut items: Vec<(String, Option<String>)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if let Some((left, rest)) = trimmed.split_once(": ")
+            && is_python_file_loc(left)
+        {
+            let rest = rest.trim();
+            let first_tok = rest.split_whitespace().next().unwrap_or("");
+            if is_python_lint_code(first_tok) {
+                items.push((format!("{left}: {rest}"), None));
+                i += 1;
+                continue;
+            }
+        }
+        // ruff 默认多行格式：`<CODE> ...` 后跟 ` --> path.py:line:col`。
+        let first_tok = trimmed.split_whitespace().next().unwrap_or("");
+        if is_python_lint_code(first_tok)
+            && !trimmed.starts_with("-->")
+            && let Some(next_line) = lines.get(i + 1)
+            && let Some(loc) = next_line.trim().strip_prefix("--> ")
+            && is_python_file_loc(loc.trim())
+        {
+            items.push((format!("{}: {trimmed}", loc.trim()), None));
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    format_diagnostics(&items)
+}
+
+fn is_eslint_file_header(line: &str) -> bool {
+    if line.is_empty() || line.starts_with(' ') || line.starts_with('\t') || line.contains("  ") {
+        return false;
+    }
+    const EXTS: &[&str] = &[
+        ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".vue", ".svelte",
+    ];
+    EXTS.iter()
+        .any(|ext| line.ends_with(ext) && line.len() > ext.len())
+}
+
+/// 解析 ESLint 默认 `stylish` 诊断：文件路径头行后跟随缩进的 `<行>:<列>  error|warning  <说明>  [规则]`。
+/// 有 `error` 时优先只收 `error`，无 `error` 时再收 `warning`（适配 `--max-warnings 0`）。
+fn eslint_diagnostic_note(log: &str) -> Option<String> {
+    let mut errors: Vec<(String, Option<String>)> = Vec::new();
+    let mut warnings: Vec<(String, Option<String>)> = Vec::new();
+    let mut current_file: Option<&str> = None;
+
+    for raw in log.lines() {
+        let trimmed_end = raw.trim_end();
+        if trimmed_end.is_empty() {
+            current_file = None;
+            continue;
+        }
+        if is_eslint_file_header(trimmed_end) {
+            current_file = Some(trimmed_end);
+            continue;
+        }
+        let Some(file) = current_file else {
+            continue;
+        };
+        if !raw.starts_with(' ') && !raw.starts_with('\t') {
+            current_file = None;
+            continue;
+        }
+        let trimmed = trimmed_end.trim_start();
+        let mut parts = trimmed.split_whitespace();
+        let Some(pos) = parts.next() else {
+            continue;
+        };
+        let Some((ln, col)) = pos.split_once(':') else {
+            continue;
+        };
+        if ln.is_empty()
+            || col.is_empty()
+            || !ln.bytes().all(|b| b.is_ascii_digit())
+            || !col.bytes().all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let Some(severity) = parts.next() else {
+            continue;
+        };
+        if severity != "error" && severity != "warning" {
+            continue;
+        }
+        let detail: Vec<&str> = parts.collect();
+        if detail.is_empty() {
+            continue;
+        }
+        let header = format!("{file}:{ln}:{col}: {severity}: {}", detail.join(" "));
+        if severity == "error" {
+            errors.push((header, None));
+        } else {
+            warnings.push((header, None));
+        }
+    }
+    if !errors.is_empty() {
+        format_diagnostics(&errors)
+    } else {
+        format_diagnostics(&warnings)
+    }
 }
 
 #[cfg(test)]
@@ -826,6 +1006,79 @@ Found 2 errors in 1 file
         assert!(
             mypy_note.contains("pkg/calc.py:21:8: error: Cannot access member"),
             "{mypy_note}"
+        );
+    }
+
+    #[test]
+    fn go_vet_ruff_and_eslint_diagnostics_are_extracted() {
+        let go_log = "\
+# example.com/app/internal/srv
+./internal/srv/http.go:42:10: fmt.Printf format %d has arg name of wrong type string
+internal/srv/main.go:12: undefined: missingHelper
+	/usr/local/go/src/runtime/panic.go:914 +0x123
+";
+        let go_note = failure_note(go_log).unwrap();
+        assert!(go_note.contains("〔编译诊断〕"), "{go_note}");
+        assert!(
+            go_note.contains("./internal/srv/http.go:42:10: fmt.Printf format %d"),
+            "{go_note}"
+        );
+        assert!(
+            go_note.contains("internal/srv/main.go:12: undefined: missingHelper"),
+            "{go_note}"
+        );
+        assert!(
+            !go_note.contains("panic.go"),
+            "缩进堆栈不应被当成编译诊断：{go_note}"
+        );
+
+        let ruff_concise = "\
+src/app.py:1:8: F401 [*] `os` imported but unused
+src/app.py:24:89: E501 Line too long (102 > 88)
+Found 2 errors.
+";
+        let ruff_note = failure_note(ruff_concise).unwrap();
+        assert!(
+            ruff_note.contains("src/app.py:1:8: F401 [*] `os` imported but unused"),
+            "{ruff_note}"
+        );
+        assert!(ruff_note.contains("src/app.py:24:89: E501"), "{ruff_note}");
+
+        let ruff_default = "\
+RUF001 String contains ambiguous unicode character
+ --> pkg/text.py:9:12
+  |
+9 | s = 'a'
+  |
+";
+        let ruff_default_note = failure_note(ruff_default).unwrap();
+        assert!(
+            ruff_default_note.contains("pkg/text.py:9:12: RUF001"),
+            "{ruff_default_note}"
+        );
+
+        let eslint_log = "\
+/repo/src/editor.ts
+  12:5   error    'unused' is assigned a value but never used  no-unused-vars
+  18:3   warning  Unexpected console statement                 no-console
+
+/repo/src/index.tsx
+   4:10  error    'Foo' is not defined                         no-undef
+
+✖ 3 problems (2 errors, 1 warning)
+";
+        let eslint_note = failure_note(eslint_log).unwrap();
+        assert!(
+            eslint_note.contains("/repo/src/editor.ts:12:5: error: 'unused' is assigned"),
+            "{eslint_note}"
+        );
+        assert!(
+            eslint_note.contains("/repo/src/index.tsx:4:10: error: 'Foo' is not defined"),
+            "{eslint_note}"
+        );
+        assert!(
+            !eslint_note.contains("no-console"),
+            "存在 error 时不混入 warning 噪音：{eslint_note}"
         );
     }
 }

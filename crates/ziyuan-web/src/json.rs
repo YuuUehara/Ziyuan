@@ -4,9 +4,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 use ziyuan_app::{
-    TaskReport, base_hash, can_execute_from_plan, can_follow_up_task, can_revise_task,
-    changes_version, demotion_note, draft_follow_up, draft_plan_execution, draft_revision,
-    estimate_cost, kaocheng_grade, parse_hunk_reviews, render_diffs, stale_files, total_hunks,
+    TaskReport, base_hash, can_execute_from_plan, can_follow_up_task, can_resume_failed_task,
+    can_revise_task, changes_version, demotion_note, draft_follow_up, draft_plan_execution,
+    draft_resume_failed, draft_revision, estimate_cost, kaocheng_grade, parse_hunk_reviews,
+    render_diffs, stale_files, total_hunks,
 };
 use ziyuan_core::{
     AgentId, BudgetScope, Department, GovernanceMode, Office, Persona, Seal, TaskId, TokenUsage,
@@ -69,6 +70,20 @@ pub fn mark_stale(value: &mut Value, court: &Court, root: &Path) {
                 "scope": draft.scope,
                 "has_changes": draft.has_changes,
                 "has_censure": draft.has_censure,
+            });
+        }
+        if can_resume_failed_task(task)
+            && let Ok(draft) = draft_resume_failed(task, root)
+        {
+            entry["resume_failed_draft"] = json!({
+                "department": draft.department.code(),
+                "department_label": draft.department.label(),
+                "scope": draft.scope,
+                "capabilities": draft.capabilities.iter().map(|c| c.code()).collect::<Vec<_>>(),
+                "mcp": draft.mcp.iter().cloned().collect::<Vec<_>>(),
+                "has_changes": draft.has_changes,
+                "failure_reason": draft.failure_reason,
+                "cancelled": draft.cancelled,
             });
         }
     }

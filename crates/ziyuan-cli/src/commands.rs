@@ -351,6 +351,47 @@ pub(crate) fn execute(
             }
             drop(executor);
         }
+        Command::EdictResumeFailed {
+            source,
+            scope,
+            queue,
+            note,
+        } => {
+            let executor = if queue { None } else { Some(lock_executor()?) };
+            let scope_override = (!scope.is_empty()).then_some(scope);
+            let (edict, draft) =
+                session.issue_resume_failed(source, &env::current_dir()?, scope_override, note)?;
+            let backend = if queue { None } else { Some(worker_backend()?) };
+            if let Some(backend) = &backend
+                && session.court().mode() == GovernanceMode::Cabinet
+            {
+                session.draft(edict.id, backend.as_ref())?;
+                print_draft(session, edict.id);
+                if session.court().in_retreat() {
+                    println!("陛下修道，司礼监代批红。");
+                } else {
+                    session.approve(edict.id)?;
+                    println!("朱笔批红。");
+                }
+            }
+            if queue {
+                println!(
+                    "已续办中断诏令 #{}，下发{}新诏令 #{}（入队）{}",
+                    source.0,
+                    draft.department.label(),
+                    edict.id.0,
+                    seal_note(&edict.seal)
+                );
+            } else {
+                let limits = Limits {
+                    max_concurrent: 1,
+                    ..DEFAULT_LIMITS
+                };
+                let backend = backend.expect("立即执行时已构造后端");
+                run_tasks(session, Some(&[edict.id]), backend, limits)?;
+            }
+            drop(executor);
+        }
         Command::Run(limits, Some(options)) => {
             let _executor = lock_executor()?;
             hold_court(session, worker_backend()?, limits, &options)?;

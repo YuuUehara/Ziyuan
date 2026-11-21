@@ -63,6 +63,13 @@ pub(crate) enum Command {
         queue: bool,
         question: String,
     },
+    /// 失败或已撤销诏令的一键续办（沿用原部门与玉玺，附前次中断现场与工具足迹）。
+    EdictResumeFailed {
+        source: TaskId,
+        scope: Vec<String>,
+        queue: bool,
+        note: String,
+    },
     /// 翰林院：列出模板。
     Templates,
     /// 外藩名册。
@@ -912,13 +919,14 @@ pub(crate) struct TemplateChoice {
 pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     const USAGE: &str = "用法: ziyuan edict [--plan] [--template <模板>] [--dept works] [--scope <路径>]... [--tools <工具,…>|none] [--mcp <授权,…>] [--queue] <诏令内容>
   或: ziyuan edict --from-plan <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [补充指示]
-  或: ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]\n  或: ziyuan edict --follow-up <诏令ID> [--dept <部门>] [--scope <路径>]... [--queue] <追问内容>";
+  或: ziyuan edict --revise <诏令ID> [--scope <路径>]... [--no-tests] [--queue] [--note <修订指示>] [修订指示]\n  或: ziyuan edict --follow-up <诏令ID> [--dept <部门>] [--scope <路径>]... [--queue] <追问内容>\n  或: ziyuan edict --resume-failed <诏令ID> [--scope <路径>]... [--queue] [--note <补充指示>] [补充指示]";
     let mut department = None;
     let mut queue = false;
     let mut plan_mode = false;
     let mut from_plan: Option<TaskId> = None;
     let mut revise: Option<TaskId> = None;
     let mut follow_up: Option<TaskId> = None;
+    let mut resume_failed: Option<TaskId> = None;
     let mut note_flag: Option<String> = None;
     let mut no_tests = false;
     let mut seal = Seal::default();
@@ -962,6 +970,14 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
                 let value = args.remove(0);
                 follow_up = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
             }
+            "--resume-failed" => {
+                if args.len() < 2 {
+                    return Err(USAGE.into());
+                }
+                args.remove(0);
+                let value = args.remove(0);
+                resume_failed = Some(TaskId(value.parse::<u64>().map_err(|_| USAGE)?));
+            }
             "--note" => {
                 if args.len() < 2 {
                     return Err(USAGE.into());
@@ -994,9 +1010,12 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
     }
     let special_modes = usize::from(from_plan.is_some())
         + usize::from(revise.is_some())
-        + usize::from(follow_up.is_some());
+        + usize::from(follow_up.is_some())
+        + usize::from(resume_failed.is_some());
     if special_modes > 1 {
-        return Err("`--from-plan`、`--revise` 与 `--follow-up` 不能同时使用".into());
+        return Err(
+            "`--from-plan`、`--revise`、`--follow-up` 与 `--resume-failed` 不能同时使用".into(),
+        );
     }
     if let Some(plan) = from_plan {
         if plan_mode
@@ -1066,8 +1085,35 @@ pub(crate) fn parse_edict(mut args: Vec<String>) -> Result<Command, Box<dyn Erro
             question,
         });
     }
+    if let Some(source) = resume_failed {
+        if plan_mode
+            || template.is_some()
+            || department.is_some()
+            || tools_given
+            || mcp_given
+            || no_tests
+        {
+            return Err(
+                "`--resume-failed` 沿用前次中断诏令的部门与玉玺授权，不能同时使用 --plan / --template / --dept / --tools / --mcp / --no-tests"
+                    .into(),
+            );
+        }
+        let trailing = args.join(" ");
+        let note = match (note_flag, trailing.is_empty()) {
+            (Some(n), true) => n,
+            (Some(n), false) if n.trim().is_empty() => trailing,
+            (Some(n), false) => format!("{n}\n{trailing}"),
+            (None, _) => trailing,
+        };
+        return Ok(Command::EdictResumeFailed {
+            source,
+            scope,
+            queue,
+            note,
+        });
+    }
     if note_flag.is_some() {
-        return Err("`--note` 只能配合 `--revise` 使用".into());
+        return Err("`--note` 只能配合 `--revise` 或 `--resume-failed` 使用".into());
     }
     if no_tests {
         return Err("`--no-tests` 只能配合 `--from-plan` 或 `--revise` 使用".into());
@@ -1516,6 +1562,38 @@ mod scheduled_tests {
         assert!(command(&["edict", "--follow-up", "5", "--tools", "write_file", "查"]).is_err());
         assert!(command(&["edict", "--follow-up", "5", "--revise", "4", "查"]).is_err());
         assert!(command(&["edict", "--note", "只有说明", "普通诏令"]).is_err());
+    }
+
+    #[test]
+    fn parse_edict_resume_failed_supports_scope_note_and_rejects_conflicts() {
+        match command(&[
+            "edict",
+            "--resume-failed",
+            "7",
+            "--scope",
+            "src",
+            "--queue",
+            "--note",
+            "先单测",
+            "继续修复",
+        ])
+        .unwrap()
+        {
+            Command::EdictResumeFailed {
+                source,
+                scope,
+                queue,
+                note,
+            } => {
+                assert_eq!(source, TaskId(7));
+                assert_eq!(scope, vec!["src"]);
+                assert!(queue);
+                assert_eq!(note, "先单测\n继续修复");
+            }
+            _ => panic!("expected Command::EdictResumeFailed"),
+        }
+        assert!(command(&["edict", "--resume-failed", "7", "--tools", "write_file"]).is_err());
+        assert!(command(&["edict", "--resume-failed", "7", "--follow-up", "2", "查"]).is_err());
     }
 
     #[test]

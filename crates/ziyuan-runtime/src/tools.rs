@@ -34,6 +34,11 @@ const MAX_MATCHES: usize = 50;
 const MAX_CONTEXT_LINES: usize = 5;
 /// 单次 `find_references` 一页最多返回的引用数。
 const MAX_REF_MATCHES: usize = 50;
+/// 单次 `symbol_impact` 的默认与最多调用点数、上下文行上限、定义列出上限。
+const DEFAULT_IMPACT_CALL_SITES: usize = 30;
+const MAX_IMPACT_CALL_SITES: usize = 100;
+const MAX_IMPACT_CONTEXT_LINES: usize = 3;
+const MAX_IMPACT_DEFS: usize = 30;
 /// 单次 `list_files` 最多列出的文件数。
 const MAX_LISTED: usize = 300;
 /// 单次 `file_outline` 默认与最多返回的符号数、可扫描的文件字节上限。
@@ -180,11 +185,12 @@ pub fn sealed_tools_with_presets(
                 tools.push(Box::new(vcs::VcsDiff(sandbox.clone())));
                 tools.push(Box::new(vcs::VcsLog(sandbox.clone())));
             }
-            // `find_symbols`、`find_references` 随 `search_code` 授予，不另设权限，玉玺编码不变。
+            // `find_symbols`、`find_references`、`symbol_impact` 随 `search_code` 授予，不另设权限，玉玺编码不变。
             Capability::SearchCode => {
                 tools.push(Box::new(SearchCode(sandbox.clone())));
                 tools.push(Box::new(FindSymbols(sandbox.clone())));
                 tools.push(Box::new(FindReferences(sandbox.clone())));
+                tools.push(Box::new(SymbolImpact(sandbox.clone())));
             }
             // `replace_text`、`delete_file`、`rename_file` 随 `write_file` 授予，不另设权限，玉玺编码不变。
             Capability::WriteFile => {
@@ -1709,6 +1715,286 @@ impl Tool for FindReferences {
             format!("共 {} 处引用，当前第 {from}–{to} 处", page.total)
         };
         out.push_str(&format!("\n[{summary}]"));
+        Ok(out)
+    }
+}
+
+struct SymbolImpact(Arc<Sandbox>);
+
+impl Tool for SymbolImpact {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "symbol_impact".into(),
+            description: format!(
+                "一次汇总授权范围（{}）内某个符号的定义位置、受影响文件及按文件分组的调用／引用点（附上下文行），用于改动前快速评估波及面；跳过注释、字符串与更长标识符子串，暂存改动优先于磁盘。可用 path、glob、kind 过滤，max_call_sites 控制展示调用点数（默认 {DEFAULT_IMPACT_CALL_SITES}，上限 {MAX_IMPACT_CALL_SITES}），context_lines 控制上下文行数（默认 1，0–{MAX_IMPACT_CONTEXT_LINES}）。",
+                self.0.scope_label()
+            ),
+            input_schema_json: format!(
+                r#"{{"type":"object","properties":{{"symbol":{{"type":"string","description":"要评估影响面的完整符号标识符（如 parse_test_presets、Seal）"}},"path":{{"type":"string","description":"可选：只查这个相对目录或文件；省略则查整个授权范围"}},"glob":{{"type":"string","description":"可选：路径通配过滤，如 *.rs、crates/**/*.rs"}},"kind":{{"type":"string","description":"可选：按定义类型过滤（如 fn、struct、enum、trait、class、interface、method）"}},"max_call_sites":{{"type":"integer","description":"最多展示的调用／引用点数，默认 {DEFAULT_IMPACT_CALL_SITES}，范围 1–{MAX_IMPACT_CALL_SITES}"}},"context_lines":{{"type":"integer","description":"每个调用点前后附带的上下文行数，默认 1，范围 0–{MAX_IMPACT_CONTEXT_LINES}"}}}},"required":["symbol"],"additionalProperties":false}}"#
+            ),
+        }
+    }
+
+    fn execute(&self, args_json: &str) -> Result<String, BoxError> {
+        let args = object_args(
+            args_json,
+            &[
+                "symbol",
+                "path",
+                "glob",
+                "kind",
+                "max_call_sites",
+                "context_lines",
+            ],
+        )?;
+        let symbol = required_string(&args, "symbol")?.trim().to_owned();
+        if !symbols::is_valid_symbol_name(&symbol) {
+            return Err("symbol 须为 1–120 字节的单个标识符（不含空格或标点）".into());
+        }
+        let kind = optional_string(&args, "kind")?
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty());
+        let max_call_sites = match optional_i64(&args, "max_call_sites")? {
+            None => DEFAULT_IMPACT_CALL_SITES,
+            Some(n) if (1..=MAX_IMPACT_CALL_SITES as i64).contains(&n) => n as usize,
+            Some(_) => {
+                return Err(
+                    format!("max_call_sites 须在 1 到 {MAX_IMPACT_CALL_SITES} 之间").into(),
+                );
+            }
+        };
+        let context_lines = match optional_i64(&args, "context_lines")? {
+            None => 1usize,
+            Some(n) if (0..=MAX_IMPACT_CONTEXT_LINES as i64).contains(&n) => n as usize,
+            Some(_) => {
+                return Err(
+                    format!("context_lines 须在 0 到 {MAX_IMPACT_CONTEXT_LINES} 之间").into(),
+                );
+            }
+        };
+        let path = optional_string(&args, "path")?;
+        let glob_matcher = match optional_string(&args, "glob")? {
+            Some(pat) if !pat.trim().is_empty() => Some(glob::GlobMatcher::compile(&pat)?),
+            Some(_) => return Err("glob 不能为空".into()),
+            None => None,
+        };
+        let CollectedTextFiles {
+            files,
+            staged: staged_snapshot,
+            explicit_file,
+        } = self.0.collect_text_files(path.as_deref())?;
+        let explicit_target = explicit_file || glob_matcher.is_some();
+
+        let mut def_entries: Vec<String> = Vec::new();
+        let mut def_files: BTreeSet<String> = BTreeSet::new();
+        let mut total_defs = 0usize;
+
+        let mut call_site_sections: Vec<String> = Vec::new();
+        let mut total_call_sites = 0usize;
+        let mut call_site_files = 0usize;
+        let mut shown_call_sites = 0usize;
+
+        for (rel, disk_path) in files {
+            if let Some(g) = &glob_matcher
+                && !g.is_match(&rel)
+            {
+                continue;
+            }
+            if !is_reference_candidate(&rel, explicit_target) {
+                continue;
+            }
+            let rel_path = Path::new(&rel);
+            let (text, stripped, syms) = if let Some(entry) = staged_snapshot.get(&rel) {
+                let Some(staged) = entry else {
+                    continue;
+                };
+                if !staged.contains(&symbol) {
+                    continue;
+                }
+                let syms = symbols::extract_for_path(rel_path, staged)
+                    .map(|(_, s)| s)
+                    .unwrap_or_default();
+                let stripped = symbols::strip_code_lines(rel_path, staged);
+                (staged.clone(), stripped, syms)
+            } else if let Some(disk) = disk_path {
+                let Ok(meta) = fs::metadata(&disk) else {
+                    continue;
+                };
+                if meta.len() > MAX_SYMBOL_FILE_BYTES {
+                    continue;
+                }
+                let stamp = index::FileStamp::from_metadata(&meta);
+                let bloom_check = stamp.and_then(|s| {
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.might_contain_ident(&rel, s, &symbol)
+                });
+                if bloom_check == Some(false) {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&disk) else {
+                    continue;
+                };
+                let stripped = symbols::strip_code_lines(rel_path, &text);
+                let cached_syms = stamp.and_then(|s| {
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.get_symbols(&rel, s)
+                });
+                let syms = match cached_syms {
+                    Some(s) => s,
+                    None => symbols::extract_for_path(rel_path, &text)
+                        .map(|(_, s)| s)
+                        .unwrap_or_default(),
+                };
+                if bloom_check.is_none()
+                    && let Some(s) = stamp
+                {
+                    let bloom = index::build_ident_bloom(&stripped);
+                    let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+                    idx.put_symbols_and_bloom(rel.clone(), s, &syms, bloom);
+                }
+                if !text.contains(&symbol) {
+                    continue;
+                }
+                (text, stripped, syms)
+            } else {
+                continue;
+            };
+
+            let mut all_def_lines: BTreeSet<usize> = BTreeSet::new();
+            for sym in syms.into_iter().filter(|s| s.name == symbol) {
+                all_def_lines.insert(sym.line);
+                if let Some(filter) = kind.as_deref()
+                    && !symbols::kind_matches(sym.kind, filter)
+                {
+                    continue;
+                }
+                total_defs += 1;
+                def_files.insert(rel.clone());
+                if def_entries.len() < MAX_IMPACT_DEFS {
+                    def_entries.push(format!(
+                        "- {rel}:{} [{}] {} — {}",
+                        sym.line_span(),
+                        sym.kind,
+                        sym.qualified_name(),
+                        sym.signature
+                    ));
+                }
+            }
+
+            let raw_lines: Vec<&str> = text.lines().collect();
+            let mut site_indices: Vec<usize> = Vec::new();
+            for (idx, code_line) in stripped.iter().enumerate() {
+                if idx >= raw_lines.len() {
+                    break;
+                }
+                if !symbols::has_whole_ident(code_line, &symbol) {
+                    continue;
+                }
+                if all_def_lines.contains(&(idx + 1)) {
+                    continue;
+                }
+                site_indices.push(idx);
+            }
+
+            if site_indices.is_empty() {
+                continue;
+            }
+            total_call_sites += site_indices.len();
+            call_site_files += 1;
+
+            if shown_call_sites < max_call_sites {
+                let remaining = max_call_sites - shown_call_sites;
+                let take_n = site_indices.len().min(remaining);
+                let chosen = &site_indices[..take_n];
+                let match_set: BTreeSet<usize> = chosen.iter().copied().collect();
+
+                let mut section = if take_n < site_indices.len() {
+                    format!(
+                        "- {rel}（共 {} 处，本处列出前 {take_n} 处）",
+                        site_indices.len()
+                    )
+                } else {
+                    format!("- {rel}（共 {} 处）", site_indices.len())
+                };
+                let mut last_emitted: Option<usize> = None;
+                for &match_idx in chosen {
+                    let start = match_idx.saturating_sub(context_lines);
+                    let end = (match_idx + context_lines).min(raw_lines.len().saturating_sub(1));
+                    if let Some(prev) = last_emitted
+                        && start > prev + 1
+                    {
+                        section.push_str("\n  ...");
+                    }
+                    let begin = match last_emitted {
+                        Some(prev) => start.max(prev + 1),
+                        None => start,
+                    };
+                    for (line_idx, raw_line) in
+                        raw_lines.iter().enumerate().take(end + 1).skip(begin)
+                    {
+                        let sep = if match_set.contains(&line_idx) {
+                            ':'
+                        } else {
+                            '-'
+                        };
+                        section.push_str(&format!(
+                            "\n  {}{sep} {}",
+                            line_idx + 1,
+                            raw_line.trim_end()
+                        ));
+                    }
+                    last_emitted = Some(end);
+                }
+                call_site_sections.push(section);
+                shown_call_sites += take_n;
+            }
+        }
+
+        {
+            let mut idx = self.0.symbol_index.lock().expect("符号索引锁未中毒");
+            idx.flush_if_dirty();
+        }
+
+        if total_defs == 0 && total_call_sites == 0 {
+            return Ok(format!("未找到符号 `{symbol}` 的定义或调用点"));
+        }
+
+        let mut out = format!("〔符号影响面：`{symbol}`〕\n\n〔定义〕\n");
+        if def_entries.is_empty() {
+            out.push_str("（无匹配定义）\n");
+        } else {
+            out.push_str(&def_entries.join("\n"));
+            out.push('\n');
+            if total_defs > def_entries.len() {
+                out.push_str(&format!(
+                    "（其余 {} 处定义未列出）\n",
+                    total_defs - def_entries.len()
+                ));
+            }
+        }
+
+        out.push_str("\n〔影响面／调用点〕\n");
+        if call_site_sections.is_empty() {
+            out.push_str("（无调用／引用点）\n");
+        } else {
+            out.push_str(&call_site_sections.join("\n"));
+            out.push('\n');
+            if total_call_sites > shown_call_sites {
+                out.push_str(&format!(
+                    "（其余 {} 处调用／引用未列出；可调大 max_call_sites 或用 path/glob 缩小范围）\n",
+                    total_call_sites - shown_call_sites
+                ));
+            }
+        }
+
+        out.push_str(&format!(
+            "\n〔汇总〕定义 {total_defs} 处（分布于 {} 个文件）；调用／引用 {total_call_sites} 处（分布于 {call_site_files} 个文件，已展示 {shown_call_sites} 处）",
+            def_files.len()
+        ));
         Ok(out)
     }
 }
@@ -4463,6 +4749,114 @@ export function bootUi() {}
             .unwrap();
         assert!(disk_outline.contains("alpha_calc"), "{disk_outline}");
         assert!(!disk_outline.contains("staged_only_fn"), "{disk_outline}");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn symbol_impact_summarizes_definitions_grouped_call_sites_and_staged_overlay() {
+        let dir = workspace("symbol-impact");
+        let root = dir.join("project");
+        fs::create_dir_all(root.join("secret")).unwrap();
+        fs::write(
+            root.join("src/math.rs"),
+            "/// compute_score helper\npub fn compute_score(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/caller.rs"),
+            "use crate::math::compute_score;\n\npub fn run() -> i32 {\n    let a = compute_score(1);\n    // compute_score in comment\n    let label = \"compute_score\";\n    let _ = label;\n    a + compute_score_extra(2)\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("secret/hidden.rs"),
+            "pub fn nope() -> i32 { compute_score(99) }\n",
+        )
+        .unwrap();
+
+        let seal = Seal {
+            capabilities: [
+                Capability::ReadFile,
+                Capability::SearchCode,
+                Capability::WriteFile,
+            ]
+            .into(),
+            scope: vec!["src".into()],
+            mcp: BTreeSet::new(),
+        };
+        let sealed = sealed_tools(&root, &seal, None).unwrap();
+        let get = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+        let impact = get("symbol_impact");
+        assert!(impact.is_read_only());
+
+        let report = impact
+            .execute(r#"{"symbol":"compute_score","kind":"fn","context_lines":1}"#)
+            .unwrap();
+        assert!(
+            report.contains("〔符号影响面：`compute_score`〕"),
+            "{report}"
+        );
+        assert!(
+            report.contains("src/math.rs:2-4 [fn] compute_score"),
+            "{report}"
+        );
+        assert!(report.contains("- src/caller.rs（共 2 处）"), "{report}");
+        assert!(
+            report.contains("4:     let a = compute_score(1);"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("secret/hidden.rs"),
+            "越界目录不可出现：{report}"
+        );
+        assert!(
+            !report.contains("compute_score_extra"),
+            "更长标识符不应作为匹配行：{report}"
+        );
+        assert!(
+            report.contains(
+                "定义 1 处（分布于 1 个文件）；调用／引用 2 处（分布于 1 个文件，已展示 2 处）"
+            ),
+            "{report}"
+        );
+
+        // 暂存新增调用点与删除文件均立即反映在影响面中。
+        get("write_file")
+            .execute(
+                r#"{"path":"src/staged.rs","content":"pub fn extra() -> i32 {\n    compute_score(42)\n}\n"}"#,
+            )
+            .unwrap();
+        let after_stage = impact
+            .execute(r#"{"symbol":"compute_score","max_call_sites":2,"context_lines":0}"#)
+            .unwrap();
+        assert!(
+            after_stage.contains("调用／引用 3 处（分布于 2 个文件，已展示 2 处）"),
+            "{after_stage}"
+        );
+        assert!(
+            after_stage.contains("其余 1 处调用／引用未列出"),
+            "{after_stage}"
+        );
+
+        // kind 不匹配时不报定义，仍能看到调用点。
+        let wrong_kind = impact
+            .execute(r#"{"symbol":"compute_score","kind":"struct"}"#)
+            .unwrap();
+        assert!(wrong_kind.contains("（无匹配定义）"), "{wrong_kind}");
+        assert!(wrong_kind.contains("src/caller.rs"), "{wrong_kind}");
+
+        // 非法参数被拒绝。
+        assert!(impact.execute(r#"{"symbol":"bad name"}"#).is_err());
+        assert!(
+            impact
+                .execute(r#"{"symbol":"compute_score","max_call_sites":0}"#)
+                .is_err()
+        );
+        assert!(
+            impact
+                .execute(r#"{"symbol":"compute_score","context_lines":4}"#)
+                .is_err()
+        );
 
         fs::remove_dir_all(dir).unwrap();
     }

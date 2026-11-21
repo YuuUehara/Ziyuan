@@ -119,6 +119,8 @@ pub(crate) enum InputKind {
     Revise(TaskId),
     /// 基于已完成前件实录发起只读续问／追查。
     FollowUp(TaskId),
+    /// 失败或已撤销诏令的一键续办。
+    ResumeFailed(TaskId),
     Recruit,
     Review(TaskId, Verdict),
     /// 逐段准奏：输入要驳回的段号。

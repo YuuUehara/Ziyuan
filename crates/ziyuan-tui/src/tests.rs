@@ -1403,3 +1403,62 @@ fn follow_up_modal_and_translation_overview_key_work_in_tui() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn resume_failed_modal_key_c_reissues_failed_task_in_tui() {
+    let (mut app, _rx, root) = temp_app("resume_failed_tui");
+    let edict = app
+        .session
+        .issue(
+            Department::Works,
+            "修复配置加载".into(),
+            Seal {
+                scope: vec![".".into()],
+                capabilities: [Capability::ReadFile, Capability::WriteFile]
+                    .into_iter()
+                    .collect(),
+                mcp: Default::default(),
+            },
+        )
+        .unwrap();
+    let worker = app.court().agents().next().unwrap().id;
+    let mut log = ziyuan_storage::EventLog::new(&root);
+    let expected = ziyuan_storage::EventStore::load(&log).unwrap().len();
+    ziyuan_storage::EventStore::append(
+        &mut log,
+        expected,
+        &[
+            ziyuan_core::CourtEvent::TaskAssigned {
+                task: edict.id,
+                worker,
+                model: None,
+            },
+            ziyuan_core::CourtEvent::TaskFailed {
+                task: edict.id,
+                reason: "连接重置".into(),
+            },
+        ],
+    )
+    .unwrap();
+    app.reload();
+    app.selected_task = Some(edict.id);
+
+    press(&mut app, "C");
+    let modal_screen = screen_at(&app, 120, 30);
+    assert!(modal_screen.contains("一键续办中断诏令"), "{modal_screen}");
+    press(&mut app, "重试并补测\n");
+    assert!(app.modal.is_none());
+    assert_eq!(app.court().tasks().count(), 2);
+    let resumed = app.court().task(TaskId(2)).unwrap();
+    assert!(
+        resumed
+            .edict
+            .seal
+            .capabilities
+            .contains(&Capability::WriteFile)
+    );
+    assert!(resumed.edict.text.contains("连接重置"));
+    assert!(resumed.edict.text.contains("重试并补测"));
+
+    let _ = std::fs::remove_dir_all(root);
+}

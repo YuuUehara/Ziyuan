@@ -22,6 +22,7 @@ mod personnel;
 mod plan;
 mod preview;
 mod reports;
+mod resume_failed;
 mod revise;
 mod run;
 mod session;
@@ -60,6 +61,9 @@ pub use preview::{PreviewFile, PreviewHunk, PreviewLine, PreviewSpan, preview_ch
 pub use reports::{
     DuzhiBudget, DuzhiExport, DuzhiRow, describe_record, duzhi_export, duzhi_export_csv,
     duzhi_export_json, duzhi_report, estimate_cost, kaocheng_grade, kaocheng_report,
+};
+pub use resume_failed::{
+    ResumeFailedDraft, can_resume_failed_task, draft_resume_failed, resume_failed_edict_text,
 };
 pub use revise::{ReviseDraft, can_revise_task, draft_revision, revision_edict_text};
 pub use run::{EXECUTOR_BUSY, NEGLECT_THRESHOLD, RunUpdate, TaskReport, WatchOptions, WatchUpdate};
