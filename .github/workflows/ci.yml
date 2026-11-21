@@ -95,6 +95,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # 号舍（Windows Server）：Windows Server 默认不对 AppContainer 开放 \Device\Null，
+      # 按 Windows 11 桌面默认规则补齐 AC / S-1-15-2-2 / Low IL，使 git (/dev/null) 与 cmd >nul 在号舍内正常运行。
+      - name: 准备 Windows Server \Device\Null 号舍权限
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/prepare-windows-null-device.ps1
       - run: ${{ matrix.command }}
       - name: R0 离线字面量检索基线（合成材料，非产品索引）
         run: cargo run -p ziyuan-runtime --example code_search_baseline --locked
