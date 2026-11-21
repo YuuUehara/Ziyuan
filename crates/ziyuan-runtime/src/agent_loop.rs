@@ -425,7 +425,8 @@ fn build_turn_digest(
                     }
                 }
             }
-            "search_code" | "find_symbols" | "find_references" | "search_records" => {
+            "search_code" | "find_symbols" | "find_references" | "symbol_impact"
+            | "search_records" => {
                 let q = args["query"]
                     .as_str()
                     .or_else(|| args["name"].as_str())

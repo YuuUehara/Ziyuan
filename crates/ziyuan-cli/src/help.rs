@@ -162,7 +162,7 @@ pub(crate) const HELP: &str = concat!(
                    默认不授。外部工具不受 --scope 约束，只授信得过的服务
   write_file、run_tests 只能授予工部：改动只暂存，诏令完成后呈报，须 `ziyuan apply` 准奏才落盘；
   授了 write_file 就同时有 replace_text（替换文件中恰好一次出现的旧文本；找不到或多处则拒绝），不另设权限。
-  授了 read_file 同时有 list_files（支持 glob）、file_outline（代码／Markdown 符号大纲）与 vcs_status／vcs_diff／vcs_log；授了 search_code 同时有 find_symbols（查定义）与 find_references（按整词查调用点／引用）。
+  授了 read_file 同时有 list_files（支持 glob）、file_outline（代码／Markdown 符号大纲）与 vcs_status／vcs_diff／vcs_log；授了 search_code 同时有 find_symbols（查定义）、find_references（按整词查调用点／引用）与 symbol_impact（一次汇总定义、受影响文件与分组调用点）。
   read_file 可不带参数整段读取；也可给行窗口 offset（从 1 起）和 lines。search_code 可给 path、glob、regex、ignore_case、context_lines（0–5）、offset、limit，一页最多 50 条。
   run_tests 在项目的临时副本（含暂存改动）中运行 ZIYUAN_TEST_COMMAND，不传 API Key 等环境变量。
   cargo test、pytest、node --test、go test、jest/vitest 未通过时，结果另附失败测试名和断言摘录；其他命令仍只给输出末尾。

@@ -1441,6 +1441,7 @@ mod tests {
                 "search_code",
                 "find_symbols",
                 "find_references",
+                "symbol_impact",
                 "search_records"
             ]
         );
