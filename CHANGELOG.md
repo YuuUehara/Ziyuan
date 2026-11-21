@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.42.0 — 2026-11-22
+
+- **翰林院整书级批量 QA 仪表盘与段旁实时译文记忆推荐（纯只读，零新增事件与玉玺代码）**：
+  - **整书级批量确定性 QA 报告**：`ziyuan-app::translation::verification` 新增 `Translations::project_qa_report` 及 `ProjectQaReport`／`ProjectQaSummary`／`ProjectQaBlockSummary`／`ProjectQaIssue`，一次性汇总全书各块的漏段、空译、数字不一致、源语字符残留、标点异常与术语不一致，并按问题类型计数与附带原文／译文短摘录；未译块单独统计为 `untranslated_blocks`，不把 `no_translation` 混入已译块的问题明细；已建朝时同步附带各块状态与已定稿计数。
+  - **CLI 与 Web 整书质检总览**：CLI 新增 `ziyuan text qa-report <项目ID> [--json]`（含 bash/zsh/fish 补全）；Web 新增只读接口 `GET /api/text/{project}/qa-report`（观政可读、零落盘）与「通读交稿 → 整书质检总览」面板（支持摘要徽章、按问题类型一键筛选，以及「定位编辑」一键跳回「译稿」页签并直达原段落输入框；「资料」工具栏同步提供直达按钮）。
+  - **段旁实时译文记忆推荐（严格只读）**：`ziyuan-app::translation::tm` 新增 `Translations::suggest_tm_for_paragraph`、`score_tm_similarity`（确定性 Unicode 字符双元组 Dice＋子串分值）与 `merge_tm_suggestions`；Web 新增只读接口 `GET /api/text/{project}/blocks/{block}/tm-suggest?paragraph=<段号>&limit=<1..=10>`（观政可读，严格拒绝额外参数以防跨项目扩权，融合本地 `tm.json` 与当前项目已建定稿 `ziyuan-memory`，未建向量索引时平滑降级为仅返回本地记忆并自动排除当前段自身）；`human-editor.mjs` 在聚焦段落时实时展示只读参考卡（支持手动「复制参考」、单调请求令牌防乱序覆盖与纯 `textContent` 防 XSS，绝不自动覆盖译文或触碰草稿脏状态）。
+- 登记次版本 `1.42.0`（序号 78，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [翰林院译书指南](docs/novel-translation.md)、[使用指南](docs/guide.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.42.0 验收记录](docs/acceptance/1.42.0.md)。
+
 ## 1.41.0 — 2026-11-22
 
 - **辅助编程 Tier 5（符号影响面、多语言静态诊断与中断诏令一键续办，零新增事件与玉玺代码）**：
