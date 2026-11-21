@@ -8,6 +8,7 @@
 - **1.1 – 1.4（小说翻译闭环、参考与勘校）**：UTF-8 TXT／Markdown 预览（含显式 ruby 注音与安全显示）及确认导入；逐块初译、双路审校、逐段朱批、修订与御览定稿；受管写入与租约临时文件清理；本地译文记忆（`local`）与显式预览参考绑定；词证、六事逐段勘校、逐阶段用量账本与成稿 TAR 导出；syosetu 关注与新章节自动入队。
 - **1.5 – 1.13（人工工作台与多格式回填）**：独立人工草稿（含注音／着重／粗斜体标记编辑器与浏览器暂存）；结构化人物／术语／称谓规则资料与段旁只读提示；三态自动版本快照与对比清理；DOCX／EPUB 导入与定稿文字回填；字幕（SRT）、本地翻译记忆与审校评论；Web 新建空项目；确定性检查、CSV／TBX 术语交换与双语检索。
 - **1.14 – 1.15（连续翻译与全工作台整理）**：完整工作区备份与恢复、多格式原文追加与单章修订（TXT／Markdown／DOCX／EPUB）、跨章待查、连续双语通读与交稿预检、HTML 成稿保留完整标记、全文检索与草稿替换、纯文本 TMX 交换、终端人工译稿以及须按项目授权的远程嵌入。
+- **1.37.0（只读续问闭环、增量符号索引缓存与 Web／TUI 度支及交互补齐）**：新增基于已结诏令前件实录的只读续问闭环（CLI `edict --follow-up`、Web `POST /api/tasks/{id}/follow-up` 与可折叠续问卡片、TUI `Q` 键，强制剥离写／测／MCP 权限并围栏包裹前件上下文）；`find_symbols`／`find_references` 引入 `.ziyuan/index/symbols-v1.json` 增量符号索引与 256-bit 标识符布隆过滤缓存（暂存优先、原子落盘、零新增依赖）；户部度支新增 CSV（支持 Excel UTF-8 BOM）与 JSON 导出（CLI `budget --export`、Web `GET /api/duzhi/export` 及页面按钮）；Web 补齐可折叠实时工具调用轨迹与 `Ctrl+K`／`Cmd+K` 全局命令面板，TUI 补齐 `B` 键译书项目概览弹窗。零新增事件与玉玺代码。
 - **1.36.0（翰林院译书工作台深化与多源追更）**：确定性检查新增多语种原文文字残留（`source_script_leak`）与成对／半角标点检查（`punctuation_mismatch`）；成稿导出新增 HTML／Markdown 双语对照模式（`--bilingual`）；术语表支持 Excel UTF-8 BOM CSV 导出与按块确定性候选术语提取（仅写 `proposals/term-candidates.json`）；作品追更扩展支持 Kakuyomu 与通用 HTTPS RSS/Atom Feed（仅查元数据与条目数、防 SSRF、绝不抓取正文）。零新增事件与玉玺代码。
 - **1.35.0（实时工具执行进度、Windows 只读工具链快照准入与韩法德译书／旧编码支持）**：`ExecutionHooks`、`Progress`／`RunUpdate`、CLI `StreamPrinter`、TUI 与 Web SSE 打通实时工具执行步序、安全定位摘要与毫秒耗时透明展示（零新增事件）；`ziyuan-runtime::haoshe` 新增 `ZIYUAN_SANDBOX_TOOLCHAIN` 显式只读工具链快照准入（fail-closed 路径／敏感目录校验、有界复制至任务私有目录＋`FRFX` DACL 与低完整性标签、零宿主 ACL 变更）；翰林院译书工作台新增韩语（`ko`）、法语（`fr`）、德语（`de`）原文语种与韩文 `EUC-KR`/`CP949`、西欧 `Windows-1252`/`ISO-8859-1` 严格无损解码（贯通 TXT／MD／SRT／CSV／TBX／TMX 与浏览器端），零新增事件与玉玺代码。
 - **1.34.0（Windows 原生号舍 W3 断网 stdio 外藩、Prompt Caching 与 TUI 安全回滚）**：`ziyuan-sandbox-windows` 与 `ziyuan-runtime` 落地 W3 双向匿名管道 AppContainer＋`PrivateDesktop`＋Job 长连接 stdio MCP 沙箱（断网＋独立只读项目快照＋私有 scratch，开放联网／域名白名单／`haoshe.write` 继续失败关闭）；新增 `ZIYUAN_LLM_PROMPT_CACHE`（默认 `auto` 自动为 Claude/Anthropic 注入最多 3 处 `cache_control` 断点）与跨服务商缓存命中解析，度支奏销、TUI 页头与 Web 透明展示缓存命中与写入，`USAGE` 零缓存保持旧编码、非零缓存追加两列（`readable_since = 1.34.0`）；TUI 诏令页新增 `Z` 安全回滚预览弹窗与 `y` 确认（冲突 fail-closed 阻断），与 CLI／Web 完整对齐。
@@ -38,7 +39,7 @@
 以下议题属于独立工程研究或长期评估方向，必须经过对应平台实测或人工盲评门槛后再决定是否并入生产流程：
 
 1. **Windows 原生号舍 W3 后续扩展（按域名放行与 `haoshe.write`）**：W2 一次性断网 `run_tests` 已于 1.31.0 落地，W3 断网只读快照长连接 stdio 外藩（`mcp.rs`）已于 1.34.0 正式接入生产；Windows 下的 `ZIYUAN_SANDBOX_ALLOW` 门吏代理、`haoshe.write` 及外部 `CARGO_TARGET_DIR` 仍按需评估，此前继续显式失败关闭。
-2. **持久化代码索引与混合检索**：轻量免索引的 `file_outline`／`find_symbols` 已在 1.18.0 落地；面向超大型仓库的持久化符号／语义混合检索与评测基线仍待后续评估。
+2. **语义代码索引与混合检索**：轻量 `file_outline`／`find_symbols` 已在 1.18.0 落地，增量持久化符号索引与标识符布隆缓存（`.ziyuan/index/symbols-v1.json`）已在 1.37.0 落地；面向超大型仓库的向量／语义混合检索与评测基线仍待后续评估。
 3. **长篇翻译文学效果评估**：在同等模型、术语、预算与审批规则下开展双语盲评，详见[译文记忆评估步骤](memory.md#文学效果要怎样另行评估)。
 
 ## 不纳入范围

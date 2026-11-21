@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.37.0 — 2026-11-22
+
+- **基于前件实录的只读「续问／追查」闭环（CLI + Web + TUI，零新事件类型）**：
+  - `ziyuan-app` 新增 `follow_up` 模块（`Session::issue_follow_up`、`FollowUpDraft`、`can_follow_up_task`、`draft_follow_up`、`follow_up_edict_text`）：支持基于任意已结诏令（完成／失败／撤销）派生只读追查诏令，代码级剥离 `write_file`、`run_tests` 与外部 MCP 工具并保证授予 `read_file`＋`search_code`，将前件诏令、回奏摘要、变更文件列表与都察院意见包裹进 `<前件实录 ...>` 隔离边界。
+  - CLI 新增 `ziyuan edict --follow-up <ID> [--dept <部门>] [--scope <路径>]... [--queue] <追问内容>` 及 bash／zsh／fish 补全；Web `/api/state` 附带 `follow_up_draft`、新增 `POST /api/tasks/{id}/follow-up`（仅限皇帝，观政只读回 403）及可折叠续问表单；TUI 诏令页新增 `Q` 快捷键弹出两栏只读续问窗口（`Tab` 换部、`↑↓` 切换追问与范围）。
+- **大型仓库增量符号索引缓存（`.ziyuan/index/symbols-v1.json`，纯标准库＋`serde_json`，零新增依赖）**：
+  - `ziyuan-runtime::tools::index` 为 `find_symbols` 与 `find_references` 引入按相对路径与 `(mtime_secs, mtime_nanos, size)` 校验的增量符号索引缓存（单仓上限 20,000 文件、临时文件原子落盘，仅在项目已存在 `.ziyuan/` 目录时持久化），内置 256-bit 3-hash FNV-1a 标识符布隆过滤器使 `find_references` 对未变且不含目标标识符的文件直接免读盘跳过；暂存改动始终实时覆盖缓存且绝不污染持久化索引。
+- **户部度支 CSV／JSON 导出与 Web／TUI 体验补齐**：
+  - `ziyuan-app::reports` 新增 `DuzhiRow`、`DuzhiBudget`、`DuzhiExport` 与 `duzhi_export`／`duzhi_export_csv`（RFC 4180＋可选 UTF-8 BOM）／`duzhi_export_json`；打通 CLI `ziyuan budget --export <文件> [--format csv|json] [--bom]`、Web `GET /api/duzhi/export?format=csv|json&bom=1`（观政只读可访问）及度支奏销页面 CSV／JSON 导出按钮。
+  - Web 奉天门新增可折叠实时工具调用轨迹（`tool-trace-history`，每件任务保留最近 200 条）与 `Ctrl+K`／`Cmd+K` 全局命令面板（支持中英文模糊过滤跳转殿宇、快捷下诏／开常朝／刷新／导出度支，严格 DOM API 无 HTML 拼串）；TUI 新增 `B` 快捷键弹出全库译书项目与各块进度概览弹窗并同步补全底栏热键提示。
+- 登记次版本 `1.37.0`（序号 73，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [使用指南](docs/guide.md)、[路线图](docs/roadmap.md) 与 [发布指南](docs/releasing.md)；验收见 [1.37.0 验收记录](docs/acceptance/1.37.0.md)。
+
 ## 1.36.0 — 2026-11-21
 
 - **多语种确定性 QA 升级（`source_script_leak` 与 `punctuation_mismatch`）**：
