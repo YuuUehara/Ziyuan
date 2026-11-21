@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.41.0 — 2026-11-22
+
+- **辅助编程 Tier 5（符号影响面、多语言静态诊断与中断诏令一键续办，零新增事件与玉玺代码）**：
+  - **`symbol_impact` 影响面聚合工具**：`ziyuan-runtime::tools` 随 `Capability::SearchCode` 新增只读工具 `symbol_impact`（不新增玉玺代码），一次返回目标符号的定义位置（带起止行号与签名）、按文件分组的调用／引用点（附去重上下文行 `context_lines` 0–3、`max_call_sites` 1–100，支持 `path`/`glob`/`kind` 过滤）与波及面汇总；跳过注释、字符串与更长标识符子串，暂存改动实时优先于磁盘并复用 `.ziyuan/index/symbols-v1.json` 增量符号索引与布隆过滤器；同步接入 `agent_loop` 长对话压缩探索摘要与 `ziyuan --help` 说明。
+  - **Go／Python／JS 快速静态检查诊断摘录**：`ziyuan-runtime::tools::failures` 在 `rustc`/`tsc`/`mypy` 之外新增 `go build`/`go vet`、`ruff`（含 concise 与默认多行块格式）／`flake8`、`eslint`（`stylish` 错误优先、零错误时兜底警告）结构化编译与静态检查定位摘录；测试成败仍只看退出码。
+  - **失败／中断诏令一键续办闭环（CLI + Web + TUI）**：`ziyuan-app` 新增 `resume_failed` 模块（`Session::issue_resume_failed`、`ResumeFailedDraft`、`can_resume_failed_task`、`draft_resume_failed`、`resume_failed_edict_text`），对失败或已撤销的非译书诏令沿用原部门与玉玺授权（绝不扩权，已删路径收拢至最近已存在父目录），在隔离围栏 `<前次中断现场 ...>` 中附带原诏令正文、失败／撤销原因与最近最多 10 次 `ToolInvoked` 足迹（仅工具名与成败，绝不带参数或密文）；打通 CLI `ziyuan edict --resume-failed <ID> [--scope <路径>]... [--queue] [--note <补充指示>] [补充指示]`（含 bash/zsh/fish 补全）、Web `POST /api/tasks/{id}/resume-failed`（观政只读 403）＋`/api/state` `resume_failed_draft` 可折叠续办卡片、TUI 诏令页 `C` 快捷键两栏续办弹窗。
+- 登记次版本 `1.41.0`（序号 77，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [使用指南](docs/guide.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.41.0 验收记录](docs/acceptance/1.41.0.md)。
+
 ## 1.40.0 — 2026-11-22
 
 - **原生 Anthropic Messages API 与 Google Gemini API 适配（实验性）**：
