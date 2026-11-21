@@ -2680,9 +2680,12 @@ async fn binary_document_import_requires_owner_and_export_requires_signoff() {
                 .http_status_as_error(false)
                 .build()
                 .into();
+            // Auth can reject before reading the body; negotiate 100-continue so Windows Winsock
+            // observes early 403 instead of racing a closed socket (WSAECONNABORTED 10053).
             agent
                 .post(&url)
                 .header("Authorization", &format!("Bearer {token}"))
+                .header("Expect", "100-continue")
                 .send("1\n00:00:01,000 --> 00:00:02,000\n自编字幕。\n".as_bytes())
                 .unwrap()
                 .status()

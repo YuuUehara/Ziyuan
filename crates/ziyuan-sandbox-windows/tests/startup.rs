@@ -735,11 +735,36 @@ if ($connected) {{ throw 'sandbox unexpectedly connected to host loopback' }}
     //    RX inheritance), verify it runs cleanly inside the sandboxed task-private copy.
     let git_exe = PathBuf::from(r"C:\Program Files\Git\cmd\git.exe");
     if git_exe.is_file() {
-        let git_res = run_shell_sandboxed(
+        let git_ver = run_shell_sandboxed(
+            &ShellSpec {
+                command: format!("\"{}\" --version", git_exe.display()),
+                cwd: work.clone(),
+                writable_dirs: vec![work.clone()],
+                readonly_dirs: Vec::new(),
+                env: Vec::new(),
+                timeout: Duration::from_secs(20),
+                max_output_bytes: None,
+            },
+            None,
+        )
+        .unwrap();
+        let ver_out = String::from_utf8_lossy(&git_ver.output);
+        println!("[w2-real-toolchain:git-version]\n{ver_out}");
+        assert_eq!(git_ver.outcome, ExitOutcome::Exited(0), "{ver_out}");
+        assert!(ver_out.contains("git version"), "{ver_out}");
+        assert_eq!(git_ver.active_processes_after, 0);
+        assert!(git_ver.cleanup_warnings.is_empty());
+
+        // `git hash-object` exercises `mingw_getcwd()`, which calls
+        // `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)`. Windows 11 26100.9711+ / 26300+
+        // permits this inside AppContainer; earlier Windows Server 26100 builds deny
+        // `\GLOBAL??` / `MountPointManager` queries (`Unable to read current working
+        // directory: Permission denied`). Verify the full SHA-1 when supported, and never
+        // mask any other error.
+        let git_hash = run_shell_sandboxed(
             &ShellSpec {
                 command: format!(
-                    "\"{}\" --version & \"{}\" -c safe.directory=* --git-dir=. hash-object artifact.txt",
-                    git_exe.display(),
+                    "\"{}\" -c safe.directory=* --git-dir=. hash-object artifact.txt",
                     git_exe.display()
                 ),
                 cwd: work.clone(),
@@ -752,18 +777,27 @@ if ($connected) {{ throw 'sandbox unexpectedly connected to host loopback' }}
             None,
         )
         .unwrap();
-        let git_out = String::from_utf8_lossy(&git_res.output);
-        println!("[w2-real-toolchain:git]\n{git_out}");
-        assert_eq!(git_res.outcome, ExitOutcome::Exited(0), "{git_out}");
-        assert!(git_out.contains("git version"), "{git_out}");
-        assert!(
-            git_out
-                .lines()
-                .any(|l| l.trim().len() == 40 && l.trim().chars().all(|c| c.is_ascii_hexdigit())),
-            "{git_out}"
+        let hash_out = String::from_utf8_lossy(&git_hash.output);
+        println!(
+            "[w2-real-toolchain:git-hash] outcome={:?}\n{hash_out}",
+            git_hash.outcome
         );
-        assert_eq!(git_res.active_processes_after, 0);
-        assert!(git_res.cleanup_warnings.is_empty());
+        if git_hash.outcome == ExitOutcome::Exited(0) {
+            assert!(
+                hash_out.lines().any(|l| {
+                    l.trim().len() == 40 && l.trim().chars().all(|c| c.is_ascii_hexdigit())
+                }),
+                "{hash_out}"
+            );
+        } else {
+            assert!(
+                hash_out.contains("Unable to read current working directory: Permission denied"),
+                "unexpected git hash-object failure: outcome={:?}\n{hash_out}",
+                git_hash.outcome
+            );
+        }
+        assert_eq!(git_hash.active_processes_after, 0);
+        assert!(git_hash.cleanup_warnings.is_empty());
     }
 
     // 3. Deterministic host-executable isolation: copy an executable into unadmitted
