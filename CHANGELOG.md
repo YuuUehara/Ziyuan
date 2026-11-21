@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.39.0 — 2026-11-22
+
+- **巨型单文件模块化拆分与工程还债（零行为变更、零新增事件与玉玺代码）**：
+  - `ziyuan-sandbox-windows`：将原 2390 行私有 `windows.rs` 拆分为入口核心 `windows.rs`（Profile／PrivateDesktop／Job／执行流程，1433 行）与 3 个内聚子模块 `windows/acl.rs`（重解析点拒绝、目录按深度准入与长路径规范化，259 行）、`windows/door.rs`（全双工重叠 I/O 命名管道门吏与 `.NET BCL` 异步桥接，618 行）、`windows/env.rs`（命令行转义、私有环境构造、有界尾部读取与匿名管道，178 行）；根工作区维持 `unsafe_code = "forbid"`，公开安全 Rust API 与 16/16 原生 Windows 11 隔离测试完全不变。
+  - `ziyuan-runtime`：将原 2091 行 `haoshe.rs` 中约 870 行 `#[cfg(windows)]` 号舍编排（工具链快照 staging、`run_shell_windows`、`spawn_stdio_windows`、`haoshe.write` fail-closed 校验与 `WINDOWS_RESERVED_ENV`）独立拆分至 `haoshe/windows.rs`，跨平台公开类型与重导出保持不变。
+  - `ziyuan-web`：从 `index.html` 抽出 `import-decoder.mjs`（多语种严解码器，配 4 条 Node 单测）与 `command-palette.mjs`（`Ctrl+K`/`Cmd+K` 命令面板构造与中英文模糊过滤，配 3 条 Node 单测），纳入鉴权 `/assets/{name}` 动态加载（保留登录页内联经典脚本零回归）；同时修复 `index.html` 中 `<div id="cmd-palette">` 误置于 `<head>` 的 HTML5 嵌套错误。
+- **稳定性约定补账与架构文档校准**：
+  - 在 [稳定性约定](docs/stability.md) 补齐 `1.31.2`–`1.38.0` 全部已发布版本的兼容边界、零新增事件声明、`USAGE` 缓存列读取门槛与非冻结缓存清单（补入 `.ziyuan/index/symbols-v1.json`），同步更新 [体系结构](docs/architecture.md) 的 Windows 号舍模块布局说明。
+- 登记次版本 `1.39.0`（序号 75，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.39.0 验收记录](docs/acceptance/1.39.0.md)。
+
 ## 1.38.0 — 2026-11-22
 
 - **Windows 原生号舍 W3 零网络能力命名管道门吏（`ZIYUAN_SANDBOX_ALLOW` 与 MCP `haoshe.network: [...]`）**：
