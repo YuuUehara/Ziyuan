@@ -1031,17 +1031,30 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             std::fs::create_dir_all(root.join(".ziyuan")).unwrap();
             std::fs::write(root.join("fake.ps1"), FAKE_PS1).unwrap();
             let root = root.canonicalize().unwrap();
+            let ps1_path = root.join("fake.ps1");
+            let ps1_str = ps1_path
+                .to_str()
+                .and_then(|s| s.strip_prefix(r"\\?\"))
+                .unwrap_or_else(|| ps1_path.to_str().unwrap());
             let ps_args = [
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "fake.ps1",
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                "fake.ps1".to_owned(),
+            ];
+            let free_args = [
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-ExecutionPolicy".to_owned(),
+                "Bypass".to_owned(),
+                "-File".to_owned(),
+                ps1_str.to_owned(),
             ];
             let config = json!({ "servers": {
                 "cell": { "command": "powershell.exe", "args": ps_args, "haoshe": { "network": false } },
-                "free": { "command": "powershell.exe", "args": ps_args },
+                "free": { "command": "powershell.exe", "args": free_args },
             }});
             std::fs::write(root.join(CONFIG), config.to_string()).unwrap();
             let outside = root.join("escaped");
@@ -1128,12 +1141,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         assert!(hits.swap(0, Ordering::SeqCst) >= 1);
 
         let ps_args = [
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            "fake.ps1",
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-ExecutionPolicy".to_owned(),
+            "Bypass".to_owned(),
+            "-File".to_owned(),
+            "fake.ps1".to_owned(),
         ];
         let config = json!({ "servers": {
             "offline": {

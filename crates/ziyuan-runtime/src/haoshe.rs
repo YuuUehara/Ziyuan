@@ -722,6 +722,7 @@ pub fn spawn_stdio_windows(spec: &StdioRunSpec<'_>) -> Result<WindowsStdioChild,
         crate::tools::copy_project_tree(spec.root, &workspace_dir)?;
         let scratch_long = normalize_windows_long_path(&scratch_dir)?;
         let program = resolve_windows_program(spec.operation, spec.program, &workspace_dir)?;
+        let cwd = normalize_windows_long_path(&workspace_dir)?;
 
         let mut env: Vec<(String, String)> = spec
             .env
@@ -738,9 +739,9 @@ pub fn spawn_stdio_windows(spec: &StdioRunSpec<'_>) -> Result<WindowsStdioChild,
             &ziyuan_sandbox_windows::StdioSpec {
                 program,
                 args: spec.args.to_vec(),
-                cwd: Some(workspace_dir),
-                writable_dirs: vec![scratch_dir],
-                readonly_dirs: vec![base_dir.join("workspace")],
+                cwd: Some(cwd.clone()),
+                writable_dirs: vec![scratch_long],
+                readonly_dirs: vec![cwd],
                 env,
                 mode: ziyuan_sandbox_windows::SandboxMode::AppContainerChildCapable,
             },
