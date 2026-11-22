@@ -1,4 +1,4 @@
-// Neo Functional Mode Panel ("新政枢机 · 垂拱听政台") for ZiYuan Web UI.
+// Neo Functional Mode Panel ("垂拱枢机 · 御前听政台") for ZiYuan Web UI.
 // Shared between `/assets/neo-panel.mjs` and `node --test`.
 
 export const NEO_SUBMODES = Object.freeze([
@@ -20,7 +20,7 @@ export const NEO_SUBMODES = Object.freeze([
   {
     id: "ministry-theme",
     label: "雅集与朝纲",
-    subtitle: "宋韵四色 · 乌丝栏格 · 制度改易",
+    subtitle: "宋韵设色 · 玄夜秉烛 · 制度改易",
   },
 ]);
 
@@ -30,32 +30,40 @@ export const CLASSICAL_THEMES = Object.freeze([
     name: "汝窑天青",
     badge: "宋瓷雅韵",
     poem: "雨过天青云破处，这般颜色做将来",
-    desc: "汝州青瓷粉青配澄心堂象牙白宣，微含竹青，朱砂钤印，久视不伤目。",
-    swatches: ["#f6f3ea", "#fcfbf6", "#e1ebe8", "#1f2826", "#b4382a"],
+    desc: "澄心堂暖宣为底，配汝窑粉青与一点胭脂印泥，温润如玉，冷暖相宜。",
+    swatches: ["#f5f2eb", "#fcfaf5", "#e3ece9", "#335c53", "#a3483c"],
   },
   {
     id: "mo",
     name: "墨分五色",
     badge: "善本水墨",
-    poem: "生绢水墨焦浓重淡清，独留一印朱砂",
-    desc: "仿宋刻善本与澄心生宣，通篇焦、浓、重、淡、清五阶水墨，唯批红与准奏钤朱。",
-    swatches: ["#efebe0", "#f8f5ec", "#e4dfd1", "#1c1b18", "#8e3226"],
+    poem: "生绢水墨焦浓重淡清，古松烟色入书卷",
+    desc: "生绢暖宣上焦、浓、重、淡、清五阶松烟墨，配古印丹砂，静穆冲淡。",
+    swatches: ["#f1ede4", "#faf8f3", "#e5e0d5", "#45413a", "#964237"],
   },
   {
     id: "qinglv",
     name: "青绿山水",
     badge: "千里江山",
-    poem: "黛蓝花青为殿脊，石绿赭石入画屏",
-    desc: "取王希孟青绿设色之法，左厢深黛如碑帖，右卷素宣明净，石绿与赭石点染。",
-    swatches: ["#f5f2e9", "#fbf9f3", "#1f2c45", "#1b2433", "#b0582a"],
+    poem: "远山花青融云气，曲水流觞入画屏",
+    desc: "素绢暖底配远山花青、石绿与赭石，摒弃沉重黑蓝，清旷雅致。",
+    swatches: ["#f3f2eb", "#fbfaf6", "#dce6e7", "#2b585c", "#a6523a"],
   },
   {
     id: "xiangzhi",
     name: "宣和缃帙",
     badge: "秘阁牙签",
     poem: "秘阁牙签缃缥色，藕荷沉香伴书卷",
-    desc: "取宋代秘阁藏书缃帙与藕荷香笺之色，熟宣暖白配紫檀浅褐，温煦静气，尤宜夜读译书。",
-    swatches: ["#f4eee4", "#fcf9f2", "#e8dfd2", "#29201b", "#a83c32"],
+    desc: "宋刻秘阁藏书熟宣米缃配紫檀沉香与藕荷，温煦醇厚，白昼久读不倦。",
+    swatches: ["#f4eee3", "#fcf8f1", "#e8ded0", "#694b39", "#9e4539"],
+  },
+  {
+    id: "ye",
+    name: "玄夜秉烛",
+    badge: "夜间模式",
+    poem: "银烛秋光冷画屏，磁青笺上泥金明",
+    desc: "取明代磁青乌金笺与松烟墨底，配素绢暖白字与粉青烛影，专为秉烛夜读与夜间听政设色。",
+    swatches: ["#171a19", "#1f2422", "#272d2b", "#e3ded3", "#4c7a6e"],
   },
 ]);
 
@@ -373,39 +381,46 @@ export function summarizeTranslationForNeo(
   let draftBlocks = 0;
   let untranslatedBlocks = 0;
 
+  const topStatuses = Array.isArray(detail?.statuses) ? detail.statuses : [];
+  const topStateMap = new Map(topStatuses.map((bs) => [bs.block, bs]));
   const chapters = outline.map((ch, idx) => {
     const blockIds = Array.isArray(ch.blocks) ? ch.blocks : [];
     const blockStates = Array.isArray(ch.block_states) ? ch.block_states : [];
     const stateMap = new Map(blockStates.map((bs) => [bs.block, bs]));
     const blocks = blockIds.map((bid, bIdx) => {
       totalBlocks += 1;
-      const stObj = stateMap.get(bid);
+      const stObj = stateMap.get(bid) || topStateMap.get(bid);
       const rawState = stObj?.state?.state || stObj?.state || "untranslated";
       let category = "untranslated";
-      let label = "待初译";
+      let label = stObj?.label || "待初译";
       if (rawState === "finalized" || rawState === "human_finalized") {
         category = "finalized";
-        label = "已定稿";
+        label = stObj?.label || "已定稿";
         finalizedBlocks += 1;
       } else if (
+        rawState === "applied" ||
+        rawState === "awaiting_yulan" ||
         rawState === "approved" ||
         rawState === "human_approved" ||
         rawState === "translated"
       ) {
         category = "approved";
-        label = "已准奏";
+        label = stObj?.label || "已准奏";
         approvedBlocks += 1;
       } else if (
         rawState === "awaiting_approval" ||
         rawState === "running" ||
+        rawState === "stale" ||
         rawState === "human_draft" ||
         rawState === "human_submitted" ||
-        rawState === "human_stale"
+        rawState === "human_stale" ||
+        rawState === "uncertain"
       ) {
         category = "draft";
-        label = rawState === "human_stale" ? "待重修" : "修撰中";
+        label = stObj?.label || (rawState === "human_stale" || rawState === "stale" ? "待重修" : "修撰中");
         draftBlocks += 1;
       } else {
+        label = rawState === "not_started" ? "待初译" : (stObj?.label || "待初译");
         untranslatedBlocks += 1;
       }
       return {
@@ -455,6 +470,26 @@ function el(doc, tag, className = "", text = null) {
 
 const fmtNum = (n) => Number(n || 0).toLocaleString("zh-CN");
 
+const SOURCE_LANG_LABELS = {
+  ja: "日文原典",
+  jp: "日文原典",
+  en: "英文原典",
+  zh: "中文原典",
+  fr: "法文原典",
+  de: "德文原典",
+  ru: "俄文原典",
+  ko: "韩文原典",
+  es: "西文原典",
+  it: "意文原典",
+  la: "拉丁原典",
+};
+
+function formatSourceLang(code) {
+  const key = String(code || "").trim().toLowerCase();
+  if (!key) return "外文原典";
+  return SOURCE_LANG_LABELS[key] || `${code} 原典`;
+}
+
 export function renderNeoPanel(container, context = {}, callbacks = {}) {
   const doc = container?.ownerDocument || globalThis.document;
   if (!container || !doc) return;
@@ -474,7 +509,7 @@ export function renderNeoPanel(container, context = {}, callbacks = {}) {
   const selectedPresetId = context.selectedPresetId || NEO_EDICT_PRESETS[0].id;
   const draftState = context.edictDraft || {};
 
-  // 1. Top Neo Scroll Header ("新政枢机 · 垂拱听政台")
+  // 1. Top Neo Scroll Header ("垂拱枢机 · 御前听政台")
   const banner = el(doc, "section", "neo-banner card");
   const bannerTop = el(doc, "div", "neo-banner-top");
 
@@ -482,12 +517,12 @@ export function renderNeoPanel(container, context = {}, callbacks = {}) {
   const sealStamp = el(doc, "span", "neo-seal-stamp", "枢机");
   sealStamp.setAttribute("aria-hidden", "true");
   const titleTextWrap = el(doc, "div", "neo-title-text");
-  const h2 = el(doc, "h2", "neo-heading", "新政枢机 · 垂拱听政台");
+  const h2 = el(doc, "h2", "neo-heading", "垂拱枢机 · 御前听政台");
   const sub = el(
     doc,
     "p",
     "neo-subtitle",
-    "一屏统揽御案急递、军机速诏、翰林译林与宋韵四色画境；审阅与准奏大权仍归御前。",
+    "一屏统揽御案急递、军机速诏、翰林译林与宋韵五境；批红与准奏大权尽归御前。",
   );
   titleTextWrap.append(h2, sub);
   titleBox.append(sealStamp, titleTextWrap);
@@ -511,7 +546,7 @@ export function renderNeoPanel(container, context = {}, callbacks = {}) {
   doctorBtn.addEventListener("click", () => callbacks.onOpenDoctor?.());
   bannerActions.appendChild(doctorBtn);
 
-  const classicBtn = el(doc, "button", "small", "返归传统六殿");
+  const classicBtn = el(doc, "button", "small", "退回六殿分理");
   classicBtn.type = "button";
   classicBtn.dataset.view = "";
   classicBtn.id = "neo-return-classic";
@@ -606,12 +641,11 @@ export function renderNeoPanel(container, context = {}, callbacks = {}) {
   );
 
   pillars.append(p1, p2, p3, p4);
-  banner.appendChild(pillars);
 
   // 3. Sub-mode Tabs ("四司枢机页签")
   const tabBar = el(doc, "div", "neo-tabs");
   tabBar.setAttribute("role", "tablist");
-  tabBar.setAttribute("aria-label", "新政枢机模式分区");
+  tabBar.setAttribute("aria-label", "垂拱枢机模式分区");
   for (const tab of NEO_SUBMODES) {
     const btn = el(doc, "button", `neo-tab ${tab.id === submode ? "current" : ""}`);
     btn.type = "button";
@@ -626,7 +660,7 @@ export function renderNeoPanel(container, context = {}, callbacks = {}) {
     tabBar.appendChild(btn);
   }
   banner.appendChild(tabBar);
-  container.appendChild(banner);
+  container.append(banner, pillars);
 
   // 4. Active Sub-mode Workspace Body
   if (submode === "overview") {
@@ -777,6 +811,30 @@ function renderOverviewSubmode(doc, container, court, trans, callbacks) {
       listWrap.appendChild(card);
     }
     leftBody.appendChild(listWrap);
+
+    const foot = el(doc, "div", "neo-overview-foot");
+    foot.appendChild(
+      el(
+        doc,
+        "span",
+        "",
+        `在册诏令共 ${court.taskTotal} 件 · 待批红 ${court.approvalCount} · 待准奏 ${court.changesCount} · 待评定 ${court.reviewCount}`,
+      ),
+    );
+    const footActs = el(doc, "div", "neo-overview-foot-actions");
+    const allTasksBtn = el(doc, "button", "small", "奉天殿诏令全册");
+    allTasksBtn.type = "button";
+    allTasksBtn.dataset.view = "";
+    allTasksBtn.addEventListener("click", () =>
+      callbacks.onSwitchHall?.("fengtian"),
+    );
+    const qijuBtn = el(doc, "button", "small", "查阅起居注");
+    qijuBtn.type = "button";
+    qijuBtn.dataset.view = "";
+    qijuBtn.addEventListener("click", () => callbacks.onSwitchHall?.("qiju"));
+    footActs.append(allTasksBtn, qijuBtn);
+    foot.appendChild(footActs);
+    leftBody.appendChild(foot);
   }
   leftCard.appendChild(leftBody);
 
@@ -949,7 +1007,7 @@ function renderQuickEdictSubmode(
   formCard.appendChild(formHead);
 
   const formBody = el(doc, "div", "body");
-  const curDept = draftState.department ?? activePreset.department;
+  let selectedDept = draftState.department ?? activePreset.department;
   const curScope = draftState.scope ?? activePreset.scope;
   const curText = draftState.text ?? activePreset.text;
   const curTools = Array.isArray(draftState.tools)
@@ -957,8 +1015,8 @@ function renderQuickEdictSubmode(
     : activePreset.tools;
 
   const deptLabel = el(doc, "label", "", "承办六部");
-  const deptSelect = el(doc, "select");
-  deptSelect.id = "neo-edict-dept";
+  const deptGrid = el(doc, "div", "neo-dept-grid");
+  deptGrid.id = "neo-edict-dept";
   const depts =
     court.departments.length > 0
       ? court.departments
@@ -970,14 +1028,27 @@ function renderQuickEdictSubmode(
           { code: "war", label: "兵部" },
           { code: "justice", label: "刑部" },
         ];
+  const deptBtns = [];
   for (const d of depts) {
-    const opt = el(doc, "option", "", d.label);
-    opt.value = d.code;
-    if (d.code === curDept) opt.selected = true;
-    deptSelect.appendChild(opt);
+    const btn = el(
+      doc,
+      "button",
+      `neo-dept-pill ${d.code === selectedDept ? "current" : ""}`,
+      d.label,
+    );
+    btn.type = "button";
+    btn.dataset.deptCode = d.code;
+    btn.addEventListener("click", () => {
+      selectedDept = d.code;
+      for (const b of deptBtns) {
+        b.className = `neo-dept-pill ${b.dataset.deptCode === selectedDept ? "current" : ""}`;
+      }
+      syncDraft();
+    });
+    deptBtns.push(btn);
+    deptGrid.appendChild(btn);
   }
-  deptSelect.value = curDept;
-  deptLabel.appendChild(deptSelect);
+  deptLabel.appendChild(deptGrid);
 
   const scopeLabel = el(
     doc,
@@ -992,7 +1063,7 @@ function renderQuickEdictSubmode(
   scopeInput.placeholder = "如 crates/ziyuan-web, docs";
   scopeLabel.appendChild(scopeInput);
 
-  const textLabel = el(doc, "label", "", "诏令正文");
+  const textLabel = el(doc, "label", "neo-grow-label", "诏令正文");
   const textArea = el(doc, "textarea");
   textArea.id = "neo-edict-text";
   textArea.value = curText;
@@ -1000,7 +1071,7 @@ function renderQuickEdictSubmode(
   textLabel.appendChild(textArea);
 
   const toolsTitle = el(doc, "label", "", "玉玺 · 授权工具");
-  const checksWrap = el(doc, "div", "checks");
+  const checksWrap = el(doc, "div", "checks neo-tool-checks");
   const toolSpecs = [
     ["read_file", "读文件 read_file"],
     ["search_code", "搜代码 search_code"],
@@ -1024,22 +1095,21 @@ function renderQuickEdictSubmode(
       .filter(([, b]) => b.checked)
       .map(([k]) => k);
     callbacks.onUpdateDraft?.({
-      department: deptSelect.value,
+      department: selectedDept,
       scope: scopeInput.value,
       text: textArea.value,
       tools: chosenTools,
     });
   };
-  deptSelect.addEventListener("change", syncDraft);
   scopeInput.addEventListener("input", syncDraft);
   textArea.addEventListener("input", syncDraft);
   Object.values(toolInputs).forEach((b) =>
     b.addEventListener("change", syncDraft),
   );
 
-  const actions = el(doc, "div", "actions");
+  const actions = el(doc, "div", "actions neo-form-actions");
   const collectPayload = (runNow) => ({
-    department: deptSelect.value,
+    department: selectedDept,
     text: textArea.value.trim(),
     scope: scopeInput.value
       .split(/[,，]/)
@@ -1073,7 +1143,7 @@ function renderQuickEdictSubmode(
     );
   }
 
-  const fullSheetBtn = el(doc, "button", "small", "打开奉天殿完整诏书台");
+  const fullSheetBtn = el(doc, "button", "", "打开奉天殿完整诏书台");
   fullSheetBtn.type = "button";
   fullSheetBtn.dataset.view = "";
   fullSheetBtn.addEventListener("click", () => callbacks.onOpenFullEdictSheet?.());
@@ -1123,70 +1193,90 @@ function renderTranslationNeoSubmode(doc, container, court, trans, callbacks) {
 
   const body = el(doc, "div", "body");
 
-  // Top toolbar: project selector + quick actions
+  // Top toolbar: classical book-slip shelf + quick actions (no native OS <select>)
   const bar = el(doc, "div", "neo-trans-bar");
-  const projSelect = el(doc, "select");
-  projSelect.id = "neo-trans-project";
+  const bookList = el(doc, "div", "neo-book-list");
+  bookList.id = "neo-trans-project";
   if (trans.projects.length === 0) {
-    const opt = el(doc, "option", "", "（尚无译书项目）");
-    opt.value = "";
-    projSelect.appendChild(opt);
+    bookList.appendChild(el(doc, "span", "hint", "秘阁尚无在译书目"));
   } else {
     for (const p of trans.projects) {
-      const opt = el(
+      const active = p.id === trans.activeId;
+      const slip = el(
         doc,
-        "option",
-        "",
-        `${p.title}（${p.source_language || "原文"} · ${p.chapters || 0} 章）`,
+        "button",
+        `neo-book-slip ${active ? "current" : ""}`,
       );
-      opt.value = p.id;
-      if (p.id === trans.activeId) opt.selected = true;
-      projSelect.appendChild(opt);
+      slip.type = "button";
+      slip.dataset.view = "";
+      slip.dataset.projectId = p.id;
+      slip.append(
+        el(doc, "b", "", p.title),
+        el(
+          doc,
+          "small",
+          "",
+          `${formatSourceLang(p.source_language)} · ${p.chapters || 0} 章`,
+        ),
+      );
+      slip.addEventListener("click", () => {
+        if (p.id) callbacks.onSelectProject?.(p.id);
+      });
+      bookList.appendChild(slip);
     }
   }
-  projSelect.addEventListener("change", () => {
-    if (projSelect.value) callbacks.onSelectProject?.(projSelect.value);
-  });
-  bar.appendChild(projSelect);
+  bar.appendChild(bookList);
 
+  const actGroup = el(doc, "div", "neo-trans-actions");
   if (!court.viewer) {
-    const newProjBtn = el(doc, "button", "small", "新建译书项目");
+    const newProjBtn = el(doc, "button", "", "新建译书项目");
     newProjBtn.type = "button";
     newProjBtn.addEventListener("click", () => callbacks.onOpenNewProject?.());
-    bar.appendChild(newProjBtn);
+    actGroup.appendChild(newProjBtn);
 
-    const quickTermBtn = el(doc, "button", "small", "快捷收术语");
+    const quickTermBtn = el(doc, "button", "", "快捷收术语");
     quickTermBtn.type = "button";
     quickTermBtn.disabled = !trans.activeId;
     quickTermBtn.addEventListener("click", () =>
       callbacks.onQuickGlossary?.("term"),
     );
-    const quickPersonBtn = el(doc, "button", "small", "快捷收人物");
+    const quickPersonBtn = el(doc, "button", "", "快捷收人物");
     quickPersonBtn.type = "button";
     quickPersonBtn.disabled = !trans.activeId;
     quickPersonBtn.addEventListener("click", () =>
       callbacks.onQuickGlossary?.("person"),
     );
-    bar.append(quickTermBtn, quickPersonBtn);
+    actGroup.append(quickTermBtn, quickPersonBtn);
   }
 
-  const qaBtn = el(doc, "button", "small primary", "整书质检总览");
+  const qaBtn = el(doc, "button", "primary", "整书质检总览");
   qaBtn.type = "button";
   qaBtn.dataset.view = "";
   qaBtn.disabled = !trans.activeId;
   qaBtn.addEventListener("click", () => callbacks.onRunProjectQa?.());
-  bar.appendChild(qaBtn);
+  actGroup.appendChild(qaBtn);
+  bar.appendChild(actGroup);
   body.appendChild(bar);
 
   // Progress bar & breakdown
   if (trans.totalBlocks > 0) {
     const progBox = el(doc, "div", "neo-progress-box");
+    const progHead = el(doc, "div", "neo-progress-head");
     const progStats = el(
       doc,
       "div",
       "neo-progress-stats",
-      `全书共 ${trans.chapterCount} 章 ${trans.totalBlocks} 组译稿 · 已定稿 ${trans.finalizedBlocks} 组 · 已准奏 ${trans.approvedBlocks} 组 · 修撰中 ${trans.draftBlocks} 组 · 待初译 ${trans.untranslatedBlocks} 组`,
+      `全书卷帙：共 ${trans.chapterCount} 章 · ${trans.totalBlocks} 组译稿（总完成度 ${trans.completionPercent}%）`,
     );
+    const progBadges = el(doc, "div", "neo-progress-badges");
+    progBadges.append(
+      el(doc, "span", "badge accept", `已定稿 ${trans.finalizedBlocks} 组`),
+      el(doc, "span", "badge assigned", `已准奏 ${trans.approvedBlocks} 组`),
+      el(doc, "span", "badge pending", `修撰中 ${trans.draftBlocks} 组`),
+      el(doc, "span", "badge", `待初译 ${trans.untranslatedBlocks} 组`),
+    );
+    progHead.append(progStats, progBadges);
+
     const track = el(doc, "div", "neo-progress-track");
     const pct = (n) => `${Math.round((n / trans.totalBlocks) * 100)}%`;
     if (trans.finalizedBlocks > 0) {
@@ -1207,7 +1297,7 @@ function renderTranslationNeoSubmode(doc, container, court, trans, callbacks) {
       seg.title = `修撰中 ${trans.draftBlocks} 组`;
       track.appendChild(seg);
     }
-    progBox.append(progStats, track);
+    progBox.append(progHead, track);
     body.appendChild(progBox);
 
     // Chapter & Block Jade Slips ("章卷牙牌")
@@ -1221,7 +1311,7 @@ function renderTranslationNeoSubmode(doc, container, court, trans, callbacks) {
           doc,
           "span",
           "hint",
-          `${ch.paragraphs} 段 · ${ch.blocks.length} 组译稿`,
+          ch.paragraphs > 0 ? `${ch.paragraphs} 段 · ${ch.blocks.length} 组译稿` : `共 ${ch.blocks.length} 组译稿`,
         ),
       );
       chBox.appendChild(chHead);
@@ -1277,11 +1367,11 @@ function renderMinistryThemeSubmode(
 ) {
   const stack = el(doc, "div", "neo-stack");
 
-  // 1. Classical Chinese Pale-Elegant Palette Gallery ("宋韵四色 · 古风淡雅画境")
+  // 1. Classical Chinese Pale-Elegant Palette Gallery ("宋韵设色 · 古风淡雅与玄夜秉烛")
   const themeCard = el(doc, "section", "card neo-section");
-  const themeHead = el(doc, "h2", "", "宋韵四色 · 中国古代淡雅设色");
+  const themeHead = el(doc, "h2", "", "宋韵五境 · 中国古代淡雅与玄夜设色");
   themeHead.appendChild(
-    el(doc, "small", "", "取法宋瓷、水墨、青绿与缃帙，分区只靠留白、细线与一枚朱印"),
+    el(doc, "small", "", "取法宋瓷、水墨、青绿、缃帙与磁青夜笺，日夜皆宜"),
   );
   themeCard.appendChild(themeHead);
 
@@ -1367,65 +1457,109 @@ function renderMinistryThemeSubmode(
   govCard.appendChild(govHead);
 
   const govBody = el(doc, "div", "body");
+  const REGIME_SPECS = {
+    chancellor: {
+      era: "中书总领",
+      desc: "设中书省丞相总率百司，御前诏令先由丞相综理，再分派六部奉行。",
+    },
+    direct: {
+      era: "六部直奏",
+      desc: "罢中书省、永不设相，皇帝亲统吏户礼兵刑工六部，政令直达尚书。",
+    },
+    cabinet: {
+      era: "票拟批红",
+      desc: "内阁首辅率大学士先行票拟条陈，经御笔或司礼监朱笔批红后发六部。",
+    },
+  };
   if (court.modes && court.modes.length) {
-    const modeBox = el(doc, "div", "modes");
+    const modeTitle = el(doc, "div", "neo-subhead");
+    modeTitle.append(
+      el(doc, "b", "", "三代官制规制"),
+      el(doc, "span", "", "点选规制笺卡即可改易朝堂票拟与六部派工路线"),
+    );
+    govBody.appendChild(modeTitle);
+
+    const modeBox = el(doc, "div", "neo-gov-modes");
     for (const m of court.modes) {
+      const active = m.code === court.modeCode;
+      const spec = REGIME_SPECS[m.code] || {
+        era: "朝堂定制",
+        desc: "依朝纲流转六部奏折与批红权限。",
+      };
       const btn = el(
         doc,
         "button",
-        m.code === court.modeCode ? "current" : "",
-        m.label,
+        `neo-regime-card ${active ? "current" : ""}`,
       );
       btn.type = "button";
       btn.disabled = court.viewer;
+      const top = el(doc, "div", "neo-regime-top");
+      top.append(
+        el(doc, "b", "neo-regime-name", m.label),
+        el(
+          doc,
+          "span",
+          active ? "badge seal" : "badge",
+          active ? `现行 · ${spec.era}` : spec.era,
+        ),
+      );
+      const desc = el(doc, "p", "neo-regime-desc", spec.desc);
+      btn.append(top, desc);
       btn.addEventListener("click", () => callbacks.onChangeGovernanceMode?.(m));
       modeBox.appendChild(btn);
     }
     govBody.appendChild(modeBox);
   }
 
-  const actionBar = el(doc, "div", "actions");
-  if (!court.viewer) {
-    const retreatBtn = el(
-      doc,
-      "button",
-      "small",
-      court.retreat ? "回朝亲政" : "移居西苑修道（司礼监代批）",
-    );
-    retreatBtn.type = "button";
-    retreatBtn.addEventListener("click", () => callbacks.onToggleRetreat?.());
-    actionBar.appendChild(retreatBtn);
-  }
+  const subZone = el(doc, "div", "neo-gov-subzone");
+  const actTitle = el(doc, "div", "neo-subhead");
+  actTitle.append(
+    el(doc, "b", "", "视朝代理 · 吏部考成与户部奏销"),
+    el(doc, "span", "", "西苑司礼监代批切换、百官考成簿、度支账册导出与太医院自检"),
+  );
+  subZone.appendChild(actTitle);
 
-  const kaoBtn = el(doc, "button", "small", "披览考成簿");
+  const actionBar = el(doc, "div", "neo-gov-actions");
+  const retreatBtn = el(
+    doc,
+    "button",
+    "",
+    court.retreat ? "回朝亲政" : "移居西苑修道（司礼监代批）",
+  );
+  retreatBtn.type = "button";
+  retreatBtn.disabled = court.viewer;
+  retreatBtn.addEventListener("click", () => callbacks.onToggleRetreat?.());
+
+  const kaoBtn = el(doc, "button", "", "披览考成簿");
   kaoBtn.type = "button";
   kaoBtn.dataset.view = "";
   kaoBtn.addEventListener("click", () => callbacks.onOpenKaocheng?.());
 
-  const duzhiBtn = el(doc, "button", "small", "披览度支奏销");
+  const duzhiBtn = el(doc, "button", "", "披览度支奏销");
   duzhiBtn.type = "button";
   duzhiBtn.dataset.view = "";
   duzhiBtn.addEventListener("click", () => callbacks.onOpenDuzhi?.());
 
-  const csvBtn = el(doc, "button", "small", "导出度支 CSV（Excel BOM）");
+  const csvBtn = el(doc, "button", "", "导出度支 CSV（Excel BOM）");
   csvBtn.type = "button";
   csvBtn.dataset.view = "";
   csvBtn.addEventListener("click", () => callbacks.onExportDuzhi?.("csv", true));
 
-  const jsonBtn = el(doc, "button", "small", "导出度支 JSON");
+  const jsonBtn = el(doc, "button", "", "导出度支 JSON");
   jsonBtn.type = "button";
   jsonBtn.dataset.view = "";
   jsonBtn.addEventListener("click", () =>
     callbacks.onExportDuzhi?.("json", false),
   );
 
-  const docBtn = el(doc, "button", "small", "太医院环境自检");
+  const docBtn = el(doc, "button", "", "太医院环境自检");
   docBtn.type = "button";
   docBtn.dataset.view = "";
   docBtn.addEventListener("click", () => callbacks.onOpenDoctor?.());
 
-  actionBar.append(kaoBtn, duzhiBtn, csvBtn, jsonBtn, docBtn);
-  govBody.appendChild(actionBar);
+  actionBar.append(retreatBtn, kaoBtn, duzhiBtn, csvBtn, jsonBtn, docBtn);
+  subZone.appendChild(actionBar);
+  govBody.appendChild(subZone);
   govCard.appendChild(govBody);
 
   stack.append(themeCard, govCard);

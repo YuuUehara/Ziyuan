@@ -641,3 +641,123 @@ test("paragraph focus loads read-only TM suggestions with stale-response and XSS
   assert.equal(editor.focusParagraph("c0001-p0001"), true);
   assert.equal(editor.focusParagraph("nonexistent"), false);
 });
+
+test("quick-approve and quick-finalize run server workflow sequentially and guard empty paragraphs", async () => {
+  const makeEl = (tag, doc) => {
+    const classes = new Set();
+    const node = {
+      tagName: tag.toUpperCase(),
+      ownerDocument: doc,
+      children: [],
+      dataset: {},
+      attributes: {},
+      listeners: new Map(),
+      className: "",
+      textContent: "",
+      _innerHTML: "",
+      value: "",
+      hidden: false,
+      disabled: false,
+      readOnly: false,
+      selectionStart: 0, selectionEnd: 0,
+      classList: {
+        toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
+        contains(name) { return classes.has(name); },
+      },
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) {
+        this._innerHTML = String(v);
+        if (this.className === "human-paragraph") {
+          const tx = makeEl("textarea", doc);
+          const src = makeEl("p", doc); src.className = "text-para";
+          const tools = makeEl("div", doc); tools.className = "actions human-mark-tools";
+          const tmBox = makeEl("div", doc); tmBox.className = "human-tm-suggest"; tmBox.hidden = true;
+          const preview = makeEl("p", doc); preview.className = "human-preview text-para";
+          const tableWrap = makeEl("div", doc); tableWrap.className = "table-wrap";
+          const table = makeEl("table", doc);
+          tableWrap.append(table);
+          this.children = [src, tx, tools, tmBox, preview, tableWrap];
+          this._map = { textarea: tx, ".human-mark-tools": tools, ".human-tm-suggest": tmBox, table, ".text-para": src, ".human-preview": preview, ".table-wrap": tableWrap };
+        } else if (this._innerHTML.includes("human-paragraphs")) {
+          const status = makeEl("p", doc); status.className = "human-status";
+          const msg = makeEl("p", doc); msg.className = "human-message hint";
+          const rec = makeEl("div", doc); rec.className = "human-recovery actions";
+          const conf = makeEl("div", doc); conf.className = "human-conflict actions";
+          const acts = makeEl("div", doc); acts.className = "human-actions actions";
+          const paras = makeEl("div", doc); paras.className = "human-paragraphs";
+          this.children = [status, msg, rec, conf, acts, paras];
+          this._map = { ".human-status": status, ".human-message": msg, ".human-recovery": rec, ".human-conflict": conf, ".human-actions": acts, ".human-paragraphs": paras };
+        }
+      },
+      setAttribute(k, v) { this.attributes[k] = v; },
+      append(...items) { items.forEach((i) => { i.parentElement = this; this.children.push(i); }); },
+      replaceChildren(...items) { this.children = []; this.append(...items); },
+      addEventListener(type, fn) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type).push(fn);
+      },
+      querySelector(sel) { return this._map?.[sel] || null; },
+      querySelectorAll(sel) {
+        const out = [];
+        const walk = (n) => {
+          for (const c of n.children || []) {
+            if (sel === "textarea" && c.tagName === "TEXTAREA") out.push(c);
+            if (sel.includes("[data-mark]") && (c.dataset.mark || c.dataset.remove !== undefined)) out.push(c);
+            walk(c);
+          }
+        };
+        walk(this);
+        return out;
+      },
+      closest(sel) { return sel === "[data-action]" && this.dataset.action ? this : null; },
+      focus() { doc.activeElement = this; },
+      scrollIntoView() {},
+    };
+    return node;
+  };
+  const doc = { activeElement: null };
+  doc.createElement = (tag) => makeEl(tag, doc);
+  const host = makeEl("div", doc);
+  const src = [{ id: "c0001-p0001", text: "原文一" }, { id: "c0001-p0002", text: "原文二" }];
+  const calls = [];
+  let rev = null;
+  let draftParas = null;
+  const humanState = { submitted: false, approved: false, finalized: false, stale: false };
+  const api = async (path, body) => {
+    if (path.endsWith("/human/progress")) return null;
+    if (body === undefined) {
+      return { founded: true, basis: { source_hash: "s", context_hash: "c" }, revision: rev, draft: draftParas ? { revision: rev, paragraphs: draftParas } : null, human: { ...humanState } };
+    }
+    calls.push(path.split("/").pop());
+    if (path.endsWith("/draft")) { rev = "rev-1"; draftParas = body.paragraphs; return { revision: rev }; }
+    if (path.endsWith("/submit")) { humanState.submitted = true; return { ok: true }; }
+    if (path.endsWith("/approve")) { humanState.approved = true; return { ok: true }; }
+    if (path.endsWith("/finalize")) { humanState.finalized = true; return { ok: true }; }
+    throw new Error("unexpected " + path);
+  };
+  const editor = mountHumanEditor(host, { api, isViewer: () => false, storage: storage(), confirm: () => true });
+  editor.update({ project: "p", block: "c0001-b0001", source: src });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const root = host.children[1].children[0];
+  const acts = root.querySelector(".human-actions").children;
+  const quickFin = acts.find((b) => b.dataset.action === "quick-finalize");
+  const quickApp = acts.find((b) => b.dataset.action === "quick-approve");
+  assert.ok(quickApp && quickFin);
+
+  // Guard: empty paragraph blocks quick pipeline without issuing any write request.
+  for (const fn of root.listeners.get("click") || []) await fn({ target: quickFin });
+  assert.deepEqual(calls, []);
+  assert.match(root.querySelector(".human-message").textContent, /尚未填写译文/);
+
+  // Fill both paragraphs and invoke quick-finalize.
+  const paras = root.querySelector(".human-paragraphs").children;
+  for (const [idx, val] of [[0, "译文一"], [1, "译文二"]]) {
+    const tx = paras[idx].querySelector("textarea");
+    tx.value = val;
+    for (const fn of tx.listeners.get("input") || []) fn({ isComposing: false });
+  }
+  for (const fn of root.listeners.get("click") || []) await fn({ target: quickFin });
+  assert.deepEqual(calls, ["draft", "submit", "approve", "finalize"]);
+  assert.match(root.querySelector(".human-message").textContent, /已一键完成保存、送审、准奏与人工御览定稿/);
+});

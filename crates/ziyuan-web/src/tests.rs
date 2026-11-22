@@ -2443,3 +2443,42 @@ async fn resume_failed_api_reissues_failed_task_blocks_viewer_and_rejects_comple
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn neo_panel_asset_and_classical_theme_contract() {
+    for expected in [
+        "id=\"neo-mode-btn\"",
+        "class=\"switch-toggle pivotal-switch\"",
+        "body.pivotal-mode",
+        "id=\"hall-neo\"",
+        "id=\"neo-panel-root\"",
+        "data-theme=\"xiangzhi\"",
+        "[data-theme=\"xiangzhi\"]",
+        "data-theme=\"ye\"",
+        "[data-theme=\"ye\"]",
+        "body.neo-wusilan",
+        "import(\"/assets/neo-panel.mjs\")",
+        "垂拱枢机",
+    ] {
+        assert!(INDEX_HTML.contains(expected), "missing {expected}");
+    }
+    assert!(!INDEX_HTML.contains("id=\"hall-nav-neo\""));
+    assert!(!INDEX_HTML.contains("新政 · Neo 枢机"));
+
+    let resp = super::asset(axum::extract::Path("neo-panel.mjs".into())).await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/javascript; charset=utf-8")
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert_eq!(body, include_str!("neo-panel.mjs"));
+    assert!(body.contains("renderNeoPanel"));
+    assert!(body.contains("宣和缃帙"));
+    assert!(body.contains("玄夜秉烛"));
+}

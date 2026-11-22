@@ -80,7 +80,7 @@ test("classical themes and Neo presets preserve imperial literary style", () => 
   assert.equal(NEO_SUBMODES.length, 4);
   assert.deepEqual(
     CLASSICAL_THEMES.map((t) => t.id),
-    ["tianqing", "mo", "qinglv", "xiangzhi"],
+    ["tianqing", "mo", "qinglv", "xiangzhi", "ye"],
   );
   assert.ok(NEO_EDICT_PRESETS.length >= 6);
   assert.ok(NEO_EDICT_PRESETS.some((p) => p.department === "works"));
@@ -202,7 +202,8 @@ test("renderNeoPanel renders all 4 submodes and respects viewer read-only mode",
     },
   );
   const overviewText = collectText(root);
-  assert.ok(overviewText.includes("新政枢机 · 垂拱听政台"));
+  assert.ok(overviewText.includes("垂拱枢机 · 御前听政台"));
+  assert.ok(!overviewText.includes("Neo"));
   assert.ok(overviewText.includes("御案急递"));
   assert.ok(overviewText.includes("朱笔批红"));
 
@@ -249,4 +250,28 @@ test("renderNeoPanel renders all 4 submodes and respects viewer read-only mode",
   assert.ok(xiangzhiBtn);
   xiangzhiBtn.listeners.click();
   assert.equal(chosenTheme, "xiangzhi");
+});
+
+test("summarizeTranslationForNeo reads real top-level statuses array from /api/text/{project}", () => {
+  const summary = summarizeTranslationForNeo(
+    [{ id: "proj-1", title: "东都风物志", source_language: "ja", chapters: 2 }],
+    {
+      project: { id: "proj-1", title: "东都风物志", source_language: "ja", chapters: 2 },
+      outline: [
+        { chapter: "c0001", title: "第一章", blocks: ["c0001-b0001"] },
+        { chapter: "c0002", title: "第二章", blocks: ["c0002-b0001", "c0002-b0002"] },
+      ],
+      statuses: [
+        { block: "c0001-b0001", state: { state: "human_finalized" }, label: "已人工定稿" },
+        { block: "c0002-b0001", state: { state: "human_approved" }, label: "已人工准奏" },
+        { block: "c0002-b0002", state: { state: "not_started" }, label: "未开始" },
+      ],
+    },
+  );
+  assert.equal(summary.finalizedBlocks, 1);
+  assert.equal(summary.approvedBlocks, 1);
+  assert.equal(summary.untranslatedBlocks, 1);
+  assert.equal(summary.completionPercent, 67);
+  assert.equal(summary.chapters[0].blocks[0].label, "已人工定稿");
+  assert.equal(summary.chapters[1].blocks[0].category, "approved");
 });

@@ -274,16 +274,18 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,onSuggestTm
     const h=d.remote?.human;
     for(const [action,button] of entry.buttons) {
       button.hidden=d.viewer;
+      const isQuick=action==="quick-approve" || action==="quick-finalize";
       const workflow=["submit","approve","finalize"].includes(action);
       const stepBlocked=
         (action==="submit" && h?.submitted===true) ||
         (action==="approve" && h?.submitted===false) ||
         (action==="finalize" && h && (!h.approved || h.stale || h.finalized));
       button.disabled=!d.editable || d.busy || d.composing ||
+        (isQuick && (notFounded||d.conflict||!!stats.problems.length)) ||
         (workflow && (notFounded||d.dirty||d.conflict||!!stats.problems.length||!d.revision||stepBlocked)) ||
         (action==="save" && (d.conflict||!!stats.problems.length)) ||
         (action==="undo" && !d.undo.length) || (action==="redo" && !d.redo.length);
-      button.title=(workflow && notFounded) ? "尚未建立朝廷（运行 ziyuan init 后可送审、准奏与御览定稿）" : "";
+      button.title=((workflow||isQuick) && notFounded) ? "尚未建立朝廷（运行 ziyuan init 后可送审、准奏与御览定稿）" : "";
     }
     if(entry.nextEmpty) {
       entry.nextEmpty.disabled=emptyCount===0;
@@ -434,7 +436,7 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,onSuggestTm
   function create(context) {
     const d=new HumanDraft(context.project,context.block,context.source,storage);
     const root=host.ownerDocument.createElement("div");
-    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段在右侧填写译文，按 Ctrl+S（macOS 为 Cmd+S）可快捷保存草稿；选中右侧译文文字可在栏下加注音、着重或粗斜体。正文用浏览器撤销，标记可单独撤销（改正文后清空标记撤销栈）。完成后依次保存、送审、准奏、御览定稿。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
+    root.innerHTML=`<div class="human-stage-head"><h3>人工译稿 · ${escape(textLocation(context.block))}</h3><p class="hint">逐段在右侧填写译文，按 Ctrl+S 可保存草稿，点击「一键保存并准奏」或「一键保存并定稿」（Ctrl+Enter）可一次连贯完成保存、送审、准奏与定稿，无需逐步点击；选中右侧译文文字可在栏下加注音、着重或粗斜体。</p></div><p role="status" class="human-status"></p><p class="human-message hint" role="status"></p><div class="human-recovery actions" hidden></div><div class="human-conflict actions" hidden></div><div class="human-actions actions"></div><div class="human-paragraphs"></div>`;
     const entry={draft:d,root,rows:[],buttons:new Map(),request:0,tmRequest:0,tmActivePara:null,
       status:root.querySelector(".human-status"),message:root.querySelector(".human-message"),
       recovery:root.querySelector(".human-recovery"),conflict:root.querySelector(".human-conflict"),paras:root.querySelector(".human-paragraphs")};
@@ -443,11 +445,62 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,onSuggestTm
     button("载入已保存稿件（替换页面内容）","disk",entry.conflict);
     button("确认保留本地，取最新基准","rebase",entry.conflict);
     const actions=root.querySelector(".human-actions");
-    for(const [action,label] of [["save","保存人工草稿"],["submit","送审当前已保存修订"],["approve","人工准奏"],["finalize","人工御览定稿"],["undo","撤销标记"],["redo","重做标记"]]) {
-      entry.buttons.set(action,button(label,action,actions,action==="save"?"primary":""));
+    for(const [action,label,variant] of [
+      ["save","保存人工草稿","primary"],
+      ["quick-approve","一键保存并准奏","gold"],
+      ["quick-finalize","一键保存并定稿","gold"],
+      ["submit","送审当前已保存修订",""],
+      ["approve","人工准奏",""],
+      ["finalize","人工御览定稿",""],
+      ["undo","撤销标记",""],
+      ["redo","重做标记",""],
+    ]) {
+      entry.buttons.set(action,button(label,action,actions,variant));
     }
     entry.nextEmpty=button("下一空白段","next-empty",actions); entry.nextEmpty.dataset.view="";
     entry.refresh=button("刷新人工状态","refresh",actions); entry.refresh.dataset.view="";
+    function checkAllFilled() {
+      const empty=d.paragraphs.filter(p=>!String(p.text||"").trim());
+      if(!empty.length) return true;
+      d.messageTone="error";
+      d.message=`本组还有 ${empty.length} 段尚未填写译文（${summarizeParagraphIds(empty.map(p=>p.id))}），请先补齐并保存人工草稿后再送审。`;
+      notify(entry);
+      const firstIdx=d.paragraphs.findIndex(p=>!String(p.text||"").trim());
+      const tx=entry.rows[firstIdx]?.textarea;
+      tx?.scrollIntoView?.({block:"center",behavior:"smooth"});
+      tx?.focus?.();
+      return false;
+    }
+    async function runQuickPipeline(finalize) {
+      if(d.viewer||!d.editable||d.busy||d.composing||d.conflict||d.stats.problems.length||d.remote?.founded===false) return;
+      if(!checkAllFilled()) return;
+      if(d.dirty || !d.revision) {
+        const p=d.save(api); notify(entry);
+        if(!await p) { notify(entry); return; }
+        await pull(entry);
+      }
+      if(!d.remote?.human?.submitted) {
+        const p=d.action("submit",api); notify(entry);
+        if(!await p) { notify(entry); return; }
+        await pull(entry);
+      }
+      if(!d.remote?.human?.approved || d.remote?.human?.stale) {
+        const p=d.action("approve",api); notify(entry);
+        if(!await p) { notify(entry); return; }
+        await pull(entry);
+      }
+      if(finalize && !d.remote?.human?.finalized) {
+        const p=d.action("finalize",api); notify(entry);
+        if(!await p) { notify(entry); return; }
+        await pull(entry);
+      }
+      d.messageTone="";
+      d.message=finalize
+        ? "已一键完成保存、送审、准奏与人工御览定稿。"
+        : "已一键完成保存、送审与人工准奏（正式译稿已落盘）。";
+      notify(entry);
+      onChanged?.(d.project,d.block);
+    }
     root.addEventListener("keydown",async event=>{
       if((event.ctrlKey||event.metaKey) && !event.altKey && String(event.key||"").toLowerCase()==="s") {
         event.preventDefault();
@@ -456,6 +509,10 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,onSuggestTm
         const promise=d.save(api);
         notify(entry); const ok=await promise; notify(entry);
         if(ok) { await pull(entry); onChanged?.(d.project,d.block); }
+      } else if((event.ctrlKey||event.metaKey) && !event.altKey && event.key==="Enter") {
+        event.preventDefault();
+        d.viewer=!!isViewer();
+        await runQuickPipeline(true);
       }
     });
     root.addEventListener("click",async event=>{
@@ -488,20 +545,10 @@ export function mountHumanEditor(host,{api,isViewer,onNext,onChanged,onSuggestTm
         syncText(entry);
       } else if(action==="undo" || action==="redo") {
         action==="undo" ? d.undoMarks() : d.redoMarks(); details(entry);
+      } else if(action==="quick-approve" || action==="quick-finalize") {
+        await runQuickPipeline(action==="quick-finalize");
       } else if(action==="save" || ["submit","approve","finalize"].includes(action)) {
-        if(action==="submit") {
-          const empty=d.paragraphs.filter(p=>!String(p.text||"").trim());
-          if(empty.length) {
-            d.messageTone="error";
-            d.message=`本组还有 ${empty.length} 段尚未填写译文（${summarizeParagraphIds(empty.map(p=>p.id))}），请先补齐并保存人工草稿后再送审。`;
-            notify(entry);
-            const firstIdx=d.paragraphs.findIndex(p=>!String(p.text||"").trim());
-            const tx=entry.rows[firstIdx]?.textarea;
-            tx?.scrollIntoView?.({block:"center",behavior:"smooth"});
-            tx?.focus?.();
-            return;
-          }
-        }
+        if(action==="submit" && !checkAllFilled()) return;
         if(action!=="save" && !confirm(`确定${{submit:"送审当前已保存修订",approve:"准奏当前已送审修订",finalize:"人工御览定稿"}[action]}？未保存或未送审的修订不会自动提交。`)) return;
         const promise=action==="save" ? d.save(api) : d.action(action,api);
         notify(entry); const ok=await promise; notify(entry);
