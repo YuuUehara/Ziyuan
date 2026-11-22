@@ -131,7 +131,7 @@ export function japanesePlausibility(text) {
 
 export function decodeImportedText(buffer, label = "文件", sourceLanguage = null) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或受支持旧编码（JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩文 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本`);
+  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或受支持旧编码（日语 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩语 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本`);
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
     try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; }
     catch { throw bad(); }
@@ -162,7 +162,7 @@ export function decodeImportedText(buffer, label = "文件", sourceLanguage = nu
     if (ko !== null) return { text: ko, encoding: "EUC-KR" };
     throw bad();
   }
-  if (sourceLanguage === "en" || sourceLanguage === "fr" || sourceLanguage === "de") {
+  if (sourceLanguage === "en" || sourceLanguage === "fr" || sourceLanguage === "de" || sourceLanguage === "es" || sourceLanguage === "it") {
     const w = decodeWindows1252Strict(bytes);
     if (w !== null) return { text: w, encoding: "Windows-1252" };
     throw bad();

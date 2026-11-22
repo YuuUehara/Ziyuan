@@ -39,6 +39,8 @@ test("page imports the actual editor, uses a persistent host and retains API con
   assert.ok(!html.includes("格式与编排不影响原件"));
   assert.match(html,/id="materials-approve-context"/);
   assert.match(html,/\.human-target-col\s*\{/);
+  assert.match(html,/\.human-target-extras\s*\{/);
+  assert.ok(!html.includes("margin: 6px 0 34px"), "source/target alignment must use grid row separation, not a hardcoded 34px margin");
   assert.match(html,/data-import-remove="/);
   assert.match(html,/id="text-project-qa"/);
   assert.match(html,/id="project-qa-run"/);

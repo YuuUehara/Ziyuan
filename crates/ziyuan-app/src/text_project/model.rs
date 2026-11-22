@@ -2,7 +2,7 @@ use super::{ImportWarning, Inline, ParseOptions, Result, SourceFormat};
 use serde::{Deserialize, Serialize};
 
 /// Supported source languages for translation projects (target is fixed to `zh-CN`).
-pub const SUPPORTED_SOURCE_LANGUAGES: &[&str] = &["ja", "en", "ko", "fr", "de"];
+pub const SUPPORTED_SOURCE_LANGUAGES: &[&str] = &["ja", "en", "ko", "fr", "de", "ru", "es", "it"];
 
 /// Whether `lang` is a supported translation project source language.
 pub fn is_supported_source_language(lang: &str) -> bool {

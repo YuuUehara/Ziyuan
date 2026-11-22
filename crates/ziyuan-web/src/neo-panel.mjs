@@ -471,23 +471,24 @@ function el(doc, tag, className = "", text = null) {
 const fmtNum = (n) => Number(n || 0).toLocaleString("zh-CN");
 
 const SOURCE_LANG_LABELS = {
-  ja: "日文原典",
-  jp: "日文原典",
-  en: "英文原典",
-  zh: "中文原典",
-  fr: "法文原典",
-  de: "德文原典",
-  ru: "俄文原典",
-  ko: "韩文原典",
-  es: "西文原典",
-  it: "意文原典",
-  la: "拉丁原典",
+  ja: "日语",
+  jp: "日语",
+  en: "英语",
+  zh: "中文",
+  "zh-cn": "简体中文",
+  fr: "法语",
+  de: "德语",
+  ru: "俄语",
+  ko: "韩语",
+  es: "西班牙语",
+  it: "意大利语",
+  la: "拉丁语",
 };
 
 function formatSourceLang(code) {
   const key = String(code || "").trim().toLowerCase();
-  if (!key) return "外文原典";
-  return SOURCE_LANG_LABELS[key] || `${code} 原典`;
+  if (!key) return "外语";
+  return SOURCE_LANG_LABELS[key] || String(code);
 }
 
 export function renderNeoPanel(container, context = {}, callbacks = {}) {

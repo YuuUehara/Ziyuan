@@ -2561,8 +2561,8 @@ async fn web_creates_empty_text_project_without_cli() {
     // 观政只能看，不能创建。
     let (code, _) = call(&base, "/text/projects", Some(VIEWER), Some(body.clone())).await;
     assert_eq!(code, 403);
-    // 韩、法、德三种原文语言均可正常创建，未知语种仍返回 400。
-    for lang in ["ko", "fr", "de"] {
+    // 韩、法、德、俄、西、意等原文语言均可正常创建，未知语种仍返回 400。
+    for lang in ["ko", "fr", "de", "ru", "es", "it"] {
         let mut multi = body.clone();
         multi["source_language"] = json!(lang);
         let (code, created) = call(&base, "/text/projects", Some(TOKEN), Some(multi)).await;

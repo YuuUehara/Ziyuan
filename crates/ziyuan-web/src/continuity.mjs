@@ -33,7 +33,7 @@ export function mount({ api, getSelection, getChapters, refresh, navigate }) {
   el("check").onclick = () => run(async () => { const file = el("file").files[0]; if (!file) throw new Error("请选择备份文件"); if (file.size > 256 * 1024 * 1024) throw new Error("备份超过 256 MiB，请检查是否选错文件"); upload = await file.arrayBuffer(); const result = await send(); if(el("file").files[0]!==file)throw new Error("备份文件已变，请重新校验"); checked=result; show(checked); el("restore").disabled = false; });
   el("restore").onclick = () => run(async () => { if (!checked) throw new Error("请先校验备份"); show(await send(`?destination=${encodeURIComponent(el("destination").value)}&fingerprint=${encodeURIComponent(checked.fingerprint)}`)); el("restore").disabled = true; });
   const updates=document.createElement("details");updates.className="continuity-tools";updates.dataset.workspaceTool="source-update";
-  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown（支持 UTF-8 与常见旧编码：日文 JIS／韩文 EUC-KR／西欧 Windows-1252）、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
+  updates.innerHTML=`<summary>追加与修订原文</summary><p class="hint">可选 TXT、Markdown（支持 UTF-8 与常见旧编码：日语 JIS／韩语 EUC-KR／西欧 Windows-1252）、DOCX 或 EPUB。TXT 和 Markdown 不超过 8 MiB，DOCX 和 EPUB 不超过 16 MiB。压缩包里最多 4096 个文件，每个解开后不超过 32 MiB。默认追加新章；勾选「修订当前章」则改当前块所在的那一章。先预览，再确认。旧原件和旧译都保留。修订时段落数和所属的块必须与原来一样，拆段、合段或重排会被拒绝。</p><div class="row write"><input type="file" accept=".txt,.md,.markdown,.docx,.epub" data-source aria-label="更新原文"><label><input type="checkbox" data-revise>修订当前章</label><button data-preview type="button">预览原文变化</button><button data-apply type="button" disabled>确认更新原文</button></div><p data-status role="status"></p><div class="continuity-result" data-result></div>`;
   host.after(updates);
   const issues=mountIssues(updates,{api,getSelection,navigate});
   const reading=mountReading(issues,{api,getSelection,getChapters,navigate});
@@ -177,7 +177,7 @@ function japanesePlausibility(text) {
 }
 export function decodeTextBytes(buffer, label = "文件", sourceLanguage = null) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或受支持旧编码（JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩文 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本`);
+  const bad = () => new Error(`「${label || "文件"}」不是有效的 UTF-8 或受支持旧编码（日语 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩语 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本`);
   if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
     try { return { text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes), encoding: "UTF-8" }; }
     catch { throw bad(); }
@@ -208,7 +208,7 @@ export function decodeTextBytes(buffer, label = "文件", sourceLanguage = null)
     if (ko !== null) return { text: ko, encoding: "EUC-KR" };
     throw bad();
   }
-  if (sourceLanguage === "en" || sourceLanguage === "fr" || sourceLanguage === "de") {
+  if (sourceLanguage === "en" || sourceLanguage === "fr" || sourceLanguage === "de" || sourceLanguage === "es" || sourceLanguage === "it") {
     const w = decodeWindows1252Strict(bytes);
     if (w !== null) return { text: w, encoding: "Windows-1252" };
     throw bad();

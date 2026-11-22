@@ -1,10 +1,10 @@
-//! UTF-8 与受支持旧编码（日文 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩文 EUC-KR／CP949；
+//! UTF-8 与受支持旧编码（日语 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩语 EUC-KR／CP949；
 //! 西欧 Windows-1252／ISO-8859-1）的严格解码。
 //!
 //! 绝不做有损替换（不产生 U+FFFD）；有效 UTF-8 始终零拷贝原样返回。
 use std::borrow::Cow;
 
-pub const UNSUPPORTED_TEXT_ENCODING: &str = "仅接受 UTF-8 或受支持旧编码（JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩文 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本";
+pub const UNSUPPORTED_TEXT_ENCODING: &str = "仅接受 UTF-8 或受支持旧编码（日语 JIS：Shift_JIS／ISO-2022-JP／EUC-JP；韩语 EUC-KR／CP949；西欧 Windows-1252／ISO-8859-1）文本";
 
 /// 识别出的文本编码。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub fn decode_text_bytes(bytes: &[u8]) -> Result<(Cow<'_, str>, TextEncoding), &
 /// 3. 含 ISO-2022-JP 转义序列（`ESC $ B` / `ESC $ @` / `ESC $ ( D`）且语种为 `ja` 或未指定时按 ISO-2022-JP 严格解码；
 /// 4. 合法 UTF-8 零拷贝原样返回；
 /// 5. 非 UTF-8 含非法控制字节（如 NUL）时拒绝；
-/// 6. 已知原文语种时只按该语种旧编码族严格解码（`ja` → Shift_JIS／EUC-JP；`ko` → EUC-KR／CP949；`en`/`fr`/`de` → Windows-1252／ISO-8859-1），
+/// 6. 已知原文语种时只按该语种旧编码族严格解码（`ja` → Shift_JIS／EUC-JP；`ko` → EUC-KR／CP949；`en`/`fr`/`de`/`es`/`it` → Windows-1252／ISO-8859-1），
 ///    未指定语种时在全部受支持旧编码中严格解码并按语言字符特征择优；
 /// 7. 全部失败或含任意非法字节序列时报错拒绝。
 pub fn decode_text_bytes_for_language<'a>(
@@ -78,7 +78,7 @@ pub fn decode_text_bytes_for_language<'a>(
     match source_language {
         Some("ja") => decode_japanese_legacy(bytes),
         Some("ko") => decode_korean_legacy(bytes),
-        Some("en" | "fr" | "de") => decode_western_legacy(bytes),
+        Some("en" | "fr" | "de" | "es" | "it") => decode_western_legacy(bytes),
         _ => decode_any_legacy(bytes),
     }
 }
@@ -435,6 +435,20 @@ mod tests {
         let (decoded, enc) = decode_text_bytes_for_language(&en_bytes, Some("en")).unwrap();
         assert_eq!(enc, TextEncoding::Windows1252);
         assert_eq!(decoded, english);
+
+        let spanish = "¡Hola! Mañana será un día cálido en España.\n";
+        let (es_bytes, _, had_errors) = encoding_rs::WINDOWS_1252.encode(spanish);
+        assert!(!had_errors);
+        let (decoded, enc) = decode_text_bytes_for_language(&es_bytes, Some("es")).unwrap();
+        assert_eq!(enc, TextEncoding::Windows1252);
+        assert_eq!(decoded, spanish);
+
+        let italian = "Città antica: perché è così bello? €10.\n";
+        let (it_bytes, _, had_errors) = encoding_rs::WINDOWS_1252.encode(italian);
+        assert!(!had_errors);
+        let (decoded, enc) = decode_text_bytes_for_language(&it_bytes, Some("it")).unwrap();
+        assert_eq!(enc, TextEncoding::Windows1252);
+        assert_eq!(decoded, italian);
     }
 
     #[test]

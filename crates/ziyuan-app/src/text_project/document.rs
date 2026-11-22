@@ -568,7 +568,15 @@ fn markdown_paragraphs(
 }
 
 fn han(c: char) -> bool {
-    matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x2ffff | 0x30000..=0x323af)
+    matches!(
+        c as u32,
+        0x3006..=0x3007
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2ffff
+            | 0x30000..=0x323af
+    )
 }
 
 fn implicit_base(text: &str) -> usize {
@@ -579,7 +587,7 @@ fn implicit_base(text: &str) -> usize {
         if han(c) {
             has_han = true;
             start = index;
-        } else if matches!(c, '々' | '〻') {
+        } else if matches!(c, '々' | '〻' | 'ヶ' | 'ヵ') {
             start = index;
         } else {
             break;
@@ -591,7 +599,7 @@ fn implicit_base(text: &str) -> usize {
     // Iteration signs may extend a run, but cannot be its first grapheme.
     while start < text.len() {
         let c = text[start..].chars().next().unwrap();
-        if !matches!(c, '々' | '〻') {
+        if !matches!(c, '々' | '〻' | 'ヶ' | 'ヵ') {
             break;
         }
         start += c.len_utf8();
@@ -693,6 +701,24 @@ fn simple_html(text: &str) -> Option<(&str, &str)> {
     Some((base, reading))
 }
 
+fn aozora_annotation_end(tail: &str) -> Option<usize> {
+    let line_end = tail.find(['\r', '\n']).unwrap_or(tail.len());
+    let mut depth = 0usize;
+    for (index, c) in tail[..line_end].char_indices() {
+        match c {
+            '［' => depth += 1,
+            '］' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index + '］'.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_inlines(
     text: &str,
     offset: usize,
@@ -774,6 +800,8 @@ fn parse_inlines_inner(
                 }
             }
             if parsed.is_none() {
+                // Persisted parser v1 stores the remainder of the paragraph for these warnings;
+                // changing the range or message breaks source validation on existing v1 manifests.
                 warning(
                     warnings,
                     offset + cursor..offset + text.len(),
@@ -789,9 +817,13 @@ fn parse_inlines_inner(
                 let open = base_start + relative;
                 let base = &text[base_start..open];
                 if !base.is_empty()
+                    && !base.starts_with([' ', '\t', '　'])
                     && boundary(text, base_start)
                     && boundary(text, open)
-                    && !base.contains(['\n', '\r', '|', '｜', '》', '<', '>'])
+                    && !base.contains([
+                        '\n', '\r', '|', '｜', '《', '》', '<', '>', '。', '！', '？', '「', '」',
+                        '『', '』',
+                    ])
                     && let Some((end, reading)) = pair(text, open)
                 {
                     parsed = Some((
@@ -835,6 +867,10 @@ fn parse_inlines_inner(
                 offset + cursor..offset + text.len(),
                 "暂不支持青空文库批注；保留字面文字",
             );
+            if let Some(rel_end) = aozora_annotation_end(tail) {
+                cursor += rel_end;
+                continue;
+            }
         }
         if let Some((start, end, inline)) = parsed {
             if let Some(ranges) = protected.as_deref_mut() {
@@ -1236,6 +1272,47 @@ mod tests {
                 .collect::<String>(),
             html_ruby
         );
+    }
+
+    #[test]
+    fn document_aozora_counters_zero_nested_annotations_and_pipe_safety() {
+        let source = "一ヶ月《いっかげつ》、市ヶ谷《いちがや》、一ヵ所《いっかしょ》、〆切《しめきり》、二〇〇〇《にせん》。";
+        let chapters = parse(source, SourceFormat::Text, true, None);
+        let p = &chapters[0].paragraphs[0];
+        assert_eq!(p.text, "一ヶ月、市ヶ谷、一ヵ所、〆切、二〇〇〇。");
+        assert!(chapters[0].warnings.is_empty());
+        assert_ranges(source, &chapters);
+
+        // Nested Aozora annotations and annotations containing 《》 are skipped cleanly without false ruby warnings.
+        let annotated = "前［＃「※［＃「さんずい＋夬」］」に傍点］中［＃「漢字《かんじ》」は底本通り］後漢字《かんじ》";
+        let chapters = parse(annotated, SourceFormat::Text, true, None);
+        assert_eq!(chapters[0].warnings.len(), 2);
+        assert!(
+            chapters[0]
+                .warnings
+                .iter()
+                .all(|w| w.message.contains("青空文库批注"))
+        );
+        assert_eq!(
+            chapters[0].paragraphs[0].text,
+            "前［＃「※［＃「さんずい＋夬」］」に傍点］中［＃「漢字《かんじ》」は底本通り］後漢字"
+        );
+        assert_ranges(annotated, &chapters);
+
+        // Literal pipes or cross-sentence pipes must not swallow a later implicit ruby.
+        let piped = "項目A | 項目B。漢字《かんじ》\n前｜後。別字《べつじ》";
+        let chapters = parse(piped, SourceFormat::Text, true, None);
+        let rubies: Vec<_> = chapters[0].paragraphs[0]
+            .inlines
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Ruby { base, reading, .. } => Some((base.as_str(), reading.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rubies, [("漢字", "かんじ"), ("別字", "べつじ")]);
+        assert!(chapters[0].warnings.is_empty());
+        assert_ranges(piped, &chapters);
     }
 
     #[test]

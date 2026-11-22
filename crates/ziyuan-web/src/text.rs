@@ -692,7 +692,9 @@ pub(crate) async fn create_project(
         return Err(ApiError::bad("项目标题不能为空。"));
     }
     if !ziyuan_app::text_project::is_supported_source_language(&body.source_language) {
-        return Err(ApiError::bad("原文语言只支持 ja、en、ko、fr 或 de。"));
+        return Err(ApiError::bad(
+            "原文语言只支持 ja、en、ko、fr、de、ru、es 或 it。",
+        ));
     }
     if body.provenance.source.is_empty() || body.provenance.rights.is_empty() {
         return Err(ApiError::bad(

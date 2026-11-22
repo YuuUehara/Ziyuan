@@ -372,7 +372,7 @@ fn validate_metadata(m: &NewProject) -> Result<()> {
         return Err(invalid("标题不能为空"));
     }
     if !super::is_supported_source_language(&m.source_language) {
-        return Err(invalid("原文语言仅支持 ja/en/ko/fr/de"));
+        return Err(invalid("原文语言仅支持 ja/en/ko/fr/de/ru/es/it"));
     }
     if m.target_language != "zh-CN" {
         return Err(invalid("目标语言仅支持 zh-CN"));

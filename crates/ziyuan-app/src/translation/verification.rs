@@ -1289,6 +1289,10 @@ fn is_hangul(ch: char) -> bool {
     )
 }
 
+fn is_cyrillic(ch: char) -> bool {
+    matches!(ch, '\u{0400}'..='\u{04FF}')
+}
+
 fn first_script_run(
     text: &str,
     predicate: impl Fn(char) -> bool,
@@ -1344,13 +1348,18 @@ fn detect_source_script_leak(
             .map(|sample| format!("译文残留日语假名「{sample}」，请确认是否漏译。")),
         "ko" => first_script_run(&masked, is_hangul, |_| false)
             .map(|sample| format!("译文残留韩文字符「{sample}」，请确认是否漏译。")),
-        "fr" | "de" => {
+        "ru" => first_script_run(&masked, is_cyrillic, |_| false)
+            .map(|sample| format!("译文残留俄语西里尔字符「{sample}」，请确认是否漏译。")),
+        "fr" | "de" | "es" | "it" => {
             const FR_DIACRITICS: &str = "éèêëàâçîïôùûüÿœæÉÈÊËÀÂÇÎÏÔÙÛÜŸŒÆ";
             const DE_DIACRITICS: &str = "äöüßÄÖÜ";
-            let diacritics = if source_language == "fr" {
-                FR_DIACRITICS
-            } else {
-                DE_DIACRITICS
+            const ES_DIACRITICS: &str = "áéíóúüñÁÉÍÓÚÜÑ";
+            const IT_DIACRITICS: &str = "àèéìíîòóùúÀÈÉÌÍÎÒÓÙÚ";
+            let diacritics = match source_language {
+                "fr" => FR_DIACRITICS,
+                "de" => DE_DIACRITICS,
+                "es" => ES_DIACRITICS,
+                _ => IT_DIACRITICS,
             };
             let source_words: std::collections::HashSet<String> = extract_western_words(source)
                 .into_iter()
@@ -1511,6 +1520,27 @@ mod tests {
                 .contains("Straße")
         );
         assert!(detect_source_script_leak("de", "Über die Straße", "穿过街道。", &[]).is_none());
+
+        assert!(
+            detect_source_script_leak("ru", "Привет, мир", "你好 Привет。", &[])
+                .unwrap()
+                .contains("Привет")
+        );
+        assert!(detect_source_script_leak("ru", "Привет, мир", "你好，世界。", &[]).is_none());
+
+        assert!(
+            detect_source_script_leak("es", "El mañana llega", "明天 mañana 到来。", &[])
+                .unwrap()
+                .contains("mañana")
+        );
+        assert!(detect_source_script_leak("es", "El mañana llega", "明天到来。", &[]).is_none());
+
+        assert!(
+            detect_source_script_leak("it", "La città antica", "古老的 città。", &[])
+                .unwrap()
+                .contains("città")
+        );
+        assert!(detect_source_script_leak("it", "La città antica", "古城。", &[]).is_none());
     }
 
     #[test]
