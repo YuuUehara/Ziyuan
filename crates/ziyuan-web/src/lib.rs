@@ -128,6 +128,7 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "project-qa.mjs" => include_str!("project-qa.mjs"),
         "doctor-panel.mjs" => include_str!("doctor-panel.mjs"),
         "quick-glossary.mjs" => include_str!("quick-glossary.mjs"),
+        "neo-panel.mjs" => include_str!("neo-panel.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (

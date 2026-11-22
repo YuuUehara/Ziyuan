@@ -3,6 +3,7 @@
 
 export function buildPaletteSpecs({ viewer = false, tasks = [], statusLabel = {} } = {}) {
   const items = [
+    { id: "hall:neo", label: "新政 · 打开 Neo 枢机功能模式面板（垂拱总揽）", meta: "Neo 模式", keys: "neo shuji 新政 枢机 面板 模式 总览", action: { type: "hall", hall: "#neo" } },
     { id: "hall:translation", label: "前往 · 翰林院（翻译与译稿）", meta: "殿阁", keys: "hanlin translation 翰林院 翻译", action: { type: "hall", hall: "#translation" } },
     { id: "hall:fengtian", label: "前往 · 奉天殿（诏令）", meta: "殿阁", keys: "fengtian edict task 奉天殿 诏令", action: { type: "hall", hall: "#fengtian" } },
     { id: "hall:huagai", label: "前往 · 华盖殿（朝堂制度）", meta: "殿阁", keys: "huagai court mode 华盖殿 朝堂", action: { type: "hall", hall: "#huagai" } },
@@ -14,7 +15,7 @@ export function buildPaletteSpecs({ viewer = false, tasks = [], statusLabel = {}
     { id: "export:json", label: "导出 · 户部度支报表（JSON）", meta: "导出", keys: "duzhi export json 度支 导出", action: { type: "export", format: "json", bom: false } },
     { id: "view:kaocheng", label: "查看 · 考成簿", meta: "只读", keys: "kaocheng 考成 政绩", action: { type: "kaocheng" } },
     { id: "view:doctor", label: "自检 · 环境与配置诊断（ziyuan doctor）", meta: "只读", keys: "doctor diagnose health 自检 诊断 健康 沙箱 模型", action: { type: "doctor" } },
-    { id: "ui:theme", label: "切换主题 · 汝窑天青 / 墨分五色 / 青绿山水", meta: "界面", keys: "theme tianqing mo qinglv 主题 配色", action: { type: "theme" } },
+    { id: "ui:theme", label: "切换主题 · 汝窑天青 / 墨分五色 / 青绿山水 / 宣和缃帙", meta: "界面", keys: "theme tianqing mo qinglv xiangzhi 主题 配色 缃帙", action: { type: "theme" } },
   ];
   if (!viewer) {
     items.push(

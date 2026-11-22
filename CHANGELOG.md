@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.44.0 — 2026-11-22
+
+- **`ziyuan doctor` 只读环境自检、翰林院 QA 误报白名单与连续巡检、译稿一键收术语及 `ziyuan-llm` 拆分（零新增事件与玉玺代码）**：
+  - **`ziyuan doctor` 与 Web `GET /api/doctor` 纯只读自检**：`ziyuan-runtime::haoshe` 新增 `probe_status()` 探针，`ziyuan-app` 新增 `doctor` 模块（`diagnose_workspace` / `format_doctor_report`），一次核查 `.ziyuan/court.log` 完整性与最低可读版本、符号索引缓存、默认模型环境变量就绪态、`.ziyuan/models.json` 合法性（256 KiB／符号链接／明文密钥字段拦截与各官职路由校验）、号舍沙箱与 `ZIYUAN_SANDBOX*`／`ZIYUAN_TEST_COMMANDS`、`jj`/`git` 及译书项目与记忆配置；严格零副作用（绝不创建 `.ziyuan/`）且绝不回显任何密文值。CLI 新增 `ziyuan doctor [--json]`（含补全与帮助）；Web 新增 `GET /api/doctor`（观政可读）、独立模块 `/assets/doctor-panel.mjs`（2 条 Node 单测）与 `Ctrl+K` 命令面板「环境与配置自检」弹窗。
+  - **翰林院 QA 误报白名单与连续巡检栏**：`ziyuan-app::translation::verification` 新增 `QaIgnore` / `KNOWN_QA_CODES` 与每项目 `qa-ignores.json`（不落朝廷事件簿，不影响定稿门控），单块 `qa()` 与整书 `project_qa_report()` 均 O(N) 过滤已忽略项并在汇总中报告 `ignored_issues` 与 `ignores`。CLI 新增 `ziyuan text qa-ignore <项目ID> [<块ID> <段号|-> <问题码> [--note <说明>] [--remove]] [--json]`；Web 新增 `GET/POST /api/text/{project}/qa-ignores`（观政可读、写回 403），`project-qa.mjs` 新增「已忽略 N」徽章、单条「标记忽略」、折叠「恢复检查」列表及译稿页「QA 连续巡检栏」（`createQaNavigator`，支持 `Alt+[` / `Alt+]` 跨块跳转与一键忽略）。
+  - **译稿页一键「收术语 / 收人物」**：`ziyuan-app::translation::materials` 新增 `Translations::quick_add_material`（`QuickMaterialInput` / `QuickMaterialReceipt`），同源词／姓名自动合并允许译法或别名，仅写入本地资料草稿（`material-draft.json`），绝不自动批准上下文或改写译稿；Web 新增 `POST /api/text/{project}/materials/quick-add`（观政 403）、独立模块 `/assets/quick-glossary.mjs`（3 条 Node 单测）及手工翻译工具栏「收术语 / 收人物」弹窗（自动捕获当前选中文本，不影响草稿脏状态）。
+  - **`ziyuan-llm` 模块化拆分与一页命令速查表**：将原 2420 行 `crates/ziyuan-llm/src/lib.rs` 拆分为 `lib.rs`（639 行：配置、路由目录与参考计价）、`openai.rs`（656 行：`OpenAiCompatible` 流式与提示词缓存）与 `tests.rs`（1141 行：全量单测），零公开 API 与行为变更；在 [使用指南](docs/guide.md) 增补 `ziyuan doctor` 与一页 CLI／Web／TUI 命令及快捷键速查表。
+- 登记次版本 `1.44.0`（序号 80，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [体系结构](docs/architecture.md)、[使用指南](docs/guide.md)、[翰林院译书指南](docs/novel-translation.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.44.0 验收记录](docs/acceptance/1.44.0.md)。
+
 ## 1.43.0 — 2026-11-22
 
 - **整书 QA 引擎 O(N) 化、`tools.rs` 模块化拆分、Web 质检模块抽出与 TUI 交互补齐（零新增事件与玉玺代码）**：
