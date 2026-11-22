@@ -2,11 +2,14 @@
 
 ## Unreleased
 
+## 1.45.0 — 2026-11-22
+
 - **奉天门宋韵五境 UI 升级（含「宣和缃帙」与「玄夜秉烛」夜间模式）、「垂拱枢机 · 御前听政台」全局模式与人工译稿一键准奏／定稿（零新增事件与玉玺代码）**：
   - **宋韵五境设色与宋刻乌丝栏版式**：在完整保留古风朝廷与翰林院文本画风的基础上，统一调和暖宣纸色温，新增第四款宋代秘阁藏书淡雅主题「**宣和缃帙**」（`[data-theme="xiangzhi"]`，熟宣暖白配紫檀沉香）与第五款夜间护眼主题「**玄夜秉烛**」（`[data-theme="ye"]`，明代磁青乌金笺与松烟墨底配素绢暖白字与粉青烛影，`color-scheme: dark`，同步适配 `git-delta` 深色高亮）；页首新增空心朱文小印、单行紧致排布与可开关的「**宋刻乌丝栏**」双线书卷装帧及「疏朗卷轴 / 紧凑奏折」行距偏好。
   - **「垂拱枢机 · 御前听政台」全局模式开关（`/assets/neo-panel.mjs`）**：页首提供独立「**垂拱枢机**」拨动开关（`label.pivotal-switch`＋待理会徽章，亦支持 `Alt+N` 与 `Ctrl+K` 切换），拨开即收起左厢六殿展开全幅听政台，拨回即退回传统六殿分理；内设四柱水牌与「**垂拱总览**（御案急递就地批红／票拟／评定、六部当值路线、六殿巡幸罗盘）、**军机速诏**（六道六部诏令锦囊与拟诏台）、**译林枢机**（读取服务端真实 `statuses` 展示整书进度条与章卷牙牌直达）、**雅集与朝纲**（宋韵五境色卡诗笺、乌丝栏／行距开关与三代官制规制笺卡）」四司模式，配 5 条 Node 单测与 Rust 契约测试。
   - **译稿手工编辑器「一键保存并准奏 / 一键保存并定稿」**：`human-editor.mjs` 新增金色按钮「一键保存并准奏」「一键保存并定稿」及 `Ctrl+Enter`／`Cmd+Enter` 快捷键，要求本组全段非空后顺次复用既有服务端 `draft → submit → approve [→ finalize]` 接口（遇错即停、绝不跳过准奏，观政只读隐藏），配 Node 回归单测。
   - **文档与全套 Web 截图刷新**：刷新 [奉天门首屏](docs/images/web-overview.png)、[华盖殿朝堂](docs/images/web-court.png)、[观政只读](docs/images/web-viewer.png)、[翰林院译稿](docs/images/web-text-translation.png)、[垂拱枢机总览](docs/images/web-neo-overview.png)、[宣和缃帙主题](docs/images/web-neo-xiangzhi-theme.png) 与新增 [玄夜秉烛夜间模式](docs/images/web-neo-ye-theme.png) 共 7 张真实浏览器截图，同步更新 [README](README.md)、[使用指南](docs/guide.md)、[翰林院译书指南](docs/novel-translation.md)、[体系结构](docs/architecture.md) 与 [稳定性约定](docs/stability.md)。
+- 登记次版本 `1.45.0`（序号 81，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [体系结构](docs/architecture.md)、[使用指南](docs/guide.md)、[翰林院译书指南](docs/novel-translation.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.45.0 验收记录](docs/acceptance/1.45.0.md)。
 
 ## 1.44.0 — 2026-11-22
 
