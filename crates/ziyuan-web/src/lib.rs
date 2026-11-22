@@ -46,6 +46,7 @@ use crate::personnel::{
 };
 use crate::run::{run, stop_run};
 use crate::state::{AppState, Inner};
+use crate::views::doctor;
 use crate::views::{
     changes_delta, duzhi, duzhi_export_download, events_stream, history, kaocheng, recommend,
     records, state,
@@ -125,6 +126,8 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "import-decoder.mjs" => include_str!("import-decoder.mjs"),
         "command-palette.mjs" => include_str!("command-palette.mjs"),
         "project-qa.mjs" => include_str!("project-qa.mjs"),
+        "doctor-panel.mjs" => include_str!("doctor-panel.mjs"),
+        "quick-glossary.mjs" => include_str!("quick-glossary.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (
@@ -222,6 +225,7 @@ fn router_for(app: AppState) -> Router {
         .route("/history", get(history))
         .route("/recommend", get(recommend))
         .route("/kaocheng", get(kaocheng))
+        .route("/doctor", get(doctor))
         .route("/duzhi", get(duzhi))
         .route("/duzhi/export", get(duzhi_export_download))
         .route("/budget", post(budget))
@@ -362,6 +366,10 @@ fn router_for(app: AppState) -> Router {
             get(text::verification_associations),
         )
         .route("/text/{project}/qa-report", get(text::qa_report))
+        .route(
+            "/text/{project}/qa-ignores",
+            get(text::qa_ignores).post(text::qa_ignore_update),
+        )
         .route("/text/{project}/blocks/{block}/qa", get(text::qa))
         .route(
             "/text/{project}/blocks/{block}/tm-suggest",

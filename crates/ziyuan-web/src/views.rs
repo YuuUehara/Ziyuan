@@ -223,6 +223,15 @@ pub(crate) async fn recommend(
     Ok(Json(json!(ranked)))
 }
 
+/// 全只读环境与配置自检（不落盘、不回显密文，观政只读可读）。
+pub(crate) async fn doctor(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let report = tokio::task::spawn_blocking(move || ziyuan_app::diagnose_workspace(&root))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(json!(report)))
+}
+
 /// 考成簿（纯文本）。
 pub(crate) async fn kaocheng(State(app): State<AppState>) -> Result<Json<Value>, ApiError> {
     let report = app.with_session(|s| Ok(kaocheng_report(s.court()))).await?;

@@ -95,6 +95,8 @@ pub(crate) enum Command {
     Tui,
     /// 检查事件簿：本版能否读、至少要哪个版本才能打开。
     Migrate,
+    /// 全只读环境与配置自检（不落盘、不回显密文）。
+    Doctor,
     /// 登录 ChatGPT 订阅；`true` 只列出可选模型。
     Login(bool),
     Logout,
@@ -294,6 +296,7 @@ pub(crate) fn parse(mut args: Vec<String>) -> Result<Command, Box<dyn Error>> {
         "tasks" => no_args(args, Command::Tasks)?,
         "tui" => no_args(args, Command::Tui)?,
         "migrate" => no_args(args, Command::Migrate)?,
+        "doctor" => no_args(args, Command::Doctor)?,
         "login" => match args.as_slice() {
             [] => Command::Login(false),
             [flag] if flag == "--models" => Command::Login(true),

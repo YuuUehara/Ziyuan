@@ -15,6 +15,7 @@
 | 选择参考、确认外发材料 | [译文记忆](memory.md#显式选用参考) |
 | 词证勘校、版本快照、通读交稿与用量账本 | [词证与逐段勘校](novel-translation.md#词证与逐段勘校)、[版本与回填](novel-translation.md#译稿版本与格式回填)、[用量账本](novel-translation.md#逐阶段用量账本与请求材料精简) |
 | 关注作品更新 | [作品更新提醒](subscriptions.md) |
+| 快速体检配置 / 查命令快捷键 | [环境自检（doctor）](#环境自检doctor)、[一页命令与快捷键速查](#一页命令与快捷键速查) |
 
 代码结构和实现取舍见 [architecture.md](architecture.md)。本指南主要用 Bash 示例；PowerShell 设置变量要用 `$env:变量名 = '值'`，不要直接照抄 `export`。示例中的任务 ID 都要换成当前项目的实际编号；同一任务的 `apply`、`discard` 等操作是不同选择，不要依次全执行。
 
@@ -150,6 +151,18 @@ ziyuan ceiling clerk:works --scope crates --tools search_code   # default 取消
 - **提示词缓存与缓存用量透明**：通过 `ZIYUAN_LLM_PROMPT_CACHE` 控制提示词缓存断点注入（`auto` 默认、`anthropic`/`on` 强制注入、`off` 关闭）。在 `auto` 模式下，当模型名含 `claude` 或接口地址含 `anthropic` 时自动为系统提示、工具定义末尾与倒数第二条历史消息注入最多 3 处 `cache_control: {"type":"ephemeral"}` 断点，OpenAI / DeepSeek / Ollama 请求体保持原样不变。响应中的缓存命中与写入 token（兼容 OpenAI `prompt_tokens_details.cached_tokens`、Responses API `input_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens` 与 Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`）会自动记账并展示在 CLI `ziyuan budget`（度支奏销）、TUI 页头（`缓存命中 X%`）与 Web 顶部／诏令卡片。
 
 小说与整本文本翻译（手工优先与模型辅助）的完整流程见[翰林院译书指南](novel-translation.md)：支持网页、终端与 `text translate`、`text review`、`text revise`、`text zhupi`、`text finalize`、`text human` 等命令，所有落盘仍须人工确认或准奏。上传原文与再分发译文的权利须另行核对；长篇连续翻译的文学质量尚未验证。
+
+## 环境自检（doctor）
+
+初次配置模型、排查沙箱或迁移工作区前，可随时运行纯只读自检：
+
+```bash
+ziyuan doctor           # 人类可读诊断报告
+ziyuan doctor --json    # 结构化 JSON（适合脚本与排错附报）
+```
+
+- **检查项**：朝廷事件簿 `.ziyuan/court.log` 完整性与最低可读版本、符号索引缓存、默认模型环境变量就绪态、`.ziyuan/models.json` 合法性（含 256 KiB 限制、符号链接拒绝、明文密钥字段拦截与各官职路由校验）、号舍沙箱可用性（Windows AppContainer / Linux `bwrap` / macOS `sandbox-exec`）及 `ZIYUAN_SANDBOX` / `ZIYUAN_TEST_COMMANDS`、版本控制工具（`jj` / `git`）以及译书项目与翻译记忆配置。
+- **安全与零副作用**：**绝不创建 `.ziyuan/` 或修改任何文件**，也**绝不回显任何 API Key 或令牌值**（只报告环境变量是否已设置）。Web 端按 `Ctrl+K`／`Cmd+K` 打开命令面板并选择「**环境与配置自检**」（`GET /api/doctor`，观政令牌亦可只读查看）即可看到同一份诊断结果。
 
 ## 奉天门：Web 界面
 
@@ -637,6 +650,40 @@ jj bookmark set work/my-feature -r @- && jj git push --remote origin -b work/my-
 - 考成簿多出一行「御前：怠政」，记着代批了多少件。史官记取材嘉靖修玄、万历三十年不上朝；回朝时轮到海瑞的《治安疏》。
 
 **史官记：** 改制时附一段史事（彩蛋）。改为内阁制是「侄儿，四叔来看你了」；从内阁改回丞相制是土木堡之变，「大元，杀回来了」；从亲政复设丞相要先看《皇明祖训》。
+
+## 一页命令与快捷键速查
+
+### 常用 CLI 命令
+
+| 场景 | 命令 |
+| --- | --- |
+| 环境体检 / 兼容检查 | `ziyuan doctor [--json]`、`ziyuan migrate [--json]` |
+| 开朝 / 朝堂 / 百官 / 起居注 | `ziyuan init`、`ziyuan court`、`ziyuan officials`、`ziyuan history` |
+| 模型配置与按部路由 | `ziyuan model list`、`ziyuan model --dept works <配置名>`、`ziyuan ceiling <官职> ...` |
+| 下诏 / 规划 / 续办 / 执行 | `ziyuan edict --plan "…"`、`ziyuan edict --from-plan <ID>`、`ziyuan edict --resume-failed <ID>`、`ziyuan run [--jobs N] [--watch]` |
+| 审阅 / 准奏 / 撤回 / 评定 | `ziyuan diff <ID>`、`ziyuan apply <ID> [--skip 2] [--commit]`、`ziyuan revert <ID>`、`ziyuan review <ID> accept` |
+| 译书导入 / 整书质检 / 误报忽略 | `ziyuan text import`、`ziyuan text qa-report <项目>`、`ziyuan text qa-ignore <项目> [<块> <段\|-> <码> --note … \| --remove]` |
+| 人工译稿 / 导出 | `ziyuan text human show\|save\|submit\|approve\|finalize <项目> <块>`、`ziyuan text export-finished <项目>` |
+| 启动 Web / TUI | `ziyuan serve [--port 8080] [--viewer]`、`ziyuan tui` |
+
+### Web 奉天门快捷键
+
+| 快捷键 | 作用 |
+| --- | --- |
+| `Ctrl+K` / `Cmd+K` | 打开命令面板（跨殿跳转、打开环境自检、刷新状态） |
+| `Ctrl+S` / `Cmd+S` | 在译书手工编辑器中显式保存当前人工草稿 |
+| `Alt+[` / `Alt+]` | QA 连续巡检栏激活时，切换上一条 / 下一条整书质检问题 |
+| `Esc` | 关闭命令面板或环境自检弹窗 |
+
+### TUI 紫禁城常用按键
+
+| 按键 | 作用 |
+| --- | --- |
+| `1`–`4` / `Tab` | 切换「诏令 / 百官 / 起居注 / 人工译稿」页签 |
+| `/` 与 `Esc` | 诏令列表即时关键词快筛与清除（纯视图态，不写事件簿） |
+| `B` | 打开译书项目概览与整书确定性 QA 汇总 |
+| `C` / `F` / `A` / `E` | 失败诏令续办 / 并行写分办 / 运行中追加 DAG 子诏令 / 调整 DAG 依赖 |
+| `r` / `a` / `x` / `X` / `R` | 执行待办 / 准奏落盘 / 刑部复勘 / 平反 / 查实录 |
 
 ## 截图来源与验证范围
 

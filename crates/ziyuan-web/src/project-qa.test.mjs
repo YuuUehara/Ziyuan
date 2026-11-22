@@ -7,6 +7,7 @@ import {
   filterProjectQaIssues,
   renderProjectQaDashboard,
   createProjectQaController,
+  createQaNavigator,
 } from "./project-qa.mjs";
 
 function fakeDoc() {
@@ -194,4 +195,127 @@ test("createProjectQaController discards stale responses after project reset", a
   assert.equal(ctrl.getState().project, "book-b");
   assert.equal(ctrl.getState().report, null);
   assert.equal(summaryHost.children.length, 0);
+});
+
+test("renderProjectQaDashboard renders ignore/restore controls and hides them for viewer", () => {
+  const doc = fakeDoc();
+  const report = {
+    founded: false,
+    summary: {
+      total_blocks: 1,
+      translated_blocks: 1,
+      untranslated_blocks: 0,
+      clean_blocks: 0,
+      blocks_with_issues: 1,
+      total_issues: 1,
+      ignored_issues: 1,
+    },
+    by_code: { punctuation_mismatch: 1 },
+    issues: [
+      { block: "c0001-b0001", paragraph: "c0001-p0001", code: "punctuation_mismatch", message: "标点异常" },
+    ],
+    ignores: [
+      { block: "c0001-b0001", paragraph: "c0001-p0002", code: "source_script_leak", note: "刻意保留" },
+    ],
+  };
+
+  const chips = buildProjectQaSummaryChips(report);
+  assert.ok(chips.some(([label]) => label === "已忽略 1"));
+
+  const ignoredCalls = [];
+  const restoredCalls = [];
+  const summaryHost = doc.makeHost();
+  const filtersHost = doc.makeHost();
+  const issuesHost = doc.makeHost();
+
+  renderProjectQaDashboard({
+    doc,
+    report,
+    viewer: false,
+    summaryHost,
+    filtersHost,
+    issuesHost,
+    onIgnore: (i) => ignoredCalls.push(i),
+    onUnignore: (e) => restoredCalls.push(e),
+  });
+
+  // Issue row has title, 定位编辑, 标记忽略
+  const issueHead = issuesHost.children[0].children[0].children[0];
+  assert.equal(issueHead.children.length, 3);
+  assert.equal(issueHead.children[2].textContent, "标记忽略");
+  issueHead.children[2].click();
+  assert.equal(ignoredCalls.length, 1);
+  assert.equal(ignoredCalls[0].code, "punctuation_mismatch");
+
+  // Ignored details box has 恢复检查 button
+  const details = issuesHost.children[1];
+  assert.equal(details.tag, "details");
+  const restoreBtn = details.children[1].children[0].children[0].children[1];
+  assert.equal(restoreBtn.textContent, "恢复检查");
+  restoreBtn.click();
+  assert.equal(restoredCalls.length, 1);
+  assert.equal(restoredCalls[0].code, "source_script_leak");
+
+  // Viewer mode hides both 标记忽略 and 恢复检查
+  renderProjectQaDashboard({
+    doc,
+    report,
+    viewer: true,
+    summaryHost,
+    filtersHost,
+    issuesHost,
+    onIgnore: () => {},
+    onUnignore: () => {},
+  });
+  assert.equal(issuesHost.children[0].children[0].children[0].children.length, 2);
+  assert.equal(issuesHost.children[1].children[1].children[0].children[0].children.length, 1);
+});
+
+test("createQaNavigator steps prev/next cyclically, ignores current item, and closes when empty", async () => {
+  const doc = fakeDoc();
+  const host = doc.makeHost();
+  host.hidden = true;
+  const navigated = [];
+  const ignored = [];
+
+  const nav = createQaNavigator({
+    host,
+    doc,
+    formatLocation: (id) => id,
+    onNavigate: (t) => navigated.push(t),
+    onIgnore: async (item) => { ignored.push(item.code); },
+    isViewer: () => false,
+  });
+
+  const list = [
+    { block: "b1", paragraph: "p1", code: "number_mismatch", message: "数字不符" },
+    { block: "b2", paragraph: "p2", code: "punctuation_mismatch", message: "标点异常" },
+  ];
+  nav.start(list, 0);
+  assert.equal(nav.isActive(), true);
+  assert.equal(host.hidden, false);
+  assert.ok(collectText(host).includes("QA 1/2"));
+
+  nav.next();
+  assert.equal(nav.getState().index, 1);
+  assert.deepEqual(navigated.at(-1), { block: "b2", paragraph: "p2", kind: "draft" });
+
+  // Wrap around to 0
+  nav.next();
+  assert.equal(nav.getState().index, 0);
+
+  // Wrap backward to 1
+  nav.prev();
+  assert.equal(nav.getState().index, 1);
+
+  // Ignore current removes it and jumps to remaining item
+  await nav.ignoreCurrent();
+  assert.deepEqual(ignored, ["punctuation_mismatch"]);
+  assert.equal(nav.getState().total, 1);
+  assert.equal(nav.getState().current.code, "number_mismatch");
+
+  // Ignoring last item closes bar
+  await nav.ignoreCurrent();
+  assert.equal(nav.isActive(), false);
+  assert.equal(host.hidden, true);
 });

@@ -96,6 +96,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     if let Command::Note(action) = command {
         return note_commands::run(action, json);
     }
+    if matches!(command, Command::Doctor) {
+        let root = env::current_dir()?;
+        let report = ziyuan_app::diagnose_workspace(&root);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print!("{}", ziyuan_app::format_doctor_report(&report));
+        }
+        return Ok(());
+    }
     let log = EventLog::new(&env::current_dir()?);
     if json && matches!(command, Command::Migrate) {
         // 不经 Session：事件簿读不了时也要给出报告。读不了时退出码为 1。

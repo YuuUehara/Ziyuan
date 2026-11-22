@@ -1937,3 +1937,82 @@ fn project_qa_report_cli_aggregates_blocks_and_json() {
     assert_eq!(report["issues"].as_array().unwrap().len(), 2);
     no_court(root);
 }
+
+#[test]
+fn doctor_and_qa_ignore_cli_roundtrip() {
+    let dir = TempDir::new("doctor-qa-ignore");
+    let root = dir.path();
+
+    // 1. ziyuan doctor --json 在未建朝目录只读且绝不创建 .ziyuan/。
+    let doc = ok_json(root, &["doctor", "--json"]);
+    assert!(doc["version"].is_string());
+    assert!(doc["overall"].is_string());
+    assert!(doc["checks"].as_array().is_some_and(|a| !a.is_empty()));
+    assert!(!root.join(".ziyuan").exists(), "doctor 绝不能创建 .ziyuan/");
+
+    // 2. qa-ignore 列出 / 添加 / 在 qa-report 生效 / 移除恢复。
+    let id = init_json(root, "忽略质检", "ja");
+    dir.write("ch1.txt", "雨の夜だった。\n");
+    let project = ok_json(root, &["text", "import", &id, "ch1.txt", "--json"]);
+    let b1 = &project["chapters"][0]["blocks"][0];
+    let b1_id = b1["block_id"].as_str().unwrap();
+    let p0 = b1["paragraphs"][0]["id"].as_str().unwrap();
+    let zh_dir = root.join("translations").join(&id).join(b1_id);
+    std::fs::create_dir_all(&zh_dir).unwrap();
+    std::fs::write(
+        zh_dir.join("zh.json"),
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "block_id": b1_id,
+            "paragraphs": [{ "id": p0, "text": "那是一个雨の夜?" }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let empty = ok_json(root, &["text", "qa-ignore", &id, "--json"]);
+    assert_eq!(empty["ignores"].as_array().unwrap().len(), 0);
+
+    let added = ok_json(
+        root,
+        &[
+            "text",
+            "qa-ignore",
+            &id,
+            b1_id,
+            p0,
+            "source_script_leak",
+            "--note",
+            "刻意保留原文助词",
+            "--json",
+        ],
+    );
+    assert_eq!(added["removed"], false);
+    assert_eq!(added["ignores"].as_array().unwrap().len(), 1);
+
+    let report = ok_json(root, &["text", "qa-report", &id, "--json"]);
+    assert_eq!(report["summary"]["total_issues"], 1);
+    assert_eq!(report["summary"]["ignored_issues"], 1);
+    assert_eq!(report["ignores"].as_array().unwrap().len(), 1);
+
+    let removed = ok_json(
+        root,
+        &[
+            "text",
+            "qa-ignore",
+            &id,
+            b1_id,
+            p0,
+            "source_script_leak",
+            "--remove",
+            "--json",
+        ],
+    );
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["ignores"].as_array().unwrap().len(), 0);
+
+    let restored = ok_json(root, &["text", "qa-report", &id, "--json"]);
+    assert_eq!(restored["summary"]["total_issues"], 2);
+    assert_eq!(restored["summary"]["ignored_issues"], 0);
+    no_court(root);
+}

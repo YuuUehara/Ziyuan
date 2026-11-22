@@ -185,6 +185,69 @@ pub(crate) async fn qa_report(
     Ok(Json(value))
 }
 
+/// 列出本项目已忽略的 QA 误报（纯只读，观政可读）。
+pub(crate) async fn qa_ignores(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let project_resp = project.clone();
+    let ignores = blocking(move || {
+        Translations::new(&root)
+            .qa_ignores(&project)
+            .map_err(material)
+    })
+    .await?;
+    Ok(Json(json!({ "project": project_resp, "ignores": ignores })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QaIgnoreBody {
+    block: String,
+    #[serde(default)]
+    paragraph: String,
+    code: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    remove: bool,
+}
+
+/// 新增或移除单条 QA 误报忽略记录（仅改本项目 qa-ignores.json，不落事件簿）。
+pub(crate) async fn qa_ignore_update(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+    Json(body): Json<QaIgnoreBody>,
+) -> Result<Json<Value>, ApiError> {
+    let root = app.0.config.root.clone();
+    let project_resp = project.clone();
+    let removed = body.remove;
+    let ignores = blocking(move || {
+        let t = Translations::new(&root);
+        if body.remove {
+            t.remove_qa_ignore(&project, &body.block, &body.paragraph, &body.code)
+                .map_err(material)
+        } else {
+            t.add_qa_ignore(
+                &project,
+                &body.block,
+                &body.paragraph,
+                &body.code,
+                &body.note,
+            )
+            .map_err(material)
+        }
+    })
+    .await?;
+    app.emit("changed", json!({}));
+    Ok(Json(json!({
+        "project": project_resp,
+        "removed": removed,
+        "ignores": ignores,
+    })))
+}
+
 /// 段旁实时译文记忆推荐（纯只读，观政可读，仅当前项目，不自动写入或覆盖译稿）。
 pub(crate) async fn tm_suggest(
     State(app): State<AppState>,

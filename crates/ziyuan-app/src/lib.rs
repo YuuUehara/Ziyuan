@@ -9,6 +9,7 @@ mod cabinet;
 mod censorate;
 mod courier;
 mod delta;
+pub mod doctor;
 mod edicts;
 mod exam;
 mod follow;
@@ -41,6 +42,9 @@ pub use courier::{PullReport, changelog_commits};
 pub use delta::{
     AnsiStyle, Delta, DeltaStyle, DeltaTheme, ansi_html, ansi_lines, delta, unified_diff,
     unified_hunks,
+};
+pub use doctor::{
+    DoctorCheck, DoctorReport, DoctorSeverity, diagnose_workspace, format_doctor_report,
 };
 pub use edicts::{
     CHANGELOG_NOTE, PROXY_REVIEW_NOTE, RevertAction, RevertFilePreview, RevertReport, RevertStatus,

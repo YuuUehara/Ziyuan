@@ -3356,3 +3356,151 @@ fn format_location_and_preflight_avoid_duplicate_block_blockers() {
             .all(|b| b.contains("译稿第") && b.contains("未开始"))
     );
 }
+
+#[test]
+fn qa_ignore_filters_single_and_project_qa_and_restores_on_remove() {
+    let fx = Fx::new("qa-ignore");
+    let t = fx.t();
+    let block = fx.block(B1);
+    let p1 = block.paragraphs[0].id.clone();
+    let p2 = block.paragraphs[1].id.clone();
+    let body = fx.candidate(B1, |ps| {
+        // 第1段保留原文数字 1 改成 999 -> number_mismatch，并去掉假名避免重叠
+        ps[0].text = "第一段 999。".into();
+        // 第2段故意留假名 の -> source_script_leak
+        ps[1].text = "第2段の译文。".into();
+        for (idx, item) in ps.iter_mut().enumerate().skip(2) {
+            item.text = format!("第{}段译文。", idx + 1);
+        }
+    });
+    let out = fx.zh_path(B1);
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    fs::write(&out, body).unwrap();
+
+    let before = t.project_qa_report(&fx.project, None).unwrap();
+    assert!(
+        before
+            .issues
+            .iter()
+            .any(|i| i.paragraph == p1 && i.code == "number_mismatch"),
+        "{:?}",
+        before.issues
+    );
+    assert!(
+        before
+            .issues
+            .iter()
+            .any(|i| i.paragraph == p2 && i.code == "source_script_leak"),
+        "{:?}",
+        before.issues
+    );
+    assert_eq!(before.summary.ignored_issues, 0);
+
+    // 拒绝未知问题码。
+    assert!(
+        t.add_qa_ignore(&fx.project, B1, &p1, "bogus_code", "")
+            .is_err()
+    );
+
+    // 标记忽略 source_script_leak 后，单块 qa 与整书 project_qa_report 一致过滤。
+    let ignores = t
+        .add_qa_ignore(
+            &fx.project,
+            B1,
+            &p2,
+            "source_script_leak",
+            "刻意保留原文拟声词",
+        )
+        .unwrap();
+    assert_eq!(ignores.len(), 1);
+
+    let after_single = t.qa(&fx.project, B1).unwrap();
+    assert_eq!(after_single.ignored_issues, 1);
+    assert!(
+        !after_single
+            .issues
+            .iter()
+            .any(|i| i.paragraph == p2 && i.code == "source_script_leak")
+    );
+
+    let after_proj = t.project_qa_report(&fx.project, None).unwrap();
+    assert_eq!(after_proj.summary.ignored_issues, 1);
+    assert_eq!(after_proj.ignores.len(), 1);
+    assert!(
+        !after_proj
+            .issues
+            .iter()
+            .any(|i| i.paragraph == p2 && i.code == "source_script_leak")
+    );
+    assert_eq!(after_proj.issues.len(), after_single.issues.len());
+
+    // 取消忽略后恢复提示。
+    let remaining = t
+        .remove_qa_ignore(&fx.project, B1, &p2, "source_script_leak")
+        .unwrap();
+    assert!(remaining.is_empty());
+    let restored = t.project_qa_report(&fx.project, None).unwrap();
+    assert_eq!(restored.summary.ignored_issues, 0);
+    assert!(
+        restored
+            .issues
+            .iter()
+            .any(|i| i.paragraph == p2 && i.code == "source_script_leak")
+    );
+}
+
+#[test]
+fn quick_add_material_adds_and_merges_term_and_person_without_auto_approving() {
+    let fx = Fx::new("quick-mat");
+    let t = fx.t();
+
+    let r1 = t
+        .quick_add_material(
+            &fx.project,
+            &QuickMaterialInput::Term {
+                source: "王都".into(),
+                target: "王城".into(),
+                category: Some("place".into()),
+                note: Some("初见".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(r1.kind, "term");
+    assert!(!r1.updated_existing);
+
+    // 同源词再次收录时自动合并允许译法，不重复建项。
+    let r2 = t
+        .quick_add_material(
+            &fx.project,
+            &QuickMaterialInput::Term {
+                source: "王都".into(),
+                target: "都城".into(),
+                category: None,
+                note: None,
+            },
+        )
+        .unwrap();
+    assert!(r2.updated_existing);
+    assert_eq!(r2.id, r1.id);
+
+    let r3 = t
+        .quick_add_material(
+            &fx.project,
+            &QuickMaterialInput::Person {
+                name: "艾琳".into(),
+                alias: Some("琳儿".into()),
+                voice: Some("沉稳".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(r3.kind, "person");
+    assert!(!r3.updated_existing);
+
+    let draft = t.material_draft(&fx.project).unwrap().unwrap();
+    assert_eq!(draft.material.terms.len(), 1);
+    assert_eq!(draft.material.terms[0].allowed, vec!["王城", "都城"]);
+    assert_eq!(draft.material.persons.len(), 1);
+    assert_eq!(draft.material.persons[0].aliases, vec!["琳儿"]);
+    // 严守人工审批边界：不自动批准上下文快照。
+    assert!(t.current_context(&fx.project).unwrap().is_none());
+}

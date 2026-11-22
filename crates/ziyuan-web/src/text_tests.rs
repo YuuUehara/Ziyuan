@@ -2928,3 +2928,153 @@ async fn project_qa_report_and_tm_suggest_are_read_only_viewer_safe_and_scoped()
     assert!(!root.join(".ziyuan/court.log").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qa_ignores_and_quick_add_material_http_roundtrip() {
+    let (base, root) = start("qa-ignore-quick-mat", false).await;
+    let p = project_files(&root, "校对快录", &[("ch1.txt", "雨の夜だった。\n")]);
+    let b1 = &p.chapters[0].blocks[0];
+    let p0 = &b1.paragraphs[0].id;
+    let zh_dir = root.join(block_dir_rel(&p.id, &b1.block_id));
+    fs::create_dir_all(&zh_dir).unwrap();
+    fs::write(
+        zh_dir.join("zh.json"),
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "block_id": b1.block_id,
+            "paragraphs": [{ "id": p0, "text": "那是一个雨の夜?" }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let ig_route = format!("/text/{}/qa-ignores", p.id);
+    let quick_route = format!("/text/{}/materials/quick-add", p.id);
+
+    // 未登录 401。
+    assert_eq!(call(&base, &ig_route, None, None).await.0, 401);
+    // 观政可读 qa-ignores，但写 qa-ignores / quick-add 一律 403。
+    let (code, empty) = call(&base, &ig_route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{empty}");
+    assert_eq!(empty["ignores"], json!([]));
+    assert_eq!(
+        call(
+            &base,
+            &ig_route,
+            Some(VIEWER),
+            Some(json!({ "block": b1.block_id, "paragraph": p0, "code": "source_script_leak" }))
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(
+            &base,
+            &quick_route,
+            Some(VIEWER),
+            Some(json!({ "kind": "term", "source": "王都", "target": "王城" }))
+        )
+        .await
+        .0,
+        403
+    );
+
+    // 皇帝标记忽略 -> qa-report 实时过滤 -> 取消忽略恢复。
+    let (code, added) = call(
+        &base,
+        &ig_route,
+        Some(TOKEN),
+        Some(json!({
+            "block": b1.block_id,
+            "paragraph": p0,
+            "code": "source_script_leak",
+            "note": "保留原文效果"
+        })),
+    )
+    .await;
+    assert_eq!(code, 200, "{added}");
+    assert_eq!(added["ignores"].as_array().unwrap().len(), 1);
+
+    let (code, report) = call(
+        &base,
+        &format!("/text/{}/qa-report", p.id),
+        Some(VIEWER),
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{report}");
+    assert_eq!(report["summary"]["total_issues"], json!(1));
+    assert_eq!(report["summary"]["ignored_issues"], json!(1));
+
+    let (code, removed) = call(
+        &base,
+        &ig_route,
+        Some(TOKEN),
+        Some(json!({
+            "block": b1.block_id,
+            "paragraph": p0,
+            "code": "source_script_leak",
+            "remove": true
+        })),
+    )
+    .await;
+    assert_eq!(code, 200, "{removed}");
+    assert_eq!(removed["ignores"], json!([]));
+
+    // 一键收术语 + 同源词合并 + 收人物，不自动批准上下文。
+    let (code, r1) = call(
+        &base,
+        &quick_route,
+        Some(TOKEN),
+        Some(json!({
+            "kind": "term",
+            "source": "王都",
+            "target": "王城",
+            "category": "place",
+            "note": "首见"
+        })),
+    )
+    .await;
+    assert_eq!(code, 200, "{r1}");
+    assert_eq!(r1["kind"], json!("term"));
+    assert_eq!(r1["updated_existing"], json!(false));
+
+    let (code, r2) = call(
+        &base,
+        &quick_route,
+        Some(TOKEN),
+        Some(json!({
+            "kind": "term",
+            "source": "王都",
+            "target": "都城"
+        })),
+    )
+    .await;
+    assert_eq!(code, 200, "{r2}");
+    assert_eq!(r2["updated_existing"], json!(true));
+    assert_eq!(r2["id"], r1["id"]);
+
+    let (code, r3) = call(
+        &base,
+        &quick_route,
+        Some(TOKEN),
+        Some(json!({
+            "kind": "person",
+            "name": "艾琳",
+            "alias": "琳儿",
+            "voice": "沉稳"
+        })),
+    )
+    .await;
+    assert_eq!(code, 200, "{r3}");
+    assert_eq!(r3["kind"], json!("person"));
+
+    let t = ziyuan_app::translation::Translations::new(&root);
+    let draft = t.material_draft(&p.id).unwrap().unwrap();
+    assert_eq!(draft.material.terms.len(), 1);
+    assert_eq!(draft.material.terms[0].allowed, vec!["王城", "都城"]);
+    assert_eq!(draft.material.persons.len(), 1);
+    assert!(t.current_context(&p.id).unwrap().is_none());
+    fs::remove_dir_all(root).unwrap();
+}

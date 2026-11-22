@@ -337,8 +337,8 @@ pub(crate) fn parse(args: Vec<String>) -> Result<TextAction, Box<dyn Error>> {
             TextAction::Verification(crate::verification_commands::parse(&args)?)
         }
         "translate" | "review" | "revise" | "zhupi" | "finalize" | "reopen" | "context"
-        | "status" | "resume" | "references" | "qa" | "qa-report" | "termbase" | "concordance"
-        | "tm" | "comment" | "compare" | "version" => {
+        | "status" | "resume" | "references" | "qa" | "qa-report" | "qa-ignore" | "termbase"
+        | "concordance" | "tm" | "comment" | "compare" | "version" => {
             TextAction::Translation(crate::translation_commands::parse(&args)?)
         }
         other => {

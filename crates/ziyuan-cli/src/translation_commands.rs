@@ -33,6 +33,9 @@ pub(crate) const TRANSLATION_HELP: &str = r#"译书（均支持 --json）：
   ziyuan text context diff <项目ID>                    只读对比本地草稿与已批准资料
   ziyuan text qa <项目ID> <块ID>                       确定性检查（空译、数字、段号、源语残留、标点、术语）
   ziyuan text qa-report <项目ID> [--json]              整书级批量确定性 QA 汇总（纯只读，汇总各块与问题分布）
+  ziyuan text qa-ignore <项目ID> [--json]              列出已忽略的 QA 误报白名单
+  ziyuan text qa-ignore <项目ID> <块ID> <段号|-> <问题码> [--note <说明>] [--remove] [--json]
+                                                    标记忽略或取消忽略指定 QA 误报（仅写本地 qa-ignores.json）
   ziyuan text termbase export <项目ID> <术语表.csv> [--bom]
                                                     导出本地草稿术语/人物 CSV（--bom 加 UTF-8 BOM 适配 Excel）
   ziyuan text termbase propose <项目ID> <块ID> [--write]
@@ -91,6 +94,15 @@ pub(crate) enum TranslationAction {
     ContextDiff(String),
     Qa(String, String),
     QaReport(String),
+    QaIgnoreList(String),
+    QaIgnoreEdit {
+        project: String,
+        block: String,
+        paragraph: String,
+        code: String,
+        note: String,
+        remove: bool,
+    },
     TermbaseExport(String, PathBuf, bool),
     TermbasePropose(String, String, bool),
     TermbaseImport(String, PathBuf),
@@ -211,6 +223,47 @@ pub(crate) fn parse(args: &[String]) -> Result<TranslationAction, Box<dyn Error>
         ["qa-report", p] if positional(p) => TranslationAction::QaReport((*p).into()),
         ["qa-report", ..] => {
             return Err("用法: ziyuan text qa-report <项目ID> [--json]".into());
+        }
+        ["qa-ignore", p] if positional(p) => TranslationAction::QaIgnoreList((*p).into()),
+        ["qa-ignore", p, b, para, code, rest @ ..]
+            if positional(p) && positional(b) && positional(para) && positional(code) =>
+        {
+            let mut note = String::new();
+            let mut remove = false;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--remove" => {
+                        remove = true;
+                        i += 1;
+                    }
+                    "--note" => {
+                        let Some(val) = rest.get(i + 1) else {
+                            return Err("用法: ziyuan text qa-ignore <项目ID> <块ID> <段号|-> <问题码> [--note <说明>] [--remove]".into());
+                        };
+                        note = (*val).to_owned();
+                        i += 2;
+                    }
+                    _ => {
+                        return Err("用法: ziyuan text qa-ignore <项目ID> <块ID> <段号|-> <问题码> [--note <说明>] [--remove]".into());
+                    }
+                }
+            }
+            TranslationAction::QaIgnoreEdit {
+                project: (*p).into(),
+                block: (*b).into(),
+                paragraph: if *para == "-" {
+                    String::new()
+                } else {
+                    (*para).into()
+                },
+                code: (*code).into(),
+                note,
+                remove,
+            }
+        }
+        ["qa-ignore", ..] => {
+            return Err("用法: ziyuan text qa-ignore <项目ID> [<块ID> <段号|-> <问题码> [--note <说明>] [--remove]] [--json]".into());
         }
         ["termbase", "export", p, f] if positional(p) && positional(f) => {
             TranslationAction::TermbaseExport((*p).into(), (*f).into(), false)
@@ -891,9 +944,83 @@ pub(crate) fn run(action: TranslationAction, json: bool) -> Result<(), Box<dyn E
                     };
                     println!("{} [{}] {}", loc, issue.code, issue.message);
                 }
+                if s.ignored_issues > 0 {
+                    println!(
+                        "已忽略误报：{} 条（运行 ziyuan text qa-ignore {project} 查看或恢复）。",
+                        s.ignored_issues
+                    );
+                }
                 if report.issues.is_empty() {
                     println!("已译块未发现确定性检查问题（不代表语义正确）。");
                 }
+            }
+            return Ok(());
+        }
+        TranslationAction::QaIgnoreList(project) => {
+            let ignores = translations.qa_ignores(&project)?;
+            if json {
+                print_json(serde_json::json!({
+                    "project": project,
+                    "ignores": ignores,
+                }))?;
+            } else if ignores.is_empty() {
+                println!("项目 {project} 尚无忽略的 QA 误报记录。");
+            } else {
+                println!("项目 {project} 已忽略 QA 误报 {} 条：", ignores.len());
+                for item in &ignores {
+                    let loc = if item.paragraph.is_empty() {
+                        item.block.clone()
+                    } else {
+                        format!("{} {}", item.block, item.paragraph)
+                    };
+                    if item.note.is_empty() {
+                        println!("  {loc} [{}]", item.code);
+                    } else {
+                        println!("  {loc} [{}] —— {}", item.code, item.note);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        TranslationAction::QaIgnoreEdit {
+            project,
+            block,
+            paragraph,
+            code,
+            note,
+            remove,
+        } => {
+            let ignores = if remove {
+                translations.remove_qa_ignore(&project, &block, &paragraph, &code)?
+            } else {
+                translations.add_qa_ignore(&project, &block, &paragraph, &code, &note)?
+            };
+            if json {
+                print_json(serde_json::json!({
+                    "project": project,
+                    "removed": remove,
+                    "ignores": ignores,
+                }))?;
+            } else if remove {
+                println!(
+                    "已恢复检查 {block} {} [{code}]（剩余忽略 {} 条）。",
+                    if paragraph.is_empty() {
+                        "-"
+                    } else {
+                        &paragraph
+                    },
+                    ignores.len()
+                );
+            } else {
+                println!(
+                    "已标记忽略 {block} {} [{code}]（现有忽略 {} 条）。",
+                    if paragraph.is_empty() {
+                        "-"
+                    } else {
+                        &paragraph
+                    },
+                    ignores.len()
+                );
             }
             return Ok(());
         }

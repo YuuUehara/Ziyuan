@@ -36,6 +36,7 @@ pub(crate) const HELP: &str = concat!(
                                        --viewer 另发只读的观政令牌（.ziyuan/web-viewer-token）
   ziyuan tui                           启动紫禁城终端界面
   ziyuan migrate                       检查事件簿：本版能否读，至少要哪个版本才能打开
+  ziyuan doctor [--json]               全只读环境与配置自检（事件簿、模型路由、号舍沙箱、版本库；绝不回显密文）
   ziyuan login [--models]              用 ChatGPT 订阅额度调用模型：浏览器登录；--models 列出可选模型
   ziyuan logout                        退出 ChatGPT 订阅登录（撤销令牌）
   ziyuan cancel <诏令ID>               撤销未结束的诏令
@@ -232,6 +233,7 @@ pub(crate) const SUBCOMMANDS: &[&str] = &[
     "tasks",
     "tui",
     "migrate",
+    "doctor",
     "login",
     "logout",
     "serve",
@@ -288,6 +290,7 @@ pub(crate) const JSON_COMMANDS: &[&str] = &[
     "history",
     "records",
     "migrate",
+    "doctor",
     "flags",
     "mcp",
     "model",
@@ -303,7 +306,7 @@ init import preview import-docx import-epub import-srt \
 export-finished export-originals export-docx export-epub export-srt \
 show usage check human recovery evidence verification \
 translate review revise references zhupi finalize reopen context status resume \
-qa qa-report termbase concordance tm comment compare version memory \
+qa qa-report qa-ignore termbase concordance tm comment compare version memory \
 backup restore source-update issue read preflight search draft-replace tmx help \
 save submit approve apply authorize build list add update delete adopt suggest \
 reply assign resolve record prepare diff export-tbx import-tbx compare-draft prune \
@@ -314,7 +317,7 @@ const TEXT_COMPLETION_FLAGS: &str = "\
 --text-paragraphs --split-long-paragraphs --chapter-title --scope --kind --selection \
 --submission --references --limit --provider --project --query --block --candidate \
 --dept --reason --clear --show --keep --include-manual --author --language --title \
---source --rights --version --date --endpoint --model --revision --dim";
+--source --rights --version --date --endpoint --model --revision --dim --note --remove";
 
 /// shell 补全脚本：首词补子命令；官职、部门、制度、工具等参数按所在子命令补全。
 pub(crate) fn completions(shell: Shell) -> String {

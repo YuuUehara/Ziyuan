@@ -630,6 +630,187 @@ impl Translations {
     }
 }
 
+impl Translations {
+    /// 从译稿编辑器一键收录单条术语或人物到本项目本地资料草稿（不自动批准上下文，不覆盖译稿）。
+    pub fn quick_add_material(
+        &self,
+        project: &str,
+        input: &QuickMaterialInput,
+    ) -> Result<QuickMaterialReceipt> {
+        self.project(project)?;
+        let existing = self
+            .material_draft(project)
+            .map_err(|e| invalid(e.to_string()))?;
+        let mut material =
+            existing
+                .as_ref()
+                .map(|d| d.material.clone())
+                .unwrap_or(StructuredGlossary {
+                    format: 2,
+                    terms: Vec::new(),
+                    persons: Vec::new(),
+                });
+        material.format = 2;
+
+        let (kind, entry_id, updated_existing) = match input {
+            QuickMaterialInput::Term {
+                source,
+                target,
+                category,
+                note,
+            } => {
+                let source = source.trim();
+                let target = target.trim();
+                if source.is_empty() || target.is_empty() {
+                    return Err(invalid("收录术语须同时填写原文与译法"));
+                }
+                let cat = match category.as_deref().map(str::trim).unwrap_or("") {
+                    "" | "common" | "通用" | "other" | "其他" => TermCategory::Common,
+                    "person_name" | "人名" => TermCategory::PersonName,
+                    "place" | "地名" => TermCategory::Place,
+                    "organization" | "org" | "组织" => TermCategory::Organization,
+                    "title" | "官职" | "头衔" => TermCategory::Title,
+                    "culture" | "文化" => TermCategory::Culture,
+                    other => {
+                        return Err(invalid(format!(
+                            "不支持的术语分类：{other}（可用 person_name／place／organization／title／culture／common）"
+                        )));
+                    }
+                };
+                if let Some(found) = material.terms.iter_mut().find(|t| t.source == source) {
+                    if !found.allowed.iter().any(|a| a == target) {
+                        found.allowed.push(target.to_owned());
+                    }
+                    if let Some(n) = note.as_deref().filter(|s| !s.trim().is_empty()) {
+                        found.note = Some(n.trim().to_owned());
+                    }
+                    ("term", found.term_id.clone(), true)
+                } else {
+                    let mut seq = material.terms.len() + 1;
+                    let mut id = format!("term-quick-{seq:03}");
+                    while material.terms.iter().any(|t| t.term_id == id) {
+                        seq += 1;
+                        id = format!("term-quick-{seq:03}");
+                    }
+                    material.terms.push(Term {
+                        term_id: id.clone(),
+                        source: source.to_owned(),
+                        category: cat,
+                        allowed: vec![target.to_owned()],
+                        note: note
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                        scope: GlossaryScope::Project,
+                        available_from: None,
+                        evidence: Vec::new(),
+                        status: GlossaryStatus::Tentative,
+                    });
+                    ("term", id, false)
+                }
+            }
+            QuickMaterialInput::Person { name, alias, voice } => {
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(invalid("收录人物须填写姓名"));
+                }
+                let alias_clean = alias
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let voice_clean = voice
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("译稿快速收录");
+                if let Some(found) = material.persons.iter_mut().find(|p| p.name == name) {
+                    if let Some(al) = alias_clean
+                        && !found.aliases.iter().any(|a| a == &al)
+                    {
+                        found.aliases.push(al);
+                    }
+                    ("person", found.person_id.clone(), true)
+                } else {
+                    let mut seq = material.persons.len() + 1;
+                    let mut id = format!("person-quick-{seq:03}");
+                    while material.persons.iter().any(|p| p.person_id == id) {
+                        seq += 1;
+                        id = format!("person-quick-{seq:03}");
+                    }
+                    material.persons.push(Person {
+                        person_id: id.clone(),
+                        available_from: None,
+                        name: name.to_owned(),
+                        reading: None,
+                        aliases: alias_clean.into_iter().collect(),
+                        terms: Vec::new(),
+                        address_rules: Vec::new(),
+                        voice: PersonVoice {
+                            description: voice_clean.to_owned(),
+                            examples: None,
+                        },
+                        evidence: Vec::new(),
+                        status: GlossaryStatus::Tentative,
+                    });
+                    ("person", id, false)
+                }
+            }
+        };
+
+        let material_bytes = serde_json::to_vec(&material)?;
+        let receipt = self
+            .save_material_draft(
+                project,
+                &MaterialSave {
+                    request_id: format!(
+                        "quick-material-{}",
+                        &super::super::sha256_hex(&material_bytes)[..16]
+                    ),
+                    expected_revision: existing.as_ref().map(|d| d.revision.clone()),
+                    material,
+                },
+            )
+            .map_err(|e| invalid(e.to_string()))?;
+
+        Ok(QuickMaterialReceipt {
+            kind,
+            id: entry_id,
+            updated_existing,
+            revision: receipt.revision,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuickMaterialInput {
+    Term {
+        source: String,
+        target: String,
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    Person {
+        name: String,
+        #[serde(default)]
+        alias: Option<String>,
+        #[serde(default)]
+        voice: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct QuickMaterialReceipt {
+    pub kind: &'static str,
+    pub id: String,
+    pub updated_existing: bool,
+    pub revision: String,
+}
+
 fn status_text(status: &GlossaryStatus) -> &'static str {
     match *status {
         GlossaryStatus::Confirmed => "confirmed",

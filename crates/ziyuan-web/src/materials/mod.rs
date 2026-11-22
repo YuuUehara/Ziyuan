@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use ziyuan_app::translation::Translations;
-use ziyuan_app::translation::materials::{MaterialError, MaterialIssue};
+use ziyuan_app::translation::materials::{MaterialError, MaterialIssue, QuickMaterialInput};
 use ziyuan_storage::{JsonFileError, LockScope, Workspace, WorkspaceError};
 
 use crate::state::AppState;
@@ -30,6 +30,7 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/text/{project}/materials", get(view))
         .route("/text/{project}/materials/draft", post(save))
+        .route("/text/{project}/materials/quick-add", post(quick_add))
         .route("/text/{project}/materials/validate", post(validate))
         .route("/text/{project}/materials/preview", post(preview))
         .route("/text/{project}/materials/prepare", post(prepare))
@@ -168,6 +169,28 @@ struct CommentAddBody {
     #[serde(default)]
     paragraph: String,
     body: String,
+}
+
+async fn quick_add(
+    State(app): State<AppState>,
+    UrlPath(project): UrlPath<String>,
+    Json(body): Json<QuickMaterialInput>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(r) => return *r,
+    };
+    let root = app.0.config.root.clone();
+    let resp = run(id, move || {
+        Translations::new(&root)
+            .quick_add_material(&project, &body)
+            .map_err(MaterialError::Visibility)
+    })
+    .await;
+    if resp.status().is_success() {
+        app.emit("changed", json!({}));
+    }
+    resp
 }
 
 async fn tm_list(State(app): State<AppState>, UrlPath(project): UrlPath<String>) -> Response {

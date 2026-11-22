@@ -32,6 +32,7 @@ pub(crate) fn execute(
         | Command::Version
         | Command::Init
         | Command::Migrate
+        | Command::Doctor
         | Command::Login(_)
         | Command::Logout
         | Command::Serve { .. }

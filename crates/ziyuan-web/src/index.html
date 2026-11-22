@@ -768,6 +768,13 @@
   .qa-issue-item { padding:8px 10px; background:var(--well); border:1px solid var(--line); border-radius:var(--radius); display:grid; gap:4px; font-size:13px; }
   .qa-issue-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
   .qa-issue-excerpts { font-size:12px; color:var(--muted); display:grid; gap:2px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .qa-ignored-box { margin-top:10px; border:1px dashed var(--line); border-radius:var(--radius); padding:8px 10px; background:var(--paper); }
+  .qa-ignored-box summary { cursor:pointer; font-size:12.5px; color:var(--muted); user-select:none; }
+  .qa-nav-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin:8px 0 10px; padding:8px 12px; border:1px solid var(--zhu); border-radius:var(--radius); background:var(--well); font-size:13px; }
+  .qa-nav-bar[hidden] { display:none; }
+  .qa-nav-info { flex:1 1 240px; min-width:0; overflow-wrap:anywhere; }
+  .qa-nav-actions { display:flex; flex-wrap:wrap; gap:6px; }
+  .human-quick-capture { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 
   .workspace-tabs { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:6px; padding:0 0 12px; margin-bottom:12px; border-bottom:1px solid var(--line); }
   .workspace-tabs button { min-width:0; white-space:normal; font-family:var(--serif); padding:6px 8px; }
@@ -1072,12 +1079,46 @@
                 <label class="switch-toggle"><input type="checkbox" id="human-editor-toggle" data-view checked><span class="switch-track" aria-hidden="true"></span><span>手工翻译</span></label>
                 <span class="hint" id="human-toggle-note"></span>
               </div>
+              <div class="human-quick-capture" aria-label="快捷收录资料">
+                <button type="button" class="small" id="quick-term-btn">收术语</button>
+                <button type="button" class="small" id="quick-person-btn">收人物</button>
+              </div>
               <div class="human-block-nav">
                 <button type="button" class="small" id="block-prev" data-view>上一组</button>
                 <span class="hint" id="block-nav-pos"></span>
                 <button type="button" class="small" id="block-next" data-view>下一组</button>
               </div>
             </section>
+            <div id="qa-nav-bar" class="qa-nav-bar" aria-label="QA 连续巡检栏" hidden></div>
+            <dialog id="quick-glossary-dialog" aria-label="快捷收录术语或人物">
+              <form method="dialog" class="write" id="quick-glossary-form">
+                <h3 id="quick-glossary-title">快捷收录术语</h3>
+                <p class="hint">仅写入本项目本地资料草稿，不影响当前译稿内容，也尚未批准生效。</p>
+                <div id="quick-term-fields">
+                  <label>原文词条<input id="quick-term-source" type="text" placeholder="原文中的专名或术语"></label>
+                  <label>译法<input id="quick-term-target" type="text" placeholder="中文译法"></label>
+                  <label>分类<select id="quick-term-category">
+                    <option value="common">通用</option>
+                    <option value="person_name">人名</option>
+                    <option value="place">地名</option>
+                    <option value="organization">组织</option>
+                    <option value="title">官职 / 头衔</option>
+                    <option value="culture">文化专词</option>
+                  </select></label>
+                  <label>备注（可选）<input id="quick-term-note" type="text" placeholder="说明或语境"></label>
+                </div>
+                <div id="quick-person-fields" hidden>
+                  <label>人物姓名<input id="quick-person-name" type="text" placeholder="主要姓名"></label>
+                  <label>别名 / 昵称（可选）<input id="quick-person-alias" type="text" placeholder="爱称或别称"></label>
+                  <label>声线 / 语态（可选）<input id="quick-person-voice" type="text" placeholder="如：沉稳、毒舌、敬语"></label>
+                </div>
+                <p class="hint" id="quick-glossary-status" role="status" aria-live="polite"></p>
+                <div class="actions">
+                  <button type="button" class="small primary" id="quick-glossary-submit">收入草稿</button>
+                  <button type="button" class="small" id="quick-glossary-cancel" data-view>取消</button>
+                </div>
+              </form>
+            </dialog>
             <section id="text-human-editor" aria-label="人工译稿标记编辑器"></section>
             <section class="text-materials" id="text-n2b-hints" aria-label="段旁提示（只读）"></section>
             <details class="continuity-tools" id="text-model-drawer">
@@ -1340,6 +1381,18 @@
   </form>
 </div></div>
 
+<div class="cmd-palette-backdrop" id="doctor-modal" role="dialog" aria-modal="true" aria-label="环境与配置自检" hidden>
+  <div class="cmd-palette-box" style="width:min(700px, 94vw)">
+    <div class="cmd-palette-head" style="justify-content:space-between">
+      <strong>环境与配置自检（只读 · 不回显密文）</strong>
+      <div class="row" style="gap:6px">
+        <button id="doctor-refresh-btn" class="ghost small" data-view type="button">刷新</button>
+        <button id="doctor-close-btn" class="ghost small" data-view type="button">关闭</button>
+      </div>
+    </div>
+    <div id="doctor-body" style="padding:12px 16px;max-height:68vh;overflow:auto;font-size:13px"></div>
+  </div>
+</div>
 <div class="cmd-palette-backdrop" id="cmd-palette" role="dialog" aria-modal="true" aria-label="快捷命令面板" hidden>
   <div class="cmd-palette-box">
     <div class="cmd-palette-head">
@@ -2399,10 +2452,41 @@ $("materials-qa-ignore")?.addEventListener("click", () => {
 });
 let projectQaCtrl = null;
 let projectQaCtrlPromise = null;
+let qaNavigator = null;
+async function toggleProjectQaIgnore(entry, remove) {
+  if (!textProjectId) return;
+  try {
+    await api("/text/" + encodeURIComponent(textProjectId) + "/qa-ignores", {
+      block: entry.block,
+      paragraph: entry.paragraph || "",
+      code: entry.code,
+      note: remove ? "" : (entry.note || ""),
+      remove: Boolean(remove),
+    });
+    const ctrl = await ensureProjectQaController();
+    const report = await ctrl.run();
+    if (report && qaNavigator?.isActive()) {
+      const st = ctrl.getState();
+      const filtered = st.filter ? (report.issues || []).filter((i) => i.code === st.filter) : (report.issues || []);
+      qaNavigator.update(filtered);
+    }
+  } catch (e) {
+    const status = $("project-qa-status");
+    if (status) status.textContent = (remove ? "恢复检查失败：" : "标记忽略失败：") + materialAdvice(e?.body?.error || e?.message);
+  }
+}
 function ensureProjectQaController() {
   if (projectQaCtrl) return Promise.resolve(projectQaCtrl);
   if (!projectQaCtrlPromise) {
-    projectQaCtrlPromise = import("/assets/project-qa.mjs").then(({ createProjectQaController }) => {
+    projectQaCtrlPromise = import("/assets/project-qa.mjs").then(({ createProjectQaController, createQaNavigator }) => {
+      qaNavigator = createQaNavigator({
+        host: $("qa-nav-bar"),
+        doc: document,
+        formatLocation: (id, isParagraph) => textLocation(id, isParagraph),
+        onNavigate: (target) => navigateToParagraph(target),
+        onIgnore: (issue) => toggleProjectQaIgnore(issue, false),
+        isViewer: () => document.body.classList.contains("viewer"),
+      });
       projectQaCtrl = createProjectQaController({
         doc: document,
         getProjectId: () => textProjectId,
@@ -2410,6 +2494,10 @@ function ensureProjectQaController() {
         formatLocation: (id, isParagraph) => textLocation(id, isParagraph),
         formatError: (e) => materialAdvice(e?.body?.error || e?.message),
         onNavigate: (target) => navigateToParagraph(target),
+        onStartNav: (list, idx) => qaNavigator?.start(list, idx),
+        onIgnore: (issue) => toggleProjectQaIgnore(issue, false),
+        onUnignore: (entry) => toggleProjectQaIgnore(entry, true),
+        isViewer: () => document.body.classList.contains("viewer"),
         statusEl: $("project-qa-status"),
         summaryHost: $("project-qa-summary"),
         filtersHost: $("project-qa-filters"),
@@ -2421,6 +2509,7 @@ function ensureProjectQaController() {
   return projectQaCtrlPromise;
 }
 function resetProjectQa(projectId) {
+  qaNavigator?.close();
   if (projectQaCtrl) {
     projectQaCtrl.reset(projectId);
     return;
@@ -5322,6 +5411,7 @@ function runCommandPaletteAction(action) {
     setTheme(order[(order.indexOf(cur) + 1) % order.length]);
     if (state) preserve(render);
   } else if (action.type === "new-edict") { location.hash = "#fengtian"; showHall(); $("edict-new")?.click(); }
+  else if (action.type === "doctor") { openDoctorModal(); }
   else if (action.type === "run") { $("run-btn")?.click(); }
   else if (action.type === "task") {
     selected = action.taskId;
@@ -5403,6 +5493,39 @@ function closeCommandPalette() {
   if (modal) modal.hidden = true;
 }
 
+let doctorMod = null;
+let doctorModPromise = null;
+async function loadDoctorReport() {
+  const body = $("doctor-body");
+  if (!body) return;
+  body.textContent = "正在执行只读环境自检…";
+  try {
+    if (!doctorMod) {
+      if (!doctorModPromise) doctorModPromise = import(`/assets/doctor-panel.mjs`).then((m) => (doctorMod = m));
+      await doctorModPromise;
+    }
+    const report = await api("GET", "/api/doctor");
+    doctorMod.renderDoctorReport(body, report);
+  } catch (err) {
+    body.textContent = `自检失败：${err.message || err}`;
+  }
+}
+function openDoctorModal() {
+  const modal = $("doctor-modal");
+  if (!modal) return;
+  modal.hidden = false;
+  loadDoctorReport();
+}
+function closeDoctorModal() {
+  const modal = $("doctor-modal");
+  if (modal) modal.hidden = true;
+}
+$("doctor-close-btn")?.addEventListener("click", closeDoctorModal);
+$("doctor-refresh-btn")?.addEventListener("click", loadDoctorReport);
+$("doctor-modal")?.addEventListener("click", (e) => {
+  if (e.target === $("doctor-modal")) closeDoctorModal();
+});
+
 $("cmd-palette-btn")?.addEventListener("click", openCommandPalette);
 $("cmd-palette-close")?.addEventListener("click", closeCommandPalette);
 $("cmd-palette")?.addEventListener("click", (e) => {
@@ -5437,15 +5560,116 @@ $("cmd-palette-input")?.addEventListener("keydown", (e) => {
     closeCommandPalette();
   }
 });
+let quickGlossaryKind = "term";
+let quickGlossaryModPromise = null;
+let quickLastSelection = "";
+function loadQuickGlossaryMod() {
+  if (!quickGlossaryModPromise) {
+    quickGlossaryModPromise = import("/assets/quick-glossary.mjs");
+  }
+  return quickGlossaryModPromise;
+}
+for (const btnId of ["quick-term-btn", "quick-person-btn"]) {
+  $(btnId)?.addEventListener("mousedown", () => {
+    const el = document.activeElement;
+    if (el && typeof el.value === "string" && typeof el.selectionStart === "number" && el.selectionEnd > el.selectionStart) {
+      quickLastSelection = el.value.slice(el.selectionStart, el.selectionEnd).trim().slice(0, 120);
+    } else {
+      quickLastSelection = (window.getSelection?.()?.toString() || "").trim().slice(0, 120);
+    }
+  });
+}
+async function openQuickGlossaryDialog(kind) {
+  if (!textProjectId) {
+    const st = $("human-toggle-note");
+    if (st) st.textContent = "请先选择项目。";
+    return;
+  }
+  const mod = await loadQuickGlossaryMod();
+  const sel = quickLastSelection || mod.extractSelectionText(document);
+  quickLastSelection = "";
+  quickGlossaryKind = kind;
+  const dlg = $("quick-glossary-dialog");
+  const title = $("quick-glossary-title");
+  const termBox = $("quick-term-fields");
+  const personBox = $("quick-person-fields");
+  const status = $("quick-glossary-status");
+  if (status) status.textContent = "";
+  if (kind === "person") {
+    if (title) title.textContent = "快捷收录人物";
+    if (termBox) termBox.hidden = true;
+    if (personBox) personBox.hidden = false;
+    $("quick-person-name").value = sel;
+    $("quick-person-alias").value = "";
+    $("quick-person-voice").value = "";
+  } else {
+    if (title) title.textContent = "快捷收录术语";
+    if (termBox) termBox.hidden = false;
+    if (personBox) personBox.hidden = true;
+    $("quick-term-source").value = sel;
+    $("quick-term-target").value = "";
+    $("quick-term-category").value = "common";
+    $("quick-term-note").value = "";
+  }
+  if (dlg && typeof dlg.showModal === "function") dlg.showModal();
+  const firstInput = kind === "person" ? $("quick-person-name") : (sel ? $("quick-term-target") : $("quick-term-source"));
+  firstInput?.focus();
+}
+$("quick-term-btn")?.addEventListener("click", () => openQuickGlossaryDialog("term"));
+$("quick-person-btn")?.addEventListener("click", () => openQuickGlossaryDialog("person"));
+$("quick-glossary-cancel")?.addEventListener("click", () => $("quick-glossary-dialog")?.close());
+$("quick-glossary-submit")?.addEventListener("click", async () => {
+  if (!textProjectId) return;
+  const mod = await loadQuickGlossaryMod();
+  const status = $("quick-glossary-status");
+  const fields = quickGlossaryKind === "person"
+    ? {
+        name: $("quick-person-name").value,
+        alias: $("quick-person-alias").value,
+        voice: $("quick-person-voice").value,
+      }
+    : {
+        source: $("quick-term-source").value,
+        target: $("quick-term-target").value,
+        category: $("quick-term-category").value,
+        note: $("quick-term-note").value,
+      };
+  const check = mod.validateQuickMaterialFields(quickGlossaryKind, fields);
+  if (!check.ok) {
+    if (status) status.textContent = check.error;
+    return;
+  }
+  if (status) status.textContent = "正在写入本地资料草稿…";
+  try {
+    const payload = mod.buildQuickMaterialPayload(quickGlossaryKind, fields);
+    const receipt = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/quick-add", payload);
+    const msg = mod.formatQuickMaterialReceipt(receipt);
+    if (status) status.textContent = msg;
+    const note = $("human-toggle-note");
+    if (note) note.textContent = msg;
+    $("quick-glossary-dialog")?.close();
+  } catch (e) {
+    if (status) status.textContent = "收录失败：" + materialAdvice(e?.body?.error || e?.message);
+  }
+});
+
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     const modal = $("cmd-palette");
     if (modal && !modal.hidden) closeCommandPalette();
     else openCommandPalette();
+  } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "[" && qaNavigator?.isActive()) {
+    e.preventDefault();
+    qaNavigator.prev();
+  } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "]" && qaNavigator?.isActive()) {
+    e.preventDefault();
+    qaNavigator.next();
   } else if (e.key === "Escape") {
     const modal = $("cmd-palette");
     if (modal && !modal.hidden) closeCommandPalette();
+    const dModal = $("doctor-modal");
+    if (dModal && !dModal.hidden) closeDoctorModal();
   }
 });
 

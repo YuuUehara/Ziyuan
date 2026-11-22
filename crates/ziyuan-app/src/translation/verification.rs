@@ -90,12 +90,47 @@ pub struct QaIssue {
     pub message: String,
 }
 
+/// 确定性 QA 检查支持的全部已知问题代码。
+pub const KNOWN_QA_CODES: &[&str] = &[
+    "no_translation",
+    "missing_paragraph",
+    "paragraph_id_mismatch",
+    "extra_paragraph",
+    "duplicate_paragraph",
+    "empty_translation",
+    "untranslated",
+    "number_mismatch",
+    "duplicate_text",
+    "term_inconsistent",
+    "source_script_leak",
+    "punctuation_mismatch",
+];
+
+/// 单条确定性 QA 误报忽略记录（仅影响本项目确定性 QA 展示，不写入朝廷事件簿）。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QaIgnore {
+    pub block: String,
+    pub paragraph: String,
+    pub code: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QaIgnoreBook {
+    #[serde(default)]
+    ignores: Vec<QaIgnore>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QaReport {
     pub project: String,
     pub block: String,
     pub paragraphs: usize,
     pub issues: Vec<QaIssue>,
+    pub ignored_issues: usize,
 }
 
 /// 整书质检总览中的单块摘要（只读、确定性，不代表语义正确）。
@@ -135,6 +170,7 @@ pub struct ProjectQaSummary {
     pub clean_blocks: usize,
     pub blocks_with_issues: usize,
     pub total_issues: usize,
+    pub ignored_issues: usize,
 }
 
 /// 整书级批量确定性 QA 报告（纯只读，零落盘，不调用模型）。
@@ -146,6 +182,7 @@ pub struct ProjectQaReport {
     pub by_code: BTreeMap<String, usize>,
     pub blocks: Vec<ProjectQaBlockSummary>,
     pub issues: Vec<ProjectQaIssue>,
+    pub ignores: Vec<QaIgnore>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +372,101 @@ impl Translations {
             1,
             16 * 1024 * 1024,
         ))
+    }
+
+    fn qa_ignores_file(&self, project: &str) -> Result<JsonFile<QaIgnoreBook>> {
+        Ok(JsonFile::new(
+            self.store_dir(project)?.join("qa-ignores.json"),
+            1,
+            2 * 1024 * 1024,
+        ))
+    }
+
+    /// 列出项目已登记的 QA 误报忽略项（纯只读，文件不存在时不创建）。
+    pub fn qa_ignores(&self, project: &str) -> Result<Vec<QaIgnore>> {
+        self.project(project)?;
+        let mut items = self
+            .qa_ignores_file(project)?
+            .load()?
+            .map(|s| s.value.ignores)
+            .unwrap_or_default();
+        items.sort();
+        items.dedup_by(|a, b| a.block == b.block && a.paragraph == b.paragraph && a.code == b.code);
+        Ok(items)
+    }
+
+    /// 新增或更新一条确定性 QA 忽略记录（按 `(block, paragraph, code)` 去重，零朝廷事件）。
+    pub fn add_qa_ignore(
+        &self,
+        project: &str,
+        block: &str,
+        paragraph: &str,
+        code: &str,
+        note: &str,
+    ) -> Result<Vec<QaIgnore>> {
+        let p = self.project(project)?;
+        let (_, _, source_block) = find_block(&p, block)?;
+        let paragraph = paragraph.trim();
+        if !paragraph.is_empty()
+            && !source_block
+                .paragraphs
+                .iter()
+                .any(|para| para.id == paragraph)
+        {
+            return Err(invalid(format!("段号「{paragraph}」不属于块「{block}」")));
+        }
+        let code = code.trim();
+        if !KNOWN_QA_CODES.contains(&code) {
+            return Err(invalid(format!("未知 QA 问题码「{code}」")));
+        }
+        let note = note.trim();
+        if note.chars().count() > 200 {
+            return Err(invalid("忽略说明不能超过 200 字"));
+        }
+        let (_, ignores) = self.qa_ignores_file(project)?.update(|old| {
+            let mut book = old.map(|s| s.value).unwrap_or_default();
+            book.ignores
+                .retain(|it| !(it.block == block && it.paragraph == paragraph && it.code == code));
+            if book.ignores.len() >= 5000 {
+                return Err(invalid("单个项目最多记录 5000 条 QA 忽略项"));
+            }
+            book.ignores.push(QaIgnore {
+                block: block.to_owned(),
+                paragraph: paragraph.to_owned(),
+                code: code.to_owned(),
+                note: note.to_owned(),
+            });
+            book.ignores.sort();
+            let list = book.ignores.clone();
+            Ok((book, list))
+        })?;
+        Ok(ignores)
+    }
+
+    /// 取消一条确定性 QA 忽略记录（不存在时幂等返回当前清单）。
+    pub fn remove_qa_ignore(
+        &self,
+        project: &str,
+        block: &str,
+        paragraph: &str,
+        code: &str,
+    ) -> Result<Vec<QaIgnore>> {
+        self.project(project)?;
+        let file = self.qa_ignores_file(project)?;
+        if file.load()?.is_none() {
+            return Ok(Vec::new());
+        }
+        let paragraph = paragraph.trim();
+        let code = code.trim();
+        let (_, ignores) = file.update(|old| -> Result<_> {
+            let mut book = old.map(|s| s.value).unwrap_or_default();
+            book.ignores
+                .retain(|it| !(it.block == block && it.paragraph == paragraph && it.code == code));
+            book.ignores.sort();
+            let list = book.ignores.clone();
+            Ok((book, list))
+        })?;
+        Ok(ignores)
     }
 
     fn verification_materials(
@@ -556,6 +688,7 @@ impl Translations {
         source_block: &PromptBlock,
         context: Option<&super::ContextSnapshot>,
         allowed_terms: &[String],
+        ignores: &BTreeSet<(&str, &str, &str)>,
     ) -> Result<(QaReport, Option<PromptBlock>)> {
         let project = p.id.as_str();
         let block = source_block.block_id.as_str();
@@ -573,17 +706,21 @@ impl Translations {
         };
         let mut issues = Vec::new();
         let Some(translation) = translation else {
-            issues.push(QaIssue {
-                paragraph: String::new(),
-                code: "no_translation",
-                message: "没有结构有效的译稿；请先完成初译或人工译稿。".into(),
-            });
+            let ignored = ignores.contains(&(block, "", "no_translation"));
+            if !ignored {
+                issues.push(QaIssue {
+                    paragraph: String::new(),
+                    code: "no_translation",
+                    message: "没有结构有效的译稿；请先完成初译或人工译稿。".into(),
+                });
+            }
             return Ok((
                 QaReport {
                     project: project.into(),
                     block: block.into(),
                     paragraphs: source_block.paragraphs.len(),
                     issues,
+                    ignored_issues: usize::from(ignored),
                 },
                 None,
             ));
@@ -733,12 +870,18 @@ impl Translations {
                 }
             }
         }
+        let before = issues.len();
+        if !ignores.is_empty() {
+            issues.retain(|it| !ignores.contains(&(block, it.paragraph.as_str(), it.code)));
+        }
+        let ignored_issues = before - issues.len();
         Ok((
             QaReport {
                 project: project.into(),
                 block: block.into(),
                 paragraphs: source.len(),
                 issues,
+                ignored_issues,
             },
             Some(translation),
         ))
@@ -750,7 +893,13 @@ impl Translations {
         let (_, _, source) = find_block(&p, block)?;
         let context = self.current_context(project)?;
         let allowed_terms = collect_allowed_glossary_terms(context.as_ref());
-        let (report, _) = self.qa_block(&p, source, context.as_ref(), &allowed_terms)?;
+        let ignore_list = self.qa_ignores(project)?;
+        let ignore_set: BTreeSet<(&str, &str, &str)> = ignore_list
+            .iter()
+            .map(|it| (it.block.as_str(), it.paragraph.as_str(), it.code.as_str()))
+            .collect();
+        let (report, _) =
+            self.qa_block(&p, source, context.as_ref(), &allowed_terms, &ignore_set)?;
         Ok(report)
     }
 
@@ -767,6 +916,11 @@ impl Translations {
         let p = self.project(project)?;
         let context = self.current_context(project)?;
         let allowed_terms = collect_allowed_glossary_terms(context.as_ref());
+        let ignore_list = self.qa_ignores(project)?;
+        let ignore_set: BTreeSet<(&str, &str, &str)> = ignore_list
+            .iter()
+            .map(|it| (it.block.as_str(), it.paragraph.as_str(), it.code.as_str()))
+            .collect();
         let status_map: BTreeMap<&str, &super::BlockStatus> = statuses
             .into_iter()
             .flatten()
@@ -805,7 +959,7 @@ impl Translations {
                     None => (None, None),
                 };
                 let (report, translation) =
-                    self.qa_block(&p, prompt, context.as_ref(), &allowed_terms)?;
+                    self.qa_block(&p, prompt, context.as_ref(), &allowed_terms, &ignore_set)?;
                 let Some(translation) = translation else {
                     summary.untranslated_blocks += 1;
                     blocks.push(ProjectQaBlockSummary {
@@ -822,6 +976,7 @@ impl Translations {
                 };
                 summary.translated_blocks += 1;
                 summary.checked_blocks += 1;
+                summary.ignored_issues += report.ignored_issues;
                 if report.issues.is_empty() {
                     summary.clean_blocks += 1;
                 } else {
@@ -887,6 +1042,7 @@ impl Translations {
             by_code,
             blocks,
             issues,
+            ignores: ignore_list,
         })
     }
 

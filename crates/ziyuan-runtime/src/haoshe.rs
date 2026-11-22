@@ -194,6 +194,24 @@ fn windows_sandbox_available() -> &'static Result<(), String> {
     })
 }
 
+/// 探测本机原生号舍可用状态（供 `ziyuan doctor` 等只读诊断展示，绝不修改宿主状态）。
+pub fn probe_status() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        windows_sandbox_available()
+            .as_ref()
+            .map(|()| "Windows 原生 AppContainer + PrivateDesktop + Job".to_owned())
+            .map_err(Clone::clone)
+    }
+    #[cfg(not(windows))]
+    {
+        available()
+            .as_ref()
+            .map(|p| format!("可用（{}）", p.display()))
+            .map_err(Clone::clone)
+    }
+}
+
 /// 本机是否具备 `run_shell` 所需的原生号舍（Linux `bwrap`、macOS `sandbox-exec`、Windows AppContainer）。
 #[cfg(test)]
 pub(crate) fn shell_sandbox_available() -> bool {

@@ -72,8 +72,8 @@ pub use issues::{IssueInput, IssueList, IssueRecord, IssueReview, IssueState, Is
 pub use markup::{TargetMark, TargetMarkKind};
 pub use materials::{
     MAX_MATERIAL_BYTES, MaterialDraft, MaterialError, MaterialIssue, MaterialIssueCode,
-    MaterialPathSegment, MaterialReceipt, MaterialSave, MaterialValidation,
-    check_material_editable, validate_material,
+    MaterialPathSegment, MaterialReceipt, MaterialSave, MaterialValidation, QuickMaterialInput,
+    QuickMaterialReceipt, check_material_editable, validate_material,
 };
 pub use reading::{ReadingParagraph, ReadingView};
 pub use references::{
@@ -97,11 +97,11 @@ pub use usage::{
     translation_usage,
 };
 pub use verification::{
-    AdviceLink, Disposition, EvidenceInput, EvidenceStatus, GlossaryHint, LexicalEvidence,
-    ParagraphVerification, ProjectQaBlockSummary, ProjectQaIssue, ProjectQaReport,
-    ProjectQaSummary, QaIssue, QaReport, Resolution, ReviewAdvice, SemanticCategory, SemanticCheck,
-    TranslationChange, VerificationInput, VerificationRecord, VerificationRecordView,
-    VerificationSnapshot, VerificationView,
+    AdviceLink, Disposition, EvidenceInput, EvidenceStatus, GlossaryHint, KNOWN_QA_CODES,
+    LexicalEvidence, ParagraphVerification, ProjectQaBlockSummary, ProjectQaIssue, ProjectQaReport,
+    ProjectQaSummary, QaIgnore, QaIssue, QaReport, Resolution, ReviewAdvice, SemanticCategory,
+    SemanticCheck, TranslationChange, VerificationInput, VerificationRecord,
+    VerificationRecordView, VerificationSnapshot, VerificationView,
 };
 pub use versions::{
     AUTO_KEEP_PER_STATE, AutoSnapshot, PruneReport, VERSION_FILE_FORMAT, VersionFile, VersionInfo,

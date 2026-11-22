@@ -2150,6 +2150,76 @@ async fn duzhi_export_endpoint_serves_csv_with_bom_and_json_for_viewer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn doctor_endpoint_is_readonly_viewer_accessible_and_leaks_no_secrets() {
+    let root = std::env::temp_dir().join(format!("ziyuan-web-doctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    Session::found(EventLog::new(&root)).unwrap();
+    let secret = "sk-web-doctor-secret-never-echo-77777";
+    std::fs::write(
+        root.join(".ziyuan").join("models.json"),
+        format!(
+            r#"{{"profiles":{{"bad":{{"provider":"openai","model":"gpt-4o","api_key":"{secret}"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let config = Config {
+        root: root.clone(),
+        token: TOKEN.into(),
+        viewer_token: Some(VIEWER.into()),
+        backend: Arc::new(ziyuan_runtime::DemoBackend),
+        limits: Limits {
+            max_concurrent: 2,
+            timeout: Duration::from_secs(10),
+        },
+        github: None,
+        model_profiles: Vec::new(),
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(config)).await.unwrap();
+    });
+
+    // 未鉴权必须返回 401。
+    let (status, _) = call(&base, "/doctor", None, None).await;
+    assert_eq!(status, 401);
+
+    // 观政只读令牌可读取，且绝不回显明文密钥。
+    let (status, report) = call(&base, "/doctor", Some(VIEWER), None).await;
+    assert_eq!(status, 200, "{report}");
+    let body = report.to_string();
+    assert!(!body.contains(secret), "doctor 绝不能回显密钥：{body}");
+    assert_eq!(report["overall"], "error");
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "llm.models_json" && c["severity"] == "error")
+    );
+
+    // 静态模块 /assets/doctor-panel.mjs 需鉴权后返回 JS。
+    let asset_url = format!("{base}/assets/doctor-panel.mjs");
+    let (status, asset) = tokio::task::spawn_blocking(move || {
+        let mut resp = ureq::get(&asset_url)
+            .header("Authorization", &format!("Bearer {VIEWER}"))
+            .call()
+            .unwrap();
+        let code = resp.status().as_u16();
+        let body = resp.body_mut().read_to_string().unwrap();
+        (code, body)
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(asset.contains("renderDoctorReport"));
+
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn office_model_supports_department_batch_and_exposes_model_profiles() {
     let root = std::env::temp_dir().join(format!("ziyuan-web-dept-model-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
