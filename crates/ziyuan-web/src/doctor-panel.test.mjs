@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  VERSION_MARK,
+  VERSION_MARK_LINE,
   buildDoctorSummaryLine,
   renderDoctorReport,
   severityLabel,
@@ -26,6 +28,9 @@ function makeFakeDoc() {
         return children[0] || null;
       },
       children,
+      hidden: false,
+      attrs: {},
+      listeners: {},
       appendChild(child) {
         children.push(child);
         return child;
@@ -33,6 +38,18 @@ function makeFakeDoc() {
       removeChild(child) {
         const idx = children.indexOf(child);
         if (idx >= 0) children.splice(idx, 1);
+      },
+      setAttribute(name, value) {
+        this.attrs[name] = String(value);
+      },
+      getAttribute(name) {
+        return this.attrs[name];
+      },
+      addEventListener(type, fn) {
+        (this.listeners[type] ||= []).push(fn);
+      },
+      click() {
+        for (const fn of this.listeners.click || []) fn();
       },
     };
     return el;
@@ -92,4 +109,40 @@ test("renderDoctorReport uses textContent safely without injecting HTML", () => 
   assert.equal(list.children[0].dataset.checkId, "llm.models_json");
   assert.ok(list.children[0].textContent.includes("<script>bad()</script>"));
   assert.ok(list.children[0].textContent.includes("请改用 api_key_env"));
+});
+
+test("doctor version starts as the reported version and reveals the mark only after click", () => {
+  const doc = makeFakeDoc();
+  const root = doc.createElement("div");
+  renderDoctorReport(
+    root,
+    {
+      version: "1.45.1",
+      os: "linux",
+      arch: "x86_64",
+      overall: "ok",
+      ok_count: 2,
+      warn_count: 0,
+      error_count: 0,
+      checks: [],
+    },
+    { doc },
+  );
+  const header = root.children[0];
+  const button = header.children.find((el) => el.tagName === "BUTTON");
+  const era = header.children.find((el) => el.className === "doctor-era");
+  assert.equal(button.textContent, "v1.45.1");
+  assert.equal(button.getAttribute("aria-pressed"), "false");
+  assert.equal(era.hidden, true);
+  assert.equal(era.textContent, VERSION_MARK_LINE);
+  assert.equal(header.textContent.includes(VERSION_MARK), false);
+  button.click();
+  assert.equal(button.textContent, VERSION_MARK);
+  assert.equal(VERSION_MARK, "（1）1.45.1（4）");
+  assert.equal(button.getAttribute("aria-pressed"), "true");
+  assert.equal(era.hidden, false);
+  assert.equal(era.textContent, "好时代，来临罢！");
+  assert.match(header.textContent, /总评：正常/);
+  button.click();
+  assert.equal(button.textContent, "（1）1.45.1（4）");
 });
