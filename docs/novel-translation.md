@@ -19,17 +19,17 @@
 
 ### 新建项目
 
-- **网页（推荐）**：在「翰林院」左侧点「新建项目」，填写标题、原文语言（支持日文 `ja`、英文 `en`、韩文 `ko`、法文 `fr`、德文 `de`，译文为简体中文）、来源与权利声明（作者、版本、日期与使用范围可选）。来源与权利只是本地自述记录，软件不作版权核验。建立后会自动进入「项目管理」页签。
+- **网页（推荐）**：在「翰林院」左侧点「新建项目」，填写标题、原文语言（日语 `ja`、英语 `en`、韩语 `ko`、法语 `fr`、德语 `de`、俄语 `ru`、西班牙语 `es`、意大利语 `it`，译文为简体中文）、来源与权利声明（作者、版本、日期与使用范围可选）。来源与权利只是本地自述记录，软件不作版权核验。建立后会自动进入「项目管理」页签。
 - **命令行**：可在 PowerShell 或 Bash 中建立空项目（基础导入整理不需要先运行 `ziyuan init`）：
 
 ```bash
-id=$(ziyuan text init --title '日文练习' --language ja --source '自写短文' --rights '本人创作，仅本地练习' --json | jq -r .id)
+id=$(ziyuan text init --title '日语练习' --language ja --source '自写短文' --rights '本人创作，仅本地练习' --json | jq -r .id)
 ziyuan text import "$id" chapter1.txt
 ziyuan text show "$id"
 ```
 
 ```powershell
-$project = ziyuan text init --title '日文练习' --language ja --source '自写短文' --rights '本人创作，仅本地练习' --json | ConvertFrom-Json
+$project = ziyuan text init --title '日语练习' --language ja --source '自写短文' --rights '本人创作，仅本地练习' --json | ConvertFrom-Json
 $id = $project.id
 ziyuan text import $id chapter1.txt
 ziyuan text show $id
@@ -45,7 +45,7 @@ ziyuan text show $id
 
 ![390px 窄屏导入预览：正文与读音清晰折行，无横向溢出](images/text-import-clean-narrow.png)
 
-1. **文件编码与上限**：接受 **UTF-8** 及各受支持语种的常见旧编码（日文 JIS：`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`；韩文：`EUC-KR`／`CP949`；西欧：`Windows-1252`／`ISO-8859-1`）的 `.txt`、`.md`、`.markdown`。有效 UTF-8 原样保留；旧编码按项目语种严格解码并转为 UTF-8 归档（含非法或截断字节时拒绝，绝不做有损替换）。原文及解码后合计上限 **8 MiB**；网页 JSON 请求体上限 **24 MiB**（含结构包装与转义开销）。
+1. **文件编码与上限**：接受 **UTF-8** 及各受支持语种的常见旧编码（日语 JIS：`Shift_JIS`／`ISO-2022-JP`／`EUC-JP`；韩语：`EUC-KR`／`CP949`；西欧语种：`Windows-1252`／`ISO-8859-1`）的 `.txt`、`.md`、`.markdown`。俄语仅 UTF-8；西班牙语与意大利语可用 Windows-1252。有效 UTF-8 原样保留；旧编码按所选语种严格解码并转为 UTF-8 归档（含非法或截断字节时拒绝，绝不做有损替换）。网页导入可「解码语言覆盖」，默认沿用项目语种，只影响本次旧编码识别与默认注音，不改项目语种。原文及解码后合计上限 **8 MiB**；网页 JSON 请求体上限 **24 MiB**（含结构包装与转义开销）。
 2. **TXT 分段与长段拆分**：
    - 网页「TXT 分段」默认选用「**每个非空行一段（常见小说排版）**」；若原文件为了排版把同一自然段折成多行，请改选「**按空行分段（段内换行保留）**」。命令行对应 `--text-paragraphs lines|blank_lines`（不带任何选项的旧 `ziyuan text import` 仍按空行分段，保持向后兼容）。
    - 勾选「**TXT 过长段落拆为工作段**」（命令行 `--split-long-paragraphs`）后，只有放不进 48 KiB 译稿组上限的超长 TXT 自然段才会被拆开，优先沿句末切分，必要时按完整字形切分，注音与强调标记保持完整；成稿导出（TXT／Markdown／HTML）时同一自然段内的工作段会自动接回原段。

@@ -323,7 +323,7 @@ impl App {
             Err(error) => return format!("翰林院译书概览读取失败：{error}"),
         };
         if projects.is_empty() {
-            return "翰林院译书概览\n\n当前项目下尚未建立译书项目。\n可用 `ziyuan text init --title <书名> --language <ja|en|ko|fr|de> --source <来源> --rights <声明>` 建立，或按 4 切至译稿页查看。".into();
+            return "翰林院译书概览\n\n当前项目下尚未建立译书项目。\n可用 `ziyuan text init --title <书名> --language <ja|en|ko|fr|de|ru|es|it> --source <来源> --rights <声明>` 建立，或按 4 切至译稿页查看。".into();
         }
         let mut out = format!("翰林院译书概览　共 {} 个译书项目\n", projects.len());
         for project in projects {

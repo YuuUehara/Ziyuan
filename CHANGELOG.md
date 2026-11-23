@@ -9,7 +9,7 @@
   - **人工双语译稿框彻底等高对齐**：[human-editor.mjs](crates/ziyuan-web/src/human-editor.mjs) 与 [index.html](crates/ziyuan-web/src/index.html) 将 `.human-mark-tools` 与 `.human-tm-suggest` 拆入 Grid 第二行 `.human-target-extras`，彻底去掉 `34px` 硬编码底距，确保原文框与译文框在译文记忆面板展开、工具栏换行、只读模式与窄屏单列下均严格顶底对齐。
   - **多语种全链路同步与「X语」用语规范**：后端 `SUPPORTED_SOURCE_LANGUAGES`（[model.rs](crates/ziyuan-app/src/text_project/model.rs)、[store.rs](crates/ziyuan-app/src/text_project/store.rs)、[text.rs](crates/ziyuan-web/src/text.rs)、[text_commands.rs](crates/ziyuan-cli/src/text_commands.rs)）补齐俄语（`ru`）、西班牙语（`es`）与意大利语（`it`）；[encoding.rs](crates/ziyuan-app/src/text_project/encoding.rs)、[import-decoder.mjs](crates/ziyuan-web/src/import-decoder.mjs) 与 [continuity.mjs](crates/ziyuan-web/src/continuity.mjs) 同步支持西语／意语 Windows-1252 旧编码；[verification.rs](crates/ziyuan-app/src/translation/verification.rs) 补全俄语西里尔字符与西／意语变音词源语残留检测；前端导入区新增默认沿用项目语种的解码语言覆盖与即时重解码，全界面语种称谓统一为「日语／英语／韩语／法语／德语／俄语／西班牙语／意大利语」。
   - **青空文库（Aozora Bunko）导入边界修复**：[document.rs](crates/ziyuan-app/src/text_project/document.rs) 的隐式注音基底补入 `ヶ / ヵ / 〆 / 〇`，新增按深度配对跳过嵌套 `［＃…］` 批注以避免批注内 `《…》` 误报，并阻止普通竖线 `｜` / `|` 跨句或带前导空白时贪婪误吞后方注音；同时完整保留既有 v1 项目清单的警告字节区间与文案兼容性。
-- 登记修订版本 `1.45.1`（序号 82，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；验收见 [1.45.1 验收记录](docs/acceptance/1.45.1.md)。
+- 登记修订版本 `1.45.1`（序号 82，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步补齐 [README](README.md)、[翰林院译书指南](docs/novel-translation.md)、[稳定性约定](docs/stability.md)，以及 `ziyuan --help` 与终端译书概览中的原文语种列表；验收见 [1.45.1 验收记录](docs/acceptance/1.45.1.md)。
 
 ## 1.45.0 — 2026-11-22
 
