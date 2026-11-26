@@ -676,7 +676,14 @@ export function renderNeoPanel(container, context = {}, callbacks = {}) {
       callbacks,
     );
   } else if (submode === "translation-neo") {
-    renderTranslationNeoSubmode(doc, container, court, trans, callbacks);
+    renderTranslationNeoSubmode(
+      doc,
+      container,
+      court,
+      trans,
+      context.textUsage || null,
+      callbacks,
+    );
   } else if (submode === "ministry-theme") {
     renderMinistryThemeSubmode(
       doc,
@@ -1170,7 +1177,14 @@ function renderQuickEdictSubmode(
   container.appendChild(grid);
 }
 
-function renderTranslationNeoSubmode(doc, container, court, trans, callbacks) {
+function renderTranslationNeoSubmode(
+  doc,
+  container,
+  court,
+  trans,
+  textUsage,
+  callbacks,
+) {
   const card = el(doc, "section", "card neo-section");
   const head = el(doc, "h2", "", "翰林译林枢机 · 书目与章卷牙牌");
   head.appendChild(
@@ -1250,6 +1264,13 @@ function renderTranslationNeoSubmode(doc, container, court, trans, callbacks) {
     actGroup.append(quickTermBtn, quickPersonBtn);
   }
 
+  const usageBtn = el(doc, "button", "", "译书度支账本");
+  usageBtn.type = "button";
+  usageBtn.dataset.view = "";
+  usageBtn.disabled = !trans.activeId;
+  usageBtn.addEventListener("click", () => callbacks.onOpenProjectUsage?.());
+  actGroup.appendChild(usageBtn);
+
   const qaBtn = el(doc, "button", "primary", "整书质检总览");
   qaBtn.type = "button";
   qaBtn.dataset.view = "";
@@ -1299,6 +1320,14 @@ function renderTranslationNeoSubmode(doc, container, court, trans, callbacks) {
       track.appendChild(seg);
     }
     progBox.append(progHead, track);
+    if (textUsage && textUsage.project === trans.activeId && textUsage.compactText) {
+      const usageRow = el(doc, "div", "neo-usage-strip");
+      usageRow.append(
+        el(doc, "span", "neo-usage-tag", "度支账本"),
+        el(doc, "span", "neo-usage-text", textUsage.compactText),
+      );
+      progBox.appendChild(usageRow);
+    }
     body.appendChild(progBox);
 
     // Chapter & Block Jade Slips ("章卷牙牌")

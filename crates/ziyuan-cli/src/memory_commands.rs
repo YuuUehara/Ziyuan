@@ -194,8 +194,10 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
             let built = session.memory_build(&root, &action.projects, provider.as_ref())?;
             if !json {
                 println!(
-                    "记忆库已重建：收录 {} 段，跳过 {} 块。原文与译稿未改动。",
+                    "记忆库已重建：收录 {} 段（复用 {} 段，新算 {} 段），跳过 {} 块。原文与译稿未改动。",
                     built.records,
+                    built.reused,
+                    built.embedded,
                     built.skipped.len()
                 );
             }
@@ -205,6 +207,7 @@ pub(crate) fn run(action: MemoryAction, json: bool) -> Result<(), Box<dyn Error>
                 .map(|b| json!({"project":b.project,"block":b.block,"reason":b.reason}))
                 .collect();
             json!({"project":action.project,"projects":action.projects,"records":built.records,
+                   "reused":built.reused,"embedded":built.embedded,
                    "skipped":skipped,"watermark":built.watermark})
         }
         "search" => {

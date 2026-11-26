@@ -914,6 +914,101 @@
   .qa-nav-actions { display:flex; flex-wrap:wrap; gap:6px; }
   .human-quick-capture { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 
+  /* ---- 译书度支账本与候选术语审定台（宋韵五境自适应） ---- */
+  #text-project-usage { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .usage-summary-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 12px; }
+  .usage-chip {
+    padding: 4px 11px; border-radius: 999px; background: var(--well); border: 1px solid var(--line);
+    font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .usage-chip.seal {
+    background: color-mix(in srgb, var(--tint) 52%, var(--sheet));
+    border-color: color-mix(in srgb, var(--seal) 42%, var(--line)); color: var(--tint-ink); font-weight: 600;
+  }
+  .usage-chip.gold {
+    background: color-mix(in srgb, var(--gold) 10%, var(--sheet));
+    border-color: color-mix(in srgb, var(--gold) 45%, var(--line)); color: var(--gold); font-weight: 600;
+  }
+  .usage-chip.warn {
+    background: color-mix(in srgb, var(--warn) 10%, var(--sheet));
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); color: var(--warn);
+  }
+  .usage-stage-grid {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 10px 0 12px;
+  }
+  .usage-stage-card {
+    padding: 12px 14px; background: var(--sheet); border: 1px solid var(--line);
+    border-top: 2px solid var(--line-strong); border-radius: var(--radius);
+    display: flex; flex-direction: column; gap: 6px; min-width: 0; box-shadow: var(--shadow-paper);
+  }
+  .usage-stage-card.is-active { border-top-color: var(--seal); }
+  .usage-stage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .usage-stage-title { font-family: var(--serif); font-size: 14.5px; letter-spacing: 1.5px; color: var(--ink); }
+  .usage-stage-value {
+    font-family: var(--serif); font-size: 16px; font-weight: 700; color: var(--ink);
+    font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+  }
+  .usage-stage-card:not(.is-active) .usage-stage-value { color: var(--muted); font-weight: 500; font-size: 14px; }
+  .usage-stage-meta { display: grid; gap: 2px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .usage-task-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+  .usage-task-item {
+    padding: 10px 12px; background: var(--sheet); border: 1px solid var(--line);
+    border-radius: var(--radius); display: grid; gap: 6px; font-size: 13px;
+  }
+  .usage-task-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .usage-task-ident, .usage-task-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .usage-charge-list {
+    padding-top: 6px; border-top: 1px dashed var(--line); display: grid; gap: 3px;
+    font: 12px/1.55 var(--mono); color: var(--muted); overflow-wrap: anywhere;
+  }
+  .usage-notes-box {
+    margin-top: 10px; padding: 8px 12px; background: var(--well);
+    border: 1px dashed var(--line); border-radius: var(--radius); font-size: 12.5px;
+  }
+  .usage-notes-box summary { cursor: pointer; font-family: var(--serif); color: var(--muted); user-select: none; }
+  .usage-notes-list { margin: 8px 0 2px; padding-left: 18px; color: var(--muted); display: grid; gap: 4px; }
+  .neo-usage-strip {
+    margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted);
+  }
+  .neo-usage-tag {
+    padding: 1px 8px; border-radius: 999px; font-family: var(--serif); font-size: 11.5px; font-weight: 600;
+    background: color-mix(in srgb, var(--tint) 48%, var(--sheet)); color: var(--tint-ink);
+    border: 1px solid color-mix(in srgb, var(--seal) 36%, var(--line));
+  }
+  .neo-usage-text { font-variant-numeric: tabular-nums; color: var(--ink); }
+  .proposal-panel {
+    margin: 10px 0; padding: 12px 14px; background: var(--well);
+    border: 1px solid var(--line); border-left: 3px solid var(--seal); border-radius: var(--radius);
+    display: grid; gap: 10px;
+  }
+  .proposal-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .proposal-head-title { font-family: var(--serif); font-size: 14.5px; font-weight: 600; letter-spacing: 1px; color: var(--ink); }
+  .proposal-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 44vh; overflow: auto; }
+  .proposal-card {
+    padding: 10px 12px; background: var(--sheet); border: 1px solid var(--line);
+    border-radius: var(--radius); display: grid; gap: 8px;
+  }
+  .proposal-card.is-merged {
+    border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+    background: color-mix(in srgb, var(--ok) 5%, var(--sheet));
+  }
+  .proposal-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; }
+  .proposal-source { font-family: var(--text); font-size: 15px; font-weight: 600; color: var(--ink); }
+  .proposal-paras { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .proposal-controls {
+    display: grid; grid-template-columns: minmax(140px, 1.2fr) minmax(105px, 0.7fr) minmax(130px, 1fr) auto;
+    gap: 8px; align-items: center;
+  }
+  .proposal-controls input, .proposal-controls select { min-width: 0; width: 100%; height: 32px; font-size: 13px; }
+  @media (max-width: 900px) {
+    .usage-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .proposal-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 520px) {
+    .usage-stage-grid, .proposal-controls { grid-template-columns: minmax(0, 1fr); }
+  }
+
   .workspace-tabs { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:6px; padding:0 0 12px; margin-bottom:12px; border-bottom:1px solid var(--line); }
   .workspace-tabs button { min-width:0; white-space:normal; font-family:var(--serif); padding:6px 8px; }
   .workspace-tabs button[aria-selected="true"] { color:var(--sheet); background:var(--ink); }
@@ -1498,6 +1593,18 @@
               <div id="project-qa-filters" class="qa-code-filters" aria-label="按问题类型筛选"></div>
               <div id="project-qa-issues" class="materials-report" aria-live="polite"></div>
             </section>
+            <section class="text-materials" id="text-project-usage" aria-label="译书度支账本">
+              <h3>译书度支账本 <small class="hint">四阶段事件簿小计 · 只读 · 估价非服务商账单</small></h3>
+              <p class="hint">按本项目关联诏令的事件簿汇总初译、忠实审校、文风审校与修订用量；未报告用量视为未知（不按零计），各币种分开测算，不改变度支限额或定稿条件。</p>
+              <div class="actions">
+                <button class="small primary" id="project-usage-run" type="button" data-view>查阅度支账本</button>
+              </div>
+              <p class="hint" id="project-usage-status" role="status" aria-live="polite">选择项目后，点「查阅度支账本」查看四阶段模型用量与估价。</p>
+              <div id="project-usage-summary" class="usage-summary-strip" aria-live="polite"></div>
+              <div id="project-usage-stages" class="usage-stage-grid" aria-label="译书四阶段用量"></div>
+              <div id="project-usage-tasks" class="materials-report" aria-live="polite"></div>
+              <div id="project-usage-notes" aria-live="polite"></div>
+            </section>
             <section class="text-memory" id="text-export" aria-label="章节导出"></section>
 
             <!-- Persistent host: renderTextNow never replaces this editor's DOM. -->
@@ -1573,6 +1680,20 @@
               <div class="actions" id="text-actions"></div>
               <p class="hint" id="text-action-result" role="status" aria-live="polite"></p>
             </details>
+            <section class="text-material" id="verification-panel" hidden>
+              <details class="continuity-tools" id="verification-details">
+                <summary>逐段勘校（六事核对、审校参考与词证登记）</summary>
+                <p class="hint">本地记录词义依据与核对情况，不会发送给模型或代为定稿。若在「资料」页改过临时关联，点「重新读取」即可同步称谓提示。</p>
+                <div class="verification-toolbar">
+                  <label>勘校段落<select id="verification-paragraph" data-view></select></label>
+                  <button type="button" class="small" id="verification-reload" data-view>重新读取（含关联）</button>
+                </div>
+                <p class="hint" id="verification-summary"></p>
+                <div id="verification-message" role="status"></div>
+                <div id="verification-facts"></div>
+                <div id="verification-form"></div>
+              </details>
+            </section>
             <section class="text-materials" id="text-materials-panel" aria-label="本地人物与术语资料">
               <h3>本地资料 <small class="hint">草稿与生产隔离；批准前不生效、不外发</small></h3>
               <p class="hint">在这里整理术语表与人物设定。保存草稿不会影响已批准译文，也不会发给模型；校验并准备后，需再点「批准上下文」。</p>
@@ -1612,6 +1733,7 @@
                   <button class="small" id="materials-diff-run" type="button">对比草稿与生产</button>
                   <button class="small" id="materials-qa" type="button" data-view>确定性检查</button>
                   <button class="small" id="materials-project-qa-jump" type="button" data-view>整书质检总览</button>
+                  <button class="small" id="materials-project-usage-jump" type="button" data-view>译书度支账本</button>
                   <button class="small" id="materials-tm-list" type="button">翻译记忆</button>
                   <button class="small" id="materials-comment-list" type="button">评论</button>
                 </div>
@@ -1619,7 +1741,7 @@
                   <span class="tool-group-label">交换备份</span>
                   <button class="small" id="materials-termbase-export" type="button">导出术语表 CSV</button>
                   <button class="small" id="materials-termbase-export-bom" type="button">导出 Excel CSV（BOM）</button>
-                  <button class="small" id="materials-termbase-propose" type="button">提取候选术语到 proposals</button>
+                  <button class="small" id="materials-termbase-propose" type="button" data-view>提取候选术语到 proposals</button>
                   <button class="small" id="materials-termbase-import" type="button">导入术语表 CSV</button>
                   <button class="small" id="materials-tbx-export" type="button">导出 TBX</button>
                   <button class="small" id="materials-tbx-import" type="button">导入 TBX</button>
@@ -1636,6 +1758,7 @@
               </p>
               <p class="hint"><label><input type="checkbox" id="materials-simple"> 简易模式（只看名称、译法与备注，隐藏范围与称谓规则）</label></p>
               <p class="hint" id="materials-status" role="status" aria-live="polite">请选择项目后读取。</p>
+              <div id="materials-proposals" class="materials-report" aria-live="polite"></div>
               <div id="materials-diff" class="materials-report" aria-live="polite"></div>
               <div class="materials-qa-bar"><label class="hint" for="materials-qa-filter">筛选</label><select id="materials-qa-filter"><option value="">全部</option><option value="no_translation">没有有效译稿</option><option value="missing_paragraph">缺段</option><option value="paragraph_id_mismatch">段号不一致</option><option value="duplicate_paragraph">段号重复</option><option value="extra_paragraph">多段</option><option value="empty_translation">空译</option><option value="untranslated">疑似未翻译</option><option value="number_mismatch">数字不一致</option><option value="duplicate_text">重复译文</option><option value="term_inconsistent">术语不一致</option><option value="source_script_leak">源语字符残留</option><option value="punctuation_mismatch">标点异常</option></select><button class="small" id="materials-qa-ignore" type="button">忽略选中</button></div>
               <div id="materials-qa-result" class="materials-report" aria-live="polite"></div>
@@ -2709,75 +2832,54 @@ $("materials-tbx-file")?.addEventListener("change", async (e) => {
     e.target.value = "";
   }
 });
-$("materials-tm-list")?.addEventListener("click", async () => {
-  const project=textProjectId;if(!project)return;
-  const entries=await api("/text/"+encodeURIComponent(project)+"/tm");if(project!==textProjectId)return;
-  const host=$("materials-tm-result");host.replaceChildren();
-  const check=()=>{if(project!==textProjectId)throw new Error("项目已变，请重新读取翻译记忆");};
-  const task=async(fn)=>{try{check();await fn();$("materials-status").textContent="翻译记忆已更新；未修改译稿。";if(project===textProjectId)$("materials-tm-list").click();}catch(e){$("materials-status").textContent=e.message;}};
-  const input=(label,value="")=>{const e=document.createElement("input");e.type="text";e.placeholder=label;e.setAttribute("aria-label",label);e.value=value;return e;};
-  const button=(label,fn)=>{const e=document.createElement("button");e.type="button";e.className="small write";e.textContent=label;e.onclick=()=>task(fn);return e;};
-  const form=document.createElement("div");form.className="row write";const source=input("记忆原文"),target=input("认可译法");
-  form.append(source,target,button("新增记忆",()=>api("/text/"+encodeURIComponent(project)+"/tm",{source:source.value,target:target.value})),button("从当前有效定稿建库",()=>api("/text/"+encodeURIComponent(project)+"/tm/build",{})));host.append(form);
-  if(!entries.length){const empty=document.createElement("p");empty.className="hint";empty.textContent="翻译记忆为空，可新增原译文对或从定稿建库。";host.append(empty);}
-  for(const entry of entries){
-    const row=document.createElement("article");row.className="continuity-change";const prose=document.createElement("p");prose.textContent=entry.source+" → "+entry.target+" · 采纳 "+entry.adopted;row.append(prose);
-    const controls=document.createElement("div");controls.className="row write";controls.append(button("采纳",()=>api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/adopt",{})));
-    const edit=document.createElement("details");edit.className="write";const summary=document.createElement("summary");summary.textContent="修改这条记忆";const original=input("记忆原文",entry.source),translation=input("认可译法",entry.target),actions=document.createElement("div");actions.className="row";
-    actions.append(button("保存记忆",()=>api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/update",{source:original.value,target:translation.value})),button("删除记忆",async()=>{if(!window.confirm("删除这条翻译记忆？译稿不受影响。"))return;await api("/text/"+encodeURIComponent(project)+"/tm/"+encodeURIComponent(entry.id)+"/delete",{});}));edit.append(summary,original,translation,actions);row.append(controls,edit);host.append(row);
+let materialsCollabMod = null;
+let materialsCollabPromise = null;
+function ensureMaterialsCollabMod() {
+  if (materialsCollabMod) return Promise.resolve(materialsCollabMod);
+  if (!materialsCollabPromise) {
+    materialsCollabPromise = import("/assets/materials-collab.mjs").then((m) => (materialsCollabMod = m));
   }
+  return materialsCollabPromise;
+}
+$("materials-tm-list")?.addEventListener("click", async () => {
+  const project = textProjectId;
+  if (!project) return;
+  const mod = await ensureMaterialsCollabMod();
+  const entries = await api("/text/" + encodeURIComponent(project) + "/tm");
+  if (project !== textProjectId) return;
+  mod.renderLocalTmPanel({
+    doc: document,
+    host: $("materials-tm-result"),
+    statusEl: $("materials-status"),
+    project,
+    entries,
+    getCurrentProject: () => textProjectId,
+    apiCall: api,
+    confirmAction: (msg) => window.confirm(msg),
+    onReload: () => $("materials-tm-list")?.click(),
+  });
 });
 async function loadMaterialsComments() {
-  const project = textProjectId; if (!project) return;
+  const project = textProjectId;
+  if (!project) return;
   try {
-    const comments = await api("/text/" + encodeURIComponent(project) + "/comments");
+    const [mod, comments] = await Promise.all([
+      ensureMaterialsCollabMod(),
+      api("/text/" + encodeURIComponent(project) + "/comments"),
+    ]);
     if (project !== textProjectId) return;
-    const host = $("materials-comment-result"); host.replaceChildren();
-    if (!comments.length) { host.textContent = "暂无评论。"; return; }
-    for (const c of comments) {
-      const row = document.createElement("p"); row.className = "hint";
-      row.textContent = c.id + (c.parent_id ? " ↳" + c.parent_id : "") + " · " + textLocation(c.paragraph || c.block) + " · " + (c.resolved ? "已解决" : "未解决") + (c.assignee ? " · 指派 " + c.assignee : "") + " · " + c.body + " ";
-      {
-        const commentProject = project;
-        const done = document.createElement("button"); done.type = "button"; done.className = "link-button write"; done.textContent = c.resolved ? "重新打开" : "标记解决";
-        done.classList.add("write");
-        done.addEventListener("click", async () => {
-          if (commentProject !== textProjectId) return;
-          try {
-            await api("/text/" + encodeURIComponent(commentProject) + "/comments/" + encodeURIComponent(c.id) + (c.resolved ? "/reopen" : "/resolve"), {});
-            $("materials-status").textContent = "评论状态已更新；未修改译稿。";
-            await loadMaterialsComments();
-          } catch (e) {
-            $("materials-status").textContent = "评论操作失败：" + (e.body?.error || e.message);
-          }
-        });
-        row.append(done);
-      }
-      const reply = document.createElement("button"); reply.type = "button"; reply.className = "link-button write"; reply.textContent = "回复";
-      reply.addEventListener("click", async () => {
-        const text = window.prompt("回复内容"); if (!text || project !== textProjectId) return;
-        try {
-          await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/reply", { body: text });
-          $("materials-status").textContent = "已回复。";
-          await loadMaterialsComments();
-        } catch (e) {
-          $("materials-status").textContent = "回复失败：" + (e.body?.error || e.message);
-        }
-      });
-      const assign = document.createElement("button"); assign.type = "button"; assign.className = "link-button write"; assign.textContent = "指派";
-      assign.addEventListener("click", async () => {
-        const who = window.prompt("负责人", c.assignee || ""); if (who === null || project !== textProjectId) return;
-        try {
-          await api("/text/" + encodeURIComponent(project) + "/comments/" + encodeURIComponent(c.id) + "/assign", { assignee: who });
-          $("materials-status").textContent = "已指派（空字符串表示取消）。";
-          await loadMaterialsComments();
-        } catch (e) {
-          $("materials-status").textContent = "指派失败：" + (e.body?.error || e.message);
-        }
-      });
-      row.append(reply, assign);
-      host.append(row);
-    }
+    mod.renderMaterialsCommentsList({
+      doc: document,
+      host: $("materials-comment-result"),
+      statusEl: $("materials-status"),
+      project,
+      comments,
+      getCurrentProject: () => textProjectId,
+      formatLocation: (id) => textLocation(id),
+      promptText: (msg, def = "") => window.prompt(msg, def),
+      apiCall: api,
+      onReload: loadMaterialsComments,
+    });
   } catch (e) {
     $("materials-status").textContent = "读取评论失败：" + (e.body?.error || e.message);
   }
@@ -2823,19 +2925,35 @@ $("materials-termbase-export-bom")?.addEventListener("click", async () => {
 });
 $("materials-termbase-propose")?.addEventListener("click", async () => {
   if (!textProjectId || !textBlockId) { $("materials-status").textContent = "请先选择项目和块。"; return; }
+  const project = textProjectId;
+  const block = textBlockId;
+  const viewer = !state || !!state.viewer;
   try {
-    const report = await api(
-      "/text/" + encodeURIComponent(textProjectId) + "/blocks/" + encodeURIComponent(textBlockId) + "/term-proposals",
-      { write: true }
-    );
+    const endpoint = "/text/" + encodeURIComponent(project) + "/blocks/" + encodeURIComponent(block) + "/term-proposals";
+    const [mod, report] = await Promise.all([
+      ensureMaterialsCollabMod(),
+      viewer ? api(endpoint) : api(endpoint, { write: true }),
+    ]);
+    if (project !== textProjectId || block !== textBlockId) return;
     const list = report.candidates || [];
-    $("materials-status").textContent = list.length
-      ? `已提取 ${list.length} 条候选术语并写入 ${report.path}（不自动入库）。`
-      : `当前块未发现新的候选术语（已写入 ${report.path}）。`;
-    const host = $("materials-diff");
-    host.textContent = list.length
-      ? list.map((c) => `${c.source}（${c.count} 次 · ${c.reason} · ${(c.paragraphs || []).join(",")}）`).join("\n")
-      : "当前块无新的候选术语。";
+    $("materials-status").textContent = viewer
+      ? (list.length ? `已预览 ${list.length} 条候选术语（观政只读，未写入磁盘）。` : "当前块未发现新的候选术语（观政只读）。")
+      : (list.length
+          ? `已提取 ${list.length} 条候选术语并写入 ${report.path}（不自动入库；可在下方选填译法收入本地草稿）。`
+          : `当前块未发现新的候选术语（已写入 ${report.path}）。`);
+    mod.renderTermProposalsPanel({
+      doc: document,
+      host: $("materials-proposals"),
+      statusEl: $("materials-status"),
+      report,
+      project,
+      viewer,
+      getCurrentProject: () => textProjectId,
+      formatLocation: (id, local) => textLocation(id, local),
+      onNavigate: (paragraph) => navigateToParagraph({ block, paragraph }),
+      apiCall: api,
+      onMerged: () => loadMaterialsView(),
+    });
   } catch (e) { $("materials-status").textContent = "提取失败：" + materialAdvice(e.body?.error || e.message); }
 });
 $("materials-termbase-import")?.addEventListener("click", () => $("materials-termbase-file")?.click());
@@ -2864,31 +2982,16 @@ $("materials-qa")?.addEventListener("click", async () => {
     $("materials-qa-result").textContent = "检查失败：" + materialAdvice(e.body?.error || e.message);
   }
 });
-function renderQaIssues() {
-  const labels = { no_translation: "没有有效译稿", missing_paragraph: "缺段", paragraph_id_mismatch: "段号不一致", extra_paragraph: "多段", duplicate_paragraph: "段号重复", empty_translation: "空译", untranslated: "疑似未翻译", number_mismatch: "数字不一致", duplicate_text: "重复译文", term_inconsistent: "术语不一致", source_script_leak: "源语字符残留", punctuation_mismatch: "标点异常" };
-  const filter = $("materials-qa-filter")?.value || "";
-  const host = $("materials-qa-result");
-  host.replaceChildren();
-  const issues = (window.__qaIssues || []).filter((i) => !filter || i.code === filter);
-  if (!issues.length) { host.textContent = "没有符合筛选的确定性检查问题（不代表语义正确）。"; return; }
-  for (const issue of issues) {
-    const row = document.createElement("label");
-    row.className = "hint";
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    const text = document.createElement("span");
-    text.textContent = " " + (labels[issue.code] || issue.code) + (issue.paragraph ? "（" + textLocation(issue.paragraph) + "）" : "") + "：" + issue.message + " ";
-    row.append(box, text);
-    if (issue.paragraph) {
-      const go = document.createElement("button");
-      go.type = "button"; go.className = "link-button"; go.textContent = "定位";
-      go.addEventListener("click", () => {
-        navigateToParagraph({ block: textBlockId, paragraph: issue.paragraph });
-      });
-      row.append(go);
-    }
-    host.append(row);
-  }
+async function renderQaIssues() {
+  const mod = await ensureMaterialsCollabMod();
+  mod.renderBlockQaIssues({
+    doc: document,
+    host: $("materials-qa-result"),
+    issues: window.__qaIssues || [],
+    filter: $("materials-qa-filter")?.value || "",
+    formatLocation: (id) => textLocation(id),
+    onNavigate: (paragraph) => navigateToParagraph({ block: textBlockId, paragraph }),
+  });
 }
 $("materials-qa-filter")?.addEventListener("change", renderQaIssues);
 $("materials-qa-ignore")?.addEventListener("click", () => {
@@ -2975,24 +3078,80 @@ $("materials-project-qa-jump")?.addEventListener("click", () => {
   selectWorkspaceTab("delivery");
   runProjectQaReport();
 });
+let projectUsageCtrl = null;
+let projectUsageCtrlPromise = null;
+let textUsageSummaryCache = null;
+function ensureProjectUsageController() {
+  if (projectUsageCtrl) return Promise.resolve(projectUsageCtrl);
+  if (!projectUsageCtrlPromise) {
+    projectUsageCtrlPromise = import("/assets/project-usage.mjs").then(({ createProjectUsageController, summarizeProjectUsage }) => {
+      projectUsageCtrl = createProjectUsageController({
+        doc: document,
+        getProjectId: () => textProjectId,
+        fetchUsage: (project) => api("/text/" + encodeURIComponent(project) + "/usage"),
+        formatLocation: (id, isParagraph) => textLocation(id, isParagraph),
+        formatError: (e) => materialAdvice(e?.body?.error || e?.message),
+        onInspectTask: (id) => gotoTask(id),
+        onOpenBlock: (blk) => {
+          selectWorkspaceTab("draft");
+          selectTextBlock(blk);
+        },
+        onReportLoaded: (_project, report) => {
+          textUsageSummaryCache = summarizeProjectUsage(report);
+          if (hall === "neo" && typeof renderNeoView === "function") renderNeoView();
+        },
+        statusEl: $("project-usage-status"),
+        summaryHost: $("project-usage-summary"),
+        stagesHost: $("project-usage-stages"),
+        tasksHost: $("project-usage-tasks"),
+        notesHost: $("project-usage-notes"),
+      });
+      return projectUsageCtrl;
+    }).catch((err) => {
+      projectUsageCtrlPromise = null;
+      console.error(err);
+      return null;
+    });
+  }
+  return projectUsageCtrlPromise;
+}
+function resetProjectUsage(projectId) {
+  if (textUsageSummaryCache && textUsageSummaryCache.project !== projectId) {
+    textUsageSummaryCache = null;
+  }
+  if (projectUsageCtrl) {
+    projectUsageCtrl.reset(projectId);
+    return;
+  }
+  const status = $("project-usage-status");
+  if (status) {
+    status.textContent = projectId
+      ? "点「查阅度支账本」按事件簿汇总本项目四阶段模型用量与估价。"
+      : "选择项目后，点「查阅度支账本」查看四阶段模型用量与估价。";
+  }
+  $("project-usage-summary")?.replaceChildren();
+  $("project-usage-stages")?.replaceChildren();
+  $("project-usage-tasks")?.replaceChildren();
+  $("project-usage-notes")?.replaceChildren();
+}
+async function runProjectUsageReport() {
+  const ctrl = await ensureProjectUsageController();
+  if (ctrl) await ctrl.run();
+}
+$("project-usage-run")?.addEventListener("click", runProjectUsageReport);
+$("materials-project-usage-jump")?.addEventListener("click", () => {
+  selectWorkspaceTab("delivery");
+  $("text-project-usage")?.scrollIntoView({ block: "nearest" });
+  runProjectUsageReport();
+});
 $("materials-diff-run")?.addEventListener("click", async () => {
   if (!textProjectId) { $("materials-status").textContent = "请先选择项目。"; return; }
   try {
-    const diff = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/diff");
-    const lines = [];
-    lines.push("草稿修订 " + diff.draft_revision + " · 已批准 " + (diff.approved_version ?? "无") + "（历史 " + (diff.approved_versions || []).join("、") + "）");
-    if (diff.legacy_production) lines.push("生产仍是旧数组资料，结构对比不可用。");
-    const fieldNames = { allowed: "允许译法", source: "原文", category: "类别", note: "备注", scope: "范围", available_from: "可用起点", evidence: "证据", status: "状态", name: "姓名", reading: "读音", aliases: "别名", terms: "关联术语", address_rules: "称谓规则", voice: "声线" };
-    const counts = {};
-    for (const change of (diff.terms || []).concat(diff.persons || [])) {
-      counts[change.kind] = (counts[change.kind] || 0) + 1;
-      const kind = ({ added: "新增", removed: "删除", changed: "改动" }[change.kind] || change.kind);
-      const fields = (change.fields || []).map((f) => fieldNames[f] || f);
-      lines.push(change.id + "：" + kind + (fields.length ? "（" + fields.join("、") + "）" : ""));
-    }
-    if (Object.keys(counts).length) lines.splice(1, 0, "摘要：" + Object.entries(counts).map(([k, v]) => ({ added: "新增", removed: "删除", changed: "改动" }[k] || k) + " " + v).join(" · "));
-    if (!(diff.terms || []).length && !(diff.persons || []).length) lines.push("草稿与已批准资料一致。");
-    $("materials-diff").textContent = lines.join("\n");
+    const [mod, diff] = await Promise.all([
+      ensureMaterialsCollabMod(),
+      api("/text/" + encodeURIComponent(textProjectId) + "/materials/diff"),
+    ]);
+    $("materials-diff").textContent = mod.formatMaterialsDiffReport(diff);
   } catch (e) {
     $("materials-diff").textContent = "对比失败：" + materialAdvice(e.body?.error || e.message);
   }
@@ -3321,6 +3480,7 @@ function fillAssocDatalists() {
   for (const box of document.querySelectorAll(".assoc-field")) renderAssocTags(box);
 }
 function materialAdvice(message) {
+  if (materialsCollabMod) return materialsCollabMod.formatMaterialAdvice(message);
   if (/请求身份已被不同内容使用|修订冲突|冲突/.test(message)) return message + " 下一步：重新读取服务器资料；当前输入可先导出备份，再决定保留哪一份。";
   if (/尚无本地资料草稿/.test(message)) return message + " 下一步：先新增一条术语或人物，保存草稿，再准备生产资料。";
   if (/不是有效 JSON|JSON 无效|格式不对/.test(message)) return message + " 下一步：检查括号和逗号；可先导出备份再修改。";
@@ -3334,6 +3494,7 @@ function setMaterialState(kind, text) {
   if (node) node.textContent = text;
 }
 function readMaterialsAssociations() {
+  if (materialsCollabMod) return materialsCollabMod.parseMaterialsAssociations(materialsAssoc);
   const out = [];
   for (const [paragraph, value] of materialsAssoc) {
     const persons = value.persons.split(",").map((s) => s.trim()).filter(Boolean);
@@ -3347,41 +3508,19 @@ function readMaterialsAssociations() {
   }
   return out;
 }
-function renderMaterialsReport(result) {
-  const host = $("materials-preview");
-  host.replaceChildren();
-  const report = result?.report;
-  if (!report) { host.textContent = "报告为空。"; return; }
-  const add = (title, items) => {
-    const box = document.createElement("div");
-    box.className = "text-material";
-    const h = document.createElement("b");
-    h.textContent = title;
-    box.append(h);
-    const list = document.createElement("ul");
-    list.className = "text-problems";
-    for (const item of items) {
-      const li = document.createElement("li");
-      li.textContent = item;
-      list.append(li);
-    }
-    box.append(list);
-    host.append(box);
-  };
-  const statusText = (s) => ({ tentative: "暂定", confirmed: "已确认" }[s] || s);
-  const kindText = (k) => ({ term: "术语", person: "人物" }[k] || k);
-  const parasText = (ps) => (ps || []).map((p) => textLocation(p)).join("、");
-  const sel = (selection) => {
-    const items = [];
-    for (const term of selection?.terms || []) items.push("术语 " + term.term_id + "（" + statusText(term.status) + "）：" + parasText(term.paragraphs));
-    for (const person of selection?.persons || []) items.push("人物 " + person.person_id + "（" + statusText(person.status) + "）：" + parasText(person.paragraphs));
-    for (const rule of selection?.address_rules || []) items.push("称呼 " + rule.person_id + "#" + rule.rule_index + "：" + parasText(rule.paragraphs));
-    return items;
-  };
-  add("适用（applicable）", sel(report.applicable));
-  add("自动候选（automatic）", sel(report.automatic));
-  add("诊断（diagnostics）", (report.diagnostics || []).map((d) =>
-    kindText(d.identity?.kind || "") + " " + (d.identity?.id || "") + " — " + (d.reason || "") + "：" + parasText(d.paragraphs)));
+async function renderMaterialsReport(result) {
+  const mod = await ensureMaterialsCollabMod();
+  mod.renderMaterialsVisibilityReport({
+    doc: document,
+    host: $("materials-preview"),
+    result,
+    formatLocation: (id) => textLocation(id),
+    sectionTitles: {
+      applicable: "适用（applicable）",
+      automatic: "自动候选（automatic）",
+      diagnostics: "诊断（diagnostics）",
+    },
+  });
 }
 $("materials-preview-run")?.addEventListener("click", async () => {
   const snapshot = materialsEditor?.previewState();
@@ -3812,6 +3951,8 @@ async function loadTextProject() {
   textError = null;
   if (project !== memoryProject) loadMemoryStatus(null);
   resetProjectQa(project);
+  resetProjectUsage(project);
+  $("materials-proposals")?.replaceChildren();
   if (!textProjectId) { renderText(); return; }
   try {
     const loaded = await api("/text/" + encodeURIComponent(project));
@@ -3834,159 +3975,45 @@ async function loadTextProject() {
   history.replaceState(null, "", textHash());
   await loadTextBlock();
 }
-// Verification forms have their own persistent DOM: polling updates facts, never local input.
-const semanticCategories = {
-  subject_speaker: {title:"言行归属", note:"核对谁在说话、谁在做事，勿张冠李戴。", example:"“清替我换钱”，不是“我替清换钱”。"},
-  agency_negation: {title:"事理正反", note:"核对动作方向与肯定、否定，勿将原意颠倒。", example:"“借给他”不是“向他借”；“并非主任”不能漏掉“并非”。"},
-  quantity: {title:"数目分寸", note:"核对金额、人数、约数与倍数，勿增减失度。", example:"“约三圆”不宜写成“恰好三圆”。"},
-  timeline: {title:"前后次第", note:"核对时间先后与事情是否已经发生。", example:"“来年暑假回去”，不是“今年暑假回过”。"},
-  names_relations: {title:"称谓名分", note:"核对人名、职务、昵称与人物关系。", example:"“副校长”不可误作“数学主任”。"},
-  humor_additions: {title:"谐趣留白", note:"核对笑点、反话与含蓄之处，勿将解释写成原文。", example:"人物本来不懂一个绰号，不能替他补上一段词典释义。"},
-};
-const verificationDispositions = {accepted:"接受", rejected:"驳回", pending:"待查", not_applicable:"不适用"};
-const verificationResolutions = {unchecked:"未检查", resolved:"已解决", unresolved:"未解决", not_applicable:"不适用"};
-const evidenceStates = {tentative:"暂定", confirmed:"已确认"};
-const evidenceFields = {quote:"原文短引", source:"出处（网址或书目信息）", locator:"出处位置（词条、页码等）", explanation:"词义核对说明", context:"适用语境"};
-const verificationDrafts = new Map();
-let verificationScope = "", verificationView = null, verificationError = "", verificationRequest = 0;
-let verificationParagraph = "", verificationFormKey = "", verificationBusy = false;
-function currentVerificationScope() { return `${textProjectId}/${textBlockId}`; }
-function verificationBase() { return `/text/${encodeURIComponent(textProjectId)}/blocks/${encodeURIComponent(textBlockId)}`; }
+// 六事逐段勘校与词证登记（/assets/verification-panel.mjs，保留 verification-reload 按钮与 verificationView 句柄供烟测核验）。
+let verificationView = null;
+let verificationCtrl = null;
+let verificationCtrlPromise = null;
+function ensureVerificationController() {
+  if (verificationCtrl) return Promise.resolve(verificationCtrl);
+  if (!verificationCtrlPromise) {
+    verificationCtrlPromise = import("/assets/verification-panel.mjs").then(({ createVerificationController }) => {
+      verificationCtrl = createVerificationController({
+        doc: document,
+        getScope: () => ({ project: textProjectId || "", block: textBlockId || "" }),
+        getBlockStatus: () => textBlock?.status || null,
+        isViewer: () => document.body.classList.contains("viewer"),
+        readAssociations: () => (typeof readMaterialsAssociations === "function" ? readMaterialsAssociations() : []),
+        apiCall: api,
+        toast,
+        formatLocation: (id) => textLocation(id),
+        getElement: $,
+        onViewChange: (v) => { verificationView = v; },
+      });
+      return verificationCtrl;
+    }).catch((err) => {
+      verificationCtrlPromise = null;
+      console.error(err);
+      return null;
+    });
+  }
+  return verificationCtrlPromise;
+}
 async function loadVerification() {
-  const scope = currentVerificationScope(), request = ++verificationRequest;
-  if (verificationScope !== scope) {
-    verificationScope = scope; verificationView = null; verificationParagraph = ""; verificationFormKey = "";
-  }
-  verificationError = "";
-  renderVerification();
-  try {
-    const assoc = typeof readMaterialsAssociations === "function" ? readMaterialsAssociations() : [];
-    const suffix = assoc.length
-      ? "/verification/associations?associations=" + encodeURIComponent(JSON.stringify(assoc))
-      : "/verification";
-    const view = await api(verificationBase() + suffix);
-    if (scope !== currentVerificationScope() || request !== verificationRequest) return;
-    verificationView = view;
-  } catch (e) {
-    if (scope !== currentVerificationScope() || request !== verificationRequest) return;
-    verificationError = e.message;
-  }
-  renderVerification();
-}
-function verificationDraft() {
-  const key = `${verificationScope}/${verificationParagraph}`;
-  if (!verificationDrafts.has(key)) verificationDrafts.set(key, {
-    fingerprint: verificationView.fingerprint,
-    checks: Object.keys(semanticCategories).map((category) => ({category, disposition: "pending", resolution: "unchecked", note: "", task: "", quote: "", evidence: ""})),
-    evidence: {quote: "", source: "", locator: "", explanation: "", context: "", status: "tentative"},
-  });
-  return verificationDrafts.get(key);
-}
-function verificationOptions(values, selected) {
-  return Object.entries(values).map(([value, label]) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
-}
-function renderVerificationForm() {
-  if (!verificationView || !verificationParagraph) return;
-  const d = verificationDraft();
-  $("verification-form").innerHTML = `<div class="write"><h4>逐段勘校</h4>
-    <p class="hint">分六项记录核对结果与存疑，意见处理与问题状态分开填；保存只作核对记录，不代准奏或定稿。</p>
-    <div class="verification-grid">${d.checks.map((c, i) => `<fieldset><legend>${esc(semanticCategories[c.category].title)}</legend>
-      <p class="hint">${esc(semanticCategories[c.category].note)}</p><p class="hint">例：${esc(semanticCategories[c.category].example)}</p>
-      <div class="row"><label>意见处理<select data-vcheck="${i}" data-vfield="disposition">${verificationOptions(verificationDispositions, c.disposition)}</select></label><label>问题状态<select data-vcheck="${i}" data-vfield="resolution">${verificationOptions(verificationResolutions, c.resolution)}</select></label></div>
-      <label>理由／核对说明<textarea data-vcheck="${i}" data-vfield="note">${esc(c.note)}</textarea></label>
-      <div class="row"><label>审校诏令号（可选）<input type="text" inputmode="numeric" data-vcheck="${i}" data-vfield="task" value="${esc(c.task)}"></label><label>关联词证编号（逗号分隔，可选）<input type="text" data-vcheck="${i}" data-vfield="evidence" value="${esc(c.evidence)}"></label></div>
-      <label>审校意见原句（填写诏令号时必填）<textarea data-vcheck="${i}" data-vfield="quote">${esc(c.quote)}</textarea></label>
-    </fieldset>`).join("")}</div>
-    <div class="actions"><button type="button" class="small" id="verification-save">保存本段六项复核</button><button type="button" class="small" id="verification-refresh">已读最新材料，继续核对</button></div>
-    <details class="continuity-tools"><summary>添加词证</summary><p class="hint">记录词义出处和说明（网址仅作记录，不自动打开；保存后保留原记录）。</p>
-    ${Object.entries(evidenceFields).map(([key, label]) => `<label>${label}<textarea data-vevidence="${key}">${esc(d.evidence[key])}</textarea></label>`).join("")}
-    <label>词证状态<select data-vevidence="status">${verificationOptions(evidenceStates, d.evidence.status)}</select></label><div class="actions"><button type="button" class="small" id="evidence-save">保存词证</button></div></details></div>`;
+  const ctrl = await ensureVerificationController();
+  if (ctrl) await ctrl.load();
 }
 function renderVerification() {
-  let panel = $("verification-panel");
-  if (!panel) {
-    panel = document.createElement("section"); panel.id = "verification-panel"; panel.className = "text-material";
-    ($("text-model-drawer") || $("text-action-result") || $("text-materials")).after(panel);
-    panel.innerHTML = `<details class="continuity-tools" id="verification-details"><summary>逐段勘校（六事核对、审校参考与词证登记）</summary><p class="hint">本地记录词义依据与核对情况，不会发送给模型或代为定稿。若在「资料」页改过临时关联，点「重新读取」即可同步称谓提示。</p><div class="verification-toolbar"><label>勘校段落<select id="verification-paragraph" data-view></select></label><button type="button" class="small" id="verification-reload">重新读取（含关联）</button></div><p class="hint" id="verification-summary"></p><div id="verification-message" role="status"></div><div id="verification-facts"></div><div id="verification-form"></div></details>`;
-    const saveInput = (e) => {
-      if (!verificationView || !verificationParagraph) return;
-      const d = verificationDraft(), el = e.target;
-      if (el.dataset.vcheck !== undefined) d.checks[Number(el.dataset.vcheck)][el.dataset.vfield] = el.value;
-      if (el.dataset.vevidence) d.evidence[el.dataset.vevidence] = el.value;
-    };
-    panel.addEventListener("input", saveInput);
-    panel.addEventListener("change", saveInput);
-    panel.addEventListener("change", (e) => {
-      if (e.target.id !== "verification-paragraph") return;
-      verificationParagraph = e.target.value; verificationFormKey = ""; renderVerification();
-    });
-    panel.addEventListener("click", verificationClick);
+  if (verificationCtrl) {
+    verificationCtrl.render();
+    return;
   }
-  panel.hidden = !textProjectId || !textBlockId;
-  if (verificationScope !== currentVerificationScope() || !verificationView) {
-    $("verification-summary").textContent = "";
-    $("verification-facts").textContent = verificationError || "正在读取复核材料…";
-    delete $("verification-facts").dataset.signature;
-    $("verification-form").replaceChildren(); verificationFormKey = "";
-    $("verification-paragraph").replaceChildren(); return;
-  }
-  const v = verificationView;
-  if (!v.source.paragraphs.some((p) => p.id === verificationParagraph)) verificationParagraph = v.source.paragraphs[0]?.id || "";
-  $("verification-paragraph").innerHTML = v.source.paragraphs.map((p) => `<option value="${esc(p.id)}" ${p.id === verificationParagraph ? "selected" : ""}>${esc(textLocation(p.id))}</option>`).join("");
-  if (!verificationParagraph) { $("verification-summary").textContent = ""; return; }
-  const d = verificationDraft(), stale = d.fingerprint !== v.fingerprint;
-  const paragraph = verificationParagraph;
-  const info = v.paragraphs.find((p) => p.paragraph === paragraph);
-  $("verification-summary").textContent = `最新复核：${info?.latest ? "#" + info.latest : "尚无"} · 待核对：${info?.unresolved ?? 6} 项 · 定稿：${textBlock?.status?.state?.state === "finalized" ? "有效" : "未定稿"}`;
-  $("verification-message").textContent = verificationError || (stale ? "材料或复核记录已更新，暂不能保存。输入已保留：请先阅读最新内容，再点「已读最新材料，继续核对」。" : "当前填写保留在页面内，核对完请主动保存；整页刷新或关闭后未保存内容会清空。");
-  const text = (block) => block?.paragraphs.find((p) => p.id === paragraph)?.text || "（无）";
-  const facts = $("verification-facts"), signature = JSON.stringify([verificationScope, paragraph, v, textBlock?.status]);
-  if (facts.dataset.signature !== signature) {
-    facts.innerHTML = `<p>结构检查：${v.structure ? (v.structure.valid ? "通过（不判断译文对错）" : "未通过") : "尚无译稿"} · 关联意见：${info?.opinions_handled ? "已处理" : "未处理"} · 人工复核：${info?.operator_reviewed ? "已复核" : "未复核"} · 御览定稿：${textBlock?.status?.state?.state === "finalized" ? "有效" : "尚无有效定稿"}${info?.latest && !info.current ? " · 旧记录须重新核对" : ""}</p>
-      <p class="text-para">原文：${esc(text(v.source))}</p><p class="text-para">现行译文：${esc(text(v.translation))}</p>
-      <details><summary>本段朱批 · 第 ${esc(v.zhupi.version)} 版</summary><pre>${esc(v.zhupi.items[paragraph]?.text || "本段没有朱批。")}</pre></details>
-      <h4>模型审校意见（仅供参考）</h4>${v.reviews.map((r) => `<details><summary>诏令 #${esc(r.task)} · ${esc({review_fidelity:"忠实审校", review_style:"文风审校"}[r.kind])}</summary><pre>${esc(r.text)}</pre></details>`).join("") || "暂无模型审校意见"}
-      <h4>已批准词表提示</h4><p class="hint">这里只核对字面用词，是否适合本段仍需你判断。</p>${v.hints.filter((h) => h.paragraph === paragraph).map((h) => `<p>${esc(h.source)} → ${h.allowed.map(esc).join(" / ")} · 适用范围：${esc(h.scope || "未注明")} · 说明：${esc(h.note || "无")} · ${esc(h.message)}</p>`).join("") || "暂无提示"}
-      <h4>本块词证</h4>${v.evidence.map((e) => `<details><summary>词证 #${esc(e.id)} · ${esc(textLocation(e.details.paragraph))} · ${esc(evidenceStates[e.details.status])}</summary><dl>${Object.entries(evidenceFields).map(([key, label]) => `<dt>${esc(label)}</dt><dd>${esc(e.details[key])}</dd>`).join("")}</dl></details>`).join("") || "尚无词证"}
-      <h4>复核历史（保留原记录）</h4>${v.records.map((r) => `<details><summary>复核 #${esc(r.record.id)} · ${esc(textLocation(r.record.paragraph))} · ${r.current ? "对应当前材料" : "旧材料 · 需重新核对"} · ${r.record.previous ? "前次 #" + esc(r.record.previous) : "首次记录"}</summary>
-        <p>${esc(r.reason || "")}</p><p class="text-para">记录时的原文：${esc(r.record.source)}</p><p class="text-para">记录时的译文：${esc(r.record.translation)}</p><p class="text-para">记录时的朱批：${esc(r.record.zhupi || "无")}</p>
-        ${r.change ? `<p class="text-para">实际修订前：${esc(r.change.before)}</p><p class="text-para">实际修订后：${esc(r.change.after)}</p>` : ""}
-        <ul class="text-glossary">${r.record.checks.map((c) => `<li><b>${esc(semanticCategories[c.category].title)}</b> · 意见处理：${esc(verificationDispositions[c.disposition])} · 问题状态：${esc(verificationResolutions[c.resolution])}<p class="text-para">${esc(c.note || "未填写核对说明")}</p>${c.advice.map((a) => `<p class="text-para">审校诏令 #${esc(a.task)}：${esc(a.quote)}</p>`).join("")}${c.evidence.length ? `<p>关联词证：${c.evidence.map((id) => "#" + esc(id)).join("、")}</p>` : ""}</li>`).join("")}</ul>
-      </details>`).join("") || "尚无复核记录，不能视为已检查"}`;
-    facts.insertAdjacentHTML("afterbegin", `<p>本段最新复核：${info?.latest ? "#" + esc(info.latest) : "尚无记录"} · 尚待核对：${esc(info?.unresolved ?? 6)} 项</p>`);
-    facts.dataset.signature = signature;
-  }
-  const key = `${verificationScope}/${paragraph}`;
-  if (key !== verificationFormKey) { verificationFormKey = key; renderVerificationForm(); }
-  panel.querySelectorAll("button").forEach((b) => b.disabled = verificationBusy || (b.id === "verification-save" && stale));
-}
-async function verificationClick(e) {
-  const action = e.target.id;
-  if (!["verification-save", "verification-refresh", "verification-reload", "evidence-save"].includes(action) || verificationBusy || document.body.classList.contains("viewer")) return;
-  const scope = currentVerificationScope(), d = verificationDraft();
-  if (action === "verification-refresh") { d.fingerprint = verificationView.fingerprint; renderVerification(); return; }
-    if (action === "verification-reload") { await loadVerification(); return; }
-  let body, endpoint;
-  try {
-    if (action === "evidence-save") { body = {paragraph: verificationParagraph, ...d.evidence}; endpoint = "/evidence"; }
-    else {
-      if (d.fingerprint !== verificationView.fingerprint) throw new Error("材料或记录已更新，请先阅读最新内容，再点「已读最新材料，继续核对」。");
-      body = {paragraph: verificationParagraph, fingerprint: d.fingerprint, checks: d.checks.map((c) => {
-        if (!!c.task.trim() !== !!c.quote.trim() || (c.task && (!/^[1-9]\d*$/.test(c.task) || !Number.isSafeInteger(Number(c.task))))) throw new Error("请同时填写审校诏令号和该条意见的原句；诏令号须为正整数。");
-        const ids = c.evidence.trim() ? c.evidence.split(",").map((n) => n.trim()) : [];
-        if (ids.some((n) => !/^[1-9]\d*$/.test(n) || !Number.isSafeInteger(Number(n)))) throw new Error("词证编号须为正整数；多个编号用英文逗号分隔，如 1,2。");
-        return {category:c.category, disposition:c.disposition, resolution:c.resolution, note:c.note, advice:c.task ? [{task:Number(c.task), quote:c.quote}] : [], evidence:ids.map(Number)};
-      })}; endpoint = "/verification";
-    }
-    verificationBusy = true; verificationError = ""; renderVerification();
-    await api(verificationBase() + endpoint, body);
-    if (scope !== currentVerificationScope()) return;
-    toast(action === "evidence-save" ? "词证已保存；未自动纳入已批准上下文，也未发送给模型。" : "复核记录已保存；不会自动解决问题或御览定稿。");
-    // Deliberately retain both forms; never infer human review from successful persistence.
-    await loadVerification();
-  } catch (error) {
-    if (scope === currentVerificationScope()) verificationError = error.message;
-  } finally { verificationBusy = false; if (scope === currentVerificationScope()) renderVerification(); }
+  if (textProjectId && textBlockId) ensureVerificationController().then((ctrl) => ctrl?.render());
 }
 async function loadTextBlock() {
   if (!textProjectId || !textBlockId) return;
@@ -4028,145 +4055,42 @@ function selectTextBlock(block) {
   if (!block || block === textBlockId) return;
   textBlockId = block;
   invalidateReferences(true);
+  $("materials-proposals")?.replaceChildren();
   textPicked = null;
   history.replaceState(null, "", textHash());
   loadTextBlock();
 }
 
-// ---- 译稿版本：草稿／准奏／定稿自动留存，只读对比与显式清理 ----
-let textVersions = [];
-let textVersionRequest = 0;
-function versionStateLabel(kind) {
-  return { draft: "草稿", approved: "准奏", finalized: "定稿", manual: "手工" }[kind] || String(kind);
-}
-function versionTime(ms) {
-  try { return new Date(ms).toLocaleString(); } catch { return String(ms); }
-}
-function versionBase() {
-  return `/text/${encodeURIComponent(textProjectId || "")}/blocks/${encodeURIComponent(textBlockId || "")}`;
-}
-function renderVersionButtons() {
-  const viewer = !state || !!state.viewer;
-  const has = textVersions.length > 0;
-  for (const [id, disabled] of [
-    ["version-compare-current", !has],
-    ["version-compare-draft", !has],
-    ["version-save", viewer || !textBlockId],
-    ["version-prune", viewer || !has],
-  ]) {
-    const button = $(id);
-    if (button) button.disabled = disabled;
+// ---- 译稿版本：草稿／准奏／定稿自动留存，只读对比与显式清理（/assets/text-versions.mjs） ----
+let textVersionsCtrl = null;
+let textVersionsCtrlPromise = null;
+function ensureTextVersionsController() {
+  if (textVersionsCtrl) return Promise.resolve(textVersionsCtrl);
+  if (!textVersionsCtrlPromise) {
+    textVersionsCtrlPromise = import("/assets/text-versions.mjs").then(({ createTextVersionsController }) => {
+      textVersionsCtrl = createTextVersionsController({
+        doc: document,
+        getScope: () => ({ project: textProjectId, block: textBlockId }),
+        isViewer: () => !state || !!state.viewer,
+        apiCall: api,
+        confirmAction: (msg) => window.confirm(msg),
+        formatLocation: (id) => textLocation(id),
+        getElement: $,
+      });
+      textVersionsCtrl.bindEvents();
+      return textVersionsCtrl;
+    }).catch((err) => {
+      textVersionsCtrlPromise = null;
+      console.error(err);
+      return null;
+    });
   }
+  return textVersionsCtrlPromise;
 }
 async function loadTextVersions() {
-  const project = textProjectId, block = textBlockId;
-  const ticket = ++textVersionRequest;
-  const list = $("version-list"), status = $("version-status"), diff = $("version-diff");
-  if (!list) return;
-  if (!project || !block) {
-    textVersions = [];
-    list.innerHTML = "";
-    list.disabled = true;
-    status.textContent = "选中一组译稿后，可查看它的版本记录。";
-    diff.replaceChildren();
-    renderVersionButtons();
-    return;
-  }
-  list.disabled = true;
-  status.textContent = "正在读取快照…";
-  try {
-    const result = await api(`${versionBase()}/versions?t=${Date.now()}`);
-    if (ticket !== textVersionRequest || project !== textProjectId || block !== textBlockId) return;
-    textVersions = result.versions || [];
-    list.innerHTML = textVersions.length
-      ? textVersions.slice().reverse().map((v) =>
-          `<option value="${esc(v.id)}">${esc(versionStateLabel(v.state))}${v.label ? " · " + esc(v.label) : ""} · ${esc(versionTime(v.created_ms))}</option>`).join("")
-      : `<option value="">（尚无快照）</option>`;
-    list.disabled = !textVersions.length;
-    status.textContent = textVersions.length
-      ? `共 ${textVersions.length} 份；自动快照每态留最新 3 份。`
-      : "尚无快照。保存草稿或准奏／定稿后留存，也可点「保存当前快照」。";
-    diff.replaceChildren();
-    renderVersionButtons();
-  } catch (e) {
-    if (ticket !== textVersionRequest) return;
-    textVersions = [];
-    list.innerHTML = `<option value="">（读取失败）</option>`;
-    list.disabled = true;
-    status.textContent = "读取快照失败：" + (e.body?.error || e.message);
-    renderVersionButtons();
-  }
+  const ctrl = await ensureTextVersionsController();
+  if (ctrl) await ctrl.load();
 }
-function renderVersionDiff(result) {
-  const host = $("version-diff");
-  host.replaceChildren();
-  const changes = result.changes || [];
-  $("version-status").textContent = changes.length
-    ? `${changes.length} 处差异（对比${result.against === "draft" ? "草稿" : "现行译稿"}；标记仅指译文相同、标记有变）。`
-    : "没有差异。";
-  for (const change of changes) {
-    const row = document.createElement("p");
-    const kinds = { added: "新增", removed: "删除", changed: "改写", markup: "标记" };
-    let text = `${textLocation(change.paragraph)} · ${kinds[change.kind] || change.kind}`;
-    if (change.kind === "changed") text += `：${change.old || ""} → ${change.new || ""}`;
-    else if (change.kind === "added") text += `：${change.new || ""}`;
-    else if (change.kind === "removed") text += `：${change.old || ""}`;
-    row.textContent = text;
-    host.append(row);
-  }
-}
-async function compareTextVersion(against) {
-  const project = textProjectId, block = textBlockId, id = $("version-list")?.value;
-  if (!project || !block || !id) { $("version-status").textContent = "没有可比较的快照。"; return; }
-  $("version-status").textContent = "正在比较…";
-  try {
-    const result = await api(`${versionBase()}/versions/${encodeURIComponent(id)}?against=${against}`);
-    if (project !== textProjectId || block !== textBlockId) return;
-    renderVersionDiff(result);
-  } catch (e) {
-    $("version-status").textContent = "比较失败：" + (e.body?.error || e.message);
-  }
-}
-async function saveTextVersion() {
-  const project = textProjectId, block = textBlockId;
-  if (!project || !block) return;
-  try {
-    const result = await api(`${versionBase()}/versions`, { label: "" });
-    $("version-status").textContent = `已保存快照 ${result.version?.id || ""}（手工）。`;
-    await loadTextVersions();
-  } catch (e) {
-    $("version-status").textContent = "保存快照失败：" + (e.body?.error || e.message);
-  }
-}
-async function pruneTextVersions() {
-  const project = textProjectId, block = textBlockId;
-  if (!project || !block) return;
-  try {
-    const preview = await api(`${versionBase()}/versions/prune`, { keep: 3, dry_run: true });
-    if (!preview.candidates.length) {
-      $("version-status").textContent = "没有可清理的快照（自动快照每态留最新 3 份，手工快照默认保留）。";
-      return;
-    }
-    const ok = window.confirm(
-      `将删除 ${preview.candidates.length} 份旧快照（自动快照每态留最新 3 份，手工快照默认保留）：\n\n` +
-      preview.candidates.join("\n") + "\n\n继续删除？"
-    );
-    if (!ok) { $("version-status").textContent = "已取消清理，未删除任何快照。"; return; }
-    const done = await api(`${versionBase()}/versions/prune`, { keep: 3, dry_run: false });
-    $("version-status").textContent = `已删除 ${done.deleted.length} 份，保留 ${done.kept} 份。`;
-    await loadTextVersions();
-  } catch (e) {
-    $("version-status").textContent = "清理失败：" + (e.body?.error || e.message);
-  }
-}
-$("version-list")?.addEventListener("change", () => {
-  $("version-diff").replaceChildren();
-  $("version-status").textContent = "选择快照后点「对比现行译稿」或「对比草稿」。";
-});
-$("version-compare-current")?.addEventListener("click", () => compareTextVersion("current"));
-$("version-compare-draft")?.addEventListener("click", () => compareTextVersion("draft"));
-$("version-save")?.addEventListener("click", saveTextVersion);
-$("version-prune")?.addEventListener("click", pruneTextVersions);
 
 // 各栏独立滚动；重绘时保留输入的文字、焦点与滚动位置。
 function textScrollers() {
@@ -4793,7 +4717,10 @@ async function runMemory(build) {
     const result = build ? await api(base + "/build", {}) : await api(base + "/search?q=" + encodeURIComponent(query));
     if (request !== memoryRequest || project !== textProjectId) return;
     if (build) {
-      $("memory-status").textContent = `当前项目缓存 ${result.records} 段；已重建。跳过 ${result.skipped} 个未满足收录条件的块。`;
+      const incNote = typeof result.reused === "number" && typeof result.embedded === "number"
+        ? `已重建（复用 ${result.reused} 段，新算 ${result.embedded} 段）`
+        : "已重建";
+      $("memory-status").textContent = `当前项目缓存 ${result.records} 段；${incNote}。跳过 ${result.skipped} 个未满足收录条件的块。`;
       $("memory-result").textContent = result.records ? "重建完成，可以输入文字检索。" : "重建完成，尚无可收录的定稿段落。";
     } else {
       $("memory-result").textContent = result.hits.length ? `找到 ${result.hits.length} 条参考（最多 8 条）。` : "当前项目没有匹配的有效定稿参考。";
@@ -6106,6 +6033,7 @@ function renderNeoView() {
       state,
       textProjects: Array.isArray(textProjects) ? textProjects : (textProjects?.projects || []),
       textProject,
+      textUsage: textUsageSummaryCache,
       selectedPresetId: neoSelectedPresetId,
       edictDraft: neoEdictDraft,
       previousHall: previousClassicHall,
@@ -6217,6 +6145,13 @@ function renderNeoView() {
         showHall();
         selectWorkspaceTab("delivery");
         runProjectQaReport();
+      },
+      onOpenProjectUsage: () => {
+        location.hash = "#translation";
+        showHall();
+        selectWorkspaceTab("delivery");
+        $("text-project-usage")?.scrollIntoView({ block: "nearest" });
+        runProjectUsageReport();
       },
       onOpenBlock: (projId, blockId) => {
         if (projId && projId !== textProjectId) textProjectId = projId;

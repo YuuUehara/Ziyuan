@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.46.0 — 2026-11-27
+
+- **译文记忆增量建库复用、翰林院度支账本、候选术语交互审定与前后端巨型模块拆分（零新增事件与玉玺代码）**：
+  - **译文记忆增量向量复用（`ziyuan-app::memory`）**：`Session::memory_build` 在每次重新核对全部有效定稿资格与水位的前提下，当模型签名（`provider / model / revision / dim / metric`）一致且定稿段落的 `identity`、原文及 `input_sha256` 未变时直接复用现有缓存向量，仅对新增或改动的段落调用嵌入提供方（空库或全量命中缓存时仍执行一次空输入核验以拦截未配置或未授权提供方，已授权远程提供方不触网；切换模型签名或遇到坏缓存时自动回退全量重算并修复索引），确定性提供方下生成的 `index.json` 与全量新建逐字节一致；`MemoryBuild`、CLI `ziyuan text memory build [--json]` 与 Web `POST /api/text/{project}/memory/build` 同步增补 `reused` 与 `embedded` 计数。
+  - **翰林院单项目四阶段度支账本（`GET /api/text/{project}/usage` + `/assets/project-usage.mjs`）**：Web 新增只读接口 `GET /api/text/{project}/usage`（观政可读，未建朝时平滑返回 `founded: false` 与四阶段空小计），并在「翰林院 → 通读交稿」（「资料」工具栏附直达入口）与「垂拱枢机 → 译林枢机」接入宋韵五境全主题自适应的「译书度支账本」，按初译、忠实审校、文风审校、修订四阶段展示已记录 token、缓存命中、分币种参考估价、关联诏令逐件明细（支持一键跳往奉天殿诏令或翰林院译块）与非账单边界说明；未报告用量显式标为未知，绝不填零。
+  - **候选术语交互审定台与一键收入草稿**：`GET/POST /api/text/{project}/blocks/{block}/term-proposals` 支持观政只读预览（`GET`，不写盘）与写用户提取落盘（`POST`，补入法／俄／西／意语双角引号 `«…»` 识别）；`materials-collab.mjs` 将「资料 → 提取候选术语到 proposals」升级为宋韵候选术语审定台，支持按段落一键定位、智能预选分类、单条或批量填写认可译法并经 `POST /api/text/{project}/materials/quick-add` 收入本地暂定草稿（绝不自动进入生产上下文）。
+  - **前后端巨型模块拆分与根仓库约定同步**：将 `crates/ziyuan-web/src/text.rs`（原 2042 行）拆分为 `text.rs` 与 `text/{qa_verify,export_import,memory_refs,human_versions}.rs`；将 `crates/ziyuan-cli/src/text_commands.rs`（原 2333 行）拆分为 `text_commands.rs` 与 `text_commands/{parse,recovery}.rs`；从 `index.html` 抽出 `text-versions.mjs`、`verification-panel.mjs` 与 `materials-collab.mjs`（连同 `project-usage.mjs` 新增 14 条 Node 单测）；新增根仓库 `AGENTS.md`、规范化 Windows 启动批处理 CRLF 行尾，并同步 `README.md`、`docs/novel-translation.md` 与 `docs/stability.md` 的八语种说明。
+- 登记次版本 `1.46.0`（序号 83，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [体系结构](docs/architecture.md)、[翰林院译书指南](docs/novel-translation.md)、[译文记忆与参考选用](docs/memory.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.46.0 验收记录](docs/acceptance/1.46.0.md)。
+
 ## 1.45.1 — 2026-11-23
 
 - **六殿居中阅读布局、手工双语译稿框严格对齐、多语种（含俄／西／意语）全链路对齐与青空文库注音解析修复（零新增事件与玉玺代码）**：

@@ -678,3 +678,137 @@ fn build_sends_finalized_source_and_search_sends_only_the_query() {
         vec![vec!["这一次的查询".to_owned()]]
     );
 }
+
+#[test]
+fn incremental_build_reuses_unchanged_vectors_and_rebuilds_on_signature_or_corrupt_cache() {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "ziyuan-memory-inc-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    Session::found(EventLog::new(&root)).unwrap();
+    let texts = TextProjects::new(&root);
+    let proj = texts
+        .create(NewProject {
+            title: "Incremental".into(),
+            source_language: "ja".into(),
+            target_language: "zh-CN".into(),
+            provenance: Provenance::default(),
+        })
+        .unwrap();
+    let ch1 = root.join("ch1.txt");
+    let ch2 = root.join("ch2.txt");
+    fs::write(&ch1, "夜が明けた。\n\n猫が来た。\n").unwrap();
+    fs::write(&ch2, "星が出た。\n").unwrap();
+    texts.import(&proj.id, &[ch1, ch2]).unwrap();
+    let projects = BTreeSet::from([proj.id.clone()]);
+
+    let finalize_block = |block_id: &str, ch_idx: usize, translations: &[&str]| {
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        let edict = s.issue_translation(&root, &proj.id, block_id).unwrap();
+        let worker = s.court().route(&edict).unwrap().worker;
+        let mut prompt =
+            Translations::new(&root).project(&proj.id).unwrap().chapters[ch_idx].blocks[0].clone();
+        for (idx, tr) in translations.iter().enumerate() {
+            prompt.paragraphs[idx].text = (*tr).into();
+        }
+        let events = [
+            CourtEvent::TaskAssigned {
+                task: edict.id,
+                worker,
+                model: None,
+            },
+            CourtEvent::ChangesProposed {
+                task: edict.id,
+                changes: vec![FileChange {
+                    path: output_rel(&proj.id, block_id),
+                    before: None,
+                    after: String::from_utf8(prompt.serialized().unwrap()).unwrap(),
+                    deleted: false,
+                }],
+            },
+            CourtEvent::TaskCompleted {
+                task: edict.id,
+                worker,
+                summary: "done".into(),
+            },
+        ];
+        EventLog::new(&root)
+            .append(s.event_count(), &events)
+            .unwrap();
+        let mut s = Session::open(EventLog::new(&root)).unwrap();
+        s.apply_changes(edict.id, &root, vec![]).unwrap();
+        s.finalize_translation(&root, &proj.id, block_id).unwrap();
+        s
+    };
+
+    let session = finalize_block("c0001-b0001", 0, &["天亮了。", "猫来了。"]);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        local: LocalProvider::new(),
+        calls: calls.clone(),
+    };
+
+    // 1. 首次建库：2 段全部新算。
+    let first = session.memory_build(&root, &projects, &provider).unwrap();
+    assert_eq!((first.records, first.reused, first.embedded), (2, 0, 2));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(calls.lock().unwrap()[0].len(), 2);
+
+    // 2. 无变更重建：2 段全部复用，仅执行一次空输入提供方校验，不重算任何原文。
+    calls.lock().unwrap().clear();
+    let unchanged = session.memory_build(&root, &projects, &provider).unwrap();
+    assert_eq!(
+        (unchanged.records, unchanged.reused, unchanged.embedded),
+        (2, 2, 0)
+    );
+    assert_eq!(calls.lock().unwrap().clone(), vec![Vec::<String>::new()]);
+
+    // 3. 新定稿第 2 章：前 2 段复用，仅新算新增的 1 段；生成的索引与全量新建逐字节一致。
+    calls.lock().unwrap().clear();
+    let session = finalize_block("c0002-b0001", 1, &["星星出来了。"]);
+    let inc = session.memory_build(&root, &projects, &provider).unwrap();
+    assert_eq!((inc.records, inc.reused, inc.embedded), (3, 2, 1));
+    assert_eq!(
+        calls.lock().unwrap().clone(),
+        vec![vec!["星が出た。".to_owned()]]
+    );
+    let index_path = root.join(".ziyuan/memory/index.json");
+    let inc_bytes = fs::read(&index_path).unwrap();
+    fs::remove_file(&index_path).unwrap();
+    let fresh = session
+        .memory_build(&root, &projects, &LocalProvider::new())
+        .unwrap();
+    assert_eq!((fresh.records, fresh.reused, fresh.embedded), (3, 0, 3));
+    let fresh_bytes = fs::read(&index_path).unwrap();
+    assert_eq!(inc_bytes, fresh_bytes, "增量建库产物须与全量建库逐字节一致");
+
+    // 4. 切换不同模型签名：自动全量重算，不混用旧模型向量。
+    let switched = session
+        .memory_build(
+            &root,
+            &projects,
+            &ziyuan_memory::DeterministicProvider::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        (switched.records, switched.reused, switched.embedded),
+        (3, 0, 3)
+    );
+
+    // 5. 缓存损坏：忽略坏缓存并全量修复重建。
+    fs::write(&index_path, b"{corrupt-index").unwrap();
+    let repaired = session
+        .memory_build(&root, &projects, &LocalProvider::new())
+        .unwrap();
+    assert_eq!(
+        (repaired.records, repaired.reused, repaired.embedded),
+        (3, 0, 3)
+    );
+    assert_eq!(fs::read(&index_path).unwrap(), fresh_bytes);
+
+    let _ = fs::remove_dir_all(&root);
+}

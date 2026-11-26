@@ -41,7 +41,7 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route(
             "/text/{project}/blocks/{block}/term-proposals",
-            post(term_proposals),
+            get(term_proposals_preview).post(term_proposals),
         )
         .route(
             "/text/{project}/materials/termbase-tbx",
@@ -411,6 +411,23 @@ async fn termbase_export(
 struct TermProposalBody {
     #[serde(default)]
     write: bool,
+}
+
+async fn term_proposals_preview(
+    State(app): State<AppState>,
+    UrlPath((project, block)): UrlPath<(String, String)>,
+) -> Response {
+    let id = match workspace(&app) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let root = app.0.config.root.clone();
+    run(id, move || {
+        Translations::new(&root)
+            .propose_block_terms(&project, &block, false)
+            .map_err(MaterialError::Visibility)
+    })
+    .await
 }
 
 async fn term_proposals(

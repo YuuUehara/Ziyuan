@@ -1129,7 +1129,7 @@ fn record_candidate(
 }
 
 fn extract_quoted_phrases(text: &str) -> Vec<String> {
-    const QUOTES: &[(char, char)] = &[('「', '」'), ('『', '』'), ('《', '》')];
+    const QUOTES: &[(char, char)] = &[('「', '」'), ('『', '』'), ('《', '》'), ('«', '»')];
     let mut out = Vec::new();
     for &(open, close) in QUOTES {
         let mut rest = text;
@@ -1258,7 +1258,7 @@ fn extract_term_candidates(
             }
         }
         _ => {
-            // en / fr / de: capitalized multi-word phrases or repeated mid-sentence capitalized tokens
+            // en / fr / de / ru / es / it: capitalized multi-word phrases or repeated mid-sentence capitalized tokens
             let mut single_counts: BTreeMap<String, (usize, Vec<String>)> = BTreeMap::new();
             for para in paragraphs {
                 for phrase in extract_quoted_phrases(&para.text) {

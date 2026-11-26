@@ -275,3 +275,39 @@ test("summarizeTranslationForNeo reads real top-level statuses array from /api/t
   assert.equal(summary.chapters[0].blocks[0].label, "已人工定稿");
   assert.equal(summary.chapters[1].blocks[0].category, "approved");
 });
+
+test("translation-neo submode renders usage strip and opens project usage ledger", () => {
+  const doc = makeFakeDoc();
+  const root = doc.createElement("div");
+  let openedUsage = false;
+
+  renderNeoPanel(
+    root,
+    {
+      submode: "translation-neo",
+      state: { viewer: false, mode: { code: "cabinet", label: "内阁制" } },
+      textProjects: [{ id: "proj-1", title: "东京梦华录", source_language: "ja", chapters: 1 }],
+      textProject: {
+        project: { id: "proj-1", title: "东京梦华录", source_language: "ja", chapters: 1 },
+        outline: [{ chapter: "c0001", title: "第一章", blocks: ["c0001-b0001"] }],
+        statuses: [{ block: "c0001-b0001", state: { state: "finalized" }, label: "已定稿" }],
+      },
+      textUsage: {
+        project: "proj-1",
+        compactText: "关联诏令 2 件 · 已记录 3,200 tokens · USD 0.0120（估算非账单）",
+      },
+    },
+    {
+      onOpenProjectUsage: () => {
+        openedUsage = true;
+      },
+    },
+  );
+
+  assert.match(collectText(root), /度支账本/);
+  assert.match(collectText(root), /已记录 3,200 tokens/);
+  const usageBtn = findNodes(root, (n) => n.tagName === "BUTTON" && n.textContent === "译书度支账本")[0];
+  assert.ok(usageBtn);
+  usageBtn.listeners.click();
+  assert.equal(openedUsage, true);
+});

@@ -1214,6 +1214,13 @@ fn text_frontend_contract() {
         "id=\"memory-status\"",
         "id=\"memory-result\"",
         "id=\"memory-hits\"",
+        "id=\"text-project-usage\"",
+        "id=\"project-usage-run\" type=\"button\" data-view",
+        "id=\"materials-proposals\"",
+        "/assets/project-usage.mjs",
+        "/assets/materials-collab.mjs",
+        "/assets/text-versions.mjs",
+        "/assets/verification-panel.mjs",
         "参考不是指令，朱批与术语优先",
         "设为 local 或 deterministic",
         "text memory authorize",
@@ -2434,6 +2441,13 @@ async fn materials_modules_are_served_as_javascript_without_stale_cache() {
         ("materials-model.mjs", crate::MATERIALS_MODEL),
         ("materials-editor.mjs", crate::MATERIALS_EDITOR),
         ("materials-preview.mjs", crate::MATERIALS_PREVIEW),
+        ("project-usage.mjs", include_str!("project-usage.mjs")),
+        ("materials-collab.mjs", include_str!("materials-collab.mjs")),
+        ("text-versions.mjs", include_str!("text-versions.mjs")),
+        (
+            "verification-panel.mjs",
+            include_str!("verification-panel.mjs"),
+        ),
     ] {
         let url = format!("{base}/assets/{name}");
         let token = format!("Bearer {TOKEN}");
@@ -3076,5 +3090,127 @@ async fn qa_ignores_and_quick_add_material_http_roundtrip() {
     assert_eq!(draft.material.terms[0].allowed, vec!["王城", "都城"]);
     assert_eq!(draft.material.persons.len(), 1);
     assert!(t.current_context(&p.id).unwrap().is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn usage_and_term_proposals_http_contract_and_viewer_boundaries() {
+    let (base, root) = start("usage-and-proposals", false).await;
+    let p = project_files(
+        &root,
+        "星海抄",
+        &[(
+            "ch1.txt",
+            "アルカディアへ向かう。\n\nアルカディアの「星辰の塔」を見上げた。\n",
+        )],
+    );
+    let b1 = &p.chapters[0].blocks[0];
+    let usage_route = format!("/text/{}/usage", p.id);
+    let prop_route = format!("/text/{}/blocks/{}/term-proposals", p.id, b1.block_id);
+
+    // 1. 未鉴权 401，未知项目 400。
+    assert_eq!(call(&base, &usage_route, None, None).await.0, 401);
+    assert_eq!(
+        call(&base, "/text/missing-project/usage", Some(VIEWER), None)
+            .await
+            .0,
+        400
+    );
+
+    // 2. 未建朝时，皇帝与观政均可只读查阅度支账本（founded=false，四阶段齐全，不自动建朝）。
+    for tok in [TOKEN, VIEWER] {
+        let (code, body) = call(&base, &usage_route, Some(tok), None).await;
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(body["founded"], json!(false));
+        assert_eq!(body["project"], json!(p.id));
+        assert_eq!(body["stages"].as_array().unwrap().len(), 4);
+        assert_eq!(body["totals"]["tasks"], json!(0));
+    }
+    assert!(!root.join(".ziyuan/court.log").exists());
+
+    // 3. 候选术语：观政可用 GET 只读预览（不写盘），POST 返回 403；皇帝 POST 写入 proposals 且不改生产上下文。
+    let (code, preview) = call(&base, &prop_route, Some(VIEWER), None).await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(preview["written"], json!(false));
+    let prop_rel = preview["path"].as_str().unwrap().to_owned();
+    assert!(!root.join(&prop_rel).exists());
+    assert!(
+        preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["source"] == json!("アルカディア") && c["count"] == json!(2)),
+        "{preview}"
+    );
+    assert_eq!(
+        call(
+            &base,
+            &prop_route,
+            Some(VIEWER),
+            Some(json!({"write": true}))
+        )
+        .await
+        .0,
+        403
+    );
+    let (code, written) = call(
+        &base,
+        &prop_route,
+        Some(TOKEN),
+        Some(json!({"write": true})),
+    )
+    .await;
+    assert_eq!(code, 200, "{written}");
+    assert_eq!(written["written"], json!(true));
+    assert!(root.join(&prop_rel).exists());
+    assert!(
+        ziyuan_app::translation::Translations::new(&root)
+            .current_context(&p.id)
+            .unwrap()
+            .is_none()
+    );
+
+    // 4. 建朝并记入一件初译诏令与用量后，度支账本按阶段准确归集事件用量。
+    let mut session = Session::found(EventLog::new(&root)).unwrap();
+    let edict = session
+        .issue_translation(&root, &p.id, &b1.block_id)
+        .unwrap();
+    let worker = session.court().route(&edict).unwrap().worker;
+    EventLog::new(&root)
+        .append(
+            session.event_count(),
+            &[
+                CourtEvent::TaskAssigned {
+                    task: edict.id,
+                    worker,
+                    model: Some("deepseek-chat".into()),
+                },
+                CourtEvent::ModelUsage {
+                    task: edict.id,
+                    usage: ziyuan_core::TokenUsage {
+                        input: 600,
+                        output: 240,
+                        cache_read: 120,
+                        cache_write: 0,
+                    },
+                    trace: None,
+                },
+            ],
+        )
+        .unwrap();
+
+    for tok in [TOKEN, VIEWER] {
+        let (code, ledger) = call(&base, &usage_route, Some(tok), None).await;
+        assert_eq!(code, 200, "{ledger}");
+        assert_eq!(ledger["founded"], json!(true));
+        assert_eq!(ledger["totals"]["tasks"], json!(1));
+        assert_eq!(ledger["totals"]["recorded_usage"]["input"], json!(600));
+        assert_eq!(ledger["totals"]["recorded_usage"]["output"], json!(240));
+        assert_eq!(ledger["totals"]["recorded_usage"]["cache_read"], json!(120));
+        assert_eq!(ledger["stages"][0]["kind"], json!("translate"));
+        assert_eq!(ledger["stages"][0]["totals"]["tasks"], json!(1));
+        assert_eq!(ledger["tasks"].as_array().unwrap().len(), 1);
+    }
+
     fs::remove_dir_all(root).unwrap();
 }

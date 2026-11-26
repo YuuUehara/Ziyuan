@@ -129,6 +129,10 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "doctor-panel.mjs" => include_str!("doctor-panel.mjs"),
         "quick-glossary.mjs" => include_str!("quick-glossary.mjs"),
         "neo-panel.mjs" => include_str!("neo-panel.mjs"),
+        "text-versions.mjs" => include_str!("text-versions.mjs"),
+        "verification-panel.mjs" => include_str!("verification-panel.mjs"),
+        "materials-collab.mjs" => include_str!("materials-collab.mjs"),
+        "project-usage.mjs" => include_str!("project-usage.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (
@@ -367,6 +371,7 @@ fn router_for(app: AppState) -> Router {
             get(text::verification_associations),
         )
         .route("/text/{project}/qa-report", get(text::qa_report))
+        .route("/text/{project}/usage", get(text::usage))
         .route(
             "/text/{project}/qa-ignores",
             get(text::qa_ignores).post(text::qa_ignore_update),

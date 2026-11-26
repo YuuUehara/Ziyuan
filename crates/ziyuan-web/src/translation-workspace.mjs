@@ -58,7 +58,7 @@ export function mountWorkspace(card) {
     for (const [selector, panel] of [
       ['#human-mode-bar','draft'], ['#text-human-editor','draft'], ['#text-n2b-hints','draft'], ['#text-model-drawer','draft'], ['#verification-panel','draft'],
       ['#text-materials-panel','materials'], ['#text-memory','materials'], ['.text-notes-layout','materials'],
-      ['#text-project-qa','delivery'], ['#text-export','delivery'], ['#text-import','manage'], ['#text-versions','manage'],
+      ['#text-project-qa','delivery'], ['#text-project-usage','delivery'], ['#text-export','delivery'], ['#text-import','manage'], ['#text-versions','manage'],
     ]) move(card.querySelector(selector), panel);
     for (const tool of card.querySelectorAll('[data-workspace-tool]')) {
       const kind = tool.dataset.workspaceTool, panel = panels.get(toolPanel(kind));

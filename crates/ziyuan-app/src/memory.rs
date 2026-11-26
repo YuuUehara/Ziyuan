@@ -42,6 +42,8 @@ pub struct MemoryPairs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryBuild {
     pub records: usize,
+    pub reused: usize,
+    pub embedded: usize,
     pub skipped: Vec<SkippedBlock>,
     pub watermark: Watermark,
 }
@@ -524,16 +526,69 @@ impl<S: EventStore> Session<S> {
                 watermark: watermark.clone(),
             })
             .collect::<Vec<_>>();
-        // 建库时把已定稿原文交给提供方，向量写入索引。空库也要调用一次，以便发现没有提供方。
-        let embedded = provider
-            .embed(
-                &records
-                    .iter()
-                    .map(|r| r.source.text.as_str())
-                    .collect::<Vec<_>>(),
+        // 模型签名一致且段落身份、原文及输入摘要未变时，复用已有有效向量；坏缓存或旧签名自动回退全量重算。
+        let record_key = |id: &Identity, sha: &str| {
+            (
+                id.workspace_id.clone(),
+                id.project.clone(),
+                id.chapter.clone(),
+                id.block.clone(),
+                id.paragraph.clone(),
+                sha.to_owned(),
             )
-            .map_err(failure)?;
-        let vectors = embedded.into_iter().map(|item| item.vector).collect();
+        };
+        let mut reusable = std::collections::BTreeMap::new();
+        if let Ok(Some(existing)) = MemoryIndex::load(root)
+            && existing.format_version == ziyuan_memory::FORMAT_VERSION
+            && existing.signature == signature
+            && existing.records.len() == existing.vectors.len()
+        {
+            for (old_record, old_vector) in existing.records.into_iter().zip(existing.vectors) {
+                if signature.matches(&old_record.embedding)
+                    && old_record.embedding.input_sha256
+                        == sha256_hex(old_record.source.text.as_bytes())
+                    && old_vector.len() == signature.dim
+                    && old_vector.iter().all(|v| v.is_finite())
+                {
+                    reusable.insert(
+                        record_key(&old_record.identity, &old_record.embedding.input_sha256),
+                        (old_record.source.text, old_vector),
+                    );
+                }
+            }
+        }
+        let mut vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(records.len());
+        let mut missing_indices = Vec::new();
+        let mut missing_texts = Vec::new();
+        let mut reused = 0usize;
+        for (idx, record) in records.iter().enumerate() {
+            let key = record_key(&record.identity, &record.embedding.input_sha256);
+            if let Some((old_source, old_vector)) = reusable.remove(&key)
+                && old_source == record.source.text
+            {
+                vectors.push(Some(old_vector));
+                reused += 1;
+            } else {
+                vectors.push(None);
+                missing_indices.push(idx);
+                missing_texts.push(record.source.text.as_str());
+            }
+        }
+        // 空库或全部命中缓存时也调用一次空输入，以便核验未授权或不可用的提供方；已授权远程提供方对空输入不触网。
+        let embedded_batch = provider.embed(&missing_texts).map_err(failure)?;
+        if embedded_batch.len() != missing_indices.len() {
+            return Err(failure(MemoryError::Config(
+                "嵌入返回的向量条数与待计算段落数不符".into(),
+            )));
+        }
+        let embedded = embedded_batch.len();
+        for (idx, item) in missing_indices.into_iter().zip(embedded_batch) {
+            vectors[idx] = Some(item.vector);
+        }
+        let vectors = vectors
+            .into_iter()
+            .map(|v| v.expect("every record either reused or embedded"))
+            .collect();
         let index = MemoryIndex {
             format_version: ziyuan_memory::FORMAT_VERSION,
             signature,
@@ -570,6 +625,8 @@ impl<S: EventStore> Session<S> {
         recheck().map_err(failure)?;
         Ok(MemoryBuild {
             records: index.records.len(),
+            reused,
+            embedded,
             skipped: all.skipped,
             watermark,
         })
