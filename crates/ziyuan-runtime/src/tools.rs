@@ -26,6 +26,7 @@ mod glob;
 mod index;
 mod read;
 mod replace;
+mod staged;
 mod symbols;
 pub mod temp_cleanup;
 mod vcs;
@@ -36,9 +37,12 @@ use exec::RunTests;
 #[cfg(windows)]
 pub(crate) use exec::copy_project_tree;
 use read::{ListFiles, ReadFile, SearchCode};
+use staged::{RevertStaged, StagedDiff};
 
 /// 单次 `read_file` 最多返回的字节数。
 const MAX_READ_BYTES: usize = 64 * 1024;
+/// 单次 `staged_diff` 最多返回的统一 diff 字节数。
+const MAX_STAGED_DIFF_BYTES: usize = 32 * 1024;
 /// 单次 `search_code` 一页最多返回的匹配行数，以及上下文行上限。
 const MAX_MATCHES: usize = 50;
 const MAX_CONTEXT_LINES: usize = 5;
@@ -113,7 +117,7 @@ impl Sealed {
         let staged = self.sandbox.staged.lock().expect("暂存区锁未中毒");
         staged
             .values()
-            .filter(|c| c.before.as_deref() != Some(c.after.as_str()))
+            .filter(|c| c.deleted || c.before.as_deref() != Some(c.after.as_str()))
             .cloned()
             .collect()
     }
@@ -202,12 +206,14 @@ pub fn sealed_tools_with_presets(
                 tools.push(Box::new(FindReferences(sandbox.clone())));
                 tools.push(Box::new(SymbolImpact(sandbox.clone())));
             }
-            // `replace_text`、`delete_file`、`rename_file` 随 `write_file` 授予，不另设权限，玉玺编码不变。
+            // `replace_text`、`delete_file`、`rename_file`、`staged_diff`、`revert_staged` 随 `write_file` 授予，不另设权限，玉玺编码不变。
             Capability::WriteFile => {
                 tools.push(Box::new(WriteFile(sandbox.clone())));
                 tools.push(Box::new(ReplaceText(sandbox.clone())));
                 tools.push(Box::new(DeleteFile(sandbox.clone())));
                 tools.push(Box::new(RenameFile(sandbox.clone())));
+                tools.push(Box::new(StagedDiff(sandbox.clone())));
+                tools.push(Box::new(RevertStaged(sandbox.clone())));
             }
             Capability::RunTests => tools.push(Box::new(RunTests(sandbox.clone()))),
         }

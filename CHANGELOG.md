@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.47.0 — 2026-11-27
+
+- **工部编程 Agent 工具与循环优化及运行时／Web 超大单文件模块化拆分（零新增事件与玉玺代码）**：
+  - **`staged_diff` 与 `revert_staged` 暂存闭环工具（随 `Capability::WriteFile` 授予，`tools/staged.rs`）**：新增只读工具 `staged_diff`（可与只读工具并发执行，按 `FileChange::hunks` 输出带 `[第 N 段]` 与 `+add -del` 汇总的统一 diff，支持按授权文件或子目录过滤，上限 32 KiB），弥补 `vcs_diff` 仅检视磁盘工作树、不含内存暂存区的空白；新增有界回退工具 `revert_staged`（支持单文件 `path` 或 `all: true` 清空暂存，立即还原至磁盘原文基线供 `read_file` / `run_tests` 重试），严格校验玉玺范围与禁区。
+  - **`replace_text` 的 CRLF 行尾自适应精确匹配**：当目标文件使用 `\r\n` 行尾而模型传入 `\n` 多行片段且字面匹配为 0 处时，自动按 `\r\n` 精确唯一匹配并将替换文本归一化为 `\r\n` 写入暂存（出现多处仍照常报错列出歧义行号，范围外匹配诊断同步适配 CRLF），避免 Windows／批处理文件替换失败或混入混合行尾。
+  - **`read_file` 可选 `line_numbers` 与 `agent_loop` 轨迹／压缩增强**：`read_file` 新增向后兼容的可选布尔参数 `line_numbers`（默认 `false` 输出字节完全不变；为 `true` 时在每行前附对齐的 `行号 | `，便于直接锚定 `replace_text` 的 `start_line`/`end_line` 与回奏引用）；`summarize_tool_args` 补齐 `read_file` 的 `offset`/`lines`/`end_line` 行号区间、批量 `replace_text` 处数及 `staged_diff`/`revert_staged` 实时定位摘要；`build_turn_digest` 在二阶段历史压缩中同步记录 `revert_staged` 回退状态与 `staged_diff` 足迹；Web 工具轨迹 `.ok` 配色统一改用宋韵五境 `--ok` 语义变量。
+  - **运行时与 Web 超大单文件工程化拆分**：将 `crates/ziyuan-runtime/src/agent_loop.rs`（原 2369 行）拆分为 `agent_loop.rs` 与 `agent_loop/{compaction,tests}.rs`；将 `crates/ziyuan-runtime/src/tools/temp_cleanup.rs`（原 2718 行）拆分为 `temp_cleanup.rs` 与 `temp_cleanup/{sweep,tests}.rs`；将 `crates/ziyuan-runtime/src/tools/symbols.rs`（原 1733 行）拆分为 `symbols.rs` 与 `symbols/{rust_jsts,other_langs,tests}.rs`；将暂存自审与回退独立为 `tools/staged.rs`；从 `crates/ziyuan-web/src/index.html` 抽离全局浮层与垂拱枢机桥接模块 `/assets/court-overlays.mjs`（附 `court-overlays.test.mjs` 单测，全仓前端单测增至 170 条）。
+- 登记次版本 `1.47.0`（序号 84，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；同步更新 [README](README.md)、[使用指南](docs/guide.md)、[体系结构](docs/architecture.md)、[稳定性约定](docs/stability.md)、[路线图](docs/roadmap.md)、[文档目录](docs/README.md) 与 [发布指南](docs/releasing.md)；验收见 [1.47.0 验收记录](docs/acceptance/1.47.0.md)。
+
 ## 1.46.0 — 2026-11-27
 
 - **译文记忆增量建库复用、翰林院度支账本、候选术语交互审定与前后端巨型模块拆分（零新增事件与玉玺代码）**：

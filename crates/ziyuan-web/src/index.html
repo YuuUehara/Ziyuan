@@ -1020,7 +1020,7 @@
   .tool-trace-history ul { list-style:none; margin:6px 0 2px; padding:0; max-height:220px; overflow:auto; font-family:var(--mono); font-size:12px; }
   .tool-trace-history li { padding:2px 0; border-bottom:1px dashed var(--line); display:flex; gap:8px; justify-content:space-between; }
   .tool-trace-history li:last-child { border-bottom:0; }
-  .tool-trace-history .ok { color:#2f6f44; }
+  .tool-trace-history .ok { color:var(--ok); }
   .tool-trace-history .err { color:var(--zhu); }
   .cmd-palette-backdrop { position:fixed; inset:0; background:rgba(20, 24, 28, 0.45); display:flex; align-items:flex-start; justify-content:center; padding-top:11vh; z-index:999; }
   .cmd-palette-backdrop[hidden] { display:none; }
@@ -1394,12 +1394,12 @@
           <div class="checks">
             <label><input type="checkbox" id="tool-read_file" data-keep checked> 读文件 <code>read_file</code></label>
             <label><input type="checkbox" id="tool-search_code" data-keep checked> 搜代码 <code>search_code</code></label>
-            <label title="唯工部可授；改动暂存，准奏后才落盘。同时可用 replace_text，只替换恰好出现一次的旧文本"><input type="checkbox" id="tool-write_file" data-keep> 改文件 <code>write_file</code></label>
+            <label title="唯工部可授；改动暂存，准奏后才落盘。同时可用 replace_text、delete_file、rename_file、staged_diff 与 revert_staged"><input type="checkbox" id="tool-write_file" data-keep> 改文件 <code>write_file</code></label>
             <label title="唯工部可授；在项目副本中运行皇帝设定的测试命令"><input type="checkbox" id="tool-run_tests" data-keep> 跑测试 <code>run_tests</code></label>
           </div>
           <label for="edict-mcp">玉玺 · 外藩 MCP <span>（服务名逗号分隔，留空为不许；须在官职外藩上限内）</span></label>
           <input type="text" id="edict-mcp" data-keep placeholder="如 docs, fetch">
-          <p class="hint"><code>.ziyuan</code>、<code>.git</code>、<code>.jj</code> 与 <code>.env*</code> 无论玉玺如何均不可读写。勾选改文件后，官员还能用 <code>replace_text</code> 替换恰好出现一次的旧文本。读文件可按行看后面的内容，搜代码可限目录、忽略大小写并翻页。<code>cargo test</code> 没通过时，结果里会留下失败测试名和断言。外部事件（如 CI）可凭令牌调用 <code>POST api/courier</code> 经兵部驿站入队。</p>
+          <p class="hint"><code>.ziyuan</code>、<code>.git</code>、<code>.jj</code> 与 <code>.env*</code> 无论玉玺如何均不可读写。勾选改文件后，官员还能用 <code>replace_text</code>（支持单处或原子批量精确替换，自动保留 CRLF 行尾）、<code>delete_file</code>、<code>rename_file</code>，并可借 <code>staged_diff</code> 自审暂存 diff、<code>revert_staged</code> 撤回试改。读文件支持按行窗口或附行号读取，搜代码支持目录／通配过滤、正则与翻页。测试未通过时会附上结构化失败与编译诊断摘录。外部事件（如 CI）可凭令牌调用 <code>POST api/courier</code> 经兵部驿站入队。</p>
           <div class="actions">
             <button type="submit" class="primary" data-run="1">下诏并执行</button>
             <button type="submit" data-run="0">仅入队</button>
@@ -1493,7 +1493,7 @@
             <div class="row" style="flex-wrap:wrap">
               <label class="shrink"><input type="checkbox" id="ceiling-read_file" data-keep checked> 读文件 <code>read_file</code></label>
               <label class="shrink"><input type="checkbox" id="ceiling-search_code" data-keep checked> 搜代码 <code>search_code</code></label>
-              <label class="shrink" title="含 replace_text：只替换恰好出现一次的旧文本"><input type="checkbox" id="ceiling-write_file" data-keep> 改文件 <code>write_file</code></label>
+              <label class="shrink" title="含 replace_text、delete_file、rename_file、staged_diff 与 revert_staged"><input type="checkbox" id="ceiling-write_file" data-keep> 改文件 <code>write_file</code></label>
               <label class="shrink"><input type="checkbox" id="ceiling-run_tests" data-keep> 跑测试 <code>run_tests</code></label>
               <button class="small shrink" id="ceiling-set">设上限</button>
               <button class="small shrink" id="ceiling-clear">取消</button>
@@ -5833,529 +5833,65 @@ $("login-form").addEventListener("submit", async (event) => {
   else toast("令牌不正确", true);
 });
 
-// ---- 快捷命令面板（Ctrl+K / Cmd+K） ----
-let cmdPaletteItems = [];
-let cmdPaletteIndex = 0;
-let cmdPaletteMod = null;
-let cmdPaletteModPromise = null;
-
-function runCommandPaletteAction(action) {
-  if (!action) return;
-  if (action.type === "hall") { location.hash = action.hall; showHall(); }
-  else if (action.type === "neo") { location.hash = "#neo"; showHall(); }
-  else if (action.type === "duzhi") { location.hash = "#wenhua"; showHall(); $("duzhi-btn")?.click(); }
-  else if (action.type === "export") { downloadDuzhiExport(action.format, action.bom); }
-  else if (action.type === "kaocheng") { location.hash = "#wenhua"; showHall(); $("kaocheng-btn")?.click(); }
-  else if (action.type === "theme") {
-    const order = ["tianqing", "mo", "qinglv", "xiangzhi", "ye"];
-    const cur = document.documentElement.dataset.theme || "tianqing";
-    setTheme(order[(order.indexOf(cur) + 1) % order.length]);
-    if (state) preserve(render);
-  } else if (action.type === "new-edict") { location.hash = "#fengtian"; showHall(); $("edict-new")?.click(); }
-  else if (action.type === "doctor") { openDoctorModal(); }
-  else if (action.type === "run") { $("run-btn")?.click(); }
-  else if (action.type === "task") {
-    selected = action.taskId;
-    location.hash = "#fengtian";
-    showHall();
-    preserve(render);
-  }
-}
-
-async function ensureCommandPaletteModule() {
-  if (cmdPaletteMod) return cmdPaletteMod;
-  if (!cmdPaletteModPromise) cmdPaletteModPromise = import(`/assets/command-palette.mjs`).then((m) => (cmdPaletteMod = m));
-  return cmdPaletteModPromise;
-}
-
-async function renderCommandPaletteList() {
-  const input = $("cmd-palette-input");
-  const list = $("cmd-palette-list");
-  if (!input || !list) return;
-  const mod = await ensureCommandPaletteModule();
-  const all = mod.buildPaletteSpecs({
-    viewer: !!(state && state.viewer),
-    tasks: state && Array.isArray(state.tasks) ? state.tasks : [],
-    statusLabel,
-  });
-  cmdPaletteItems = mod.filterPaletteItems(all, input.value).map((spec) => ({
-    ...spec,
-    run: () => runCommandPaletteAction(spec.action),
-  }));
-  if (cmdPaletteIndex >= cmdPaletteItems.length) cmdPaletteIndex = 0;
-  list.textContent = "";
-  if (!cmdPaletteItems.length) {
-    const empty = document.createElement("li");
-    empty.className = "cmd-palette-item";
-    empty.textContent = "无匹配指令";
-    list.appendChild(empty);
-    return;
-  }
-  cmdPaletteItems.forEach((item, idx) => {
-    const li = document.createElement("li");
-    li.className = "cmd-palette-item" + (idx === cmdPaletteIndex ? " active" : "");
-    li.setAttribute("role", "option");
-    li.setAttribute("aria-selected", idx === cmdPaletteIndex ? "true" : "false");
-    const title = document.createElement("span");
-    title.textContent = item.label;
-    const meta = document.createElement("span");
-    meta.className = "cmd-meta";
-    meta.textContent = item.meta;
-    li.appendChild(title);
-    li.appendChild(meta);
-    li.addEventListener("mouseenter", () => {
-      cmdPaletteIndex = idx;
-      list.querySelectorAll(".cmd-palette-item").forEach((n, i) => {
-        n.classList.toggle("active", i === idx);
-        n.setAttribute("aria-selected", i === idx ? "true" : "false");
+// ---- 全局浮层与垂拱枢机桥接（/assets/court-overlays.mjs） ----
+let courtOverlaysCtrl = null;
+let courtOverlaysPromise = null;
+function ensureCourtOverlays() {
+  if (courtOverlaysCtrl) return Promise.resolve(courtOverlaysCtrl);
+  if (!courtOverlaysPromise) {
+    courtOverlaysPromise = import("/assets/court-overlays.mjs").then((m) => {
+      courtOverlaysCtrl = m.mountCourtOverlays({
+        doc: document,
+        win: window,
+        storage: typeof localStorage !== "undefined" ? localStorage : null,
+        getById: $,
+        api,
+        act,
+        toast,
+        chronicle,
+        preserve,
+        render,
+        showHall,
+        setTheme,
+        downloadDuzhiExport,
+        selectWorkspaceTab,
+        runProjectQaReport,
+        runProjectUsageReport,
+        selectTextBlock,
+        loadText,
+        loadTextProject,
+        materialAdvice,
+        statusLabel,
+        getState: () => state,
+        getHall: () => hall,
+        getPreviousClassicHall: () => previousClassicHall,
+        setSelectedTask: (id) => { selected = id; },
+        getTextState: () => ({
+          textLoaded,
+          textProjects,
+          textProject,
+          textProjectId,
+          textUsageSummaryCache,
+        }),
+        setTextProjectId: (id) => { textProjectId = id; },
+        getQaNavigator: () => qaNavigator,
+        loadNeoModule: () => import("/assets/neo-panel.mjs"),
+        loadPaletteModule: () => import("/assets/command-palette.mjs"),
+        loadDoctorModule: () => import("/assets/doctor-panel.mjs"),
+        loadQuickGlossaryModule: () => import("/assets/quick-glossary.mjs"),
       });
+      return courtOverlaysCtrl;
     });
-    li.addEventListener("click", () => {
-      closeCommandPalette();
-      item.run();
-    });
-    list.appendChild(li);
-  });
-}
-
-function openCommandPalette() {
-  const modal = $("cmd-palette");
-  const input = $("cmd-palette-input");
-  if (!modal || !input) return;
-  modal.hidden = false;
-  input.value = "";
-  cmdPaletteIndex = 0;
-  renderCommandPaletteList();
-  input.focus();
-}
-
-function closeCommandPalette() {
-  const modal = $("cmd-palette");
-  if (modal) modal.hidden = true;
-}
-
-let doctorMod = null;
-let doctorModPromise = null;
-async function loadDoctorReport() {
-  const body = $("doctor-body");
-  if (!body) return;
-  body.textContent = "正在执行只读环境自检…";
-  try {
-    if (!doctorMod) {
-      if (!doctorModPromise) doctorModPromise = import(`/assets/doctor-panel.mjs`).then((m) => (doctorMod = m));
-      await doctorModPromise;
-    }
-    const report = await api("/doctor");
-    doctorMod.renderDoctorReport(body, report);
-  } catch (err) {
-    body.textContent = `自检失败：${err.message || err}`;
   }
+  return courtOverlaysPromise;
 }
-function openDoctorModal() {
-  const modal = $("doctor-modal");
-  if (!modal) return;
-  modal.hidden = false;
-  loadDoctorReport();
-}
-function closeDoctorModal() {
-  const modal = $("doctor-modal");
-  if (modal) modal.hidden = true;
-}
-$("doctor-open-btn")?.addEventListener("click", openDoctorModal);
-$("doctor-close-btn")?.addEventListener("click", closeDoctorModal);
-$("doctor-refresh-btn")?.addEventListener("click", loadDoctorReport);
-$("doctor-modal")?.addEventListener("click", (e) => {
-  if (e.target === $("doctor-modal")) closeDoctorModal();
-});
-
-// ---- 垂拱枢机 · 御前听政台模式面板 ----
-let neoMod = null;
-let neoModPromise = null;
-let neoSubmode = "overview";
-let neoSelectedPresetId = "works-audit";
-let neoEdictDraft = {};
-let neoWusilan = (() => { try { return localStorage.getItem("ziyuan-wusilan") !== "0"; } catch { return true; } })();
-let neoCompact = (() => { try { return localStorage.getItem("ziyuan-compact") === "1"; } catch { return false; } })();
-
-function applyNeoLayoutClasses() {
-  document.body.classList.toggle("neo-wusilan", neoWusilan);
-  document.body.classList.toggle("neo-compact", neoCompact);
-}
-applyNeoLayoutClasses();
-
-function toggleNeoMode() {
-  if (hall === "neo") {
-    location.hash = "#" + (previousClassicHall || "fengtian");
-  } else {
-    location.hash = "#neo";
-  }
-  showHall();
-}
-$("neo-mode-btn")?.addEventListener("change", (e) => {
-  location.hash = e.target.checked ? "#neo" : "#" + (previousClassicHall || "fengtian");
-  showHall();
-});
-
 function ensureNeoPanel() {
-  if (neoMod) {
-    renderNeoView();
-    return Promise.resolve(neoMod);
-  }
-  if (!neoModPromise) {
-    neoModPromise = import("/assets/neo-panel.mjs").then((m) => {
-      neoMod = m;
-      renderNeoView();
-      return m;
-    }).catch((err) => {
-      neoModPromise = null;
-      const root = $("neo-panel-root");
-      if (root) root.textContent = "垂拱枢机面板加载失败：" + (err.message || err);
-    });
-  }
-  return neoModPromise;
+  return ensureCourtOverlays().then((c) => c.ensureNeoPanel());
 }
-
 function renderNeoView() {
-  const root = $("neo-panel-root");
-  if (!root || !neoMod) return;
-  // 若正在军机速诏输入中，避免轮询重绘打断光标焦点
-  if (hall === "neo" && neoSubmode === "quick-edict" && root.contains(document.activeElement)) {
-    const tag = document.activeElement?.tagName;
-    if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
-  }
-  neoMod.renderNeoPanel(
-    root,
-    {
-      submode: neoSubmode,
-      theme: document.documentElement.dataset.theme || "tianqing",
-      wusilan: neoWusilan,
-      compact: neoCompact,
-      state,
-      textProjects: Array.isArray(textProjects) ? textProjects : (textProjects?.projects || []),
-      textProject,
-      textUsage: textUsageSummaryCache,
-      selectedPresetId: neoSelectedPresetId,
-      edictDraft: neoEdictDraft,
-      previousHall: previousClassicHall,
-    },
-    {
-      onSelectSubmode: (id) => {
-        neoSubmode = id;
-        if (id === "translation-neo" && !textLoaded) loadText();
-        renderNeoView();
-      },
-      onRunPending: () => $("run-btn")?.click(),
-      onOpenDoctor: () => openDoctorModal(),
-      onReturnClassic: (target) => {
-        location.hash = "#" + (target || previousClassicHall || "fengtian");
-        showHall();
-      },
-      onDraftTask: (id) => {
-        act(api(`/tasks/${id}/draft`, {})).then((r) => r && toast(`诏令 #${id} 票拟：拟派 ${r.name}`));
-      },
-      onApproveTask: (id) => {
-        act(api(`/tasks/${id}/approve`, {}), `诏令 #${id} 已批红`);
-      },
-      onReviewTask: (id, verdict) => {
-        act(api(`/tasks/${id}/review`, { verdict, note: "" }), verdict === "accept" ? "已采纳" : "已驳回");
-      },
-      onCensorTask: (id) => {
-        act(api(`/tasks/${id}/censor`, {})).then((r) => r && toast(`诏令 #${id} 都察院${r.label}`));
-      },
-      onInspectTask: (id) => {
-        selected = id;
-        location.hash = "#fengtian";
-        showHall();
-        preserve(render);
-      },
-      onQuickDepartmentEdict: (deptCode) => {
-        const preset = neoMod.NEO_EDICT_PRESETS.find((p) => p.department === deptCode) || neoMod.NEO_EDICT_PRESETS[0];
-        neoSelectedPresetId = preset.id;
-        neoEdictDraft = {
-          department: deptCode,
-          scope: preset.scope,
-          text: preset.text,
-          tools: preset.tools.slice(),
-        };
-        neoSubmode = "quick-edict";
-        renderNeoView();
-      },
-      onSwitchHall: (targetHall) => {
-        location.hash = "#" + targetHall;
-        showHall();
-      },
-      onSelectPreset: (preset) => {
-        neoSelectedPresetId = preset.id;
-        neoEdictDraft = {
-          department: preset.department,
-          scope: preset.scope,
-          text: preset.text,
-          tools: preset.tools.slice(),
-        };
-        renderNeoView();
-      },
-      onUpdateDraft: (draft) => {
-        neoEdictDraft = { ...neoEdictDraft, ...draft };
-      },
-      onIssueEdict: async (payload) => {
-        if (!payload.text) {
-          toast("请先填写诏令正文", true);
-          return;
-        }
-        const run = !!payload.run;
-        const result = await act(api("/edicts", {
-          department: payload.department,
-          text: payload.text,
-          scope: payload.scope,
-          tools: payload.tools,
-          mcp: payload.mcp || [],
-          template: "",
-        }));
-        if (!result) return;
-        selected = result.id;
-        toast(`诏令 #${result.id} 已自军机处颁布${state.mode.code === "cabinet" && !run ? "，待批红" : ""}`);
-        if (run && state.mode.code === "cabinet") {
-          await act(api(`/tasks/${result.id}/draft`, {}));
-          await act(api(`/tasks/${result.id}/approve`, {}));
-        }
-        if (run && !state.running) await act(api("/run", {}));
-        neoSubmode = "overview";
-        renderNeoView();
-      },
-      onOpenFullEdictSheet: () => {
-        selected = "new";
-        location.hash = "#fengtian";
-        showHall();
-        preserve(render);
-      },
-      onSelectProject: (projId) => {
-        textProjectId = projId;
-        loadTextProject();
-      },
-      onOpenNewProject: () => {
-        location.hash = "#translation";
-        showHall();
-        $("text-new-project")?.click();
-      },
-      onQuickGlossary: (kind) => {
-        openQuickGlossaryDialog(kind);
-      },
-      onRunProjectQa: () => {
-        location.hash = "#translation";
-        showHall();
-        selectWorkspaceTab("delivery");
-        runProjectQaReport();
-      },
-      onOpenProjectUsage: () => {
-        location.hash = "#translation";
-        showHall();
-        selectWorkspaceTab("delivery");
-        $("text-project-usage")?.scrollIntoView({ block: "nearest" });
-        runProjectUsageReport();
-      },
-      onOpenBlock: (projId, blockId) => {
-        if (projId && projId !== textProjectId) textProjectId = projId;
-        location.hash = `#translation/text/${encodeURIComponent(projId)}/${encodeURIComponent(blockId)}`;
-        showHall();
-        selectTextBlock(blockId);
-      },
-      onSelectTheme: (themeId) => {
-        setTheme(themeId);
-        if (state) preserve(render);
-      },
-      onToggleWusilan: (on) => {
-        neoWusilan = Boolean(on);
-        try { localStorage.setItem("ziyuan-wusilan", neoWusilan ? "1" : "0"); } catch {}
-        applyNeoLayoutClasses();
-        renderNeoView();
-      },
-      onToggleCompact: (on) => {
-        neoCompact = Boolean(on);
-        try { localStorage.setItem("ziyuan-compact", neoCompact ? "1" : "0"); } catch {}
-        applyNeoLayoutClasses();
-        renderNeoView();
-      },
-      onChangeGovernanceMode: (m) => {
-        if (!state || m.code === state.mode.code) return;
-        if (m.code === "direct" && state.mode.code === "chancellor") {
-          location.hash = "#huagai";
-          showHall();
-          $("abolish-choice").hidden = false;
-          return;
-        }
-        if (confirm(`改制为「${m.label}」？旧制度的中书省/内阁官职将自动撤销。`)) {
-          act(api("/reform", { mode: m.code }), `已改制为${m.label}`).then((r) => r && chronicle(r.note));
-        }
-      },
-      onToggleRetreat: () => {
-        $("retreat-btn")?.click();
-      },
-      onOpenKaocheng: () => {
-        location.hash = "#wenhua";
-        showHall();
-        $("kaocheng-btn")?.click();
-      },
-      onOpenDuzhi: () => {
-        location.hash = "#wenhua";
-        showHall();
-        $("duzhi-btn")?.click();
-      },
-      onExportDuzhi: (fmt, bom) => {
-        downloadDuzhiExport(fmt, bom);
-      },
-    }
-  );
+  if (courtOverlaysCtrl) courtOverlaysCtrl.renderNeoView();
 }
-
-$("cmd-palette-btn")?.addEventListener("click", openCommandPalette);
-$("cmd-palette-close")?.addEventListener("click", closeCommandPalette);
-$("cmd-palette")?.addEventListener("click", (e) => {
-  if (e.target === $("cmd-palette")) closeCommandPalette();
-});
-$("cmd-palette-input")?.addEventListener("input", () => {
-  cmdPaletteIndex = 0;
-  renderCommandPaletteList();
-});
-$("cmd-palette-input")?.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") {
-    e.preventDefault();
-    if (cmdPaletteItems.length) {
-      cmdPaletteIndex = (cmdPaletteIndex + 1) % cmdPaletteItems.length;
-      renderCommandPaletteList();
-    }
-  } else if (e.key === "ArrowUp") {
-    e.preventDefault();
-    if (cmdPaletteItems.length) {
-      cmdPaletteIndex = (cmdPaletteIndex - 1 + cmdPaletteItems.length) % cmdPaletteItems.length;
-      renderCommandPaletteList();
-    }
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    const chosen = cmdPaletteItems[cmdPaletteIndex];
-    if (chosen) {
-      closeCommandPalette();
-      chosen.run();
-    }
-  } else if (e.key === "Escape") {
-    e.preventDefault();
-    closeCommandPalette();
-  }
-});
-let quickGlossaryKind = "term";
-let quickGlossaryModPromise = null;
-let quickLastSelection = "";
-function loadQuickGlossaryMod() {
-  if (!quickGlossaryModPromise) {
-    quickGlossaryModPromise = import("/assets/quick-glossary.mjs");
-  }
-  return quickGlossaryModPromise;
-}
-for (const btnId of ["quick-term-btn", "quick-person-btn"]) {
-  $(btnId)?.addEventListener("mousedown", () => {
-    const el = document.activeElement;
-    if (el && typeof el.value === "string" && typeof el.selectionStart === "number" && el.selectionEnd > el.selectionStart) {
-      quickLastSelection = el.value.slice(el.selectionStart, el.selectionEnd).trim().slice(0, 120);
-    } else {
-      quickLastSelection = (window.getSelection?.()?.toString() || "").trim().slice(0, 120);
-    }
-  });
-}
-async function openQuickGlossaryDialog(kind) {
-  if (!textProjectId) {
-    const st = $("human-toggle-note");
-    if (st) st.textContent = "请先选择项目。";
-    return;
-  }
-  const mod = await loadQuickGlossaryMod();
-  const sel = quickLastSelection || mod.extractSelectionText(document);
-  quickLastSelection = "";
-  quickGlossaryKind = kind;
-  const dlg = $("quick-glossary-dialog");
-  const title = $("quick-glossary-title");
-  const termBox = $("quick-term-fields");
-  const personBox = $("quick-person-fields");
-  const status = $("quick-glossary-status");
-  if (status) status.textContent = "";
-  if (kind === "person") {
-    if (title) title.textContent = "快捷收录人物";
-    if (termBox) termBox.hidden = true;
-    if (personBox) personBox.hidden = false;
-    $("quick-person-name").value = sel;
-    $("quick-person-alias").value = "";
-    $("quick-person-voice").value = "";
-  } else {
-    if (title) title.textContent = "快捷收录术语";
-    if (termBox) termBox.hidden = false;
-    if (personBox) personBox.hidden = true;
-    $("quick-term-source").value = sel;
-    $("quick-term-target").value = "";
-    $("quick-term-category").value = "common";
-    $("quick-term-note").value = "";
-  }
-  if (dlg && typeof dlg.showModal === "function") dlg.showModal();
-  const firstInput = kind === "person" ? $("quick-person-name") : (sel ? $("quick-term-target") : $("quick-term-source"));
-  firstInput?.focus();
-}
-$("quick-term-btn")?.addEventListener("click", () => openQuickGlossaryDialog("term"));
-$("quick-person-btn")?.addEventListener("click", () => openQuickGlossaryDialog("person"));
-$("quick-glossary-cancel")?.addEventListener("click", () => $("quick-glossary-dialog")?.close());
-$("quick-glossary-submit")?.addEventListener("click", async () => {
-  if (!textProjectId) return;
-  const mod = await loadQuickGlossaryMod();
-  const status = $("quick-glossary-status");
-  const fields = quickGlossaryKind === "person"
-    ? {
-        name: $("quick-person-name").value,
-        alias: $("quick-person-alias").value,
-        voice: $("quick-person-voice").value,
-      }
-    : {
-        source: $("quick-term-source").value,
-        target: $("quick-term-target").value,
-        category: $("quick-term-category").value,
-        note: $("quick-term-note").value,
-      };
-  const check = mod.validateQuickMaterialFields(quickGlossaryKind, fields);
-  if (!check.ok) {
-    if (status) status.textContent = check.error;
-    return;
-  }
-  if (status) status.textContent = "正在写入本地资料草稿…";
-  try {
-    const payload = mod.buildQuickMaterialPayload(quickGlossaryKind, fields);
-    const receipt = await api("/text/" + encodeURIComponent(textProjectId) + "/materials/quick-add", payload);
-    const msg = mod.formatQuickMaterialReceipt(receipt);
-    if (status) status.textContent = msg;
-    const note = $("human-toggle-note");
-    if (note) note.textContent = msg;
-    $("quick-glossary-dialog")?.close();
-  } catch (e) {
-    if (status) status.textContent = "收录失败：" + materialAdvice(e?.body?.error || e?.message);
-  }
-});
-
-document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    const modal = $("cmd-palette");
-    if (modal && !modal.hidden) closeCommandPalette();
-    else openCommandPalette();
-  } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "n") {
-    e.preventDefault();
-    toggleNeoMode();
-  } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "[" && qaNavigator?.isActive()) {
-    e.preventDefault();
-    qaNavigator.prev();
-  } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "]" && qaNavigator?.isActive()) {
-    e.preventDefault();
-    qaNavigator.next();
-  } else if (e.key === "Escape") {
-    const modal = $("cmd-palette");
-    if (modal && !modal.hidden) closeCommandPalette();
-    const dModal = $("doctor-modal");
-    if (dModal && !dModal.hidden) closeDoctorModal();
-  }
-});
+ensureCourtOverlays();
 
 refresh().then(() => { if (state) connect(); });
 // CLI 等其他进程的变更不会推送，定期刷新。

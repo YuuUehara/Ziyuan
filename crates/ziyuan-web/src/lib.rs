@@ -133,6 +133,7 @@ async fn asset(axum::extract::Path(name): axum::extract::Path<String>) -> axum::
         "verification-panel.mjs" => include_str!("verification-panel.mjs"),
         "materials-collab.mjs" => include_str!("materials-collab.mjs"),
         "project-usage.mjs" => include_str!("project-usage.mjs"),
+        "court-overlays.mjs" => include_str!("court-overlays.mjs"),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (

@@ -85,6 +85,10 @@ test("classical themes and Neo presets preserve imperial literary style", () => 
   assert.ok(NEO_EDICT_PRESETS.length >= 6);
   assert.ok(NEO_EDICT_PRESETS.some((p) => p.department === "works"));
   assert.ok(NEO_EDICT_PRESETS.some((p) => p.department === "justice"));
+  const worksRepair = NEO_EDICT_PRESETS.find((p) => p.id === "works-repair");
+  assert.ok(worksRepair);
+  assert.match(worksRepair.text, /staged_diff/);
+  assert.match(worksRepair.desc, /revert_staged/);
 });
 
 test("classifyTaskAttention and summarizeCourtForNeo compute attention breakdown accurately", () => {

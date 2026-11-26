@@ -98,8 +98,8 @@ export const NEO_EDICT_PRESETS = Object.freeze([
     departmentLabel: "工部",
     tools: ["read_file", "search_code", "write_file", "run_tests"],
     scope: "crates",
-    text: "按既定边界实施代码修缮，补充相应单元测试，并在号舍内执行 run_tests 核验通过；改动暂存呈报，待御览准奏后落盘。",
-    desc: "授改文件与跑测试之权；改动仅暂存事件簿，须亲自准奏方才落盘。",
+    text: "按既定边界实施代码修缮，补充相应单元测试，用 staged_diff 自审暂存改动并在号舍内执行 run_tests 核验通过；改动暂存呈报，待御览准奏后落盘。",
+    desc: "授改文件与跑测试之权（含 replace_text、staged_diff、revert_staged）；改动仅暂存事件簿，须亲自准奏方才落盘。",
   },
   {
     id: "justice-security",
@@ -1167,7 +1167,7 @@ function renderQuickEdictSubmode(
       doc,
       "p",
       "hint",
-      "提示：.ziyuan、.git、.jj 与 .env* 恒受封禁；工部改动只入暂存奏本，经御览逐段准奏后方才落盘。",
+      "提示：.ziyuan、.git、.jj 与 .env* 恒受封禁；工部授改文件权后可借 staged_diff 自审暂存差异、revert_staged 撤回试改，全部改动须经御览逐段准奏方才落盘。",
     ),
     actions,
   );

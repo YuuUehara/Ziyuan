@@ -74,19 +74,23 @@ impl Tool for ReadFile {
         ToolSpec {
             name: Capability::ReadFile.code().into(),
             description: format!(
-                "读取项目内的文本文件（相对项目根目录的路径）。只能读取授权范围：{}。不给 offset、lines 与 end_line 时从开头读，超过 {MAX_READ_BYTES} 字节截断。给出 offset（从 1 起的行号）、lines（行数）或 end_line（结束行号，含，与 lines 互斥）时按行窗口读取，并说明总行数和后面是否还有。",
+                "读取项目内的文本文件（相对项目根目录的路径）。只能读取授权范围：{}。不给 offset、lines、end_line 与 line_numbers 时从开头读，超过 {MAX_READ_BYTES} 字节截断。给出 offset（从 1 起的行号）、lines（行数）或 end_line（结束行号，含，与 lines 互斥）时按行窗口读取，并说明总行数和后面是否还有；可选传 line_numbers=true 在每行前附 `行号 | `，便于精确定位 replace_text 的 start_line/end_line 与引用行号。",
                 self.0.scope_label()
             ),
-            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"offset":{"type":"integer","description":"从第几行开始读，从 1 起"},"lines":{"type":"integer","description":"最多读几行（与 end_line 互斥）"},"end_line":{"type":"integer","description":"读到第几行（含，从 1 起，与 lines 互斥；可直接使用 file_outline / find_symbols 返回的行号范围）"}},"required":["path"],"additionalProperties":false}"#.into(),
+            input_schema_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"相对项目根目录的文件路径"},"offset":{"type":"integer","description":"从第几行开始读，从 1 起"},"lines":{"type":"integer","description":"最多读几行（与 end_line 互斥）"},"end_line":{"type":"integer","description":"读到第几行（含，从 1 起，与 lines 互斥；可直接使用 file_outline / find_symbols 返回的行号范围）"},"line_numbers":{"type":"boolean","description":"可选：为 true 时在每行前附 `行号 | `，便于对齐行号"}},"required":["path"],"additionalProperties":false}"#.into(),
         }
     }
 
     fn execute(&self, args_json: &str) -> Result<String, BoxError> {
-        let args = object_args(args_json, &["path", "offset", "lines", "end_line"])?;
+        let args = object_args(
+            args_json,
+            &["path", "offset", "lines", "end_line", "line_numbers"],
+        )?;
         let relative = required_string(&args, "path")?;
         let offset = optional_i64(&args, "offset")?;
         let lines = optional_i64(&args, "lines")?;
         let end_line = optional_i64(&args, "end_line")?;
+        let line_numbers = optional_bool(&args, "line_numbers")?.unwrap_or(false);
         if lines.is_some() && end_line.is_some() {
             return Err("lines 与 end_line 不能同时指定".into());
         }
@@ -113,7 +117,7 @@ impl Tool for ReadFile {
             Some(StagedEntry::Content(text)) => text.into_bytes(),
             None => fs::read(self.0.resolve(&relative)?)?,
         };
-        if offset.is_none() && effective_lines.is_none() {
+        if offset.is_none() && effective_lines.is_none() && !line_numbers {
             let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_READ_BYTES)]);
             return if bytes.len() > MAX_READ_BYTES {
                 Ok(format!("{text}\n[已截断：文件共 {} 字节]", bytes.len()))
@@ -122,7 +126,7 @@ impl Tool for ReadFile {
             };
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| "不是文本文件，不能按行读取")?;
-        read_window(text, offset, effective_lines)
+        read_window(text, offset, effective_lines, line_numbers)
     }
 }
 
@@ -351,7 +355,12 @@ impl Tool for SearchCode {
     }
 }
 
-fn read_window(text: &str, offset: Option<i64>, lines: Option<i64>) -> Result<String, BoxError> {
+fn read_window(
+    text: &str,
+    offset: Option<i64>,
+    lines: Option<i64>,
+    line_numbers: bool,
+) -> Result<String, BoxError> {
     let start = match offset.unwrap_or(1) {
         n if n < 1 => return Err("offset 从 1 起".into()),
         n => usize::try_from(n).map_err(|_| "offset 过大")?,
@@ -373,13 +382,22 @@ fn read_window(text: &str, offset: Option<i64>, lines: Option<i64>) -> Result<St
     let mut end = start - 1;
     let mut byte_cut = false;
     let last = want.map(|n| (start + n - 1).min(total)).unwrap_or(total);
+    let num_width = last.to_string().len();
     for (number, &(from, to)) in spans
         .iter()
         .enumerate()
         .skip(start - 1)
         .take(last - (start - 1))
     {
-        let piece = &text[from..to];
+        let raw_piece = &text[from..to];
+        let numbered;
+        let piece: &str = if line_numbers {
+            let line_no = number + 1;
+            numbered = format!("{line_no:>num_width$} | {raw_piece}");
+            &numbered
+        } else {
+            raw_piece
+        };
         if body.len() + piece.len() > MAX_READ_BYTES {
             let room = MAX_READ_BYTES.saturating_sub(body.len());
             if room == 0 {

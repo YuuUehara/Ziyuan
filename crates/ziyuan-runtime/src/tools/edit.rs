@@ -1,4 +1,4 @@
-//! 暂存写工具：`write_file`、`replace_text`、`delete_file`、`rename_file`（均写入内存暂存区，不直接写盘）。
+//! 暂存写工具：`write_file`、`replace_text`、`delete_file`、`rename_file`（均写入内存暂存区，不直接写盘；自审与回退见 `staged`）。
 
 use serde_json::Value;
 use std::fs;
@@ -211,10 +211,28 @@ impl Tool for ReplaceText {
                     }
                 })?;
             let window = &working[win.start..win.end];
-            let matches: Vec<usize> = window
-                .match_indices(&edit.old)
+            let mut effective_old = edit.old.clone();
+            let mut effective_new = edit.new.clone();
+            let mut matches: Vec<usize> = window
+                .match_indices(&effective_old)
                 .map(|(pos, _)| pos)
                 .collect();
+            if matches.is_empty()
+                && window.contains("\r\n")
+                && edit.old.contains('\n')
+                && !edit.old.contains("\r\n")
+            {
+                let crlf_old = edit.old.replace('\n', "\r\n");
+                let crlf_matches: Vec<usize> = window
+                    .match_indices(&crlf_old)
+                    .map(|(pos, _)| pos)
+                    .collect();
+                if !crlf_matches.is_empty() {
+                    matches = crlf_matches;
+                    effective_old = crlf_old;
+                    effective_new = edit.new.replace("\r\n", "\n").replace('\n', "\r\n");
+                }
+            }
             if matches.is_empty() {
                 let detail = format_missing_match(
                     &working, &spans, win.start, win.end, &edit.old, win.range,
@@ -234,10 +252,10 @@ impl Tool for ReplaceText {
                 });
             }
             let abs_start = win.start + matches[0];
-            let abs_end = abs_start + edit.old.len();
-            working.replace_range(abs_start..abs_end, &edit.new);
-            old_bytes += edit.old.len();
-            new_bytes += edit.new.len();
+            let abs_end = abs_start + effective_old.len();
+            working.replace_range(abs_start..abs_end, &effective_new);
+            old_bytes += effective_old.len();
+            new_bytes += effective_new.len();
         }
         if working.len() > MAX_WRITE_BYTES {
             return Err(format!("替换后超过 {MAX_WRITE_BYTES} 字节").into());
@@ -359,10 +377,21 @@ fn format_missing_match(
     range: Option<(usize, usize)>,
 ) -> String {
     if let Some((start, end)) = range {
-        let anywhere: Vec<usize> = working
+        let mut anywhere: Vec<usize> = working
             .match_indices(old)
             .map(|(pos, _)| byte_offset_to_line(spans, pos))
             .collect();
+        if anywhere.is_empty()
+            && working.contains("\r\n")
+            && old.contains('\n')
+            && !old.contains("\r\n")
+        {
+            let crlf_old = old.replace('\n', "\r\n");
+            anywhere = working
+                .match_indices(&crlf_old)
+                .map(|(pos, _)| byte_offset_to_line(spans, pos))
+                .collect();
+        }
         if !anywhere.is_empty() {
             return format!(
                 "在指定行范围 {start}..={end} 内找不到要替换的文本（但文件其他位置{}存在完全匹配，请核对行号）",

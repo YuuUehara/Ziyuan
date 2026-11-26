@@ -1854,3 +1854,202 @@ fn symbol_impact_summarizes_definitions_grouped_call_sites_and_staged_overlay() 
 
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn staged_diff_and_revert_staged_preview_and_restore_disk_state() {
+    let dir = workspace("staged-diff-revert");
+    let root = dir.join("project");
+    fs::create_dir_all(root.join("secret")).unwrap();
+    fs::write(root.join("secret/key.txt"), "nope\n").unwrap();
+    fs::write(
+        root.join("src/calc.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/drop_me.rs"), "pub fn old() {}\n").unwrap();
+
+    let sealed = sealed_tools(
+        &root,
+        &seal(&[Capability::ReadFile, Capability::WriteFile], &["src"]),
+        None,
+    )
+    .unwrap();
+    let get = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+    assert!(get("staged_diff").is_read_only());
+    assert!(!get("revert_staged").is_read_only());
+
+    assert_eq!(
+        get("staged_diff").execute(r#"{}"#).unwrap(),
+        "当前暂存区无未呈报改动"
+    );
+
+    get("replace_text")
+        .execute(r#"{"path":"src/calc.rs","old":"a + b","new":"a.saturating_add(b)"}"#)
+        .unwrap();
+    get("write_file")
+        .execute(r#"{"path":"src/added.rs","content":"pub const VERSION: u32 = 1;\n"}"#)
+        .unwrap();
+    get("delete_file")
+        .execute(r#"{"path":"src/drop_me.rs"}"#)
+        .unwrap();
+
+    let full_diff = get("staged_diff").execute(r#"{}"#).unwrap();
+    assert!(
+        full_diff.contains("〔暂存奏本预览：共 3 个文件，3 段，+2 -2〕"),
+        "{full_diff}"
+    );
+    assert!(
+        full_diff.contains("--- /dev/null\n+++ b/src/added.rs")
+            && full_diff.contains("+pub const VERSION: u32 = 1;"),
+        "{full_diff}"
+    );
+    assert!(
+        full_diff.contains("--- a/src/calc.rs\n+++ b/src/calc.rs")
+            && full_diff.contains("-    a + b")
+            && full_diff.contains("+    a.saturating_add(b)"),
+        "{full_diff}"
+    );
+    assert!(
+        full_diff.contains("--- a/src/drop_me.rs\n+++ /dev/null")
+            && full_diff.contains("-pub fn old() {}"),
+        "{full_diff}"
+    );
+
+    let single_diff = get("staged_diff")
+        .execute(r#"{"path":"src/calc.rs"}"#)
+        .unwrap();
+    assert!(
+        single_diff.contains("共 1 个文件") && !single_diff.contains("added.rs"),
+        "{single_diff}"
+    );
+
+    // 越界与禁区路径一律拒绝。
+    assert!(
+        get("staged_diff")
+            .execute(r#"{"path":"secret/key.txt"}"#)
+            .is_err()
+    );
+    assert!(get("staged_diff").execute(r#"{"path":".env"}"#).is_err());
+    assert!(
+        get("revert_staged")
+            .execute(r#"{"path":"secret/key.txt"}"#)
+            .is_err()
+    );
+    assert!(
+        get("revert_staged")
+            .execute(r#"{"path":"src/calc.rs","all":true}"#)
+            .is_err()
+    );
+    assert!(get("revert_staged").execute(r#"{}"#).is_err());
+
+    // 撤销单文件改动后，read_file 重新看到磁盘原文；已删文件恢复可读。
+    let rev_calc = get("revert_staged")
+        .execute(r#"{"path":"src/calc.rs"}"#)
+        .unwrap();
+    assert!(rev_calc.contains("已撤销 src/calc.rs"), "{rev_calc}");
+    let calc_now = get("read_file")
+        .execute(r#"{"path":"src/calc.rs"}"#)
+        .unwrap();
+    assert!(
+        calc_now.contains("a + b") && !calc_now.contains("saturating_add"),
+        "{calc_now}"
+    );
+
+    let rev_del = get("revert_staged")
+        .execute(r#"{"path":"src/drop_me.rs"}"#)
+        .unwrap();
+    assert!(rev_del.contains("暂存删除"), "{rev_del}");
+    assert_eq!(
+        get("read_file")
+            .execute(r#"{"path":"src/drop_me.rs"}"#)
+            .unwrap(),
+        "pub fn old() {}\n"
+    );
+
+    assert_eq!(sealed.changes().len(), 1);
+    let rev_all = get("revert_staged").execute(r#"{"all":true}"#).unwrap();
+    assert!(
+        rev_all.contains("已撤销全部暂存改动") && rev_all.contains("src/added.rs"),
+        "{rev_all}"
+    );
+    assert!(sealed.changes().is_empty());
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn replace_text_handles_crlf_files_without_mixed_line_endings_and_read_file_numbers_lines() {
+    let dir = workspace("crlf-and-linenos");
+    let root = dir.join("project");
+    fs::write(
+        root.join("src/win.bat"),
+        "@echo off\r\nset MODE=debug\r\necho ready\r\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/dup_crlf.rs"),
+        "fn a() {\r\n    let v = 1;\r\n}\r\nfn b() {\r\n    let v = 1;\r\n}\r\n",
+    )
+    .unwrap();
+
+    let sealed = sealed_tools(
+        &root,
+        &seal(&[Capability::ReadFile, Capability::WriteFile], &["src"]),
+        None,
+    )
+    .unwrap();
+    let get = |name: &str| sealed.tools.iter().find(|t| t.spec().name == name).unwrap();
+
+    // 默认不带 line_numbers 时原样返回字节，保持 100% 兼容。
+    let raw = get("read_file")
+        .execute(r#"{"path":"src/win.bat"}"#)
+        .unwrap();
+    assert_eq!(raw, "@echo off\r\nset MODE=debug\r\necho ready\r\n");
+
+    // 开启 line_numbers=true 时返回精确 1 起始行号与窗口头。
+    let numbered = get("read_file")
+        .execute(r#"{"path":"src/dup_crlf.rs","offset":2,"end_line":5,"line_numbers":true}"#)
+        .unwrap();
+    assert!(numbered.contains("〔第 2–5 行，共 6 行"), "{numbered}");
+    assert!(numbered.contains("2 |     let v = 1;\r\n"), "{numbered}");
+    assert!(numbered.contains("4 | fn b() {\r\n"), "{numbered}");
+
+    // 模型传入 LF 的多行 old/new 时，对唯一匹配的 CRLF 文件自动按 CRLF 精确替换并保留 CRLF 行尾。
+    get("replace_text")
+        .execute(
+            r#"{"path":"src/win.bat","old":"set MODE=debug\necho ready","new":"set MODE=release\necho launched"}"#,
+        )
+        .unwrap();
+    let updated = &sealed
+        .changes()
+        .into_iter()
+        .find(|c| c.path == "src/win.bat")
+        .unwrap()
+        .after;
+    assert_eq!(
+        updated,
+        "@echo off\r\nset MODE=release\r\necho launched\r\n"
+    );
+
+    // CRLF 下出现多处匹配时照常拒绝并报告具体行号，可用 start_line/end_line 唯一锚定。
+    let ambig = get("replace_text")
+        .execute(r#"{"path":"src/dup_crlf.rs","old":"fn a() {\n    let v = 1;","new":"fn a() {\n    let v = 2;"}"#)
+        .is_ok();
+    assert!(ambig, "唯一多行块应成功替换");
+
+    let multi_err = get("replace_text")
+        .execute(r#"{"path":"src/dup_crlf.rs","old":"{\n    let v =","new":"{\n    let w ="}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(multi_err.contains("匹配到 2 处"), "{multi_err}");
+
+    let outside_err = get("replace_text")
+        .execute(
+            r#"{"path":"src/dup_crlf.rs","old":"fn b() {\n    let v = 1;","new":"fn b() {\n    let v = 9;","start_line":1,"end_line":3}"#,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(outside_err.contains("第 4 行存在完全匹配"), "{outside_err}");
+
+    fs::remove_dir_all(dir).unwrap();
+}

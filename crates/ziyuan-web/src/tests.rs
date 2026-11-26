@@ -2481,4 +2481,14 @@ async fn neo_panel_asset_and_classical_theme_contract() {
     assert!(body.contains("renderNeoPanel"));
     assert!(body.contains("宣和缃帙"));
     assert!(body.contains("玄夜秉烛"));
+
+    let overlay_resp = super::asset(axum::extract::Path("court-overlays.mjs".into())).await;
+    assert_eq!(overlay_resp.status(), axum::http::StatusCode::OK);
+    let overlay_bytes = axum::body::to_bytes(overlay_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(overlay_bytes.to_vec()).unwrap(),
+        include_str!("court-overlays.mjs")
+    );
 }

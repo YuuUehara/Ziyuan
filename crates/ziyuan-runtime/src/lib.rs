@@ -344,7 +344,8 @@ impl WorkerBackend for AgentBackend {
         let nonce = guard::nonce();
         let powers = if edict.seal.capabilities.contains(&Capability::WriteFile) {
             "你可以用 write_file 整篇改写或新建文件，用 replace_text 替换唯一一段或一批原子化补丁（找不到或出现不止一处就整批拒绝），\
-             用 delete_file / rename_file 暂存删除与改名，也可用 vcs_status / vcs_diff / vcs_log 只读查看版本库状态与近期改动。\
+             用 delete_file / rename_file 暂存删除与改名，用 staged_diff 自审当前暂存统一 diff，若试改有误可用 revert_staged 撤销单文件或全部暂存回到磁盘原状，\
+             也可用 vcs_status / vcs_diff / vcs_log 只读查看版本库状态与近期改动。\
              改动只暂存，回奏后由皇帝审阅 diff 决定是否落盘；不能执行测试命令以外的任何命令。回奏时列出改了哪些文件、为什么改。"
         } else {
             "你只能使用所提供的工具查阅授权范围内的内容，不能修改文件或执行命令。"
