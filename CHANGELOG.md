@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.47.1 — 2026-11-27
+
+- **同步写工具契约测试与都察院暂存回退验功失效判定（零新增事件与玉玺代码）**：
+  - **写工具集合集成测试对齐**：更新 [reference_execution.rs](crates/ziyuan-cli/tests/reference_execution.rs) 中 `assert_writer_tools` 对 `Capability::WriteFile` 工具集合的精确断言，补入 `1.47.0` 随 `write_file` 授予的 `staged_diff` 与 `revert_staged`，修复常规 CI 集成测试失败。
+  - **都察院验功失效判定覆盖 `revert_staged`**：[censorate.rs](crates/ziyuan-app/src/censorate.rs) 将 `revert_staged` 纳入 `is_write_tool`（在 `run_tests` 之后调用 `revert_staged` 会改动暂存区，先前测试通过记录即失效须重验；只读 `staged_diff` 不影响验功有效性），并同步补齐都察院系统提示与单测。
+- 登记修订版本 `1.47.1`（序号 85，零新增事件类型与玉玺代码，不提高旧事件簿读取门槛）；验收见 [1.47.1 验收记录](docs/acceptance/1.47.1.md)。
+
 ## 1.47.0 — 2026-11-27
 
 - **工部编程 Agent 工具与循环优化及运行时／Web 超大单文件模块化拆分（零新增事件与玉玺代码）**：

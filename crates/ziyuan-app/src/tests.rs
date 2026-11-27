@@ -3920,3 +3920,87 @@ fn revise_edict_carries_diff_censure_review_and_note_and_preserves_seal() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn staged_diff_preserves_and_revert_staged_invalidates_test_evidence() {
+    let dir = temp_root("censor-staged-tools");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn ok() -> bool { true }\n").unwrap();
+
+    let mut s = Session::found(EventLog::new(&dir)).unwrap();
+    let task = s
+        .issue(
+            Department::Works,
+            "试改并自审".into(),
+            Seal {
+                capabilities: [
+                    Capability::ReadFile,
+                    Capability::WriteFile,
+                    Capability::RunTests,
+                ]
+                .into(),
+                scope: vec!["src".into()],
+                mcp: Default::default(),
+            },
+        )
+        .unwrap()
+        .id;
+    let worker = s
+        .court()
+        .route(&s.court().task(task).unwrap().edict)
+        .unwrap()
+        .worker;
+
+    s.commit(|_| {
+        Ok(vec![
+            CourtEvent::TaskAssigned {
+                task,
+                worker,
+                model: None,
+            },
+            CourtEvent::ToolInvoked {
+                task,
+                tool: "write_file".into(),
+                args_json: r#"{"path":"src/lib.rs"}"#.into(),
+                ok: true,
+            },
+            CourtEvent::ToolInvoked {
+                task,
+                tool: "run_tests".into(),
+                args_json: "{}".into(),
+                ok: true,
+            },
+            CourtEvent::ToolInvoked {
+                task,
+                tool: "staged_diff".into(),
+                args_json: "{}".into(),
+                ok: true,
+            },
+        ])
+    })
+    .unwrap();
+
+    let ev_after_diff = test_evidence(s.court().task(task).unwrap(), s.history().unwrap());
+    assert!(
+        ev_after_diff.applicable,
+        "只读 staged_diff 不得使先前通过的测试验功失效：{ev_after_diff}"
+    );
+
+    s.commit(|_| {
+        Ok(vec![CourtEvent::ToolInvoked {
+            task,
+            tool: "revert_staged".into(),
+            args_json: r#"{"path":"src/lib.rs"}"#.into(),
+            ok: true,
+        }])
+    })
+    .unwrap();
+
+    let ev_after_revert = test_evidence(s.court().task(task).unwrap(), s.history().unwrap());
+    assert!(
+        !ev_after_revert.applicable,
+        "revert_staged 变更了暂存区，先前测试验功必须失效：{ev_after_revert}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

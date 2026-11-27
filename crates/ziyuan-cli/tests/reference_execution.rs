@@ -319,9 +319,9 @@ fn assert_writer_tools(request: &Value) {
         .collect();
     names.sort_unstable();
     // Runtime's ReadFile capability also grants list_files, file_outline and readonly vcs_* tools, and
-    // WriteFile also grants replace_text. The finalized fixture supplies
-    // records, so search_records already exists. Require the identical, exact
-    // set for selected and no-reference controls.
+    // WriteFile also grants replace_text, delete_file, rename_file, staged_diff and revert_staged.
+    // The finalized fixture supplies records, so search_records already exists. Require the identical,
+    // exact set for selected and no-reference controls.
     assert_eq!(
         names,
         [
@@ -331,7 +331,9 @@ fn assert_writer_tools(request: &Value) {
             "read_file",
             "rename_file",
             "replace_text",
+            "revert_staged",
             "search_records",
+            "staged_diff",
             "vcs_diff",
             "vcs_log",
             "vcs_status",
